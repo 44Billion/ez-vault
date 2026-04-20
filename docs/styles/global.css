@@ -29,12 +29,6 @@ body.detached {
   width: 360px;
 }
 
-body > div {
-  padding: 0 6px 6px 6px;
-  background-color: oklch(0.3 0.12 274.76);
-  border-radius: 8px;
-}
-
 .field {
   width: 100%;
 }

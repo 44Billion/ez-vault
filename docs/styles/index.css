@@ -1,0 +1,47 @@
+#vault {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 16px;
+}
+
+.accounts-section {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.accounts-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.primary-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background-color: oklch(0.3 0.12 274.76);
+  color: oklch(0.92 0 89.88);
+  border-radius: 8px;
+  padding: 10px 8px;
+  font-size: 14rem;
+  text-align: center;
+}
+
+.primary-action:active {
+  background-color: oklch(0.38 0.1 274.76);
+}
+
+.primary-action .glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.primary-action .glyph svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+}

@@ -9,7 +9,21 @@
     <link href="./styles/index.css" rel="stylesheet" />
   </head>
   <body>
-    Hello World!
+    <div id="vault">
+      <section class="accounts-section">
+        <div class="accounts-actions">
+          <button id="create-account-btn" type="button" class="primary-action">
+            <span class="glyph"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5l0 14" /><path d="M5 12l14 0" /></svg></span>
+            <span>Create Account</span>
+          </button>
+          <button id="import-account-btn" type="button" class="primary-action">
+            <span class="glyph"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5l0 14" /><path d="M16 15l-4 4" /><path d="M8 15l4 4" /></svg></span>
+            <span>Import Account</span>
+          </button>
+        </div>
+        <account-list class="accounts-list"></account-list>
+      </section>
+    </div>
   </body>
   <script type="importmap">
   {
