@@ -1,0 +1,29 @@
+{
+  "name": "46b-vault",
+  "version": "0.0.1",
+  "description": "NIP-46 iframe signer",
+  "keywords": [
+    "nostr",
+    "signer",
+    "nip-46",
+    "nip46"
+  ],
+  "license": "MIT",
+  "author": "arthurfranca",
+  "type": "module",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "node --test 'tests/**/*.test.js'",
+    "start": "python3 server.py",
+    "end": "pkill -f 'python3 server.py'"
+  },
+  "devDependencies": {
+    "eslint": "^9.39.4",
+    "eslint-plugin-html": "^8.1.4",
+    "globals": "^17.5.0",
+    "neostandard": "^0.13.0"
+  }
+}
