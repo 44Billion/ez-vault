@@ -42,12 +42,22 @@ export class AccountList extends HTMLElement {
       if (!accountPubkeys.has(pk)) tile.remove()
       else tile.refresh?.()
     }
-    for (const acc of accounts) {
+    for (let i = 0; i < accounts.length; i++) {
+      const acc = accounts[i]
       if (existing.has(acc.pubkey)) continue
       const tile = document.createElement('account-avatar')
       tile.setAttribute('mode', 'normal')
       tile.setAttribute('pubkey', acc.pubkey)
-      this.appendChild(tile)
+      // Insert before the first following account that already has a tile
+      // so new records (e.g. imports added via store.unshift) land at their
+      // store-order position instead of at the end of the DOM.
+      let nextTile = null
+      for (let j = i + 1; j < accounts.length; j++) {
+        const sibling = existing.get(accounts[j].pubkey)
+        if (sibling) { nextTile = sibling; break }
+      }
+      if (nextTile) this.insertBefore(tile, nextTile)
+      else this.appendChild(tile)
     }
   }
 }

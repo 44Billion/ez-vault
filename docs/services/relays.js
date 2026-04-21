@@ -2,15 +2,17 @@ import { SimplePool } from 'nostr-tools/pool'
 
 // Used only to discover users' NIP-65 relay lists (kind:10002).
 export const seedRelays = [
+  'wss://relay.44billion.net',
   'wss://purplepag.es',
   'wss://user.kindpag.es',
   'wss://relay.nos.social',
   'wss://indexer.coracle.social'
 ]
 
-// Fallback write-accepting relays. Used as the initial write-relay set for
+// Fallback write-accepting relays. Used as the initial write/read-relay set for
 // new accounts and as a fallback when we cannot resolve a user's own relays.
 export const freeRelays = [
+  'wss://relay.44billion.net',
   'wss://nos.lol',
   'wss://relay.primal.net',
   'wss://relay.damus.io'
@@ -57,7 +59,7 @@ export function fetchLatestEvent (filter, relays, {
       resolve(latest)
     }
 
-    const sub = pool.subscribeMany(relays, [filter], {
+    const sub = pool.subscribeMany(relays, filter, {
       onevent (event) {
         if (!latest || event.created_at > latest.created_at) latest = event
       },

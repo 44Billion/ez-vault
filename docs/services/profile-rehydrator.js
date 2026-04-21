@@ -1,6 +1,8 @@
 import * as store from './accounts-store.js'
 import { fetchLatestProfile, fetchRelayListEvent, parseRelayListEvent, freeRelays } from './relays.js'
 import { parseProfileEvent } from './nostr.js'
+import { fetchBunkerUserPubkey } from './bunker.js'
+import * as status from './account-status.js'
 import { seededAvatarDataUrl } from './avatar.js'
 import { isOnline, onOnline } from '../helpers/network.js'
 
@@ -25,6 +27,38 @@ export async function rehydrateAll () {
 
 async function rehydrateOne (account) {
   const patch = {}
+
+  // For bunker accounts, confirm the bunker still speaks for the same pubkey
+  // we cached. If it has drifted, the fetched pubkey is the new source of
+  // truth — adopt it and drop metadata tied to the old one so the relay and
+  // profile refresh below repopulates from the new pubkey's own events.
+  if (account.type === 'bunker' && account.bunker) {
+    let liveBunkerPubkey
+    try {
+      ;({ pubkey: liveBunkerPubkey } = await fetchBunkerUserPubkey(account.bunker))
+      status.clearError(account.pubkey)
+    } catch (err) {
+      status.setError(account.pubkey, String(err?.message ?? err))
+      throw err
+    }
+    if (liveBunkerPubkey !== account.pubkey) {
+      if (store.get(liveBunkerPubkey)) {
+        console.warn('Bunker pubkey drifted into an already-imported account', account.pubkey, '->', liveBunkerPubkey)
+        return { updated: false }
+      }
+      console.warn('Bunker pubkey drifted — adopting new pubkey', account.pubkey, '->', liveBunkerPubkey)
+      const reset = {
+        pubkey: liveBunkerPubkey,
+        profileEvent: undefined,
+        relayListEvent: undefined,
+        writeRelays: undefined,
+        name: '',
+        picture: undefined
+      }
+      store.update(account.pubkey, reset)
+      account = { ...account, ...reset }
+    }
+  }
 
   // Refresh the user's NIP-65 write relays (seed relays → kind:10002).
   const relayListEvent = await fetchRelayListEvent(account.pubkey)

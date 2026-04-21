@@ -35,6 +35,14 @@ export function add (account) {
   write(all)
 }
 
+export function replace (pubkey, account) {
+  const all = read()
+  const i = all.findIndex(a => a.pubkey === pubkey)
+  if (i === -1) throw new Error('ACCOUNT_NOT_FOUND')
+  all[i] = account
+  write(all)
+}
+
 export function update (pubkey, patch) {
   const all = read()
   const i = all.findIndex(a => a.pubkey === pubkey)

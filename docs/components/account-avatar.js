@@ -1,6 +1,7 @@
 import * as store from '../services/accounts-store.js'
 import * as nostr from '../services/nostr.js'
 import * as relays from '../services/relays.js'
+import * as accountStatus from '../services/account-status.js'
 import { seededAvatarDataUrl } from '../services/avatar.js'
 import { injectComponentStyles } from '../helpers/dom.js'
 
@@ -16,6 +17,7 @@ const ICON_X = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill
 const ICON_KEY = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16.555 3.843l3.602 3.602a2.877 2.877 0 0 1 0 4.069l-2.643 2.643a2.877 2.877 0 0 1 -4.069 0l-.301 -.301l-6.558 6.558a2 2 0 0 1 -1.239 .578l-.175 .008h-1.172a1 1 0 0 1 -.993 -.883l-.007 -.117v-1.172a2 2 0 0 1 .467 -1.284l.119 -.13l.414 -.414h2v-2h2v-2l2.144 -2.144l-.301 -.301a2.877 2.877 0 0 1 0 -4.069l2.643 -2.643a2.877 2.877 0 0 1 4.069 0" /><path d="M15 9h.01" /></svg>'
 const ICON_CHECK = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5l10 -10" /></svg>'
 const ICON_COPY = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 9.667a2.667 2.667 0 0 1 2.667 -2.667h8.666a2.667 2.667 0 0 1 2.667 2.667v8.666a2.667 2.667 0 0 1 -2.667 2.667h-8.666a2.667 2.667 0 0 1 -2.667 -2.667l0 -8.666" /><path d="M4.012 16.737a2.005 2.005 0 0 1 -1.012 -1.737v-10c0 -1.1 .9 -2 2 -2h10c.75 0 1.158 .385 1.5 1" /></svg>'
+const ICON_ALERT = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4" /><path d="M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0z" /><path d="M12 16h.01" /></svg>'
 // Filled silhouette (tabler user-filled) for the empty-avatar fallback.
 const ICON_USER_FILLED = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a5 5 0 1 1 -5 5l.005 -.217a5 5 0 0 1 4.995 -4.783z" /><path d="M14 14a5 5 0 0 1 5 5v1a2 2 0 0 1 -2 2h-10a2 2 0 0 1 -2 -2v-1a5 5 0 0 1 5 -5h4z" /></svg>'
 
@@ -51,6 +53,31 @@ const STYLES = /* css */`
   }
   account-avatar .avatar-image[data-loaded="true"] + .avatar-fallback {
     display: none;
+  }
+  account-avatar .avatar-error-overlay {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background-color: oklch(0.55 0.2 25 / 0.5);
+    border: 2px solid oklch(0.55 0.2 25);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+  }
+  account-avatar[data-error] .avatar-error-overlay {
+    display: flex;
+  }
+  account-avatar .avatar-error-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: oklch(0.55 0.2 25);
+  }
+  account-avatar .avatar-error-icon svg {
+    width: 50%;
+    height: 50%;
+    display: block;
   }
   account-avatar .avatar-btn {
     position: absolute;
@@ -114,6 +141,7 @@ const STYLES = /* css */`
 const TEMPLATE = `
   <div class="avatar-image" aria-hidden="true"></div>
   <div class="avatar-fallback" aria-hidden="true">${ICON_USER_FILLED}</div>
+  <div class="avatar-error-overlay" aria-hidden="true"><span class="avatar-error-icon">${ICON_ALERT}</span></div>
   <button class="avatar-btn at-top-left" data-action="cancel-create" title="Cancel" type="button"><span class="avatar-btn-icon">${ICON_TRASH}</span></button>
   <button class="avatar-btn at-top-left" data-action="delete" title="Remove account" type="button"><span class="avatar-btn-icon">${ICON_TRASH}</span></button>
   <button class="avatar-btn at-top-right" data-action="cycle" title="Change image" type="button"><span class="avatar-btn-icon">${ICON_REFRESH}</span></button>
@@ -131,6 +159,7 @@ export class AccountAvatar extends HTMLElement {
   #image
   #flashTimers = new Map()
   #flashLabels = new Map()
+  #unsubStatus = null
 
   connectedCallback () {
     injectComponentStyles('account-avatar', STYLES)
@@ -149,11 +178,25 @@ export class AccountAvatar extends HTMLElement {
         return
       }
       this.#renderPicture(this.#account.picture, this.#account.pubkey)
+      this.#updateCopyKeyButton()
     }
+
+    this.#refreshStatus()
+    this.#unsubStatus = accountStatus.subscribe((pubkey) => {
+      if (pubkey === this.getAttribute('pubkey')) this.#refreshStatus()
+    })
+  }
+
+  #refreshStatus () {
+    const pk = this.getAttribute('pubkey')
+    const st = pk ? accountStatus.get(pk) : null
+    this.toggleAttribute('data-error', !!st?.error)
   }
 
   disconnectedCallback () {
     this.removeEventListener('click', this.#onClick)
+    this.#unsubStatus?.()
+    this.#unsubStatus = null
     for (const id of this.#flashTimers.values()) clearTimeout(id)
     this.#flashTimers.clear()
     this.#flashLabels.clear()
@@ -167,8 +210,16 @@ export class AccountAvatar extends HTMLElement {
       return
     }
     const picChanged = acc.picture !== this.#account?.picture
+    const typeChanged = acc.type !== this.#account?.type
     this.#account = acc
     if (picChanged) this.#renderPicture(acc.picture, acc.pubkey)
+    if (typeChanged) this.#updateCopyKeyButton()
+  }
+
+  #updateCopyKeyButton () {
+    const btn = this.querySelector('button[data-action="copy-nsec"]')
+    if (!btn) return
+    btn.title = this.#account?.type === 'bunker' ? 'Copy bunker URL' : 'Copy nsec'
   }
 
   #onClick = (e) => {
@@ -182,7 +233,7 @@ export class AccountAvatar extends HTMLElement {
       case 'edit': return this.#setMode(MODE.EDITING)
       case 'cancel-edit': return this.#setMode(MODE.NORMAL)
       case 'delete': return this.#deleteAccount()
-      case 'copy-nsec': return this.#copy(btn, this.#account?.nsec)
+      case 'copy-nsec': return this.#copy(btn, this.#account?.type === 'bunker' ? this.#account.bunker : this.#account?.nsec)
       case 'copy-npub': return this.#copy(btn, nostr.npubFromPubkey(this.#account?.pubkey))
     }
   }
