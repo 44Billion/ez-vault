@@ -1,7 +1,7 @@
 import * as store from './accounts-store.js'
 import { fetchLatestProfile, fetchRelayListEvent, parseRelayListEvent, freeRelays } from './relays.js'
 import { parseProfileEvent } from './nostr.js'
-import { fetchBunkerUserPubkey } from './bunker.js'
+import { claimBunker, releaseBunker } from './bunker.js'
 import * as status from './account-status.js'
 import { seededAvatarDataUrl } from './avatar.js'
 import { isOnline, onOnline } from '../helpers/network.js'
@@ -33,9 +33,10 @@ async function rehydrateOne (account) {
   // truth — adopt it and drop metadata tied to the old one so the relay and
   // profile refresh below repopulates from the new pubkey's own events.
   if (account.type === 'bunker' && account.bunker) {
+    const bunker = claimBunker(account)
     let liveBunkerPubkey
     try {
-      ;({ pubkey: liveBunkerPubkey } = await fetchBunkerUserPubkey(account.bunker))
+      liveBunkerPubkey = await bunker.getPublicKey()
       status.clearError(account.pubkey)
     } catch (err) {
       status.setError(account.pubkey, String(err?.message ?? err))
@@ -47,6 +48,9 @@ async function rehydrateOne (account) {
         return { updated: false }
       }
       console.warn('Bunker pubkey drifted — adopting new pubkey', account.pubkey, '->', liveBunkerPubkey)
+      // The pool entry is keyed by the old pubkey — tear it down so the next
+      // caller gets a fresh handle under the adopted pubkey.
+      releaseBunker(account.pubkey)
       const reset = {
         pubkey: liveBunkerPubkey,
         profileEvent: undefined,

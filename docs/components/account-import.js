@@ -6,7 +6,7 @@ import {
   parseRelayListEvent,
   freeRelays
 } from '../services/relays.js'
-import { fetchBunkerUserPubkey } from '../services/bunker.js'
+import { fetchBunkerUserPubkey, releaseBunker } from '../services/bunker.js'
 import { seededAvatarDataUrl } from '../services/avatar.js'
 import { injectComponentStyles } from '../helpers/dom.js'
 
@@ -215,19 +215,26 @@ export class AccountImport extends HTMLElement {
     else store.add(record)
   }
 
-  async #importBunker (bunkerUrl) {
-    const { pubkey } = await fetchBunkerUserPubkey(bunkerUrl)
-    // Bunker-over-bunker for the same pubkey is treated as a URL refresh
-    // (new relays / new secret for the same remote signer). Bunker-over-nsec
-    // would be a capability downgrade — reject.
+  async #importBunker (bunkerUrlInput) {
+    // fetchBunkerUserPubkey spins up a pooled BunkerHandle, generates the
+    // persistent client key, burns the URL's one-use secret on connect, and
+    // returns the values we must persist. The handle keeps the connection
+    // warm for the rehydrator/sign path that follows.
+    const { pubkey, clientKey, bunkerUrl } = await fetchBunkerUserPubkey(bunkerUrlInput)
     const existing = store.get(pubkey)
-    if (existing && existing.type !== 'bunker') throw new Error('ACCOUNT_EXISTS')
+    if (existing && existing.type !== 'bunker') {
+      // The handle has already registered itself in the pool keyed by this
+      // pubkey — clean it up since we're rejecting the import.
+      releaseBunker(pubkey)
+      throw new Error('ACCOUNT_EXISTS')
+    }
     const meta = await resolveMetadata(pubkey)
     const picture = meta.picture || existing?.picture || await seededAvatarDataUrl(pubkey)
     const record = {
       type: 'bunker',
       pubkey,
       bunker: bunkerUrl,
+      bunkerClientKey: clientKey,
       picture,
       name: meta.name || existing?.name || '',
       profileEvent: meta.profileEvent || existing?.profileEvent,
