@@ -87,9 +87,9 @@ async function rehydrateOne (account) {
     patch.name = parsed.name || account.name || ''
     patch.picture = parsed.picture ||
       account.picture ||
-      await seededAvatarDataUrl(account.nsec || account.pubkey)
+      await seededAvatarDataUrl(account.pubkey)
   } else if (!account.picture) {
-    patch.picture = await seededAvatarDataUrl(account.nsec || account.pubkey)
+    patch.picture = await seededAvatarDataUrl(account.pubkey)
   }
 
   if (Object.keys(patch).length) store.update(account.pubkey, patch)

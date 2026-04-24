@@ -5,28 +5,65 @@ import {
   nip19
 } from 'nostr-tools'
 
+const HEX_SECKEY_REGEX = /^[0-9a-f]{64}$/i
+
+export function bytesToHex (bytes) {
+  let s = ''
+  for (const b of bytes) s += b.toString(16).padStart(2, '0')
+  return s
+}
+
+export function hexToBytes (hex) {
+  const out = new Uint8Array(hex.length / 2)
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16)
+  return out
+}
+
 export function generateKeypair () {
   const secretKey = generateSecretKey()
   const pubkey = getPublicKey(secretKey)
   return {
     secretKey,
+    seckey: bytesToHex(secretKey),
     pubkey,
     nsec: nip19.nsecEncode(secretKey),
     npub: nip19.npubEncode(pubkey)
   }
 }
 
-export function keypairFromNsec (nsec) {
-  const decoded = nip19.decode(nsec)
-  if (decoded.type !== 'nsec') throw new Error('NOT_AN_NSEC')
-  const secretKey = decoded.data
+// Accepts either an `nsec1...` bech32 string or a 64-char hex secret key.
+// Returns both encodings so callers can store the hex form and display the
+// nsec form without re-decoding.
+export function keypairFromSeckey (raw) {
+  let secretKey
+  if (HEX_SECKEY_REGEX.test(raw)) {
+    secretKey = hexToBytes(raw.toLowerCase())
+  } else {
+    const decoded = nip19.decode(raw)
+    if (decoded.type !== 'nsec') throw new Error('NOT_A_SECRET_KEY')
+    secretKey = decoded.data
+  }
   const pubkey = getPublicKey(secretKey)
   return {
     secretKey,
+    seckey: bytesToHex(secretKey),
     pubkey,
-    nsec,
+    nsec: nip19.nsecEncode(secretKey),
     npub: nip19.npubEncode(pubkey)
   }
+}
+
+// npub-only: hex pubkeys are not accepted for read-only imports because
+// bech32 includes a checksum that protects against user-typo imports of a
+// pubkey they cannot sign for.
+export function pubkeyFromNpub (npub) {
+  const decoded = nip19.decode(npub)
+  if (decoded.type !== 'npub') throw new Error('NOT_AN_NPUB')
+  return decoded.data
+}
+
+export function nsecFromHex (hex) {
+  return nip19.nsecEncode(hexToBytes(hex))
 }
 
 export function npubFromPubkey (pubkey) {

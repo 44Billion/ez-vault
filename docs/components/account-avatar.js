@@ -114,8 +114,31 @@ const STYLES = /* css */`
   account-avatar[mode="normal"] .avatar-btn[data-action="edit"],
   account-avatar[mode="editing"] .avatar-btn[data-action="delete"],
   account-avatar[mode="editing"] .avatar-btn[data-action="cancel-edit"],
-  account-avatar[mode="editing"] .avatar-btn[data-action="copy-nsec"],
+  account-avatar[mode="editing"]:not([data-type="npub"]) .avatar-btn[data-action="copy-nsec"],
   account-avatar[mode="editing"] .avatar-btn[data-action="copy-npub"] {
+    display: inline-flex;
+  }
+  account-avatar .avatar-readonly-label {
+    position: absolute;
+    bottom: 2px;
+    right: 2px;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 0 8px;
+    height: 18px;
+    border-radius: 9999px;
+    background-color: oklch(0.22 0 89.88);
+    color: oklch(0.92 0 89.88);
+    font-size: 9rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    box-shadow: 0 0 0 2px oklch(0.3 0.12 274.76);
+    pointer-events: none;
+    z-index: 1;
+  }
+  account-avatar[mode="normal"][data-type="npub"] .avatar-readonly-label {
     display: inline-flex;
   }
   account-avatar .avatar-btn.is-success {
@@ -146,6 +169,7 @@ const TEMPLATE = `
   <button class="avatar-btn at-top-left" data-action="delete" title="Remove account" type="button"><span class="avatar-btn-icon">${ICON_TRASH}</span></button>
   <button class="avatar-btn at-top-right" data-action="cycle" title="Change image" type="button"><span class="avatar-btn-icon">${ICON_REFRESH}</span></button>
   <button class="avatar-btn at-top-right" data-action="edit" title="Edit" type="button"><span class="avatar-btn-icon">${ICON_PENCIL}</span></button>
+  <span class="avatar-readonly-label" aria-label="Read-only account">read-only</span>
   <button class="avatar-btn at-top-right" data-action="cancel-edit" title="Close" type="button"><span class="avatar-btn-icon">${ICON_X}</span></button>
   <button class="avatar-btn at-bottom-left" data-action="copy-nsec" title="Copy nsec" type="button"><span class="avatar-btn-icon">${ICON_KEY}</span></button>
   <button class="avatar-btn at-bottom-right at-primary" data-action="save" title="Save" type="button"><span class="avatar-btn-icon">${ICON_CHECK}</span></button>
@@ -177,6 +201,7 @@ export class AccountAvatar extends HTMLElement {
         this.remove()
         return
       }
+      this.#applyAccountType()
       this.#renderPicture(this.#account.picture, this.#account.pubkey)
       this.#updateCopyKeyButton()
     }
@@ -212,14 +237,29 @@ export class AccountAvatar extends HTMLElement {
     const picChanged = acc.picture !== this.#account?.picture
     const typeChanged = acc.type !== this.#account?.type
     this.#account = acc
+    if (typeChanged) this.#applyAccountType()
     if (picChanged) this.#renderPicture(acc.picture, acc.pubkey)
     if (typeChanged) this.#updateCopyKeyButton()
+  }
+
+  #applyAccountType () {
+    const type = this.#account?.type
+    if (type) this.setAttribute('data-type', type)
+    else this.removeAttribute('data-type')
   }
 
   #updateCopyKeyButton () {
     const btn = this.querySelector('button[data-action="copy-nsec"]')
     if (!btn) return
     btn.title = this.#account?.type === 'bunker' ? 'Copy bunker URL' : 'Copy nsec'
+  }
+
+  #copyKey (btn) {
+    const acc = this.#account
+    if (!acc) return this.#flashError(btn)
+    if (acc.type === 'bunker') return this.#copy(btn, acc.bunker)
+    if (acc.type === 'nsec' && acc.seckey) return this.#copy(btn, nostr.nsecFromHex(acc.seckey))
+    return this.#flashError(btn)
   }
 
   #onClick = (e) => {
@@ -233,7 +273,7 @@ export class AccountAvatar extends HTMLElement {
       case 'edit': return this.#setMode(MODE.EDITING)
       case 'cancel-edit': return this.#setMode(MODE.NORMAL)
       case 'delete': return this.#deleteAccount()
-      case 'copy-nsec': return this.#copy(btn, this.#account?.type === 'bunker' ? this.#account.bunker : this.#account?.nsec)
+      case 'copy-nsec': return this.#copyKey(btn)
       case 'copy-npub': return this.#copy(btn, nostr.npubFromPubkey(this.#account?.pubkey))
     }
   }
@@ -256,7 +296,7 @@ export class AccountAvatar extends HTMLElement {
     }
     try {
       const kp = nostr.generateKeypair()
-      const picture = await seededAvatarDataUrl(kp.nsec)
+      const picture = await seededAvatarDataUrl(kp.pubkey)
       this.#draft = { ...kp, picture }
       await this.#renderPicture(picture)
     } finally {
@@ -324,8 +364,9 @@ export class AccountAvatar extends HTMLElement {
       if (!profilePublish.success) throw new Error('PROFILE_PUBLISH_FAILED')
 
       const record = {
+        type: 'nsec',
         pubkey: this.#draft.pubkey,
-        nsec: this.#draft.nsec,
+        seckey: this.#draft.seckey,
         picture: this.#draft.picture,
         name: '',
         profileEvent,
@@ -337,6 +378,8 @@ export class AccountAvatar extends HTMLElement {
       this.#draft = null
       this.#account = record
       this.setAttribute('pubkey', record.pubkey)
+      this.#applyAccountType()
+      this.#updateCopyKeyButton()
       this.#setMode(MODE.NORMAL)
       store.add(record)
     } catch (err) {

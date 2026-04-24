@@ -89,7 +89,7 @@ const TEMPLATE = /* html */`
     <button class="import-btn" data-action="cancel" type="button" title="Cancel">
       <span class="import-btn-icon">${ICON_X}</span>
     </button>
-    <input class="import-input" type="text" placeholder="nsec1... or bunker://" spellcheck="false" autocorrect="off" autocapitalize="off" />
+    <input class="import-input" type="text" placeholder="nsec1.../hex, npub1..., or bunker://" spellcheck="false" autocorrect="off" autocapitalize="off" />
     <button class="import-btn" data-action="confirm" type="submit" title="Import">
       <span class="import-btn-icon">${ICON_CHECK}</span>
     </button>
@@ -149,8 +149,10 @@ export class AccountImport extends HTMLElement {
     try {
       if (raw.startsWith('bunker://')) {
         await this.#importBunker(raw)
+      } else if (raw.startsWith('npub1')) {
+        await this.#importNpub(raw)
       } else {
-        await this.#importNsec(raw)
+        await this.#importSeckey(raw)
       }
       this.removeAttribute('open')
       this.#input.value = ''
@@ -192,27 +194,51 @@ export class AccountImport extends HTMLElement {
     }
   }
 
-  async #importNsec (nsec) {
-    const { pubkey } = nostr.keypairFromNsec(nsec)
-    // An nsec gives strictly more capability than a bunker URL, so an nsec
-    // import for a pubkey currently held as a bunker is an in-place upgrade.
-    // Any other existing entry (already an nsec) is a duplicate — reject.
+  async #importSeckey (raw) {
+    const { pubkey, seckey } = nostr.keypairFromSeckey(raw)
+    // A bare secret key gives strictly more capability than a bunker URL or a
+    // read-only npub, so importing a seckey for a pubkey currently held as
+    // either is an in-place upgrade. An existing seckey entry is a duplicate.
     const existing = store.get(pubkey)
-    if (existing && existing.type !== 'bunker') throw new Error('ACCOUNT_EXISTS')
+    if (existing && existing.type === 'nsec') throw new Error('ACCOUNT_EXISTS')
     const meta = await resolveMetadata(pubkey)
-    const picture = meta.picture || existing?.picture || await seededAvatarDataUrl(nsec)
+    const picture = meta.picture || existing?.picture || await seededAvatarDataUrl(pubkey)
     const record = {
       type: 'nsec',
       pubkey,
-      nsec,
+      seckey,
       picture,
       name: meta.name || existing?.name || '',
       profileEvent: meta.profileEvent || existing?.profileEvent,
       relayListEvent: meta.relayListEvent || existing?.relayListEvent,
       writeRelays: meta.writeRelays
     }
-    if (existing) store.replace(pubkey, record)
-    else store.add(record)
+    if (existing) {
+      // Upgrading from bunker → nsec: the live BunkerHandle is now obsolete,
+      // tear it down so it doesn't linger in the pool.
+      if (existing.type === 'bunker') releaseBunker(pubkey)
+      store.replace(pubkey, record)
+    } else {
+      store.add(record)
+    }
+  }
+
+  async #importNpub (npub) {
+    const pubkey = nostr.pubkeyFromNpub(npub)
+    // npub is the weakest form (read-only), so it can never overwrite an
+    // existing entry — any nsec/bunker/npub at this pubkey wins.
+    if (store.get(pubkey)) throw new Error('ACCOUNT_EXISTS')
+    const meta = await resolveMetadata(pubkey)
+    const picture = meta.picture || await seededAvatarDataUrl(pubkey)
+    store.add({
+      type: 'npub',
+      pubkey,
+      picture,
+      name: meta.name || '',
+      profileEvent: meta.profileEvent,
+      relayListEvent: meta.relayListEvent,
+      writeRelays: meta.writeRelays
+    })
   }
 
   async #importBunker (bunkerUrlInput) {
@@ -222,7 +248,10 @@ export class AccountImport extends HTMLElement {
     // warm for the rehydrator/sign path that follows.
     const { pubkey, clientKey, bunkerUrl } = await fetchBunkerUserPubkey(bunkerUrlInput)
     const existing = store.get(pubkey)
-    if (existing && existing.type !== 'bunker') {
+    // A bunker import can replace another bunker entry (URL/secret refresh)
+    // or upgrade a read-only npub; an existing nsec is strictly more capable,
+    // so we reject that case.
+    if (existing && existing.type !== 'bunker' && existing.type !== 'npub') {
       // The handle has already registered itself in the pool keyed by this
       // pubkey — clean it up since we're rejecting the import.
       releaseBunker(pubkey)
