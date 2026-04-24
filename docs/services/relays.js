@@ -6,6 +6,7 @@ export const seedRelays = [
   'wss://purplepag.es',
   'wss://user.kindpag.es',
   'wss://relay.nos.social',
+  'wss://nostr.land',
   'wss://indexer.coracle.social'
 ]
 
@@ -21,7 +22,7 @@ export const freeRelays = [
 const POST_EOSE_GRACE_MS = 500
 const HARD_TIMEOUT_MS = 5000
 
-const pool = new SimplePool()
+export const pool = new SimplePool()
 
 export async function publish (event, relays) {
   if (!relays?.length) throw new Error('NO_RELAYS')

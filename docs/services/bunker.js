@@ -1,13 +1,7 @@
 import { BunkerSigner, parseBunkerInput } from 'nostr-tools/nip46'
-import { SimplePool } from 'nostr-tools/pool'
 import { generateSecretKey } from 'nostr-tools'
 import * as store from './accounts-store.js'
-
-// One SimplePool shared by every BunkerHandle in this page session. Per-call
-// pools would open a fresh WebSocket to the same relays for every request
-// and tear them down on close — wasteful and papers over the fact that
-// bunker relays are long-lived subscriptions, not one-shot fetches.
-const relayPool = new SimplePool()
+import { pool } from './relays.js'
 
 const handles = new Map() // userPubkey -> BunkerHandle
 
@@ -60,7 +54,7 @@ function buildBunkerUrl (remoteSignerPubkey, relays) {
 async function openSigner (bunkerUrl, clientSecretKey) {
   const pointer = await parseBunkerInput(bunkerUrl)
   if (!pointer) throw new Error('INVALID_BUNKER_URL')
-  const signer = BunkerSigner.fromBunker(clientSecretKey, pointer, { pool: relayPool })
+  const signer = BunkerSigner.fromBunker(clientSecretKey, pointer, { pool })
   try {
     await signer.connect()
   } catch (err) {
