@@ -1,6 +1,7 @@
 import './components/account-list.js'
 import './components/account-import.js'
 import { rehydrateAll } from './services/profile-rehydrator.js'
+import { initMessenger } from './services/messenger.js'
 
 const list = document.querySelector('account-list')
 const importPanel = document.querySelector('account-import')
@@ -11,3 +12,4 @@ createBtn.addEventListener('click', () => list.startCreate())
 importBtn.addEventListener('click', () => importPanel.open())
 
 rehydrateAll()
+initMessenger()

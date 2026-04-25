@@ -7,6 +7,7 @@ import {
   freeRelays
 } from '../services/relays.js'
 import { fetchBunkerUserPubkey, releaseBunker } from '../services/bunker.js'
+import { releaseSigner } from '../services/signer.js'
 import { seededAvatarDataUrl } from '../services/avatar.js'
 import { injectComponentStyles } from '../helpers/dom.js'
 
@@ -214,9 +215,9 @@ export class AccountImport extends HTMLElement {
       writeRelays: meta.writeRelays
     }
     if (existing) {
-      // Upgrading from bunker → nsec: the live BunkerHandle is now obsolete,
-      // tear it down so it doesn't linger in the pool.
-      if (existing.type === 'bunker') releaseBunker(pubkey)
+      // Upgrading from bunker/npub → nsec: any live signer backing the prior
+      // entry is now obsolete, tear it down so it doesn't linger.
+      releaseSigner(pubkey)
       store.replace(pubkey, record)
     } else {
       store.add(record)

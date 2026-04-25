@@ -1,0 +1,132 @@
+import { ask, reply } from '../helpers/window-message.js'
+import { serializeError } from '../helpers/error.js'
+import * as store from './accounts-store.js'
+import * as signer from './signer.js'
+import * as log from './messenger-log.js'
+
+// Only parents on this list are treated as the launcher. When we can resolve
+// the parent's origin (ancestorOrigins or document.referrer), we target
+// VAULT_READY at it specifically so the port never reaches an untrusted
+// frame. When we can't, we fall back to "*" and rely on LAUNCHER_READY as
+// the gate.
+const TRUSTED_ORIGIN_PATTERNS = [
+  /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/,
+  'https://nostrapps.com'
+]
+
+function isTrustedOrigin (origin) {
+  if (!origin || typeof origin !== 'string') return false
+  for (const rule of TRUSTED_ORIGIN_PATTERNS) {
+    if (rule instanceof RegExp ? rule.test(origin) : rule === origin) return true
+  }
+  return false
+}
+
+// Chromium/WebKit expose ancestorOrigins synchronously. Firefox doesn't, so
+// we try document.referrer's origin next — that can be stripped by the
+// parent's referrer-policy, in which case we return null and the caller
+// falls back to targetOrigin="*".
+function syncTrustedParentOrigin () {
+  const ancestors = window.location.ancestorOrigins
+  if (ancestors?.length) {
+    return isTrustedOrigin(ancestors[0]) ? ancestors[0] : null
+  }
+  try {
+    if (!document.referrer) return null
+    const origin = new URL(document.referrer).origin
+    return isTrustedOrigin(origin) ? origin : null
+  } catch {
+    return null
+  }
+}
+
+// Only non-sensitive fields: pubkey, display metadata, and `type` so the
+// launcher can render the account list. Secret keys and bunker URLs stay in
+// the vault.
+function snapshotAccounts () {
+  return store.list().map(({ pubkey, name, picture, type }) => ({
+    pubkey, name, picture, type
+  }))
+}
+
+let launcherPort = null
+let launcherOrigin = null
+let handshakeComplete = false
+
+export async function initMessenger () {
+  // No parent to talk to — we're top-level (opened directly).
+  if (window === window.top) return
+
+  launcherOrigin = syncTrustedParentOrigin()
+  // The launcher can't know when the vault is ready, so we send VAULT_READY
+  // unprompted. If we can't pin a trusted origin up front, fall back to "*"
+  // — the port may end up in an untrusted parent, but it can't drive NIP07
+  // until handshakeComplete flips, and that gate requires a REPLY whose
+  // window-level origin we verify (port messages carry no origin).
+  const targetOrigin = launcherOrigin ?? '*'
+
+  const { port1, port2 } = new MessageChannel()
+  port1.addEventListener('message', onPortMessage)
+  port1.start()
+  launcherPort = port1
+
+  // ask() generates a reqId, posts on window.parent, and resolves on the
+  // matching REPLY (also a window-level message — that's where e.origin
+  // lives). We validate origin against the allowlist before flipping the
+  // gate; a malicious parent that grabbed the port via the "*" fallback
+  // can't fake a trusted e.origin on the reply.
+  const { error, origin } = await ask(window.parent, {
+    code: 'VAULT_READY',
+    payload: { accounts: snapshotAccounts() }
+  }, { targetOrigin, transfer: [port2] })
+  if (error || !isTrustedOrigin(origin)) {
+    // Disentangle the channel — port2 may be held by an untrusted parent via
+    // the "*" fallback; closing port1 guarantees any message they post on it
+    // can no longer reach us.
+    try { port1.close() } catch { /* noop */ }
+    launcherPort = null
+    return
+  }
+  launcherOrigin ??= origin
+  handshakeComplete = true
+}
+
+function onPortMessage (e) {
+  if (!e.data || typeof e.data !== 'object') return
+  const { code } = e.data
+  // REPLY frames belong to window-message's own listener when/if we make
+  // port-side asks. We currently don't, but guard against stray ones.
+  if (code === 'REPLY') return
+  if (!handshakeComplete) return
+  if (code === 'NIP07') return handleNip07(e)
+}
+
+async function handleNip07 (e) {
+  const { pubkey, method, params = [], app = {} } = e.data.payload ?? {}
+  const eventKind = method === 'sign_event'
+    ? params?.[0]?.kind
+    : undefined
+
+  const logBase = {
+    code: 'NIP07',
+    pubkey,
+    method,
+    app: { id: app.id ?? '', name: app.name ?? '' },
+    origin: launcherOrigin,
+    eventKind
+  }
+
+  try {
+    const payload = await signer.run({ pubkey, method, params })
+    log.append({ ...logBase, status: 'success' })
+    reply(e, { payload }, { to: launcherPort })
+  } catch (err) {
+    const serialized = serializeError(err, { eventKind })
+    log.append({
+      ...logBase,
+      status: 'failure',
+      error: { message: err.message }
+    })
+    reply(e, { error: serialized }, { to: launcherPort })
+  }
+}
