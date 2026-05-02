@@ -2,6 +2,7 @@ import * as store from '../services/accounts-store.js'
 import * as nostr from '../services/nostr.js'
 import * as relays from '../services/relays.js'
 import * as accountStatus from '../services/account-status.js'
+import * as messengerLog from '../services/messenger-log/index.js'
 import { releaseSigner } from '../services/signer.js'
 import { seededAvatarDataUrl } from '../services/avatar.js'
 import { injectComponentStyles } from '../helpers/dom.js'
@@ -394,8 +395,10 @@ export class AccountAvatar extends HTMLElement {
 
   #deleteAccount () {
     if (!this.#account) return
-    releaseSigner(this.#account.pubkey)
-    store.remove(this.#account.pubkey)
+    const pubkey = this.#account.pubkey
+    releaseSigner(pubkey)
+    messengerLog.removeForPubkey(pubkey)
+    store.remove(pubkey)
   }
 
   async #copy (btn, value) {

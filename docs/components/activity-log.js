@@ -7,7 +7,7 @@ import './shared/table-saw.js'
 // Manual override. When true, fixtures.json (next to messenger-log) is
 // merged into the displayed list so we can eyeball every method/kind
 // shape without driving each one through the real signer pipeline.
-const DEV_MODE = true
+const DEV_MODE = false
 
 const FIXTURES_URL = new URL('../services/messenger-log/fixtures.json', import.meta.url)
 
@@ -21,6 +21,13 @@ const STYLES = /* css */`
   activity-log {
     display: block;
     padding-top: 6px;
+  }
+  /* When activity-log has no entries, hide the entire accordion (header
+     and all) so the user isn't tempted to expand an empty panel. The
+     component owns this rule rather than a parent because the empty
+     state is its own state to manage. */
+  accordion-panel:has(activity-log[data-empty]) {
+    display: none;
   }
   activity-log .empty {
     padding: 16px 4px;
@@ -409,12 +416,18 @@ export class ActivityLog extends HTMLElement {
     if (id !== this.#renderId) return
 
     if (entries.length === 0) {
+      // [data-empty] hides the wrapping accordion-panel via :has() so the
+      // user doesn't see an empty disclosure. Keep the inner empty-state
+      // markup as a fallback for contexts where activity-log is used
+      // outside an accordion.
+      this.toggleAttribute('data-empty', true)
       this.replaceChildren(Object.assign(document.createElement('div'), {
         className: 'empty',
         textContent: 'No activity yet.'
       }))
       return
     }
+    this.toggleAttribute('data-empty', false)
 
     const tableSaw = document.createElement('table-saw')
     tableSaw.setAttribute('type', 'container')

@@ -60,6 +60,15 @@ export function list () {
   return read()
 }
 
+export function removeForPubkey (pubkey) {
+  if (!pubkey) return
+  const all = read()
+  const next = all.filter(e => e.pubkey !== pubkey)
+  if (next.length === all.length) return
+  write(next)
+  notify()
+}
+
 export function clear () {
   write([])
   notify()
