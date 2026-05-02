@@ -1,4 +1,4 @@
-const KEY = '46b-vault:accounts'
+const KEY = 'ez-vault:accounts'
 const listeners = new Set()
 
 function read () {

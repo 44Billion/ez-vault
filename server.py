@@ -49,7 +49,7 @@ if __name__ == "__main__":
     socketserver.TCPServer.allow_reuse_address = True
 
     with socketserver.TCPServer(("", PORT), NoCacheHTTPRequestHandler) as httpd:
-        print(f"Serving 46b signer docs folder at http://localhost:{PORT}")
+        print(f"Serving EZ Vault docs folder at http://localhost:{PORT}")
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:

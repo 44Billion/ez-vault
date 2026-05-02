@@ -1,5 +1,7 @@
 import './components/account-list.js'
 import './components/account-import.js'
+import './components/shared/accordion-panel.js'
+import './components/activity-log.js'
 import { rehydrateAll } from './services/profile-rehydrator.js'
 import { initMessenger } from './services/messenger.js'
 

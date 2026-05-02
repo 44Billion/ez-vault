@@ -1,0 +1,241 @@
+[
+  {
+    "ts": 1746201600,
+    "code": "NIP07",
+    "pubkey": "82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2",
+    "method": "sign_event",
+    "app": {
+      "id": "com.coracle.social",
+      "name": "Coracle",
+      "icon": "https://coracle.social/favicon.ico"
+    },
+    "origin": "https://coracle.social",
+    "eventKind": 1,
+    "status": "success",
+    "params": [
+      {
+        "kind": 1,
+        "created_at": 1746201598,
+        "tags": [["t", "nostr"]],
+        "content": "GM nostr! Trying out the new vault."
+      }
+    ],
+    "result": {
+      "id": "0bf9c2a6c3e91f3a1f6bb4f9a2e0d3b5a8c7f3e2d1c0b9a8e7d6c5b4a3f2e1d0",
+      "pubkey": "82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2",
+      "kind": 1,
+      "created_at": 1746201598,
+      "tags": [["t", "nostr"]],
+      "content": "GM nostr! Trying out the new vault.",
+      "sig": "f1e2d3c4b5a69788a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f23456789012345678901234567890123456789012345678901234567890abcdef"
+    }
+  },
+  {
+    "ts": 1746198000,
+    "code": "NIP07",
+    "pubkey": "82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2",
+    "method": "nip44_decrypt",
+    "app": {
+      "id": "+chat.0xchat",
+      "name": "0xchat",
+      "icon": ""
+    },
+    "origin": "https://0xchat.com",
+    "status": "success",
+    "params": [
+      "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d",
+      "AhFjzRm8b7GhPpVL+Yq7xKp8m3F5N0u5hPq3wQyR9d8cYv0JbXQfL2KkNxDhCJpLwH4nM5R0eS9xVzAbCdEf"
+    ],
+    "result": "Hey, are we still on for the call at 4pm? I have the docs ready to share."
+  },
+  {
+    "ts": 1746194400,
+    "code": "NIP07",
+    "pubkey": "82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2",
+    "method": "sign_event",
+    "app": {
+      "id": "com.amethyst",
+      "name": "Amethyst",
+      "icon": "https://amethyst.social/icon.png"
+    },
+    "origin": "https://amethyst.social",
+    "eventKind": 7,
+    "status": "success",
+    "params": [
+      {
+        "kind": 7,
+        "created_at": 1746194398,
+        "tags": [
+          ["e", "abc123def456abc123def456abc123def456abc123def456abc123def456abcd"],
+          ["p", "0000000000000000000000000000000000000000000000000000000000000001"]
+        ],
+        "content": "🤙"
+      }
+    ],
+    "result": {
+      "id": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+      "pubkey": "82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2",
+      "kind": 7,
+      "created_at": 1746194398,
+      "tags": [
+        ["e", "abc123def456abc123def456abc123def456abc123def456abc123def456abcd"],
+        ["p", "0000000000000000000000000000000000000000000000000000000000000001"]
+      ],
+      "content": "🤙",
+      "sig": "a1b2c3d4e5f607182930415263748596a7b8c9d0e1f203142536475869708192a3b4c5d6e7f80910213243546576879809a1b2c3d4e5f607182930415263748596"
+    }
+  },
+  {
+    "ts": 1746190800,
+    "code": "NIP07",
+    "pubkey": "82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2",
+    "method": "nip44_encrypt",
+    "app": {
+      "id": "+++mystery.app",
+      "name": "",
+      "icon": ""
+    },
+    "origin": "https://mystery.example",
+    "status": "success",
+    "params": [
+      "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d",
+      "Confirming dinner Friday 7pm at the usual place."
+    ],
+    "result": "AjK9f8nVxQp2zM4cN6vL1tR3sW5yY7uHbGhFeDcBaZxVwUtSrQpOnMlKjIhGfEdC"
+  },
+  {
+    "ts": 1746187200,
+    "code": "NIP07",
+    "pubkey": "82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2",
+    "method": "sign_event",
+    "app": {
+      "id": "com.habla",
+      "name": "Habla",
+      "icon": "https://habla.news/favicon.ico"
+    },
+    "origin": "https://habla.news",
+    "eventKind": 30023,
+    "status": "success",
+    "params": [
+      {
+        "kind": 30023,
+        "created_at": 1746187198,
+        "tags": [
+          ["d", "vault-launch-notes"],
+          ["title", "Vault Launch Notes"],
+          ["summary", "Field notes from running the new ez-vault iframe signer for two weeks."],
+          ["t", "nostr"],
+          ["t", "vault"]
+        ],
+        "content": "# Vault launch notes\n\nAfter two weeks of running the new ez-vault signer in production I have a handful of observations worth writing down before they fade.\n\n## What worked\n\n- The vertical-drawer shape really does fit on every device size we tested. The narrow column constraint forced us to keep the UI honest.\n- Storing the audit trail next to the keys is a surprisingly powerful trust signal. People open the activity log on day one and almost never close it.\n- NIP-65 lookups via the seed-relay set are fast enough that we never had to add any extra caching beyond what nostr-tools already does.\n\n## What did not work\n\n- The first iteration leaked the parent origin into log entries before the handshake completed. We caught it in code review, but it is the kind of thing you only catch if you actually read every line.\n- Auto-reconnection on bunker timeouts is still flaky on mobile Safari when the page is backgrounded for more than 30 seconds.\n\n## Next steps\n\nEncrypt the audit log at rest using the same key derivation that wraps the nsec. Add a quick-filter by app id to the activity log. Surface failed signs more visibly — right now they are easy to miss.\n"
+      }
+    ],
+    "result": {
+      "id": "1111111122222222333333334444444455555555666666667777777788888888",
+      "pubkey": "82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2",
+      "kind": 30023,
+      "created_at": 1746187198,
+      "tags": [
+        ["d", "vault-launch-notes"],
+        ["title", "Vault Launch Notes"],
+        ["summary", "Field notes from running the new ez-vault iframe signer for two weeks."],
+        ["t", "nostr"],
+        ["t", "vault"]
+      ],
+      "content": "# Vault launch notes\n\nAfter two weeks of running the new ez-vault signer in production I have a handful of observations worth writing down before they fade.\n\n## What worked\n\n- The vertical-drawer shape really does fit on every device size we tested. The narrow column constraint forced us to keep the UI honest.\n- Storing the audit trail next to the keys is a surprisingly powerful trust signal. People open the activity log on day one and almost never close it.\n- NIP-65 lookups via the seed-relay set are fast enough that we never had to add any extra caching beyond what nostr-tools already does.\n\n## What did not work\n\n- The first iteration leaked the parent origin into log entries before the handshake completed. We caught it in code review, but it is the kind of thing you only catch if you actually read every line.\n- Auto-reconnection on bunker timeouts is still flaky on mobile Safari when the page is backgrounded for more than 30 seconds.\n\n## Next steps\n\nEncrypt the audit log at rest using the same key derivation that wraps the nsec. Add a quick-filter by app id to the activity log. Surface failed signs more visibly — right now they are easy to miss.\n",
+      "sig": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    }
+  },
+  {
+    "ts": 1746183600,
+    "code": "NIP07",
+    "pubkey": "82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2",
+    "method": "nip04_decrypt",
+    "app": {
+      "id": "com.iris",
+      "name": "Iris",
+      "icon": "https://iris.to/favicon.ico"
+    },
+    "origin": "https://iris.to",
+    "status": "success",
+    "params": [
+      "8e0d3d3eb2881c4f1a5d68b3e9a6c5f0d2e1f4c5b6a7d8e9f0c1b2a3d4e5f607",
+      "wfQg+5XJ4r1P2yKkN3oM5pL6qR7sT8uV9wX0yZ1aB2cD3eF4gH5iJ6?iv=AbCdEfGhIjKlMnOpQrSt=="
+    ],
+    "result": "thanks for the relay tip — switched and it's much faster"
+  },
+  {
+    "ts": 1746180000,
+    "code": "NIP07",
+    "pubkey": "82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2",
+    "method": "sign_event",
+    "app": {
+      "id": "com.snort",
+      "name": "Snort",
+      "icon": "https://snort.social/favicon.ico"
+    },
+    "origin": "https://snort.social",
+    "eventKind": 4,
+    "status": "success",
+    "params": [
+      {
+        "kind": 4,
+        "created_at": 1746179998,
+        "tags": [["p", "8e0d3d3eb2881c4f1a5d68b3e9a6c5f0d2e1f4c5b6a7d8e9f0c1b2a3d4e5f607"]],
+        "content": "wfQg+5XJ4r1P2yKkN3oM5pL6qR7sT8uV9wX0yZ1aB2cD3eF4gH5iJ6?iv=AbCdEfGhIjKlMnOpQrSt=="
+      }
+    ],
+    "result": {
+      "id": "9876543210abcdef9876543210abcdef9876543210abcdef9876543210abcdef",
+      "pubkey": "82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2",
+      "kind": 4,
+      "created_at": 1746179998,
+      "tags": [["p", "8e0d3d3eb2881c4f1a5d68b3e9a6c5f0d2e1f4c5b6a7d8e9f0c1b2a3d4e5f607"]],
+      "content": "wfQg+5XJ4r1P2yKkN3oM5pL6qR7sT8uV9wX0yZ1aB2cD3eF4gH5iJ6?iv=AbCdEfGhIjKlMnOpQrSt==",
+      "sig": "0102030405060708091011121314151617181920212223242526272829303132333435363738394041424344454647484950515253545556575859606162636465"
+    }
+  },
+  {
+    "ts": 1746176400,
+    "code": "NIP07",
+    "pubkey": "82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2",
+    "method": "nip04_encrypt",
+    "app": {
+      "id": "++unknown",
+      "name": "",
+      "icon": ""
+    },
+    "origin": "https://unnamed.example",
+    "status": "success",
+    "params": [
+      "8e0d3d3eb2881c4f1a5d68b3e9a6c5f0d2e1f4c5b6a7d8e9f0c1b2a3d4e5f607",
+      "ok, see you there"
+    ],
+    "result": "P9q8R7s6T5u4V3w2X1y0Z?iv=ZyXwVuTsRqPoNmLk=="
+  },
+  {
+    "ts": 1746172800,
+    "code": "NIP07",
+    "pubkey": "82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2",
+    "method": "sign_event",
+    "app": {
+      "id": "com.primal",
+      "name": "Primal",
+      "icon": "https://primal.net/favicon.ico"
+    },
+    "origin": "https://primal.net",
+    "eventKind": 1,
+    "status": "failure",
+    "params": [
+      {
+        "kind": 1,
+        "created_at": 1746172798,
+        "tags": [],
+        "content": "test post that should fail"
+      }
+    ],
+    "error": {
+      "message": "BUNKER_TIMEOUT"
+    }
+  }
+]

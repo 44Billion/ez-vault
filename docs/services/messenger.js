@@ -2,7 +2,14 @@ import { ask, reply } from '../helpers/window-message.js'
 import { serializeError } from '../helpers/error.js'
 import * as store from './accounts-store.js'
 import * as signer from './signer.js'
-import * as log from './messenger-log.js'
+import * as log from './messenger-log/index.js'
+
+// Read-only disclosures — the result is publicly derivable, so logging them
+// would just be noise in the audit trail. Match both wire and JS spellings.
+const UNLOGGED_METHODS = new Set([
+  'getPublicKey', 'get_public_key',
+  'getRelays', 'get_relays'
+])
 
 // Only parents on this list are treated as the launcher. When we can resolve
 // the parent's origin (ancestorOrigins or document.referrer), we target
@@ -111,22 +118,29 @@ async function handleNip07 (e) {
     code: 'NIP07',
     pubkey,
     method,
-    app: { id: app.id ?? '', name: app.name ?? '' },
+    app: { id: app.id ?? '', name: app.name ?? '', icon: app.icon ?? '' },
     origin: launcherOrigin,
     eventKind
   }
 
+  const shouldLog = !UNLOGGED_METHODS.has(method)
+
   try {
     const payload = await signer.run({ pubkey, method, params })
-    log.append({ ...logBase, status: 'success' })
+    if (shouldLog) {
+      log.append({ ...logBase, status: 'success', params, result: payload })
+    }
     reply(e, { payload }, { to: launcherPort })
   } catch (err) {
     const serialized = serializeError(err, { eventKind })
-    log.append({
-      ...logBase,
-      status: 'failure',
-      error: { message: err.message }
-    })
+    if (shouldLog) {
+      log.append({
+        ...logBase,
+        status: 'failure',
+        params,
+        error: { message: err.message }
+      })
+    }
     reply(e, { error: serialized }, { to: launcherPort })
   }
 }

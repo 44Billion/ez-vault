@@ -114,6 +114,19 @@ Development-only tooling and scripts live **outside** `docs/` so they are never 
 - **Feature logic, API client, stateful singleton, or a bag of related methods?** → `docs/services/`
 - **Styling?** → `docs/styles/` — either extend an existing file or add a new one and link it from `index.html`.
 
+### Services that grow auxiliary files
+
+A service typically lives in a single file (e.g. `docs/services/foo.js`). When a service grows enough that it wants to ship alongside auxiliary files (fixtures, JSON data, helper modules used only by that service), promote it to its own folder:
+
+```
+docs/services/foo/
+├── index.js        # the public entry — same exports as the old foo.js
+├── fixtures.json   # auxiliary data, only loaded when needed
+└── ...             # additional internal modules, each kept small
+```
+
+Importers should write `from './services/foo/index.js'`. Keep the index file as the only public surface — internal modules are not imported from outside the folder. See `docs/services/messenger-log/` for the canonical example.
+
 ## Styling Rules
 
 The CSS reset in [`docs/styles/reset.css`](docs/styles/reset.css) sets `html { font-size: 0.0625em }` so that `1rem ≈ 1px`. This is a deliberate trick with two consequences:
