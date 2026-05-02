@@ -26,13 +26,7 @@ Because the signer custodies private keys, the overriding design principle is **
 
 ## Communication Model
 
-Unlike a traditional `window.postMessage` iframe signer, this vault does **not** talk to the parent window directly. Instead, it uses the [NIP-46 (Nostr Connect)](https://github.com/nostr-protocol/nips/blob/master/46.md) protocol, specifically the **["Direct connection initiated by the client"](https://github.com/nostr-protocol/nips/blob/master/46.md#direct-connection-initiated-by-the-client)** flow:
-
-- The client (app launcher) initiates the connection.
-- Requests and responses travel as Nostr events through **Nostr relays**.
-- The vault publishes/subscribes on those relays to receive signing requests and return signed results.
-
-When implementing or modifying signer behavior, follow the NIP-46 spec linked above as the source of truth.
+The vault is am iframe signer that talks to the parent window (app launcher) directly using `window.postMessage`. An app requests a permission to the app launcher that, if granted, talks to the vault on behalf of the app.
 
 ## Nostr Relays & Event Discovery (NIP-65)
 
