@@ -12,9 +12,44 @@
 }
 
 .accounts-actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+  display: flex;
+  flex-wrap: wrap;
   gap: 10px;
+}
+
+.accounts-actions .primary-action {
+  flex: 1 1 calc(50% - 5px);
+  min-width: 100px;
+}
+
+/* The HTML `hidden` attribute is normally `display: none`, but the class
+   above overrides it on specificity. Restore the intent so toggling
+   `hidden` from JS actually hides the button. */
+.primary-action[hidden] {
+  display: none;
+}
+
+/* Short labels stay hidden by default; the :has() rule below swaps them in
+   only when all three buttons are sharing one row. */
+.primary-action .text-short {
+  display: none;
+}
+
+/* When the Export button is visible, switch Import + Export to their short
+   labels and weight flex so the New Account button keeps half the row
+   while Import + Export share the other half (25% each). */
+.accounts-actions:has(#export-account-btn:not([hidden])) .primary-action {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.accounts-actions:has(#export-account-btn:not([hidden])) #create-account-btn {
+  flex-grow: 2;
+}
+.accounts-actions:has(#export-account-btn:not([hidden])) .text-full {
+  display: none;
+}
+.accounts-actions:has(#export-account-btn:not([hidden])) .text-short {
+  display: inline;
 }
 
 .primary-action {
@@ -28,6 +63,32 @@
   padding: 10px 8px;
   font-size: 14rem;
   text-align: center;
+  /* Each button is its own size container so the @container rules below can
+     ask "am I too narrow?" per button. Without this, every button-level
+     query would fall through to the document root. */
+  container-type: inline-size;
+}
+
+/* Hard backstop: never let a too-long label wrap to a second line — even
+   if the container queries below mis-predict, we degrade to a one-line
+   ellipsis instead of a misshapen two-line button. */
+.primary-action span:not(.glyph) {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+/* When a single button gets too narrow to comfortably fit its label
+   alongside the icon, drop the icon and let the text take the whole
+   button. Thresholds are tuned per label length: "New Account" needs more
+   room than "Import" / "Export". */
+@container (max-width: 130px) {
+  #create-account-btn .glyph { display: none; }
+}
+@container (max-width: 90px) {
+  #import-account-btn .glyph,
+  #export-account-btn .glyph { display: none; }
 }
 
 .primary-action:active {

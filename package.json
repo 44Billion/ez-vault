@@ -18,12 +18,15 @@
   "scripts": {
     "test": "node --test 'tests/**/*.test.js'",
     "start": "python3 server.py",
+    "// start:peer": "Or open http://localhost:4000 and http://127.0.0.1:4000 for different origins",
+    "start:peer": "PORT=4001 python3 server.py",
     "end": "pkill -f 'python3 server.py'"
   },
   "devDependencies": {
     "eslint": "^9.39.4",
     "eslint-plugin-html": "^8.1.4",
     "globals": "^17.5.0",
-    "neostandard": "^0.13.0"
+    "neostandard": "^0.13.0",
+    "nostr-tools": "^2.23.3"
   }
 }

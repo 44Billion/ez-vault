@@ -38,7 +38,9 @@ def signal_handler(sig, frame):
     sys.exit(0)
 
 if __name__ == "__main__":
-    PORT = 4000
+    # PORT is overridable via the env so we can spin up a second instance on
+    # a different port for two-tab testing (e.g. pairing source vs. target).
+    PORT = int(os.environ.get("PORT", "4000"))
     # Set up signal handler for CTRL+C
     signal.signal(signal.SIGINT, signal_handler)
 

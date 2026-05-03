@@ -268,12 +268,14 @@ export function releaseBunker (pubkey) {
 }
 
 // Import-time entry. Creates a handle (generating a fresh persistent client
-// key), lets it connect using the URL's `secret`, and returns the values the
-// caller must persist to the store. The handle stays in the pool, keyed by
-// the user pubkey, so the rehydrator/sign flow later reuses the live
-// connection instead of opening a new one.
-export async function fetchBunkerUserPubkey (bunkerUrl) {
-  const handle = new BunkerHandle({ bunkerUrl, onStateChange: persistHandleState })
+// key, or reusing the one supplied by the caller), lets it connect using the
+// URL's `secret`, and returns the values the caller must persist to the
+// store. The handle stays in the pool, keyed by the user pubkey, so the
+// rehydrator/sign flow later reuses the live connection instead of opening
+// a new one. A supplied `clientKey` lets the nostrpair import path adopt a
+// bunker connection from another device without invalidating the prior key.
+export async function fetchBunkerUserPubkey (bunkerUrl, { clientKey } = {}) {
+  const handle = new BunkerHandle({ bunkerUrl, clientKey, onStateChange: persistHandleState })
   try {
     const pubkey = await handle.getPublicKey()
     return {

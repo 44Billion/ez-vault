@@ -161,6 +161,51 @@ const STYLES = /* css */`
     height: 16px;
     display: block;
   }
+  /* Export-selection: parent list flips the [selecting] attribute on each
+     tile. We hide all per-tile controls (so the avatar acts as one big
+     toggle target), dim un-selected tiles, and overlay a check on selected
+     ones. The list owns selection state and click handling. */
+  account-avatar[selecting] .avatar-btn,
+  account-avatar[selecting] .avatar-readonly-label {
+    display: none !important;
+  }
+  account-avatar[selecting] {
+    cursor: pointer;
+    transition: opacity 120ms ease-out;
+  }
+  account-avatar[selecting]:not([selected]) {
+    opacity: 0.35;
+  }
+  account-avatar .avatar-select-overlay {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    display: none;
+    align-items: flex-end;
+    justify-content: flex-end;
+    padding: 4px;
+    pointer-events: none;
+    z-index: 2;
+  }
+  account-avatar[selecting][selected] .avatar-select-overlay {
+    display: flex;
+  }
+  account-avatar .avatar-select-badge {
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background-color: oklch(0.55 0.18 145);
+    color: oklch(0.98 0 0);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 0 0 2px oklch(0.3 0.12 274.76);
+  }
+  account-avatar .avatar-select-badge svg {
+    width: 16px;
+    height: 16px;
+    display: block;
+  }
 `
 
 const TEMPLATE = `
@@ -176,6 +221,7 @@ const TEMPLATE = `
   <button class="avatar-btn at-bottom-left" data-action="copy-nsec" title="Copy nsec" type="button"><span class="avatar-btn-icon">${ICON_KEY}</span></button>
   <button class="avatar-btn at-bottom-right at-primary" data-action="save" title="Save" type="button"><span class="avatar-btn-icon">${ICON_CHECK}</span></button>
   <button class="avatar-btn at-bottom-right" data-action="copy-npub" title="Copy npub" type="button"><span class="avatar-btn-icon">${ICON_COPY}</span></button>
+  <span class="avatar-select-overlay" aria-hidden="true"><span class="avatar-select-badge">${ICON_CHECK}</span></span>
 `
 
 export class AccountAvatar extends HTMLElement {

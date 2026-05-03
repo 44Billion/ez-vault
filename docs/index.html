@@ -15,14 +15,21 @@
           <div class="accounts-actions">
             <button id="create-account-btn" type="button" class="primary-action">
               <span class="glyph"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5l0 14" /><path d="M5 12l14 0" /></svg></span>
-              <span>Create Account</span>
+              <span>New Account</span>
             </button>
             <button id="import-account-btn" type="button" class="primary-action">
               <span class="glyph"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5l0 14" /><path d="M16 15l-4 4" /><path d="M8 15l4 4" /></svg></span>
-              <span>Import Account</span>
+              <span class="text-full">Import Account</span>
+              <span class="text-short">Import</span>
+            </button>
+            <button id="export-account-btn" type="button" class="primary-action" hidden>
+              <span class="glyph"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5l0 14" /><path d="M16 9l-4 -4" /><path d="M8 9l4 -4" /></svg></span>
+              <span class="text-full">Export Account</span>
+              <span class="text-short">Export</span>
             </button>
           </div>
           <account-import></account-import>
+          <account-export></account-export>
         </div>
         <account-list class="accounts-list"></account-list>
       </section>
@@ -34,11 +41,14 @@
   <script type="importmap">
   {
     "imports": {
+      "jsqr": "https://esm.sh/jsqr@1.4.0",
       "nostr-tools": "https://esm.sh/nostr-tools@2.23.3",
-      "nostr-tools/": "https://esm.sh/nostr-tools@2.23.3/"
+      "nostr-tools/": "https://esm.sh/nostr-tools@2.23.3/",
+      "qrcode-generator": "https://esm.sh/qrcode-generator@1.4.4"
     }
   }
   </script>
+  <script src="./pre-paint.js"></script>
   <script type="module">
     import './index.js'
   </script>
