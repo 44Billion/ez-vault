@@ -164,6 +164,10 @@ class BunkerHandle {
     if (this.#closed) throw new Error('BUNKER_CLOSED')
     this.#lastUsedAt = Date.now()
     const signer = await this.#getSigner()
+    // Re-check after the await: close() may have run while we waited for
+    // connect, in which case we must not issue any further RPC (and must
+    // not let getPublicKey claim the pool with a closed handle).
+    if (this.#closed) throw new Error('BUNKER_CLOSED')
     return fn(signer)
   }
 
@@ -274,8 +278,11 @@ export function releaseBunker (pubkey) {
 // rehydrator/sign flow later reuses the live connection instead of opening
 // a new one. A supplied `clientKey` lets the nostrpair import path adopt a
 // bunker connection from another device without invalidating the prior key.
-export async function fetchBunkerUserPubkey (bunkerUrl, { clientKey } = {}) {
+export async function fetchBunkerUserPubkey (bunkerUrl, { clientKey, onHandle } = {}) {
   const handle = new BunkerHandle({ bunkerUrl, clientKey, onStateChange: persistHandleState })
+  // Surface the live handle so the caller can release it (e.g. on user
+  // cancel) before the handshake/getPublicKey RPC ever resolves.
+  onHandle?.(handle)
   try {
     const pubkey = await handle.getPublicKey()
     return {

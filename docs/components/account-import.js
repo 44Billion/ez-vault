@@ -249,6 +249,7 @@ export class AccountImport extends HTMLElement {
   #busy = false
   #pairSession = null
   #scanner = null
+  #activeImport = null
 
   connectedCallback () {
     injectComponentStyles('account-import', STYLES)
@@ -288,7 +289,9 @@ export class AccountImport extends HTMLElement {
   }
 
   close () {
-    if (this.#busy) return
+    // No #busy guard: the X button intentionally aborts an in-flight import
+    // via #onCancel before getting here. Other call sites should call
+    // #abortActiveImport() first if they need the same behaviour.
     this.removeAttribute('open')
     this.#input.value = ''
     this.#clearErrorFlash()
@@ -296,7 +299,19 @@ export class AccountImport extends HTMLElement {
   }
 
   #onCancel = () => {
+    if (this.#busy) this.#abortActiveImport()
     this.close()
+  }
+
+  #abortActiveImport () {
+    const token = this.#activeImport
+    if (!token || token.cancelled) return
+    token.cancelled = true
+    for (const fn of token.cleanups) {
+      try { fn() } catch (err) { console.warn('import cleanup failed', err?.message ?? err) }
+    }
+    token.cleanups.length = 0
+    token.cancelReject?.(new Error('IMPORT_CANCELLED'))
   }
 
   #onSubmit = async (e) => {
@@ -309,27 +324,40 @@ export class AccountImport extends HTMLElement {
 
   async #runImport (raw) {
     this.#setBusy(true)
+    const token = createImportToken()
+    this.#activeImport = token
+
+    // Run dispatch separately so a post-cancel rejection (e.g. the bunker
+    // handle finally errors out after we've already moved on) gets swallowed
+    // here instead of surfacing as an unhandled promise rejection.
+    const dispatchPromise = this.#dispatch(raw, token).catch(err => {
+      if (token.cancelled) return
+      throw err
+    })
+
     try {
-      await this.#dispatch(raw)
+      // Race the dispatch against the cancel signal so the X button can
+      // unblock the UI immediately, even when the bunker is still hanging on
+      // the connect/getPublicKey RPC.
+      await Promise.race([dispatchPromise, token.cancelPromise])
+      if (token.cancelled) return
       this.removeAttribute('open')
       this.#input.value = ''
     } catch (err) {
-      // User-initiated pair cancel isn't a failure — skip the red flash so
-      // the UI doesn't accuse the user of doing something wrong.
-      if (err?.message !== 'IMPORT_CANCELLED') {
-        console.error('import failed', err?.message ?? err)
-        this.#flashError()
-      }
+      if (token.cancelled || err?.message === 'IMPORT_CANCELLED') return
+      console.error('import failed', err?.message ?? err)
+      this.#flashError()
     } finally {
+      if (this.#activeImport === token) this.#activeImport = null
       this.#setBusy(false)
     }
   }
 
   // Single dispatch point so the nostrpair flow can fan out the same way the
   // user-typed input does (without re-entering the nostrpair branch).
-  async #dispatch (raw) {
-    if (raw.startsWith('nostrpair://')) return this.#importNostrpair(raw)
-    if (raw.startsWith('bunker://')) return this.#importBunker(raw)
+  async #dispatch (raw, token) {
+    if (raw.startsWith('nostrpair://')) return this.#importNostrpair(raw, token)
+    if (raw.startsWith('bunker://')) return this.#importBunker(raw, token)
     if (raw.startsWith('npub1')) return this.#importNpub(raw)
     return this.#importSeckey(raw)
   }
@@ -337,7 +365,9 @@ export class AccountImport extends HTMLElement {
   #setBusy (on) {
     this.#busy = on
     this.#input.disabled = on
-    this.#cancelBtn.disabled = on
+    // Cancel button stays enabled on purpose — clicking it during a pending
+    // import aborts the in-flight bunker handshake/network work and closes
+    // the panel via #abortActiveImport.
     this.#scanBtn.disabled = on
     this.#confirmBtn.disabled = on
     this.#confirmIcon.classList.toggle('pulsate', on)
@@ -345,7 +375,6 @@ export class AccountImport extends HTMLElement {
 
   #flashError () {
     this.#clearErrorFlash()
-    this.#cancelBtn.disabled = true
     this.#confirmBtn.disabled = true
     this.#confirmBtn.classList.add('is-error')
     this.#confirmIcon.innerHTML = ICON_ALERT
@@ -359,10 +388,7 @@ export class AccountImport extends HTMLElement {
     }
     this.#confirmBtn.classList.remove('is-error')
     this.#confirmIcon.innerHTML = ICON_CHECK
-    if (!this.#busy) {
-      this.#cancelBtn.disabled = false
-      this.#confirmBtn.disabled = false
-    }
+    if (!this.#busy) this.#confirmBtn.disabled = false
   }
 
   async #importSeckey (raw) {
@@ -412,48 +438,73 @@ export class AccountImport extends HTMLElement {
     })
   }
 
-  async #importBunker (bunkerUrlInput) {
+  async #importBunker (bunkerUrlInput, token) {
     // Pairing-imported bunker URLs carry the persistent client key as a
     // local-only `#client_key=` fragment so the receiving device can adopt
     // the same client identity instead of generating a fresh one (a fresh
     // key would force a re-auth on the bunker, defeating the point).
     const { url: cleanedUrl, clientKey: suppliedClientKey } = extractBunkerClientKey(bunkerUrlInput)
-    // fetchBunkerUserPubkey spins up a pooled BunkerHandle, generates the
-    // persistent client key (or uses the supplied one), burns the URL's
-    // one-use secret on connect, and returns the values we must persist.
-    // The handle keeps the connection warm for the rehydrator/sign path
-    // that follows.
-    const { pubkey, clientKey, bunkerUrl } = await fetchBunkerUserPubkey(cleanedUrl, {
-      clientKey: suppliedClientKey ?? undefined
-    })
-    const existing = store.get(pubkey)
-    // A bunker import can replace another bunker entry (URL/secret refresh)
-    // or upgrade a read-only npub; an existing nsec is strictly more capable,
-    // so we reject that case.
-    if (existing && existing.type !== 'bunker' && existing.type !== 'npub') {
-      // The handle has already registered itself in the pool keyed by this
-      // pubkey — clean it up since we're rejecting the import.
-      releaseBunker(pubkey)
-      throw new Error('ACCOUNT_EXISTS')
+
+    let bunkerHandle = null
+    let committed = false
+    // Closes the in-flight handle if cancel happens before store commit.
+    // After commit the handle is the live connection for the new account
+    // and must stay alive — `committed` short-circuits the cleanup then.
+    const cleanup = () => {
+      if (committed) return
+      try { bunkerHandle?.close() } catch { /* noop */ }
     }
-    const meta = await resolveMetadata(pubkey)
-    const picture = meta.picture || existing?.picture || await seededAvatarDataUrl(pubkey)
-    const record = {
-      type: 'bunker',
-      pubkey,
-      bunker: bunkerUrl,
-      bunkerClientKey: clientKey,
-      picture,
-      name: meta.name || existing?.name || '',
-      profileEvent: meta.profileEvent || existing?.profileEvent,
-      relayListEvent: meta.relayListEvent || existing?.relayListEvent,
-      writeRelays: meta.writeRelays
+    token?.cleanups.push(cleanup)
+
+    try {
+      // fetchBunkerUserPubkey spins up a pooled BunkerHandle, generates the
+      // persistent client key (or uses the supplied one), burns the URL's
+      // one-use secret on connect, and returns the values we must persist.
+      // The handle keeps the connection warm for the rehydrator/sign path
+      // that follows.
+      const { pubkey, clientKey, bunkerUrl } = await fetchBunkerUserPubkey(cleanedUrl, {
+        clientKey: suppliedClientKey ?? undefined,
+        onHandle: (h) => { bunkerHandle = h }
+      })
+      if (token?.cancelled) throw new Error('IMPORT_CANCELLED')
+
+      const existing = store.get(pubkey)
+      // A bunker import can replace another bunker entry (URL/secret
+      // refresh) or upgrade a read-only npub; an existing nsec is strictly
+      // more capable, so we reject that case.
+      if (existing && existing.type !== 'bunker' && existing.type !== 'npub') {
+        // The handle has already registered itself in the pool keyed by
+        // this pubkey — clean it up since we're rejecting the import.
+        releaseBunker(pubkey)
+        throw new Error('ACCOUNT_EXISTS')
+      }
+      const meta = await resolveMetadata(pubkey)
+      if (token?.cancelled) throw new Error('IMPORT_CANCELLED')
+      const picture = meta.picture || existing?.picture || await seededAvatarDataUrl(pubkey)
+      if (token?.cancelled) throw new Error('IMPORT_CANCELLED')
+      const record = {
+        type: 'bunker',
+        pubkey,
+        bunker: bunkerUrl,
+        bunkerClientKey: clientKey,
+        picture,
+        name: meta.name || existing?.name || '',
+        profileEvent: meta.profileEvent || existing?.profileEvent,
+        relayListEvent: meta.relayListEvent || existing?.relayListEvent,
+        writeRelays: meta.writeRelays
+      }
+      if (existing) store.replace(pubkey, record)
+      else store.add(record)
+      committed = true
+    } finally {
+      if (token) {
+        const idx = token.cleanups.indexOf(cleanup)
+        if (idx >= 0) token.cleanups.splice(idx, 1)
+      }
     }
-    if (existing) store.replace(pubkey, record)
-    else store.add(record)
   }
 
-  async #importNostrpair (url) {
+  async #importNostrpair (url, token) {
     if (this.#pairSession) throw new Error('PAIR_IN_PROGRESS')
     this.dataset.pair = 'active'
     this.#pairCodeEl.textContent = '------'
@@ -472,45 +523,61 @@ export class AccountImport extends HTMLElement {
     })
     this.#pairSession = session
 
-    let accounts
-    try {
-      accounts = await session.run()
-    } finally {
-      this.#pairSession = null
-      session.close()
-    }
+    // Tie the pair session to the import token so the X button (or any
+    // other abort) closes the channel and resets the pair UI in one go.
+    const pairCleanup = () => this.#cancelPair()
+    token?.cleanups.push(pairCleanup)
 
-    if (!accounts.length) {
+    try {
+      let accounts
+      try {
+        accounts = await session.run()
+      } finally {
+        this.#pairSession = null
+        session.close()
+      }
+
+      if (token?.cancelled) throw new Error('IMPORT_CANCELLED')
+
+      if (!accounts.length) {
+        this.dataset.pair = ''
+        this.#setPairStatus('', null)
+        throw new Error('IMPORT_REJECTED')
+      }
+
+      this.#setPairStatus(`Importing ${accounts.length} account${accounts.length === 1 ? '' : 's'}…`, null)
+
+      const errors = []
+      // Iterate the payload in reverse: store.add() unshifts each new record
+      // to the head of the list, so the LAST imported entry ends up topmost.
+      // Reversing the iteration order makes the source's [A, B, ...] order
+      // preserved on the target ([A, B, ...existing]) instead of mirrored.
+      for (let i = accounts.length - 1; i >= 0; i--) {
+        if (token?.cancelled) break
+        const item = accounts[i]
+        if (typeof item !== 'string') continue
+        try {
+          if (item.startsWith('bunker://')) await this.#importBunker(item, token)
+          else if (item.startsWith('npub1')) await this.#importNpub(item)
+          else if (item.startsWith('nsec1')) await this.#importSeckey(item)
+          else errors.push(`unknown entry: ${item.slice(0, 16)}…`)
+        } catch (err) {
+          if (err?.message === 'IMPORT_CANCELLED') throw err
+          // Don't abort the whole batch on a single bad entry — the user
+          // gets whatever else came through, and we log the rest.
+          errors.push(err?.message ?? String(err))
+        }
+      }
+
       this.dataset.pair = ''
       this.#setPairStatus('', null)
-      throw new Error('IMPORT_REJECTED')
-    }
-
-    this.#setPairStatus(`Importing ${accounts.length} account${accounts.length === 1 ? '' : 's'}…`, null)
-
-    const errors = []
-    // Iterate the payload in reverse: store.add() unshifts each new record
-    // to the head of the list, so the LAST imported entry ends up topmost.
-    // Reversing the iteration order makes the source's [A, B, ...] order
-    // preserved on the target ([A, B, ...existing]) instead of mirrored.
-    for (let i = accounts.length - 1; i >= 0; i--) {
-      const item = accounts[i]
-      if (typeof item !== 'string') continue
-      try {
-        if (item.startsWith('bunker://')) await this.#importBunker(item)
-        else if (item.startsWith('npub1')) await this.#importNpub(item)
-        else if (item.startsWith('nsec1')) await this.#importSeckey(item)
-        else errors.push(`unknown entry: ${item.slice(0, 16)}…`)
-      } catch (err) {
-        // Don't abort the whole batch on a single bad entry — the user gets
-        // whatever else came through, and we log the rest.
-        errors.push(err?.message ?? String(err))
+      if (errors.length === accounts.length) throw new Error('IMPORT_FAILED')
+    } finally {
+      if (token) {
+        const idx = token.cleanups.indexOf(pairCleanup)
+        if (idx >= 0) token.cleanups.splice(idx, 1)
       }
     }
-
-    this.dataset.pair = ''
-    this.#setPairStatus('', null)
-    if (errors.length === accounts.length) throw new Error('IMPORT_FAILED')
   }
 
   #cancelPair () {
@@ -581,6 +648,28 @@ export class AccountImport extends HTMLElement {
     const video = this.#scanWrap.querySelector('video')
     if (video) video.remove()
   }
+}
+
+// Per-import abort token. Carries:
+//   - cancelled: flag that import steps poll between awaits
+//   - cleanups:  effect-rollback fns registered by individual import paths
+//                (e.g. close the bunker handle if cancel hits before commit)
+//   - cancelPromise/cancelReject: lets #runImport unblock immediately on
+//                cancel via Promise.race instead of waiting for the
+//                underlying RPC to time out
+function createImportToken () {
+  const token = {
+    cancelled: false,
+    cancelReject: null,
+    cleanups: [],
+    cancelPromise: null
+  }
+  token.cancelPromise = new Promise((_resolve, reject) => { token.cancelReject = reject })
+  // If cancel never fires, cancelPromise stays pending forever and gets
+  // GC'd with the token — no unhandled rejection. The handler here just
+  // covers the post-race window where nothing else is awaiting it.
+  token.cancelPromise.catch(() => {})
+  return token
 }
 
 async function resolveMetadata (pubkey) {
