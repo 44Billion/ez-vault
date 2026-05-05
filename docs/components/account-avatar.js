@@ -181,7 +181,7 @@ const STYLES = /* css */`
     inset: 0;
     border-radius: 50%;
     display: none;
-    align-items: flex-end;
+    align-items: flex-start;
     justify-content: flex-end;
     padding: 4px;
     pointer-events: none;
@@ -191,15 +191,15 @@ const STYLES = /* css */`
     display: flex;
   }
   account-avatar .avatar-select-badge {
-    width: 26px;
-    height: 26px;
-    border-radius: 50%;
-    background-color: oklch(0.55 0.18 145);
+    width: 22px;
+    height: 22px;
+    border-radius: 0;
+    background-color: oklch(0.3 0.12 274.76);
     color: oklch(0.98 0 0);
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    box-shadow: 0 0 0 2px oklch(0.3 0.12 274.76);
+    box-shadow: 0 0 0 2px oklch(0.35 0.11 277.19);
   }
   account-avatar .avatar-select-badge svg {
     width: 16px;

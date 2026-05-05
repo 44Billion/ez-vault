@@ -11,14 +11,17 @@ import { releaseSigner } from '../services/signer.js'
 import { seededAvatarDataUrl } from '../services/avatar.js'
 import { ImportSession, extractBunkerClientKey } from '../services/nostrpair.js'
 import { QrScanner, isCameraSupported } from '../services/qr-scanner.js'
+import * as toast from './shared/toast.js'
 import { injectComponentStyles } from '../helpers/dom.js'
 
 const ICON_X = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6l-12 12" /><path d="M6 6l12 12" /></svg>'
 const ICON_CHECK = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5l10 -10" /></svg>'
 const ICON_ALERT = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4" /><path d="M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0z" /><path d="M12 16h.01" /></svg>'
 const ICON_CAMERA = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h2a2 2 0 0 0 2 -2a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1a2 2 0 0 0 2 2h2a2 2 0 0 1 2 2v9a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-9a2 2 0 0 1 2 -2" /><path d="M9 13a3 3 0 1 0 6 0a3 3 0 0 0 -6 0" /></svg>'
+const ICON_COPY = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 9.667a2.667 2.667 0 0 1 2.667 -2.667h8.666a2.667 2.667 0 0 1 2.667 2.667v8.666a2.667 2.667 0 0 1 -2.667 2.667h-8.666a2.667 2.667 0 0 1 -2.667 -2.667l0 -8.666" /><path d="M4.012 16.737a2.005 2.005 0 0 1 -1.012 -1.737v-10c0 -1.1 .9 -2 2 -2h10c.75 0 1.158 .385 1.5 1" /></svg>'
 
 const ERROR_FLASH_MS = 1500
+const COPY_FLASH_MS = 1500
 
 const STYLES = /* css */`
   account-import {
@@ -30,10 +33,17 @@ const STYLES = /* css */`
   account-import[open] {
     max-height: 60px;
   }
-  /* Pair flow opens an extra status panel below the input — let the host
-     element grow tall enough to show the code + helper text. */
-  account-import[open][data-pair="active"] {
-    max-height: 240px;
+  /* Pair flow opens an extra status panel below the input. Active (still
+     waiting for the 6-digit code) and error both show only the status line,
+     so they share the same compact height. */
+  account-import[open][data-pair="active"],
+  account-import[open][data-pair="error"] {
+    max-height: 110px;
+  }
+  /* Once the code is computed, grow the host so the label + code reveal as
+     the .pair-code-section expands inside it (both transitions in step). */
+  account-import[open][data-pair="active"][data-pair-ready="true"] {
+    max-height: 200px;
   }
   /* Scan flow swaps the input row out for a camera preview + Stop button.
      Drop the height cap entirely so the video gets its natural box. */
@@ -122,43 +132,87 @@ const STYLES = /* css */`
   account-import .pair-panel {
     display: none;
     flex-direction: column;
-    gap: 8px;
+    /* No flex gap here: the only sibling-spacing we need (between the
+       code section and the status line) lives on .pair-code-section's
+       margin-bottom, so it can transition with the collapse animation
+       and shrink to 0 in the connecting/importing/error states. */
     padding-top: 14px;
   }
-  account-import[data-pair="active"] .pair-panel {
+  account-import[data-pair="active"] .pair-panel,
+  account-import[data-pair="error"] .pair-panel {
     display: flex;
   }
+  /* Wraps the label + 6-digit code so we can collapse them as one block
+     while still pairing. The transition mirrors the host's max-height
+     animation so they slide in together when the code is ready. */
+  account-import .pair-code-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 0;
+    opacity: 0;
+    margin-bottom: 0;
+    overflow: hidden;
+    transition: max-height 280ms ease-out, opacity 200ms ease-out, margin-bottom 280ms ease-out;
+  }
+  account-import[data-pair="active"][data-pair-ready="true"] .pair-code-section {
+    max-height: 80px;
+    opacity: 1;
+    margin-bottom: 8px;
+  }
   account-import .pair-label {
-    font-size: 12rem;
+    font-size: 14rem;
+    font-weight: 600;
     color: oklch(0.7 0 89.88);
   }
+  /* 3-column grid keeps the digits visually centered in the box even though
+     the copy button only sits on the right (column 1 is an empty mirror of
+     column 3's button width). */
   account-import .pair-code {
-    text-align: center;
-    letter-spacing: 0.4em;
-    font-size: 28rem;
-    font-variant-numeric: tabular-nums;
+    display: grid;
+    grid-template-columns: 32px 1fr 32px;
+    align-items: center;
     background-color: oklch(0.28 0 89.88);
     color: oklch(0.92 0 89.88);
     padding: 8px;
     border-radius: 6px;
   }
+  account-import .pair-code-text {
+    grid-column: 2;
+    text-align: center;
+    letter-spacing: 0.4em;
+    font-size: 28rem;
+    font-variant-numeric: tabular-nums;
+  }
+  account-import .pair-code-copy {
+    grid-column: 3;
+    justify-self: end;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background-color: transparent;
+    color: oklch(0.92 0 89.88);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  account-import .pair-code-copy:active {
+    background-color: oklch(0.38 0 89.88);
+  }
+  account-import .pair-code-copy.is-success {
+    color: oklch(0.55 0.18 145);
+  }
+  account-import .pair-code-copy svg {
+    width: 16px;
+    height: 16px;
+    display: block;
+  }
   account-import .pair-status {
-    font-size: 12rem;
+    font-size: 15rem;
     color: oklch(0.7 0 89.88);
     min-height: 16px;
   }
   account-import .pair-status.is-error { color: oklch(0.7 0.18 25); }
-  account-import .pair-cancel {
-    align-self: flex-start;
-    padding: 4px 10px;
-    background-color: oklch(0.28 0 89.88);
-    color: oklch(0.92 0 89.88);
-    border-radius: 4px;
-    font-size: 11rem;
-  }
-  account-import .pair-cancel:active {
-    background-color: oklch(0.38 0 89.88);
-  }
   account-import .scan-overlay {
     display: none;
     flex-direction: column;
@@ -220,10 +274,14 @@ const TEMPLATE = /* html */`
     </button>
   </form>
   <div class="pair-panel">
-    <span class="pair-label">Show this code on the other device:</span>
-    <div class="pair-code">------</div>
+    <div class="pair-code-section">
+      <span class="pair-label">Type this code on the other device:</span>
+      <div class="pair-code">
+        <span class="pair-code-text">------</span>
+        <button class="pair-code-copy" type="button" title="Copy code">${ICON_COPY}</button>
+      </div>
+    </div>
     <span class="pair-status"></span>
-    <button class="pair-cancel" type="button">Cancel pairing</button>
   </div>
   <div class="scan-overlay">
     <div class="scan-video-wrap">
@@ -239,17 +297,23 @@ export class AccountImport extends HTMLElement {
   #scanBtn
   #confirmBtn
   #confirmIcon
-  #pairPanel
   #pairCodeEl
+  #pairCopyBtn
   #pairStatusEl
-  #pairCancelBtn
   #scanWrap
   #scanStopBtn
   #errorTimer = null
+  #copyTimer = null
   #busy = false
   #pairSession = null
   #scanner = null
   #activeImport = null
+
+  // Wired by index.js. Buttons listed here are .disabled while the import
+  // panel is open so the user can't kick off a conflicting flow (currently
+  // just the Export button — opening the export pane on top of an active
+  // pairing would leave two pair sessions racing on the same relay).
+  toolbarButtons = []
 
   connectedCallback () {
     injectComponentStyles('account-import', STYLES)
@@ -260,10 +324,9 @@ export class AccountImport extends HTMLElement {
     this.#scanBtn = this.querySelector('button[data-action="scan"]')
     this.#confirmBtn = this.querySelector('button[data-action="confirm"]')
     this.#confirmIcon = this.#confirmBtn.querySelector('.import-btn-icon')
-    this.#pairPanel = this.querySelector('.pair-panel')
-    this.#pairCodeEl = this.querySelector('.pair-code')
+    this.#pairCodeEl = this.querySelector('.pair-code-text')
+    this.#pairCopyBtn = this.querySelector('.pair-code-copy')
     this.#pairStatusEl = this.querySelector('.pair-status')
-    this.#pairCancelBtn = this.querySelector('.pair-cancel')
     this.#scanWrap = this.querySelector('.scan-video-wrap')
     this.#scanStopBtn = this.querySelector('.scan-stop')
 
@@ -271,7 +334,7 @@ export class AccountImport extends HTMLElement {
     this.#cancelBtn.addEventListener('click', this.#onCancel)
     this.#scanBtn.addEventListener('click', this.#onStartScan)
     this.#scanStopBtn.addEventListener('click', () => this.#stopScan())
-    this.#pairCancelBtn.addEventListener('click', () => this.#cancelPair())
+    this.#pairCopyBtn.addEventListener('click', this.#onCopyPairCode)
 
     if (isCameraSupported()) this.dataset.camera = 'true'
   }
@@ -285,6 +348,7 @@ export class AccountImport extends HTMLElement {
   open () {
     if (this.hasAttribute('open')) return
     this.setAttribute('open', '')
+    this.#setToolbarDisabled(true)
     requestAnimationFrame(() => this.#input?.focus())
   }
 
@@ -296,6 +360,19 @@ export class AccountImport extends HTMLElement {
     this.#input.value = ''
     this.#clearErrorFlash()
     this.#stopScan()
+    // Drop any pair UI residue (e.g. a lingering "error" state from a failed
+    // pairing) so the next open() starts clean.
+    this.dataset.pair = ''
+    this.dataset.pairReady = ''
+    this.#setPairStatus('', null)
+    this.#resetPairCopy()
+    this.#setToolbarDisabled(false)
+  }
+
+  #setToolbarDisabled (disabled) {
+    for (const btn of this.toolbarButtons) {
+      if (btn) btn.disabled = disabled
+    }
   }
 
   #onCancel = () => {
@@ -323,6 +400,13 @@ export class AccountImport extends HTMLElement {
   }
 
   async #runImport (raw) {
+    // Clear any stale pair-error UI from a previous failed pairing — a fresh
+    // submission (or scan result) is the user's "try again" signal, so the
+    // pair-cancel button should reappear on the new attempt if it's a
+    // nostrpair URL. Non-nostrpair imports just leave it empty.
+    this.dataset.pair = ''
+    this.dataset.pairReady = ''
+    this.#setPairStatus('', null)
     this.#setBusy(true)
     const token = createImportToken()
     this.#activeImport = token
@@ -341,8 +425,9 @@ export class AccountImport extends HTMLElement {
       // the connect/getPublicKey RPC.
       await Promise.race([dispatchPromise, token.cancelPromise])
       if (token.cancelled) return
-      this.removeAttribute('open')
-      this.#input.value = ''
+      // Funnel through close() so the toolbar re-enable / scan-stop / pair
+      // reset all run together (the explicit-cancel path already did them).
+      this.close()
     } catch (err) {
       if (token.cancelled || err?.message === 'IMPORT_CANCELLED') return
       console.error('import failed', err?.message ?? err)
@@ -514,7 +599,12 @@ export class AccountImport extends HTMLElement {
       onConnected: () => this.#setPairStatus('Connected. Computing pairing code…', null),
       onPairingCode: (code) => {
         this.#pairCodeEl.textContent = code
-        this.#setPairStatus('Type this code on the other device.', null)
+        // Reveal the label + code section. Sized via CSS — the host's
+        // max-height grows in lockstep so the reveal is one smooth motion.
+        // The label already says "Show this code on the other device:", so
+        // the status line is cleared until the source replies with accounts.
+        this.dataset.pairReady = 'true'
+        this.#setPairStatus('', null)
       },
       onError: (err) => {
         console.error('pair import error', err?.message ?? err)
@@ -538,14 +628,21 @@ export class AccountImport extends HTMLElement {
       }
 
       if (token?.cancelled) throw new Error('IMPORT_CANCELLED')
+      if (!accounts.length) throw new Error('IMPORT_REJECTED')
 
-      if (!accounts.length) {
-        this.dataset.pair = ''
-        this.#setPairStatus('', null)
-        throw new Error('IMPORT_REJECTED')
-      }
-
-      this.#setPairStatus(`Importing ${accounts.length} account${accounts.length === 1 ? '' : 's'}…`, null)
+      // Source has replied — the code is no longer useful. Collapse the
+      // code section (and shrink the host) the same way it expanded.
+      this.dataset.pairReady = ''
+      // Status counts down as each entry is processed: starts at the full
+      // payload size and drops by one after every iteration so the user
+      // sees "Importing 1 account…" once the avatar for the prior entry
+      // has landed in the list.
+      let remaining = accounts.length
+      const showRemaining = () => this.#setPairStatus(
+        `Importing ${remaining} account${remaining === 1 ? '' : 's'}…`,
+        null
+      )
+      showRemaining()
 
       const errors = []
       // Iterate the payload in reverse: store.add() unshifts each new record
@@ -555,23 +652,45 @@ export class AccountImport extends HTMLElement {
       for (let i = accounts.length - 1; i >= 0; i--) {
         if (token?.cancelled) break
         const item = accounts[i]
-        if (typeof item !== 'string') continue
-        try {
-          if (item.startsWith('bunker://')) await this.#importBunker(item, token)
-          else if (item.startsWith('npub1')) await this.#importNpub(item)
-          else if (item.startsWith('nsec1')) await this.#importSeckey(item)
-          else errors.push(`unknown entry: ${item.slice(0, 16)}…`)
-        } catch (err) {
-          if (err?.message === 'IMPORT_CANCELLED') throw err
-          // Don't abort the whole batch on a single bad entry — the user
-          // gets whatever else came through, and we log the rest.
-          errors.push(err?.message ?? String(err))
+        if (typeof item === 'string') {
+          try {
+            if (item.startsWith('bunker://')) await this.#importBunker(item, token)
+            else if (item.startsWith('npub1')) await this.#importNpub(item)
+            else if (item.startsWith('nsec1')) await this.#importSeckey(item)
+            else errors.push(`unknown entry: ${item.slice(0, 16)}…`)
+          } catch (err) {
+            if (err?.message === 'IMPORT_CANCELLED') throw err
+            // Don't abort the whole batch on a single bad entry — the user
+            // gets whatever else came through, and we log the rest.
+            errors.push(err?.message ?? String(err))
+          }
         }
+        remaining -= 1
+        // Skip the final "Importing 0 accounts…" flash; the success path
+        // (a few lines below) clears the status anyway.
+        if (remaining > 0) showRemaining()
       }
 
-      this.dataset.pair = ''
-      this.#setPairStatus('', null)
       if (errors.length === accounts.length) throw new Error('IMPORT_FAILED')
+
+      this.dataset.pair = ''
+      this.dataset.pairReady = ''
+      this.#setPairStatus('', null)
+      const importedCount = accounts.length - errors.length
+      const summary = `Imported ${importedCount} account${importedCount === 1 ? '' : 's'}`
+      if (errors.length) toast.warning(`${summary} (${errors.length} failed)`, errors.join('\n'))
+      else toast.success(summary)
+    } catch (err) {
+      // Cancellation is user-initiated and surfaces no UI error: #cancelPair
+      // (or close()) has already cleared the pair UI in that case.
+      if (err?.message !== 'IMPORT_CANCELLED') {
+        this.dataset.pair = 'error'
+        this.dataset.pairReady = ''
+        this.#setPairStatus('Error. Try again!', 'error')
+        const { message, longMessage } = pairErrorToToast(err)
+        toast.error(message, longMessage)
+      }
+      throw err
     } finally {
       if (token) {
         const idx = token.cleanups.indexOf(pairCleanup)
@@ -585,7 +704,35 @@ export class AccountImport extends HTMLElement {
     this.#pairSession = null
     if (s) s.close()
     this.dataset.pair = ''
+    this.dataset.pairReady = ''
     this.#setPairStatus('', null)
+    this.#resetPairCopy()
+  }
+
+  #onCopyPairCode = async () => {
+    const code = this.#pairCodeEl.textContent
+    // Don't copy the placeholder ('------') if the button is somehow reached
+    // before the real code arrives (it shouldn't, since the code section is
+    // collapsed until then).
+    if (!code || code === '------') return
+    try {
+      await navigator.clipboard.writeText(code)
+      this.#pairCopyBtn.classList.add('is-success')
+      this.#pairCopyBtn.innerHTML = ICON_CHECK
+      if (this.#copyTimer) clearTimeout(this.#copyTimer)
+      this.#copyTimer = setTimeout(() => this.#resetPairCopy(), COPY_FLASH_MS)
+    } catch (err) {
+      console.error('copy pair code failed', err?.message ?? err)
+    }
+  }
+
+  #resetPairCopy () {
+    if (this.#copyTimer) {
+      clearTimeout(this.#copyTimer)
+      this.#copyTimer = null
+    }
+    this.#pairCopyBtn.classList.remove('is-success')
+    this.#pairCopyBtn.innerHTML = ICON_COPY
   }
 
   #setPairStatus (text, kind) {
@@ -602,6 +749,11 @@ export class AccountImport extends HTMLElement {
     // the stream actually lights up.
     this.#scanBtn.disabled = true
     this.#scanBtn.classList.add('pulsate')
+    // Drop any pair-error residue so we don't render the error message under
+    // the camera preview while scanning.
+    this.dataset.pair = ''
+    this.dataset.pairReady = ''
+    this.#setPairStatus('', null)
     const scanner = new QrScanner({
       onResult: (value) => {
         this.#stopScan()
@@ -670,6 +822,27 @@ function createImportToken () {
   // covers the post-race window where nothing else is awaiting it.
   token.cancelPromise.catch(() => {})
   return token
+}
+
+// Map nostrpair-flow error codes to toast copy. Unknown codes (e.g. a custom
+// reply.error string from the source device) fall through to a generic header
+// with the raw code as the expandable detail.
+function pairErrorToToast (err) {
+  const code = err?.message ?? String(err)
+  switch (code) {
+    case 'IMPORT_TIMEOUT':
+      return { message: 'Pairing timed out', longMessage: 'The other device did not respond in time.' }
+    case 'IMPORT_REJECTED':
+      return { message: 'Pairing rejected', longMessage: 'The other device declined the request or sent no accounts.' }
+    case 'IMPORT_BAD_RESPONSE':
+      return { message: 'Pairing failed', longMessage: 'Got an unexpected response from the other device.' }
+    case 'IMPORT_FAILED':
+      return { message: 'Import failed', longMessage: 'No accounts could be imported.' }
+    case 'INVALID_NOSTRPAIR_URL':
+      return { message: 'Invalid pairing URL', longMessage: '' }
+    default:
+      return { message: 'Pairing failed', longMessage: code }
+  }
 }
 
 async function resolveMetadata (pubkey) {

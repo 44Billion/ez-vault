@@ -83,7 +83,7 @@ const STYLES = /* css */`
     align-self: center;
   }
   toast-message .toast-message {
-    font-size: 14rem;
+    font-size: 16rem;
     line-height: 1.35;
     word-break: break-word;
   }
@@ -101,7 +101,7 @@ const STYLES = /* css */`
     display: none;
     align-items: center;
     gap: 6px;
-    font-size: 12rem;
+    font-size: 14rem;
     color: oklch(0.7 0 89.88);
     font-family: inherit;
   }
@@ -139,7 +139,7 @@ const STYLES = /* css */`
     padding: 8px 10px;
     background-color: oklch(0.18 0 89.88);
     border-radius: 6px;
-    font-size: 12rem;
+    font-size: 14rem;
     line-height: 1.4;
     color: oklch(0.85 0 89.88);
     word-break: break-word;

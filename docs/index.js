@@ -21,6 +21,9 @@ const exportBtn = document.getElementById('export-account-btn')
 exportPanel.list = list
 exportPanel.toolbarButtons = [createBtn, importBtn, exportBtn]
 
+// Import disables only the Export button while it's open
+importPanel.toolbarButtons = [exportBtn]
+
 createBtn.addEventListener('click', () => list.startCreate())
 importBtn.addEventListener('click', () => importPanel.open())
 exportBtn.addEventListener('click', () => exportPanel.open())
