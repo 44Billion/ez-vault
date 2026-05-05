@@ -6,7 +6,7 @@
   html {
     filter: invert(1) hue-rotate(180deg);
   }
-  img, video, iframe, svg, .photo-picker > .icon-wrapper {
+  img, video, iframe, .avatar-image {
     /* inverts it back */
     filter: invert(1) hue-rotate(180deg);
   }
