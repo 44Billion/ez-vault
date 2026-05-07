@@ -6,11 +6,12 @@ import {
   parseRelayListEvent,
   freeRelays
 } from '../services/relays.js'
-import { fetchBunkerUserPubkey, releaseBunker } from '../services/bunker.js'
-import { releaseSigner } from '../services/signer.js'
+import { fetchBunkerUserPubkey } from '../services/bunker.js'
 import { seededAvatarDataUrl } from '../services/avatar.js'
 import { ImportSession, extractBunkerClientKey } from '../services/nostrpair.js'
 import { QrScanner, isCameraSupported } from '../services/qr-scanner.js'
+import * as secrets from '../services/secrets.js'
+import * as passkey from '../services/passkey.js'
 import * as toast from './shared/toast.js'
 import { injectComponentStyles } from '../helpers/dom.js'
 
@@ -442,9 +443,14 @@ export class AccountImport extends HTMLElement {
   // user-typed input does (without re-entering the nostrpair branch).
   async #dispatch (raw, token) {
     if (raw.startsWith('nostrpair://')) return this.#importNostrpair(raw, token)
-    if (raw.startsWith('bunker://')) return this.#importBunker(raw, token)
+    if (raw.startsWith('bunker://')) {
+      await this.#importBunker(raw, token)
+      await passkey.writeSecretsBlob()
+      return
+    }
     if (raw.startsWith('npub1')) return this.#importNpub(raw)
-    return this.#importSeckey(raw)
+    await this.#importSeckey(raw)
+    await passkey.writeSecretsBlob()
   }
 
   #setBusy (on) {
@@ -483,12 +489,14 @@ export class AccountImport extends HTMLElement {
     // either is an in-place upgrade. An existing seckey entry is a duplicate.
     const existing = store.get(pubkey)
     if (existing && existing.type === 'nsec') throw new Error('ACCOUNT_EXISTS')
+    // Register the vault's passkey on the first non-npub import. Idempotent:
+    // does nothing if the vault is already unlocked.
+    await passkey.ensureRegistered()
     const meta = await resolveMetadata(pubkey)
     const picture = meta.picture || existing?.picture || await seededAvatarDataUrl(pubkey)
     const record = {
       type: 'nsec',
       pubkey,
-      seckey,
       picture,
       name: meta.name || existing?.name || '',
       profileEvent: meta.profileEvent || existing?.profileEvent,
@@ -496,13 +504,13 @@ export class AccountImport extends HTMLElement {
       writeRelays: meta.writeRelays
     }
     if (existing) {
-      // Upgrading from bunker/npub → nsec: any live signer backing the prior
-      // entry is now obsolete, tear it down so it doesn't linger.
-      releaseSigner(pubkey)
+      // secrets.setNsecSecret below also drops any prior bunker handle /
+      // nsec signer cached for this pubkey, so no separate teardown call.
       store.replace(pubkey, record)
     } else {
       store.add(record)
     }
+    secrets.setNsecSecret(pubkey, seckey)
   }
 
   async #importNpub (npub) {
@@ -542,12 +550,13 @@ export class AccountImport extends HTMLElement {
     token?.cleanups.push(cleanup)
 
     try {
-      // fetchBunkerUserPubkey spins up a pooled BunkerHandle, generates the
-      // persistent client key (or uses the supplied one), burns the URL's
-      // one-use secret on connect, and returns the values we must persist.
-      // The handle keeps the connection warm for the rehydrator/sign path
-      // that follows.
-      const { pubkey, clientKey, bunkerUrl } = await fetchBunkerUserPubkey(cleanedUrl, {
+      // fetchBunkerUserPubkey spins up a transient BunkerHandle, generates
+      // the persistent client key (or uses the supplied one), burns the
+      // URL's one-use secret on connect, and resolves with the user pubkey.
+      // The clientKey is intentionally not returned — it lives in the
+      // handle's WeakMap-backed slot until `bunkerHandle.commit()` adopts
+      // the handle into secrets's pool below.
+      const { pubkey, bunkerUrl } = await fetchBunkerUserPubkey(cleanedUrl, {
         clientKey: suppliedClientKey ?? undefined,
         onHandle: (h) => { bunkerHandle = h }
       })
@@ -558,11 +567,11 @@ export class AccountImport extends HTMLElement {
       // refresh) or upgrade a read-only npub; an existing nsec is strictly
       // more capable, so we reject that case.
       if (existing && existing.type !== 'bunker' && existing.type !== 'npub') {
-        // The handle has already registered itself in the pool keyed by
-        // this pubkey — clean it up since we're rejecting the import.
-        releaseBunker(pubkey)
         throw new Error('ACCOUNT_EXISTS')
       }
+      // Register the vault's passkey on the first non-npub import. Idempotent
+      // when the vault is already unlocked.
+      await passkey.ensureRegistered()
       const meta = await resolveMetadata(pubkey)
       if (token?.cancelled) throw new Error('IMPORT_CANCELLED')
       const picture = meta.picture || existing?.picture || await seededAvatarDataUrl(pubkey)
@@ -571,7 +580,6 @@ export class AccountImport extends HTMLElement {
         type: 'bunker',
         pubkey,
         bunker: bunkerUrl,
-        bunkerClientKey: clientKey,
         picture,
         name: meta.name || existing?.name || '',
         profileEvent: meta.profileEvent || existing?.profileEvent,
@@ -580,6 +588,9 @@ export class AccountImport extends HTMLElement {
       }
       if (existing) store.replace(pubkey, record)
       else store.add(record)
+      // Adopt the live handle (with its WeakMap-protected clientKey) into
+      // the secrets pool. The bytes never travel through this scope.
+      bunkerHandle.commit()
       committed = true
     } finally {
       if (token) {
@@ -645,6 +656,9 @@ export class AccountImport extends HTMLElement {
       showRemaining()
 
       const errors = []
+      // Track whether any non-npub item landed in the secrets map: only then
+      // is the largeBlob re-write at the end of the batch necessary.
+      let needsSecretsPersist = false
       // Iterate the payload in reverse: store.add() unshifts each new record
       // to the head of the list, so the LAST imported entry ends up topmost.
       // Reversing the iteration order makes the source's [A, B, ...] order
@@ -654,10 +668,14 @@ export class AccountImport extends HTMLElement {
         const item = accounts[i]
         if (typeof item === 'string') {
           try {
-            if (item.startsWith('bunker://')) await this.#importBunker(item, token)
-            else if (item.startsWith('npub1')) await this.#importNpub(item)
-            else if (item.startsWith('nsec1')) await this.#importSeckey(item)
-            else errors.push(`unknown entry: ${item.slice(0, 16)}…`)
+            if (item.startsWith('bunker://')) {
+              await this.#importBunker(item, token)
+              needsSecretsPersist = true
+            } else if (item.startsWith('npub1')) await this.#importNpub(item)
+            else if (item.startsWith('nsec1')) {
+              await this.#importSeckey(item)
+              needsSecretsPersist = true
+            } else errors.push(`unknown entry: ${item.slice(0, 16)}…`)
           } catch (err) {
             if (err?.message === 'IMPORT_CANCELLED') throw err
             // Don't abort the whole batch on a single bad entry — the user
@@ -672,6 +690,10 @@ export class AccountImport extends HTMLElement {
       }
 
       if (errors.length === accounts.length) throw new Error('IMPORT_FAILED')
+
+      // One passkey-side persistence per batch — the per-item handlers leave
+      // the secrets map in memory and we seal the whole snapshot here.
+      if (needsSecretsPersist) await passkey.writeSecretsBlob()
 
       this.dataset.pair = ''
       this.dataset.pairReady = ''

@@ -72,7 +72,7 @@ The vault is always embedded in a **vertical drawer that slides in from the righ
 - **Tall, narrow, one-column by default.** Think "vertical strip", not "page".
 - **On portrait-mode mobile** the drawer takes most of the viewport width.
 - **On landscape or desktop** the drawer stays roughly the same narrow width — it does **not** expand to fill extra horizontal space. Do not design desktop-specific wide layouts.
-- **Columns scale with item size, not with the viewport.** For grids of small items (e.g. account avatars) use `grid-template-columns: repeat(auto-fill, minmax(<min-item-size>, 1fr))` so the drawer naturally fits 3 columns of small items, 2 of medium items, and 1 of large items. Do **not** hard-code a fixed column count.
+- **Column count depends on item type.** Aside from case-by-case exceptions, items should span one to four (virtual) columns so that all columns are filled per row.
 - **Configuration uses accordions, not pages.** Each config section is a collapsible accordion panel on the same screen. This keeps every setting one tap away.
 - **No client-side router.** The SPA is effectively always on `/` — there are no route transitions to design for. State lives in the DOM (open accordion, selected account, etc.), not in the URL path.
 - **Query-string parameters on the iframe `src` are allowed** for the initial handshake / configuration passed in by the launcher. Read them from `location.search` at startup; do not mutate them afterwards.

@@ -1,5 +1,6 @@
 import * as log from '../services/messenger-log/index.js'
 import * as accountsStore from '../services/accounts-store.js'
+import * as secrets from '../services/secrets.js'
 import { seededAvatarDataUrl } from '../services/avatar.js'
 import { injectComponentStyles } from '../helpers/dom.js'
 import './shared/table-saw.js'
@@ -390,12 +391,16 @@ function relativeTime (tsSeconds) {
 
 export class ActivityLog extends HTMLElement {
   #unsub = null
+  #unsubSecrets = null
   #renderId = 0
 
   connectedCallback () {
     injectComponentStyles('activity-log', STYLES)
     this.addEventListener('click', this.#onClick)
     this.#unsub = log.subscribe(() => this.#render())
+    // Sealed entries inflate to their decrypted shape only while the vault
+    // is unlocked; re-render on lock state changes so previews refresh.
+    this.#unsubSecrets = secrets.subscribe(() => this.#render())
     this.#render()
   }
 
@@ -403,6 +408,8 @@ export class ActivityLog extends HTMLElement {
     this.removeEventListener('click', this.#onClick)
     this.#unsub?.()
     this.#unsub = null
+    this.#unsubSecrets?.()
+    this.#unsubSecrets = null
   }
 
   async #render () {

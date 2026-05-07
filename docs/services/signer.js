@@ -1,6 +1,5 @@
 import * as store from './accounts-store.js'
-import NsecSigner from './nsec-signer.js'
-import { claimBunker, releaseBunker } from './bunker.js'
+import * as secrets from './secrets.js'
 
 // NIP-07 / NIP-46 method whitelist. Anything outside this set is rejected
 // before we hit the per-type signer, so typos and unknown methods fail fast
@@ -26,19 +25,19 @@ function normalizeMethod (method) {
 export function claimSigner (account) {
   if (!account) throw new Error('UNKNOWN_ACCOUNT')
   switch (account.type) {
-    case 'nsec': return NsecSigner.getOrCreate(account.seckey)
-    case 'bunker': return claimBunker(account)
+    case 'nsec': {
+      const signer = secrets.getNsecSigner(account.pubkey)
+      if (!signer) throw new Error('VAULT_LOCKED')
+      return signer
+    }
+    case 'bunker': {
+      const handle = secrets.getBunkerHandle(account.pubkey)
+      if (!handle) throw new Error('VAULT_LOCKED')
+      return handle
+    }
     case 'npub': throw new Error('READ_ONLY_ACCOUNT')
     default: throw new Error('UNKNOWN_ACCOUNT_TYPE')
   }
-}
-
-// Release both possible backings for a pubkey. Safe to call on a pubkey that
-// never had a live signer; each underlying release is itself a no-op in that
-// case. Call this on account remove/replace so stale signers don't linger.
-export function releaseSigner (pubkey) {
-  NsecSigner.release(pubkey)
-  releaseBunker(pubkey)
 }
 
 // Single entry point for the (future) messenger's NIP-07/46 dispatch. Looks

@@ -1,5 +1,6 @@
 import * as store from '../services/accounts-store.js'
 import * as nostr from '../services/nostr.js'
+import * as passkey from '../services/passkey.js'
 import { ExportSession, buildExportPayload } from '../services/nostrpair.js'
 import { generateQrDataUrl } from '../helpers/qrcode.js'
 import { injectComponentStyles } from '../helpers/dom.js'
@@ -357,7 +358,19 @@ export class AccountExport extends HTMLElement {
         this.#flashPinError('Select at least one account before confirming.')
         return
       }
-      const payload = buildExportPayload(accounts, {
+      // Pull the raw secret material via a fresh passkey prompt rather than
+      // the in-memory `secrets` module — exporting a key is a deliberate
+      // disclosure that should require user verification at the moment of
+      // the transfer.
+      let entries
+      try {
+        entries = await passkey.openSecrets()
+      } catch (err) {
+        console.warn('export auth failed', err?.message ?? err)
+        this.#flashPinError('Authentication failed.')
+        return
+      }
+      const payload = buildExportPayload(accounts, entries, {
         nsecFromHex: nostr.nsecFromHex,
         npubFromPubkey: nostr.npubFromPubkey
       })

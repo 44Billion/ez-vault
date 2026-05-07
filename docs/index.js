@@ -4,7 +4,9 @@ import './components/account-export.js'
 import './components/shared/accordion-panel.js'
 import './components/shared/toast.js'
 import './components/activity-log.js'
+import './components/lock-overlay.js'
 import * as store from './services/accounts-store.js'
+import * as secrets from './services/secrets.js'
 import { rehydrateAll } from './services/profile-rehydrator.js'
 import { initMessenger } from './services/messenger.js'
 
@@ -36,5 +38,16 @@ function refreshExportVisibility () {
 store.subscribe(refreshExportVisibility)
 refreshExportVisibility()
 
+// Bunker rehydrate needs the per-account client key from `secrets`, so the
+// initial pass only succeeds if the vault is already unlocked (typical only
+// for an npub-only state). The subscription below re-runs rehydrate the
+// moment the user unlocks so bunker connections come back without waiting
+// for the 60s backoff timer.
+let lastUnlocked = secrets.isUnlocked()
+secrets.subscribe(() => {
+  const nowUnlocked = secrets.isUnlocked()
+  if (!lastUnlocked && nowUnlocked) rehydrateAll()
+  lastUnlocked = nowUnlocked
+})
 rehydrateAll()
 initMessenger()

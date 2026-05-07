@@ -3,8 +3,10 @@ import * as nostr from '../services/nostr.js'
 import * as relays from '../services/relays.js'
 import * as accountStatus from '../services/account-status.js'
 import * as messengerLog from '../services/messenger-log/index.js'
-import { releaseSigner } from '../services/signer.js'
+import * as secrets from '../services/secrets.js'
+import * as passkey from '../services/passkey.js'
 import { seededAvatarDataUrl } from '../services/avatar.js'
+import * as toast from './shared/toast.js'
 import { injectComponentStyles } from '../helpers/dom.js'
 
 const MODE = { CREATING: 'creating', NORMAL: 'normal', EDITING: 'editing' }
@@ -302,12 +304,31 @@ export class AccountAvatar extends HTMLElement {
     btn.title = this.#account?.type === 'bunker' ? 'Copy bunker URL' : 'Copy nsec'
   }
 
-  #copyKey (btn) {
+  async #copyKey (btn) {
     const acc = this.#account
     if (!acc) return this.#flashError(btn)
     if (acc.type === 'bunker') return this.#copy(btn, acc.bunker)
-    if (acc.type === 'nsec' && acc.seckey) return this.#copy(btn, nostr.nsecFromHex(acc.seckey))
-    return this.#flashError(btn)
+    if (acc.type !== 'nsec') return this.#flashError(btn)
+    // Force a fresh user-verification prompt and decrypt the largeBlob
+    // ad-hoc — the in-memory `secrets` module deliberately does not expose
+    // the seckey for silent retrieval. The PRF and the entries returned
+    // here only live on this stack frame.
+    const icon = btn.querySelector('.avatar-btn-icon')
+    btn.disabled = true
+    icon?.classList.add('pulsate')
+    try {
+      const entries = await passkey.openSecrets()
+      const entry = entries.find(e => e.type === 'nsec' && e.pubkey === acc.pubkey)
+      if (!entry?.seckey) return this.#flashError(btn)
+      return this.#copy(btn, nostr.nsecFromHex(entry.seckey))
+    } catch (err) {
+      console.warn('copy-nsec auth failed', err?.message ?? err)
+      toast.error('Authentication failed')
+      this.#flashError(btn)
+    } finally {
+      btn.disabled = false
+      icon?.classList.remove('pulsate')
+    }
   }
 
   #onClick = (e) => {
@@ -320,7 +341,7 @@ export class AccountAvatar extends HTMLElement {
       case 'save': return this.#save(btn)
       case 'edit': return this.#setMode(MODE.EDITING)
       case 'cancel-edit': return this.#setMode(MODE.NORMAL)
-      case 'delete': return this.#deleteAccount()
+      case 'delete': return this.#deleteAccount(btn)
       case 'copy-nsec': return this.#copyKey(btn)
       case 'copy-npub': return this.#copy(btn, nostr.npubFromPubkey(this.#account?.pubkey))
     }
@@ -411,10 +432,13 @@ export class AccountAvatar extends HTMLElement {
       const profilePublish = await relays.publish(profileEvent, writeRelays)
       if (!profilePublish.success) throw new Error('PROFILE_PUBLISH_FAILED')
 
+      // Register the vault's passkey on the first non-npub account; no-op
+      // when the vault is already unlocked.
+      await passkey.ensureRegistered()
+
       const record = {
         type: 'nsec',
         pubkey: this.#draft.pubkey,
-        seckey: this.#draft.seckey,
         picture: this.#draft.picture,
         name: '',
         profileEvent,
@@ -423,6 +447,7 @@ export class AccountAvatar extends HTMLElement {
       }
       // Convert the draft tile in place so it keeps its DOM position
       // (account-list's render reuses tiles by pubkey).
+      const newSeckey = this.#draft.seckey
       this.#draft = null
       this.#account = record
       this.setAttribute('pubkey', record.pubkey)
@@ -430,6 +455,8 @@ export class AccountAvatar extends HTMLElement {
       this.#updateCopyKeyButton()
       this.#setMode(MODE.NORMAL)
       store.add(record)
+      secrets.setNsecSecret(record.pubkey, newSeckey)
+      await passkey.writeSecretsBlob()
     } catch (err) {
       console.error(err)
       this.#flashError(btn)
@@ -439,10 +466,34 @@ export class AccountAvatar extends HTMLElement {
     }
   }
 
-  #deleteAccount () {
+  async #deleteAccount (btn) {
     if (!this.#account) return
     const pubkey = this.#account.pubkey
-    releaseSigner(pubkey)
+    const wasNonReadOnly = this.#account.type !== 'npub'
+    if (wasNonReadOnly) {
+      // Re-seal the largeBlob *before* dropping the tile from the DOM. If
+      // we removed the account from the store first, account-list would
+      // tear down this avatar and the user would see a passkey prompt with
+      // no visible context — pulsating the delete button keeps the source
+      // of the prompt obvious. secrets.deleteSecret also closes any pooled
+      // BunkerHandle and releases the cached NsecSigner, so there's no
+      // separate signer-cleanup call.
+      const icon = btn?.querySelector('.avatar-btn-icon')
+      if (btn) btn.disabled = true
+      icon?.classList.add('pulsate')
+      secrets.deleteSecret(pubkey)
+      try {
+        await passkey.writeSecretsBlob()
+      } catch (err) {
+        // The in-memory secret is already gone; failing to re-seal the
+        // largeBlob is recoverable on the next mutation since the seal
+        // path always writes the full snapshot.
+        console.warn('failed to update vault blob after delete', err?.message ?? err)
+      } finally {
+        if (btn) btn.disabled = false
+        icon?.classList.remove('pulsate')
+      }
+    }
     messengerLog.removeForPubkey(pubkey)
     store.remove(pubkey)
   }

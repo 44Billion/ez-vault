@@ -1,13 +1,19 @@
 import { BunkerSigner, parseBunkerInput } from 'nostr-tools/nip46'
 import { generateSecretKey } from 'nostr-tools'
 import * as store from './accounts-store.js'
+import * as secrets from './secrets.js'
 import { pool } from './relays.js'
-
-const handles = new Map() // userPubkey -> BunkerHandle
 
 const PING_INTERVAL_MS = 60_000
 const PING_TIMEOUT_MS = 10_000
 const IDLE_TIMEOUT_MS = 5 * 60_000
+
+// Module-private slot for raw client keys. Mirrors the NsecSigner pattern
+// in nsec-signer.js: the bytes only ever live inside this WeakMap, keyed
+// by the BunkerHandle instance, so prototype/property poking on the
+// instance ("handle.leak = () => …") can't reach them.
+const clientKeysByHandle = new WeakMap()
+const handleCreateToken = Symbol('BunkerHandle-create')
 
 function bytesToHex (bytes) {
   let s = ''
@@ -74,7 +80,7 @@ async function openSigner (bunkerUrl, clientSecretKey) {
 // Persists bunker-URL changes (secret stripping, switch_relays result) back
 // to the store record. Safe to call with a null pubkey (e.g. during import
 // before the record exists) — the store lookup just misses.
-function persistHandleState ({ pubkey, bunkerUrl }) {
+export function persistHandleState ({ pubkey, bunkerUrl }) {
   if (!pubkey) return
   const rec = store.get(pubkey)
   if (!rec || rec.bunker === bunkerUrl) return
@@ -86,30 +92,42 @@ function persistHandleState ({ pubkey, bunkerUrl }) {
 // alive, transparently reconnects on failure (always without the secret),
 // and self-evicts after IDLE_TIMEOUT_MS with no real method calls.
 //
-// Internal state uses its own field names (bunkerUrl, clientKey, pubkey) so
-// it stays decoupled from the account-record shape in accounts-store.
-class BunkerHandle {
+// Encapsulation, mirroring the NsecSigner pattern in nsec-signer.js:
+// - `clientKey` lives in a module-private WeakMap, never on the instance.
+// - The constructor requires a Symbol token so external callers can't
+//   `new BunkerHandle(...)` with arbitrary key material — they must go
+//   through `BunkerHandle.create(...)`.
+// - `Object.preventExtensions(this)` and `Object.freeze(prototype)` block
+//   `handle.leak = () => …` style monkey-patching tricks.
+// - The `state` getter exposes only `{ pubkey, bunkerUrl }`; the clientKey
+//   is never reachable through the public surface.
+export class BunkerHandle {
   #state
   #onStateChange
   #signerPromise = null
   #pingTimer = null
   #lastUsedAt = 0
   #closed = false
+  #onClose
 
-  constructor ({ pubkey = null, bunkerUrl, clientKey = null, onStateChange } = {}) {
+  static create (params) {
+    return new BunkerHandle(handleCreateToken, params)
+  }
+
+  constructor (token, { pubkey = null, bunkerUrl, clientKey = null, onStateChange, onClose } = {}) {
+    if (token !== handleCreateToken) throw new Error('USE_BunkerHandle_create')
     if (!bunkerUrl) throw new Error('BUNKER_URL_REQUIRED')
-    this.#state = {
-      pubkey,
-      bunkerUrl,
-      clientKey: clientKey || bytesToHex(generateSecretKey())
-    }
+    const finalClientKey = clientKey || bytesToHex(generateSecretKey())
+    this.#state = { pubkey, bunkerUrl }
+    clientKeysByHandle.set(this, finalClientKey)
     this.#onStateChange = onStateChange
+    this.#onClose = onClose
     this.#lastUsedAt = Date.now()
+    Object.preventExtensions(this)
     this.#scheduleTick()
   }
 
-  // Read-only snapshot for callers that need to persist post-connect state
-  // (import flow reads clientKey + stripped bunkerUrl from here).
+  // Read-only snapshot. Note: clientKey is intentionally absent.
   get state () {
     return { ...this.#state }
   }
@@ -118,7 +136,6 @@ class BunkerHandle {
     const pubkey = await this.#request(s => s.getPublicKey())
     if (!this.#state.pubkey) {
       this.#state.pubkey = pubkey
-      this.#claimPool()
       this.#notifyStateChange()
     }
     return pubkey
@@ -130,14 +147,24 @@ class BunkerHandle {
   async nip44Encrypt (pk, pt) { return this.#request(s => s.nip44Encrypt(pk, pt)) }
   async nip44Decrypt (pk, ct) { return this.#request(s => s.nip44Decrypt(pk, ct)) }
 
+  // Adopt this freshly-imported handle into the secrets pool. Called by the
+  // import flow after `passkey.ensureRegistered()` succeeds. The clientKey
+  // is read out of the WeakMap and threaded straight into secrets's
+  // adopt-call without flowing through any return value.
+  commit () {
+    const pubkey = this.#state.pubkey
+    if (!pubkey) throw new Error('PUBKEY_NOT_READY')
+    const clientKey = clientKeysByHandle.get(this)
+    if (!clientKey) throw new Error('NO_CLIENT_KEY')
+    secrets.adoptBunkerHandle(pubkey, this, clientKey)
+  }
+
   async close () {
     if (this.#closed) return
     this.#closed = true
     clearTimeout(this.#pingTimer)
     this.#pingTimer = null
-    if (this.#state.pubkey && handles.get(this.#state.pubkey) === this) {
-      handles.delete(this.#state.pubkey)
-    }
+    this.#onClose?.(this)
     const p = this.#signerPromise
     this.#signerPromise = null
     if (p) {
@@ -146,14 +173,6 @@ class BunkerHandle {
         try { await signer.close() } catch { /* noop */ }
       } catch { /* noop */ }
     }
-  }
-
-  #claimPool () {
-    const { pubkey } = this.#state
-    if (!pubkey) return
-    const prior = handles.get(pubkey)
-    if (prior && prior !== this) prior.close()
-    handles.set(pubkey, this)
   }
 
   #notifyStateChange () {
@@ -165,8 +184,7 @@ class BunkerHandle {
     this.#lastUsedAt = Date.now()
     const signer = await this.#getSigner()
     // Re-check after the await: close() may have run while we waited for
-    // connect, in which case we must not issue any further RPC (and must
-    // not let getPublicKey claim the pool with a closed handle).
+    // connect, in which case we must not issue any further RPC.
     if (this.#closed) throw new Error('BUNKER_CLOSED')
     return fn(signer)
   }
@@ -184,7 +202,8 @@ class BunkerHandle {
   }
 
   async #connect () {
-    const signer = await openSigner(this.#state.bunkerUrl, hexToBytes(this.#state.clientKey))
+    const clientKey = clientKeysByHandle.get(this)
+    const signer = await openSigner(this.#state.bunkerUrl, hexToBytes(clientKey))
     let urlChanged = false
     // The URL's `secret` is one-use; now that we've burned it, strip it from
     // our in-memory copy so any future reconnect can't replay it.
@@ -244,55 +263,30 @@ class BunkerHandle {
     this.#scheduleTick()
   }
 }
+Object.freeze(BunkerHandle.prototype)
+Object.freeze(BunkerHandle)
 
-export function claimBunker (account) {
-  if (account.type !== 'bunker') throw new Error('NOT_A_BUNKER_ACCOUNT')
-  if (!account.bunkerClientKey) throw new Error('MISSING_BUNKER_CLIENT_KEY')
-  const existing = handles.get(account.pubkey)
-  if (existing) {
-    const s = existing.state
-    if (s.bunkerUrl === account.bunker && s.clientKey === account.bunkerClientKey) {
-      return existing
-    }
-    existing.close()
-  }
-  const handle = new BunkerHandle({
-    pubkey: account.pubkey,
-    bunkerUrl: account.bunker,
-    clientKey: account.bunkerClientKey,
-    onStateChange: persistHandleState
-  })
-  handles.set(account.pubkey, handle)
-  return handle
-}
-
-export function releaseBunker (pubkey) {
-  const handle = handles.get(pubkey)
-  if (handle) handle.close()
-}
-
-// Import-time entry. Creates a handle (generating a fresh persistent client
-// key, or reusing the one supplied by the caller), lets it connect using the
-// URL's `secret`, and returns the values the caller must persist to the
-// store. The handle stays in the pool, keyed by the user pubkey, so the
-// rehydrator/sign flow later reuses the live connection instead of opening
-// a new one. A supplied `clientKey` lets the nostrpair import path adopt a
-// bunker connection from another device without invalidating the prior key.
+// Import-time entry. Creates a transient handle (generating a fresh
+// persistent client key, or reusing the one supplied by the caller),
+// connects using the URL's `secret`, and resolves with the user pubkey
+// the bunker speaks for. The clientKey is *not* returned — the caller
+// commits via `handle.commit()` (delivered through onHandle) once the
+// vault is unlocked, so the bytes never travel through this function's
+// return shape.
 export async function fetchBunkerUserPubkey (bunkerUrl, { clientKey, onHandle } = {}) {
-  const handle = new BunkerHandle({ bunkerUrl, clientKey, onStateChange: persistHandleState })
+  const handle = BunkerHandle.create({ bunkerUrl, clientKey, onStateChange: persistHandleState })
   // Surface the live handle so the caller can release it (e.g. on user
-  // cancel) before the handshake/getPublicKey RPC ever resolves.
+  // cancel) before the handshake/getPublicKey RPC ever resolves and so it
+  // can call .commit() once the vault is ready.
   onHandle?.(handle)
   try {
     const pubkey = await handle.getPublicKey()
     return {
       pubkey,
-      clientKey: handle.state.clientKey,
       bunkerUrl: handle.state.bunkerUrl
     }
   } catch (err) {
-    // Connect failed — tear down the draft handle so it doesn't linger in
-    // the pool (it hasn't been keyed yet if we never reached getPublicKey).
+    // Connect failed — tear down the draft handle.
     await handle.close()
     throw err
   }

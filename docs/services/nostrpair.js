@@ -331,16 +331,30 @@ export class ImportSession {
 // per-account persistent client key. The fragment is local-only — the bunker
 // itself never sees it because relays don't transmit URL fragments — so it's
 // just a convenient way to pack two values into one string.
-export function buildExportPayload (accounts, { nsecFromHex, npubFromPubkey }) {
+//
+// `secretEntries` is the snapshot returned by `passkey.openSecrets()` — the
+// caller has just performed a fresh passkey reauth to obtain the raw key
+// material. Threading it in explicitly keeps the secret-extraction call
+// site visible at the export boundary.
+export function buildExportPayload (accounts, secretEntries, { nsecFromHex, npubFromPubkey }) {
+  const nsecByPubkey = new Map()
+  const clientKeyByPubkey = new Map()
+  for (const e of secretEntries) {
+    if (e.type === 'nsec') nsecByPubkey.set(e.pubkey, e.seckey)
+    else if (e.type === 'bunker') clientKeyByPubkey.set(e.pubkey, e.clientKey)
+  }
   const out = []
   for (const acc of accounts) {
     if (acc.type === 'nsec') {
-      if (!acc.seckey) continue
-      out.push(nsecFromHex(acc.seckey))
+      const seckey = nsecByPubkey.get(acc.pubkey)
+      if (!seckey) continue
+      out.push(nsecFromHex(seckey))
     } else if (acc.type === 'npub') {
       out.push(npubFromPubkey(acc.pubkey))
     } else if (acc.type === 'bunker') {
-      out.push(buildBunkerUrlWithClientKey(acc.bunker, acc.bunkerClientKey))
+      const clientKey = clientKeyByPubkey.get(acc.pubkey)
+      if (!clientKey) continue
+      out.push(buildBunkerUrlWithClientKey(acc.bunker, clientKey))
     }
   }
   return out
