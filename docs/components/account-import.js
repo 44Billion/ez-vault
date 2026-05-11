@@ -644,6 +644,18 @@ export class AccountImport extends HTMLElement {
       // Source has replied — the code is no longer useful. Collapse the
       // code section (and shrink the host) the same way it expanded.
       this.dataset.pairReady = ''
+      // WebAuthn (passkey create/get) requires the page to have focus —
+      // and the user is typically still on the source tab when the reply
+      // lands here, so any ensureRegistered() / writeSecretsBlob() below
+      // would throw "the page does not have focus" without ever showing
+      // a prompt. Park the flow until they tab back in; the click that
+      // refocuses the document also grants the transient activation
+      // WebAuthn needs.
+      if (!document.hasFocus()) {
+        this.#setPairStatus('Switch back to this tab to continue…', null)
+        await this.#waitForFocus(token)
+        if (token?.cancelled) throw new Error('IMPORT_CANCELLED')
+      }
       // Status counts down as each entry is processed: starts at the full
       // payload size and drops by one after every iteration so the user
       // sees "Importing 1 account…" once the avatar for the prior entry
@@ -677,6 +689,7 @@ export class AccountImport extends HTMLElement {
               needsSecretsPersist = true
             } else errors.push(`unknown entry: ${item.slice(0, 16)}…`)
           } catch (err) {
+            console.log(err)
             if (err?.message === 'IMPORT_CANCELLED') throw err
             // Don't abort the whole batch on a single bad entry — the user
             // gets whatever else came through, and we log the rest.
@@ -729,6 +742,28 @@ export class AccountImport extends HTMLElement {
     this.dataset.pairReady = ''
     this.#setPairStatus('', null)
     this.#resetPairCopy()
+  }
+
+  // Resolves once the document is focused (or the import is cancelled).
+  // Both events feed the same check because focus alone — without a
+  // visibility flip — is enough on a tab the user just clicked, and a
+  // visibility flip without focus (e.g. window-level Alt+Tab without
+  // the document gaining focus) isn't enough on its own. The token's
+  // cleanup list owns teardown so a cancel mid-wait drops the
+  // listeners and unblocks the awaiter.
+  #waitForFocus (token) {
+    return new Promise(resolve => {
+      if (document.hasFocus()) return resolve()
+      const finish = () => {
+        window.removeEventListener('focus', onChange)
+        document.removeEventListener('visibilitychange', onChange)
+        resolve()
+      }
+      const onChange = () => { if (document.hasFocus()) finish() }
+      window.addEventListener('focus', onChange)
+      document.addEventListener('visibilitychange', onChange)
+      token?.cleanups.push(finish)
+    })
   }
 
   #onCopyPairCode = async () => {
