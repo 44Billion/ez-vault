@@ -13,7 +13,7 @@ import { QrScanner, isCameraSupported } from '../services/qr-scanner.js'
 import * as secrets from '../services/secrets.js'
 import * as passkey from '../services/passkey.js'
 import * as toast from './shared/toast.js'
-import { injectComponentStyles } from '../helpers/dom.js'
+import { injectComponentStyles, waitForFocus } from '../helpers/dom.js'
 
 const ICON_X = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6l-12 12" /><path d="M6 6l12 12" /></svg>'
 const ICON_CHECK = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5l10 -10" /></svg>'
@@ -723,7 +723,7 @@ export class AccountImport extends HTMLElement {
       // WebAuthn needs.
       if (!document.hasFocus()) {
         this.#setPairStatus('Switch back to this tab to continue…', null)
-        await this.#waitForFocus(token)
+        await waitForFocus(cancel => token?.cleanups.push(cancel))
         if (token?.cancelled) throw new Error('IMPORT_CANCELLED')
       }
       // Status counts down as each entry is prepared: starts at the full
@@ -812,28 +812,6 @@ export class AccountImport extends HTMLElement {
     this.dataset.pairReady = ''
     this.#setPairStatus('', null)
     this.#resetPairCopy()
-  }
-
-  // Resolves once the document is focused (or the import is cancelled).
-  // Both events feed the same check because focus alone — without a
-  // visibility flip — is enough on a tab the user just clicked, and a
-  // visibility flip without focus (e.g. window-level Alt+Tab without
-  // the document gaining focus) isn't enough on its own. The token's
-  // cleanup list owns teardown so a cancel mid-wait drops the
-  // listeners and unblocks the awaiter.
-  #waitForFocus (token) {
-    return new Promise(resolve => {
-      if (document.hasFocus()) return resolve()
-      const finish = () => {
-        window.removeEventListener('focus', onChange)
-        document.removeEventListener('visibilitychange', onChange)
-        resolve()
-      }
-      const onChange = () => { if (document.hasFocus()) finish() }
-      window.addEventListener('focus', onChange)
-      document.addEventListener('visibilitychange', onChange)
-      token?.cleanups.push(finish)
-    })
   }
 
   #onCopyPairCode = async () => {

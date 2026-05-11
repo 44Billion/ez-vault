@@ -7,7 +7,7 @@ import * as secrets from '../services/secrets.js'
 import * as passkey from '../services/passkey.js'
 import { seededAvatarDataUrl } from '../services/avatar.js'
 import * as toast from './shared/toast.js'
-import { injectComponentStyles } from '../helpers/dom.js'
+import { injectComponentStyles, waitForFocus } from '../helpers/dom.js'
 
 const MODE = { CREATING: 'creating', NORMAL: 'normal', EDITING: 'editing' }
 const FLASH_MS = 1200
@@ -501,6 +501,12 @@ export class AccountAvatar extends HTMLElement {
   async #copy (btn, value) {
     if (!value) return this.#flashError(btn)
     try {
+      // navigator.clipboard.writeText needs document focus. The nsec path
+      // goes through passkey.openSecrets() first, whose WebAuthn dialog
+      // steals focus and doesn't always hand it back before this await
+      // — wait for it to come back so the write doesn't throw
+      // NotAllowedError "document is not focused".
+      await waitForFocus()
       await navigator.clipboard.writeText(value)
       this.#flashSuccess(btn)
     } catch (err) {
