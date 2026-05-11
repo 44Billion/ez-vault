@@ -4,6 +4,8 @@ import { BunkerHandle, persistHandleState } from './bunker.js'
 import * as store from './accounts-store.js'
 import { encodeSecretEntries, decodeSecretEntries } from './secret-blob.js'
 import { bytesToBase64, base64ToBytes } from '../helpers/base64.js'
+import { hexToBytes } from './nostr.js'
+import { deriveSignerSeckey } from '../helpers/signer-key.js'
 
 // In-memory home for every account's secret material plus the deterministic
 // vault key derived from the passkey PRF extension. Nothing here ever
@@ -42,6 +44,19 @@ const accountTypeByPubkey = new Map()
 const rawNsecHexByPubkey = new Map()
 const rawClientKeyHexByPubkey = new Map()
 
+// One per-account "signer" seckey per non-npub account. Deterministically
+// derived from (passkey PRF, accountPubkey) via HKDF — see
+// helpers/signer-key.js. We still persist the result in the same TLV blob
+// (rather than re-deriving on every unlock) so it shares the encrypted-at-
+// rest property of the nsec/bunker secrets and so the signer pubkey
+// remains stable across any future change to the derivation function.
+// The blob's NIP-44 envelope is keyed on the vault PRF, so a passkey
+// re-create takes both the blob AND any chance of re-deriving the same
+// signer keys with it — recovery in that case means re-importing accounts.
+// Independent of the nsec/bunker pools above: a signer key can coexist
+// with either, and is added/removed alongside its account's secret.
+const signerSeckeyByAccount = new Map()
+
 const listeners = new Set()
 
 function notify () {
@@ -63,6 +78,12 @@ function dropPriorEntry (pubkey) {
     bunkerHandlesByPubkey.delete(pubkey)
     rawClientKeyHexByPubkey.delete(pubkey)
   }
+  // The signer key tracks the account pubkey, not the secret type, so it
+  // outlives a bunker→nsec upgrade (the import flow always re-derives and
+  // re-sets it during commit anyway). It only really matters that we clear
+  // it here so a `deleteSecret(pubkey)` — which goes through this function
+  // — drops the signer along with the account's secret material.
+  signerSeckeyByAccount.delete(pubkey)
   accountTypeByPubkey.delete(pubkey)
 }
 
@@ -106,6 +127,7 @@ function clearAll () {
   accountTypeByPubkey.clear()
   rawNsecHexByPubkey.clear()
   rawClientKeyHexByPubkey.clear()
+  signerSeckeyByAccount.clear()
 }
 
 export function subscribe (fn) {
@@ -147,6 +169,7 @@ function loadEntries (ciphertext) {
   for (const e of decodeSecretEntries(tlvBytes)) {
     if (e.type === 'nsec') adoptNsec(e.pubkey, e.seckey)
     else if (e.type === 'bunker') adoptBunkerFromUnlock(e.pubkey, e.clientKey)
+    else if (e.type === 'signer') signerSeckeyByAccount.set(e.pubkey, e.seckey)
   }
 }
 
@@ -172,6 +195,45 @@ export function adoptBunkerHandle (pubkey, handle, clientKey) {
   notify()
 }
 
+// Adopt a per-account signer seckey into the in-memory pool. The seckey is
+// either freshly derived via `deriveAccountSignerSecret` (below) or pulled
+// out of the TLV blob at unlock; either way it's a 32-byte hex string. The
+// pool participates in `sealCurrentEntries`, so the next writeSecretsBlob
+// persists it alongside the matching nsec/bunker entry.
+export function setSignerSecret (accountPubkey, signerSeckey) {
+  if (!isUnlocked()) throw new Error('VAULT_LOCKED')
+  signerSeckeyByAccount.set(accountPubkey, signerSeckey)
+  notify()
+}
+
+// Derive (without persisting) the per-account signer seckey from the held
+// vault key — which IS the passkey's PRF output, by construction. Keeping
+// the derivation inside this module means the PRF bytes never cross a
+// module boundary. The result is a 32-byte hex string.
+export async function deriveAccountSignerSecret (accountPubkey) {
+  if (!vaultPrivkey) throw new Error('VAULT_LOCKED')
+  return deriveSignerSeckey(vaultPrivkey, accountPubkey)
+}
+
+// Same as `deriveAccountSignerSecret` but also returns the matching pubkey.
+// Used by the pair-import flow, which needs the pubkey for the trust
+// exchange and hands the seckey straight into `setSignerSecret` afterwards
+// — saves recomputing the public point at the call site.
+export async function deriveAccountSignerKeypair (accountPubkey) {
+  const seckey = await deriveAccountSignerSecret(accountPubkey)
+  return { seckey, pubkey: getPublicKey(hexToBytes(seckey)) }
+}
+
+// Per-account signer pubkey, derived on demand from the seckey in the
+// pool. Returns `null` if no signer has been set for this account
+// (e.g. an npub-only account, or a non-npub one that hasn't gone through
+// the import/create commit yet).
+export function getSignerPubkey (accountPubkey) {
+  const seckey = signerSeckeyByAccount.get(accountPubkey)
+  if (!seckey) return null
+  return getPublicKey(hexToBytes(seckey))
+}
+
 export function deleteSecret (pubkey) {
   if (!accountTypeByPubkey.has(pubkey)) return
   dropPriorEntry(pubkey)
@@ -180,8 +242,16 @@ export function deleteSecret (pubkey) {
 
 // Profile-rehydrator drift: a bunker we cached as `oldPubkey` now reports
 // `newPubkey`. Move the secret + the live handle over without exposing the
-// raw clientKey through any public surface.
-export function transferBunkerSecret (oldPubkey, newPubkey) {
+// raw clientKey through any public surface. Also re-derives the per-account
+// signer key for the new pubkey — the old signer is bound to the old pubkey
+// (via the HKDF info parameter) and gets dropped along with the old account
+// entry, so we need a fresh signer for the new pubkey.
+//
+// Note: the new signer pubkey will differ from the old one, so any trust
+// relationships peers stored under (oldPubkey, oldSignerPubkey) are now
+// orphan from this device's perspective and the user has to re-pair to
+// re-establish trust under the new pubkey.
+export async function transferBunkerSecret (oldPubkey, newPubkey) {
   if (!isUnlocked()) throw new Error('VAULT_LOCKED')
   if (accountTypeByPubkey.get(oldPubkey) !== 'bunker') return
   const clientKey = rawClientKeyHexByPubkey.get(oldPubkey)
@@ -191,9 +261,11 @@ export function transferBunkerSecret (oldPubkey, newPubkey) {
   }
   // Drop the stale handle/secret first so adoptBunkerFromUnlock's read of
   // the store record (which the caller will have just rewritten under
-  // `newPubkey`) finds a clean slate.
+  // `newPubkey`) finds a clean slate. This also drops the old signer key.
   deleteSecret(oldPubkey)
   adoptBunkerFromUnlock(newPubkey, clientKey)
+  const signerSeckey = await deriveSignerSeckey(vaultPrivkey, newPubkey)
+  signerSeckeyByAccount.set(newPubkey, signerSeckey)
   notify()
 }
 
@@ -236,6 +308,9 @@ function listRawEntriesInternal () {
       const clientKey = rawClientKeyHexByPubkey.get(pubkey)
       if (clientKey) out.push({ type: 'bunker', pubkey, clientKey })
     }
+  }
+  for (const [pubkey, seckey] of signerSeckeyByAccount) {
+    out.push({ type: 'signer', pubkey, seckey })
   }
   return out
 }

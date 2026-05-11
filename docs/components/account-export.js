@@ -1,9 +1,12 @@
 import * as store from '../services/accounts-store.js'
 import * as nostr from '../services/nostr.js'
 import * as passkey from '../services/passkey.js'
+import * as secrets from '../services/secrets.js'
+import * as trustedSigners from '../services/trusted-signers.js'
 import { ExportSession, buildExportPayload } from '../services/nostrpair.js'
 import { generateQrDataUrl } from '../helpers/qrcode.js'
 import { injectComponentStyles } from '../helpers/dom.js'
+import { detectPlatform } from '../helpers/platform.js'
 
 const ICON_X = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6l-12 12" /><path d="M6 6l12 12" /></svg>'
 const ICON_COPY = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 9.667a2.667 2.667 0 0 1 2.667 -2.667h8.666a2.667 2.667 0 0 1 2.667 2.667v8.666a2.667 2.667 0 0 1 -2.667 2.667h-8.666a2.667 2.667 0 0 1 -2.667 -2.667l0 -8.666" /><path d="M4.012 16.737a2.005 2.005 0 0 1 -1.012 -1.737v-10c0 -1.1 .9 -2 2 -2h10c.75 0 1.158 .385 1.5 1" /></svg>'
@@ -272,6 +275,23 @@ export class AccountExport extends HTMLElement {
       onError: (err) => {
         console.error('export session error', err?.message ?? err)
         this.#setStatus('Pairing channel error — try again.', 'error')
+      },
+      // Target's follow-up after it received and committed the accounts:
+      // its per-account signer pubkeys + a "OS / browser" label. Persist
+      // them into our encrypted trust list keyed by accountPubkey. Throw
+      // here surfaces as a 'register_trusted_signers failed' reply, which
+      // the target sees and aborts the import on.
+      onTrustedSignersReceived: ({ platform, signers }) => {
+        const entries = []
+        for (const s of signers) {
+          if (!s?.accountPubkey || !s?.signerPubkey) continue
+          entries.push({
+            accountPubkey: s.accountPubkey,
+            pubkey: s.signerPubkey,
+            platform
+          })
+        }
+        if (entries.length) trustedSigners.addMany(entries)
       }
     })
     this.#session.start()
@@ -370,18 +390,39 @@ export class AccountExport extends HTMLElement {
         this.#flashPinError('Authentication failed.')
         return
       }
-      const payload = buildExportPayload(accounts, entries, {
+      const accountTuples = buildExportPayload(accounts, entries, {
         nsecFromHex: nostr.nsecFromHex,
-        npubFromPubkey: nostr.npubFromPubkey
+        npubFromPubkey: nostr.npubFromPubkey,
+        // Per-account signer pubkey we announce alongside each non-npub
+        // bareKey. The target stores it as trusted in the same commit.
+        getSignerPubkey: (pubkey) => secrets.getSignerPubkey(pubkey)
       })
-      const ok = await this.#session.confirmImport(code, payload)
+      const envelope = { platform: detectPlatform(), accounts: accountTuples }
+      const ok = await this.#session.confirmImport(code, envelope)
       if (!ok) {
         this.#flashPinError('Code mismatch — check the digits on the other device.')
         return
       }
-      this.#setStatus('Accounts sent. The other device should now show them.', 'success')
-      // Brief pause so the user sees the success state before the panel
-      // collapses and the export-mode UI tears down.
+      this.#setStatus('Accounts sent — waiting for the other device to confirm…', null)
+      // Wait for the target to send back its signer pubkeys and us to ack.
+      // Without this, closing the session immediately would race the
+      // target's `register_trusted_signers` request and leave the trust
+      // relationship one-sided. The pairing-relay round-trip plus the
+      // target's prepare/passkey work can easily take 10-20 seconds.
+      const TRUST_EXCHANGE_TIMEOUT_MS = 60_000
+      try {
+        await Promise.race([
+          this.#session.awaitTrustedSignerExchange(),
+          new Promise((_resolve, reject) => setTimeout(
+            () => reject(new Error('TRUST_EXCHANGE_TIMEOUT')),
+            TRUST_EXCHANGE_TIMEOUT_MS
+          ))
+        ])
+        this.#setStatus('Accounts sent and confirmed.', 'success')
+      } catch (err) {
+        console.warn('trust exchange did not complete', err?.message ?? err)
+        this.#setStatus('Accounts sent — the other device did not confirm trust setup.', null)
+      }
       setTimeout(() => this.close(), 1200)
     } finally {
       this.#busy = false

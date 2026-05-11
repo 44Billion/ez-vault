@@ -4,6 +4,7 @@ import { parseProfileEvent } from './nostr.js'
 import * as status from './account-status.js'
 import * as secrets from './secrets.js'
 import * as passkey from './passkey.js'
+import * as trustedSigners from './trusted-signers.js'
 import { seededAvatarDataUrl } from './avatar.js'
 import { isOnline, onOnline } from '../helpers/network.js'
 
@@ -67,10 +68,20 @@ async function rehydrateOne (account) {
       // new bunker URL out of it when it reconstructs the moved handle.
       store.update(oldPubkey, reset)
       account = { ...account, ...reset }
-      secrets.transferBunkerSecret(oldPubkey, liveBunkerPubkey)
-      // Re-seal the secrets blob so the moved client key survives reload.
-      // This will trigger a passkey prompt — drift is rare enough that the
-      // confirmation is acceptable and reasonably informative.
+      // transferBunkerSecret also re-derives the per-account signer key for
+      // the new pubkey (the old one was bound to the old pubkey via HKDF).
+      await secrets.transferBunkerSecret(oldPubkey, liveBunkerPubkey)
+      // Trust entries on this device were keyed by the OLD account pubkey,
+      // so they're now orphan from our perspective. Drop them — the user
+      // will need to re-pair to re-establish trust under the new pubkey
+      // (which also gives us a fresh signer pubkey to advertise).
+      try { trustedSigners.removeForAccount(oldPubkey) } catch (err) {
+        console.warn('failed to drop orphan trusted signers after drift', err?.message ?? err)
+      }
+      // Re-seal the secrets blob so the moved client key + new signer key
+      // survive reload. This will trigger a passkey prompt — drift is rare
+      // enough that the confirmation is acceptable and reasonably
+      // informative.
       try {
         await passkey.writeSecretsBlob()
       } catch (err) {

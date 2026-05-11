@@ -12,8 +12,10 @@ import { ImportSession, extractBunkerClientKey } from '../services/nostrpair.js'
 import { QrScanner, isCameraSupported } from '../services/qr-scanner.js'
 import * as secrets from '../services/secrets.js'
 import * as passkey from '../services/passkey.js'
+import * as trustedSigners from '../services/trusted-signers.js'
 import * as toast from './shared/toast.js'
 import { injectComponentStyles, waitForFocus } from '../helpers/dom.js'
+import { detectPlatform } from '../helpers/platform.js'
 
 const ICON_X = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6l-12 12" /><path d="M6 6l12 12" /></svg>'
 const ICON_CHECK = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5l10 -10" /></svg>'
@@ -610,14 +612,19 @@ export class AccountImport extends HTMLElement {
 
   // Atomic-ish commit for a batch of prepared items. The passkey ceremony
   // (ensureRegistered + writeSecretsBlob) brackets the synchronous store /
-  // secrets mutations. If the trailing writeSecretsBlob throws — or any of
-  // the inner mutations does — we roll the store back to its prior records
-  // and reload the secrets pool from a snapshot taken just before commit.
-  // Net effect: either every record in the batch lands cleanly on disk or
-  // none of them do, so the user can never end up with a store entry whose
-  // secret never made it to the largeBlob.
-  async #commitPrepared (prepared) {
+  // secrets mutations + the trusted-signers write. If the trailing
+  // writeSecretsBlob throws — or any of the inner mutations does — we roll
+  // the store back to its prior records, reload the secrets pool from a
+  // snapshot taken just before commit, and restore the trusted-signers
+  // ciphertext. Net effect: either every record in the batch lands cleanly
+  // on disk or none of them do.
+  //
+  // `options.trustedSigners` is `[{ accountPubkey, pubkey, platform }, ...]`
+  // — the peer-signer list the pair flow received from the source. Omitted
+  // for single-account dispatch paths (no peer to receive trust from).
+  async #commitPrepared (prepared, options = {}) {
     if (!prepared.length) return
+    const { trustedSigners: incomingTrust = null } = options
     const needsSecretsPersist = prepared.some(p => p.type !== 'npub')
     if (needsSecretsPersist) await passkey.ensureRegistered()
 
@@ -627,8 +634,20 @@ export class AccountImport extends HTMLElement {
     const priorBlob = needsSecretsPersist ? secrets.sealCurrentEntries() : null
     const priorStoreRecords = new Map()
     for (const p of prepared) priorStoreRecords.set(p.pubkey, store.get(p.pubkey))
+    const priorTrustedSignersBlob = incomingTrust?.length ? trustedSigners.snapshot() : null
+
+    // Derive any signer seckeys that haven't been pre-filled yet. The pair
+    // flow fills them earlier (so it can announce the signer pubkeys in
+    // `register_trusted_signers` BEFORE this commit runs); single-account
+    // paths leave them empty and we derive here. Idempotent — re-derivation
+    // returns the same bytes.
+    for (const p of prepared) {
+      if (p.type === 'npub') continue
+      if (!p.signerSeckey) p.signerSeckey = await secrets.deriveAccountSignerSecret(p.pubkey)
+    }
 
     let committedCount = 0
+    let trustedSignersWritten = false
     try {
       for (const p of prepared) {
         const prior = priorStoreRecords.get(p.pubkey)
@@ -644,7 +663,16 @@ export class AccountImport extends HTMLElement {
           p.bunkerHandle.commit()
           p.markCommitted()
         }
+        if (p.signerSeckey) secrets.setSignerSecret(p.pubkey, p.signerSeckey)
         committedCount++
+      }
+      // Trusted-signers BEFORE the largeBlob write: the user's stated intent
+      // is "store the trusted public keys before importing secrets", and
+      // bracketing both inside this try/catch means the rollback can put the
+      // prior ciphertext back if writeSecretsBlob below throws.
+      if (incomingTrust?.length) {
+        trustedSigners.addMany(incomingTrust)
+        trustedSignersWritten = true
       }
       if (needsSecretsPersist) await passkey.writeSecretsBlob()
     } catch (err) {
@@ -664,6 +692,11 @@ export class AccountImport extends HTMLElement {
       if (priorBlob !== null) {
         try { secrets.reload(priorBlob) } catch (e) {
           console.warn('secrets rollback failed', e?.message ?? e)
+        }
+      }
+      if (trustedSignersWritten) {
+        try { trustedSigners.restore(priorTrustedSignersBlob) } catch (e) {
+          console.warn('trusted-signers rollback failed', e?.message ?? e)
         }
       }
       throw err
@@ -700,13 +733,11 @@ export class AccountImport extends HTMLElement {
     token?.cleanups.push(pairCleanup)
 
     try {
-      let accounts
-      try {
-        accounts = await session.run()
-      } finally {
-        this.#pairSession = null
-        session.close()
-      }
+      // Envelope shape from session.run():
+      //   { platform: string, accounts: [[bareKey], [bareKey, signerPubkey], ...] }
+      // We leave the session OPEN — it's needed for `register_trusted_signers`
+      // below — and close it ourselves once the round-trip completes.
+      const { platform: sourcePlatform, accounts } = await session.run()
 
       if (token?.cancelled) throw new Error('IMPORT_CANCELLED')
       if (!accounts.length) throw new Error('IMPORT_REJECTED')
@@ -748,21 +779,29 @@ export class AccountImport extends HTMLElement {
       const errors = []
       for (let i = accounts.length - 1; i >= 0; i--) {
         if (token?.cancelled) throw new Error('IMPORT_CANCELLED')
-        const item = accounts[i]
-        if (typeof item === 'string') {
-          try {
-            let p
-            if (item.startsWith('bunker://')) p = await this.#prepareBunker(item, token)
-            else if (item.startsWith('npub1')) p = await this.#prepareNpub(item)
-            else if (item.startsWith('nsec1')) p = await this.#prepareSeckey(item)
-            else throw new Error(`unknown entry: ${item.slice(0, 16)}…`)
-            prepared.push(p)
-          } catch (err) {
-            if (err?.message === 'IMPORT_CANCELLED') throw err
-            // Don't abort the whole batch on a single bad entry — the user
-            // gets whatever else came through, and we log the rest.
-            errors.push(err?.message ?? String(err))
-          }
+        const tuple = accounts[i]
+        if (!Array.isArray(tuple) || typeof tuple[0] !== 'string') {
+          remaining -= 1
+          if (remaining > 0) showRemaining()
+          continue
+        }
+        const bareKey = tuple[0]
+        const sourceSignerPubkey = typeof tuple[1] === 'string' ? tuple[1] : null
+        try {
+          let p
+          if (bareKey.startsWith('bunker://')) p = await this.#prepareBunker(bareKey, token)
+          else if (bareKey.startsWith('npub1')) p = await this.#prepareNpub(bareKey)
+          else if (bareKey.startsWith('nsec1')) p = await this.#prepareSeckey(bareKey)
+          else throw new Error(`unknown entry: ${bareKey.slice(0, 16)}…`)
+          // Stash the source's announced signer pubkey for this account so
+          // we can fold it into the trusted-signers write at commit time.
+          if (sourceSignerPubkey) p.sourceSignerPubkey = sourceSignerPubkey
+          prepared.push(p)
+        } catch (err) {
+          if (err?.message === 'IMPORT_CANCELLED') throw err
+          // Don't abort the whole batch on a single bad entry — the user
+          // gets whatever else came through, and we log the rest.
+          errors.push(err?.message ?? String(err))
         }
         remaining -= 1
         // Skip the final "Importing 0 accounts…" flash; the commit step
@@ -773,11 +812,52 @@ export class AccountImport extends HTMLElement {
       if (!prepared.length) throw new Error('IMPORT_FAILED')
       if (token?.cancelled) throw new Error('IMPORT_CANCELLED')
 
-      // Phase 2 — passkey ceremony + synchronous store/secret mutations +
-      // largeBlob write, all bracketed by a single rollback. The two
-      // passkey prompts fire back-to-back with nothing awaited between
-      // them, and any failure leaves disk state unchanged.
-      await this.#commitPrepared(prepared)
+      // Phase 2 — unlock the vault (passkey prompt #1) so we can derive
+      // each non-npub account's signer keypair. The pubkeys then travel
+      // back over the session in `register_trusted_signers`; the seckeys
+      // stay on this device and ride into the same writeBlob as the
+      // imported secrets below.
+      await passkey.ensureRegistered()
+      if (token?.cancelled) throw new Error('IMPORT_CANCELLED')
+
+      const ourSigners = []
+      const incomingTrust = []
+      for (const p of prepared) {
+        if (p.type === 'npub') continue
+        const { seckey, pubkey } = await secrets.deriveAccountSignerKeypair(p.pubkey)
+        p.signerSeckey = seckey
+        ourSigners.push({ accountPubkey: p.pubkey, signerPubkey: pubkey })
+        if (p.sourceSignerPubkey) {
+          incomingTrust.push({
+            accountPubkey: p.pubkey,
+            pubkey: p.sourceSignerPubkey,
+            platform: sourcePlatform
+          })
+        }
+      }
+
+      // Phase 3 — trusted-signer exchange. Source receives our signer
+      // pubkeys, stores them, replies 'ack'. Skip when nothing to exchange
+      // (an all-npub payload is theoretically possible).
+      if (ourSigners.length) {
+        await session.registerTrustedSigners({
+          platform: detectPlatform(),
+          signers: ourSigners
+        })
+        if (token?.cancelled) throw new Error('IMPORT_CANCELLED')
+      }
+
+      // Round-trip done — drop the session before commit so a cancel mid-
+      // commit doesn't try to close it again from pairCleanup.
+      this.#pairSession = null
+      session.close()
+
+      // Phase 4 — passkey ceremony tail (writeBlob = prompt #2) +
+      // synchronous store/secret mutations + trusted-signers write, all
+      // bracketed by a single rollback. The ensureRegistered call inside
+      // commitPrepared is a no-op (vault already unlocked above), and the
+      // pre-derived signer seckeys mean commit just adopts them as-is.
+      await this.#commitPrepared(prepared, { trustedSigners: incomingTrust })
 
       this.dataset.pair = ''
       this.dataset.pairReady = ''
@@ -801,6 +881,12 @@ export class AccountImport extends HTMLElement {
         const idx = token.cleanups.indexOf(pairCleanup)
         if (idx >= 0) token.cleanups.splice(idx, 1)
       }
+      // Idempotent — Phase 3 closes the session on the happy path, and
+      // #cancelPair closes it on user-cancel. This covers any other
+      // exit path (prepare failure, register_trusted_signers reject,
+      // commit failure) so we don't leak the relay subscription.
+      try { session.close() } catch { /* noop */ }
+      this.#pairSession = null
     }
   }
 

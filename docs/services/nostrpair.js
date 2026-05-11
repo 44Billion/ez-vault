@@ -96,13 +96,20 @@ export class ExportSession {
   #pendingImport = null
   #closed = false
   #connectTimer = null
+  // One-shot resolver for the trusted-signer round-trip the target fires
+  // after it has the import_accounts reply in hand. Set on demand by
+  // `awaitTrustedSignerExchange`; the `register_trusted_signers` handler
+  // below flips the received flag and resolves whoever's waiting.
+  #trustExchangeReceived = false
+  #trustExchangeResolve = null
+  #trustExchangeReject = null
 
-  constructor ({ onTargetConnected, onPairingCode, onError } = {}) {
+  constructor ({ onTargetConnected, onPairingCode, onError, onTrustedSignersReceived } = {}) {
     this.#ephSecretKey = generateSecretKey()
     this.#ephPubkey = getPublicKey(this.#ephSecretKey)
     this.#secret = randomHex(SECRET_BYTES)
     this.#relay = pairingRelay
-    this.#handlers = { onTargetConnected, onPairingCode, onError }
+    this.#handlers = { onTargetConnected, onPairingCode, onError, onTrustedSignersReceived }
   }
 
   get url () {
@@ -157,6 +164,28 @@ export class ExportSession {
       return
     }
 
+    // Target's follow-up after it received and validated the import_accounts
+    // reply: it now sends back its own per-account signer pubkeys so the
+    // source can store them as trusted. Params shape:
+    //   { platform: 'macOS / Chrome', signers: [{ accountPubkey, signerPubkey }, ...] }
+    // We reply 'ack' once the handler has stashed them.
+    if (req.method === 'register_trusted_signers') {
+      const params = req.params && typeof req.params === 'object' ? req.params : {}
+      const platform = typeof params.platform === 'string' ? params.platform : ''
+      const signers = Array.isArray(params.signers) ? params.signers : []
+      try {
+        await this.#handlers.onTrustedSignersReceived?.({ platform, signers })
+      } catch (err) {
+        return this.#reply(event.pubkey, req.id, null, err?.message || 'register_trusted_signers failed')
+      }
+      await this.#reply(event.pubkey, req.id, 'ack', null)
+      this.#trustExchangeReceived = true
+      this.#trustExchangeResolve?.()
+      this.#trustExchangeResolve = null
+      this.#trustExchangeReject = null
+      return
+    }
+
     // Per spec: any single-account NIP-46 method (sign_event, nip04_*,
     // nip44_*, get_public_key, get_relays, ...) is meaningless on a pairing
     // channel. Reply with an explicit error so the target sees why instead
@@ -166,10 +195,15 @@ export class ExportSession {
     }
   }
 
-  // Caller passes in the user-typed code AND the array of accounts to send.
-  // Returns true on a code match (and the accounts get delivered), false on
-  // mismatch (the channel stays open so the user can try again).
-  async confirmImport (typedCode, accounts) {
+  // Caller passes in the user-typed code AND the envelope to send. The
+  // envelope is `{ platform, accounts }` where `accounts` is the per-account
+  // tuple list produced by `buildExportPayload`. Returns true on a code
+  // match (and the envelope gets delivered), false on mismatch (the channel
+  // stays open so the user can try again). The session does NOT close
+  // here — it stays alive for the target's follow-up `register_trusted_signers`
+  // request, which the source acks on; the caller closes the session after
+  // that round-trip.
+  async confirmImport (typedCode, envelope) {
     if (!this.#pendingImport || !this.#clientPubkey) return false
     const { id, code } = this.#pendingImport
     if (typedCode !== code) {
@@ -177,23 +211,38 @@ export class ExportSession {
       // error and keep the pending request alive for a retry.
       return false
     }
-    await this.#reply(this.#clientPubkey, id, JSON.stringify(accounts), null)
+    await this.#reply(this.#clientPubkey, id, JSON.stringify(envelope), null)
     this.#pendingImport = null
     return true
   }
 
   // Active cancel: if the target is waiting on import_accounts, send the
-  // empty-array+error reply documented in the spec so the target stops
+  // empty-envelope+error reply documented in the spec so the target stops
   // waiting and surfaces the cancellation cleanly. Then tear down.
   async cancel () {
     if (this.#pendingImport && this.#clientPubkey) {
       const { id } = this.#pendingImport
       this.#pendingImport = null
       try {
-        await this.#reply(this.#clientPubkey, id, JSON.stringify([]), 'cancelled by source')
+        await this.#reply(this.#clientPubkey, id, JSON.stringify({ platform: '', accounts: [] }), 'cancelled by source')
       } catch { /* noop — we're closing anyway */ }
     }
     this.close()
+  }
+
+  // Resolves once the target has sent `register_trusted_signers` and we've
+  // acked it. Race-safe: if the RPC already arrived before the caller
+  // awaits, the returned promise resolves immediately; otherwise it
+  // resolves when the inbound handler does. Single-awaiter — a second
+  // call to this method abandons the prior promise (we don't need
+  // fan-out and the usage site is exactly one caller). `close()` rejects
+  // any pending wait with `IMPORT_CANCELLED`.
+  awaitTrustedSignerExchange () {
+    if (this.#trustExchangeReceived) return Promise.resolve()
+    return new Promise((resolve, reject) => {
+      this.#trustExchangeResolve = resolve
+      this.#trustExchangeReject = reject
+    })
   }
 
   close () {
@@ -203,6 +252,9 @@ export class ExportSession {
     this.#connectTimer = null
     try { this.#sub?.close() } catch { /* noop */ }
     this.#sub = null
+    this.#trustExchangeReject?.(new Error('IMPORT_CANCELLED'))
+    this.#trustExchangeResolve = null
+    this.#trustExchangeReject = null
   }
 
   #reply (toPubkey, id, result, error) {
@@ -260,8 +312,22 @@ export class ImportSession {
     const resultJson = await this.#request('import_accounts', [])
     let parsed
     try { parsed = JSON.parse(resultJson) } catch { throw new Error('IMPORT_BAD_RESPONSE') }
-    if (!Array.isArray(parsed)) throw new Error('IMPORT_BAD_RESPONSE')
-    return parsed
+    // Envelope shape: { platform, accounts: [[bareKey], [bareKey, signerPubkey], ...] }.
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.accounts)) {
+      throw new Error('IMPORT_BAD_RESPONSE')
+    }
+    return { platform: typeof parsed.platform === 'string' ? parsed.platform : '', accounts: parsed.accounts }
+  }
+
+  // Round-trip for the trusted-signer exchange that follows import_accounts.
+  // Caller passes `{ platform, signers }` — our platform label + the
+  // [{accountPubkey, signerPubkey}, ...] list — and we wait for the source's
+  // 'ack' before resolving. Source rejects via reply.error if it couldn't
+  // store; we surface that as a rejected promise.
+  async registerTrustedSigners (params) {
+    const result = await this.#request('register_trusted_signers', params)
+    if (result !== 'ack') throw new Error('REGISTER_TRUSTED_SIGNERS_FAILED')
+    return result
   }
 
   close () {
@@ -336,7 +402,15 @@ export class ImportSession {
 // caller has just performed a fresh passkey reauth to obtain the raw key
 // material. Threading it in explicitly keeps the secret-extraction call
 // site visible at the export boundary.
-export function buildExportPayload (accounts, secretEntries, { nsecFromHex, npubFromPubkey }) {
+//
+// Each account becomes a tuple in the returned array:
+//   - npub:        [bareKey]
+//   - nsec/bunker: [bareKey, signerPubkey]
+// The `signerPubkey` is the source device's per-account signer pubkey,
+// looked up via `getSignerPubkey(accountPubkey)`. It travels with the
+// secret material so the target can store it as a trusted signer in the
+// same atomic commit it stores the account itself.
+export function buildExportPayload (accounts, secretEntries, { nsecFromHex, npubFromPubkey, getSignerPubkey }) {
   const nsecByPubkey = new Map()
   const clientKeyByPubkey = new Map()
   for (const e of secretEntries) {
@@ -348,13 +422,16 @@ export function buildExportPayload (accounts, secretEntries, { nsecFromHex, npub
     if (acc.type === 'nsec') {
       const seckey = nsecByPubkey.get(acc.pubkey)
       if (!seckey) continue
-      out.push(nsecFromHex(seckey))
+      const signerPubkey = getSignerPubkey?.(acc.pubkey)
+      out.push(signerPubkey ? [nsecFromHex(seckey), signerPubkey] : [nsecFromHex(seckey)])
     } else if (acc.type === 'npub') {
-      out.push(npubFromPubkey(acc.pubkey))
+      out.push([npubFromPubkey(acc.pubkey)])
     } else if (acc.type === 'bunker') {
       const clientKey = clientKeyByPubkey.get(acc.pubkey)
       if (!clientKey) continue
-      out.push(buildBunkerUrlWithClientKey(acc.bunker, clientKey))
+      const bareKey = buildBunkerUrlWithClientKey(acc.bunker, clientKey)
+      const signerPubkey = getSignerPubkey?.(acc.pubkey)
+      out.push(signerPubkey ? [bareKey, signerPubkey] : [bareKey])
     }
   }
   return out
