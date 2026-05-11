@@ -440,17 +440,16 @@ export class AccountImport extends HTMLElement {
   }
 
   // Single dispatch point so the nostrpair flow can fan out the same way the
-  // user-typed input does (without re-entering the nostrpair branch).
+  // user-typed input does (without re-entering the nostrpair branch). Both
+  // paths funnel through #commitPrepared so the passkey ceremony and the
+  // largeBlob write run back-to-back, with rollback on writeBlob failure.
   async #dispatch (raw, token) {
     if (raw.startsWith('nostrpair://')) return this.#importNostrpair(raw, token)
-    if (raw.startsWith('bunker://')) {
-      await this.#importBunker(raw, token)
-      await passkey.writeSecretsBlob()
-      return
-    }
-    if (raw.startsWith('npub1')) return this.#importNpub(raw)
-    await this.#importSeckey(raw)
-    await passkey.writeSecretsBlob()
+    let prepared
+    if (raw.startsWith('bunker://')) prepared = await this.#prepareBunker(raw, token)
+    else if (raw.startsWith('npub1')) prepared = await this.#prepareNpub(raw)
+    else prepared = await this.#prepareSeckey(raw)
+    await this.#commitPrepared([prepared])
   }
 
   #setBusy (on) {
@@ -482,16 +481,19 @@ export class AccountImport extends HTMLElement {
     if (!this.#busy) this.#confirmBtn.disabled = false
   }
 
-  async #importSeckey (raw) {
+  // Each #prepare* call resolves the pubkey, runs the duplicate check, and
+  // fetches metadata + the seeded avatar, but does NOT touch the store or the
+  // secrets module. The returned object holds everything #commitPrepared
+  // needs to apply the mutation synchronously, so the passkey + largeBlob
+  // prompts can fire back-to-back with no awaited work splitting them.
+
+  async #prepareSeckey (raw) {
     const { pubkey, seckey } = nostr.keypairFromSeckey(raw)
     // A bare secret key gives strictly more capability than a bunker URL or a
     // read-only npub, so importing a seckey for a pubkey currently held as
     // either is an in-place upgrade. An existing seckey entry is a duplicate.
     const existing = store.get(pubkey)
     if (existing && existing.type === 'nsec') throw new Error('ACCOUNT_EXISTS')
-    // Register the vault's passkey on the first non-npub import. Idempotent:
-    // does nothing if the vault is already unlocked.
-    await passkey.ensureRegistered()
     const meta = await resolveMetadata(pubkey)
     const picture = meta.picture || existing?.picture || await seededAvatarDataUrl(pubkey)
     const record = {
@@ -503,24 +505,17 @@ export class AccountImport extends HTMLElement {
       relayListEvent: meta.relayListEvent || existing?.relayListEvent,
       writeRelays: meta.writeRelays
     }
-    if (existing) {
-      // secrets.setNsecSecret below also drops any prior bunker handle /
-      // nsec signer cached for this pubkey, so no separate teardown call.
-      store.replace(pubkey, record)
-    } else {
-      store.add(record)
-    }
-    secrets.setNsecSecret(pubkey, seckey)
+    return { type: 'nsec', pubkey, record, seckey }
   }
 
-  async #importNpub (npub) {
+  async #prepareNpub (npub) {
     const pubkey = nostr.pubkeyFromNpub(npub)
     // npub is the weakest form (read-only), so it can never overwrite an
     // existing entry — any nsec/bunker/npub at this pubkey wins.
     if (store.get(pubkey)) throw new Error('ACCOUNT_EXISTS')
     const meta = await resolveMetadata(pubkey)
     const picture = meta.picture || await seededAvatarDataUrl(pubkey)
-    store.add({
+    const record = {
       type: 'npub',
       pubkey,
       picture,
@@ -528,10 +523,11 @@ export class AccountImport extends HTMLElement {
       profileEvent: meta.profileEvent,
       relayListEvent: meta.relayListEvent,
       writeRelays: meta.writeRelays
-    })
+    }
+    return { type: 'npub', pubkey, record }
   }
 
-  async #importBunker (bunkerUrlInput, token) {
+  async #prepareBunker (bunkerUrlInput, token) {
     // Pairing-imported bunker URLs carry the persistent client key as a
     // local-only `#client_key=` fragment so the receiving device can adopt
     // the same client identity instead of generating a fresh one (a fresh
@@ -540,9 +536,12 @@ export class AccountImport extends HTMLElement {
 
     let bunkerHandle = null
     let committed = false
-    // Closes the in-flight handle if cancel happens before store commit.
-    // After commit the handle is the live connection for the new account
-    // and must stay alive — `committed` short-circuits the cleanup then.
+    // Closes the in-flight handle if cancel happens before commit. After
+    // commit the handle is the live connection for the new account and
+    // must stay alive — `committed` short-circuits the cleanup then.
+    // The cleanup stays armed on token.cleanups across the prepare→commit
+    // boundary and is dropped (along with the committed=true flip) by the
+    // `markCommitted` returned to the caller.
     const cleanup = () => {
       if (committed) return
       try { bunkerHandle?.close() } catch { /* noop */ }
@@ -569,9 +568,6 @@ export class AccountImport extends HTMLElement {
       if (existing && existing.type !== 'bunker' && existing.type !== 'npub') {
         throw new Error('ACCOUNT_EXISTS')
       }
-      // Register the vault's passkey on the first non-npub import. Idempotent
-      // when the vault is already unlocked.
-      await passkey.ensureRegistered()
       const meta = await resolveMetadata(pubkey)
       if (token?.cancelled) throw new Error('IMPORT_CANCELLED')
       const picture = meta.picture || existing?.picture || await seededAvatarDataUrl(pubkey)
@@ -586,17 +582,91 @@ export class AccountImport extends HTMLElement {
         relayListEvent: meta.relayListEvent || existing?.relayListEvent,
         writeRelays: meta.writeRelays
       }
-      if (existing) store.replace(pubkey, record)
-      else store.add(record)
-      // Adopt the live handle (with its WeakMap-protected clientKey) into
-      // the secrets pool. The bytes never travel through this scope.
-      bunkerHandle.commit()
-      committed = true
-    } finally {
+      return {
+        type: 'bunker',
+        pubkey,
+        record,
+        bunkerHandle,
+        markCommitted: () => {
+          committed = true
+          if (token) {
+            const idx = token.cleanups.indexOf(cleanup)
+            if (idx >= 0) token.cleanups.splice(idx, 1)
+          }
+        }
+      }
+    } catch (err) {
+      // Prepare failed — close the in-flight handle and unregister the
+      // cleanup before re-throwing, so the per-item failure can't leave a
+      // dangling token.cleanups entry that closes a stale handle later.
+      cleanup()
       if (token) {
         const idx = token.cleanups.indexOf(cleanup)
         if (idx >= 0) token.cleanups.splice(idx, 1)
       }
+      throw err
+    }
+  }
+
+  // Atomic-ish commit for a batch of prepared items. The passkey ceremony
+  // (ensureRegistered + writeSecretsBlob) brackets the synchronous store /
+  // secrets mutations. If the trailing writeSecretsBlob throws — or any of
+  // the inner mutations does — we roll the store back to its prior records
+  // and reload the secrets pool from a snapshot taken just before commit.
+  // Net effect: either every record in the batch lands cleanly on disk or
+  // none of them do, so the user can never end up with a store entry whose
+  // secret never made it to the largeBlob.
+  async #commitPrepared (prepared) {
+    if (!prepared.length) return
+    const needsSecretsPersist = prepared.some(p => p.type !== 'npub')
+    if (needsSecretsPersist) await passkey.ensureRegistered()
+
+    // Snapshots are taken AFTER ensureRegistered so a first-time registration
+    // is the baseline we'd revert to (an empty pool) rather than a not-yet-
+    // unlocked state.
+    const priorBlob = needsSecretsPersist ? secrets.sealCurrentEntries() : null
+    const priorStoreRecords = new Map()
+    for (const p of prepared) priorStoreRecords.set(p.pubkey, store.get(p.pubkey))
+
+    let committedCount = 0
+    try {
+      for (const p of prepared) {
+        const prior = priorStoreRecords.get(p.pubkey)
+        if (prior) store.replace(p.pubkey, p.record)
+        else store.add(p.record)
+        if (p.type === 'nsec') {
+          // secrets.setNsecSecret also drops any prior bunker handle / nsec
+          // signer cached for this pubkey, so no separate teardown call.
+          secrets.setNsecSecret(p.pubkey, p.seckey)
+        } else if (p.type === 'bunker') {
+          // Adopts the live handle (with its WeakMap-protected clientKey)
+          // into the secrets pool. The bytes never travel through this scope.
+          p.bunkerHandle.commit()
+          p.markCommitted()
+        }
+        committedCount++
+      }
+      if (needsSecretsPersist) await passkey.writeSecretsBlob()
+    } catch (err) {
+      for (let i = 0; i < committedCount; i++) {
+        const p = prepared[i]
+        const prior = priorStoreRecords.get(p.pubkey)
+        try {
+          if (prior) store.replace(p.pubkey, prior)
+          else store.remove(p.pubkey)
+        } catch { /* noop */ }
+      }
+      // secrets.reload's clearAll() closes any bunker handles currently in
+      // the pool — which includes the ones we just committed — and re-adopts
+      // the prior set from the snapshot. Nsec signers and bunker handles
+      // adopted by the reload are fresh instances, but functionally equal to
+      // the pre-batch pool.
+      if (priorBlob !== null) {
+        try { secrets.reload(priorBlob) } catch (e) {
+          console.warn('secrets rollback failed', e?.message ?? e)
+        }
+      }
+      throw err
     }
   }
 
@@ -656,10 +726,10 @@ export class AccountImport extends HTMLElement {
         await this.#waitForFocus(token)
         if (token?.cancelled) throw new Error('IMPORT_CANCELLED')
       }
-      // Status counts down as each entry is processed: starts at the full
+      // Status counts down as each entry is prepared: starts at the full
       // payload size and drops by one after every iteration so the user
-      // sees "Importing 1 account…" once the avatar for the prior entry
-      // has landed in the list.
+      // sees "Importing 1 account…" once the prior entry's metadata fetch
+      // has settled.
       let remaining = accounts.length
       const showRemaining = () => this.#setPairStatus(
         `Importing ${remaining} account${remaining === 1 ? '' : 's'}…`,
@@ -667,29 +737,27 @@ export class AccountImport extends HTMLElement {
       )
       showRemaining()
 
+      // Phase 1 — prepare every item in memory. All the network work
+      // (fetchBunkerUserPubkey, resolveMetadata, seededAvatarDataUrl) happens
+      // here, with no store/secrets mutations. Iterate the payload in
+      // reverse: store.add() unshifts each new record to the head of the
+      // list, so the LAST imported entry ends up topmost. Reversing the
+      // iteration order makes the source's [A, B, ...] order preserved on
+      // the target ([A, B, ...existing]) instead of mirrored.
+      const prepared = []
       const errors = []
-      // Track whether any non-npub item landed in the secrets map: only then
-      // is the largeBlob re-write at the end of the batch necessary.
-      let needsSecretsPersist = false
-      // Iterate the payload in reverse: store.add() unshifts each new record
-      // to the head of the list, so the LAST imported entry ends up topmost.
-      // Reversing the iteration order makes the source's [A, B, ...] order
-      // preserved on the target ([A, B, ...existing]) instead of mirrored.
       for (let i = accounts.length - 1; i >= 0; i--) {
-        if (token?.cancelled) break
+        if (token?.cancelled) throw new Error('IMPORT_CANCELLED')
         const item = accounts[i]
         if (typeof item === 'string') {
           try {
-            if (item.startsWith('bunker://')) {
-              await this.#importBunker(item, token)
-              needsSecretsPersist = true
-            } else if (item.startsWith('npub1')) await this.#importNpub(item)
-            else if (item.startsWith('nsec1')) {
-              await this.#importSeckey(item)
-              needsSecretsPersist = true
-            } else errors.push(`unknown entry: ${item.slice(0, 16)}…`)
+            let p
+            if (item.startsWith('bunker://')) p = await this.#prepareBunker(item, token)
+            else if (item.startsWith('npub1')) p = await this.#prepareNpub(item)
+            else if (item.startsWith('nsec1')) p = await this.#prepareSeckey(item)
+            else throw new Error(`unknown entry: ${item.slice(0, 16)}…`)
+            prepared.push(p)
           } catch (err) {
-            console.log(err)
             if (err?.message === 'IMPORT_CANCELLED') throw err
             // Don't abort the whole batch on a single bad entry — the user
             // gets whatever else came through, and we log the rest.
@@ -697,22 +765,24 @@ export class AccountImport extends HTMLElement {
           }
         }
         remaining -= 1
-        // Skip the final "Importing 0 accounts…" flash; the success path
-        // (a few lines below) clears the status anyway.
+        // Skip the final "Importing 0 accounts…" flash; the commit step
+        // below clears the status anyway.
         if (remaining > 0) showRemaining()
       }
 
-      if (errors.length === accounts.length) throw new Error('IMPORT_FAILED')
+      if (!prepared.length) throw new Error('IMPORT_FAILED')
+      if (token?.cancelled) throw new Error('IMPORT_CANCELLED')
 
-      // One passkey-side persistence per batch — the per-item handlers leave
-      // the secrets map in memory and we seal the whole snapshot here.
-      if (needsSecretsPersist) await passkey.writeSecretsBlob()
+      // Phase 2 — passkey ceremony + synchronous store/secret mutations +
+      // largeBlob write, all bracketed by a single rollback. The two
+      // passkey prompts fire back-to-back with nothing awaited between
+      // them, and any failure leaves disk state unchanged.
+      await this.#commitPrepared(prepared)
 
       this.dataset.pair = ''
       this.dataset.pairReady = ''
       this.#setPairStatus('', null)
-      const importedCount = accounts.length - errors.length
-      const summary = `Imported ${importedCount} account${importedCount === 1 ? '' : 's'}`
+      const summary = `Imported ${prepared.length} account${prepared.length === 1 ? '' : 's'}`
       if (errors.length) toast.warning(`${summary} (${errors.length} failed)`, errors.join('\n'))
       else toast.success(summary)
     } catch (err) {

@@ -124,15 +124,30 @@ export function isUnlocked () {
 export function unlock (vaultKeyBytes, ciphertext) {
   vaultPrivkey = vaultKeyBytes
   vaultConversationKey = nip44.getConversationKey(vaultKeyBytes, getPublicKey(vaultKeyBytes))
-  clearAll()
-  if (ciphertext) {
-    const tlvBytes = base64ToBytes(nip44.decrypt(ciphertext, vaultConversationKey))
-    for (const e of decodeSecretEntries(tlvBytes)) {
-      if (e.type === 'nsec') adoptNsec(e.pubkey, e.seckey)
-      else if (e.type === 'bunker') adoptBunkerFromUnlock(e.pubkey, e.clientKey)
-    }
-  }
+  loadEntries(ciphertext)
   notify()
+}
+
+// Restore the pool to the state captured by an earlier `sealCurrentEntries()`
+// snapshot, using the already-set vault key. The import flow uses this to
+// roll back adopt-replace mutations when the post-commit largeBlob write
+// fails: walking the pool back to the snapshot closes any handles adopted
+// in the intervening commit (clearAll inside loadEntries) and re-adopts the
+// prior set from the same ciphertext that was on disk a moment ago.
+export function reload (ciphertext) {
+  if (!vaultPrivkey) throw new Error('VAULT_LOCKED')
+  loadEntries(ciphertext)
+  notify()
+}
+
+function loadEntries (ciphertext) {
+  clearAll()
+  if (!ciphertext) return
+  const tlvBytes = base64ToBytes(nip44.decrypt(ciphertext, vaultConversationKey))
+  for (const e of decodeSecretEntries(tlvBytes)) {
+    if (e.type === 'nsec') adoptNsec(e.pubkey, e.seckey)
+    else if (e.type === 'bunker') adoptBunkerFromUnlock(e.pubkey, e.clientKey)
+  }
 }
 
 export function lock () {
