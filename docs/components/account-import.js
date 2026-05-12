@@ -451,6 +451,11 @@ export class AccountImport extends HTMLElement {
     if (raw.startsWith('bunker://')) prepared = await this.#prepareBunker(raw, token)
     else if (raw.startsWith('npub1')) prepared = await this.#prepareNpub(raw)
     else prepared = await this.#prepareSeckey(raw)
+    // Single-account paste flashes the red error icon on a duplicate. The
+    // skipped marker exists for the pair flow's trust-exchange-on-duplicate
+    // behavior; here we surface it as the same throw the prepare functions
+    // used to do.
+    if (prepared.skipped) throw new Error(prepared.reason)
     await this.#commitPrepared([prepared])
   }
 
@@ -493,9 +498,15 @@ export class AccountImport extends HTMLElement {
     const { pubkey, seckey } = nostr.keypairFromSeckey(raw)
     // A bare secret key gives strictly more capability than a bunker URL or a
     // read-only npub, so importing a seckey for a pubkey currently held as
-    // either is an in-place upgrade. An existing seckey entry is a duplicate.
+    // either is an in-place upgrade. An existing seckey entry is a duplicate
+    // — return a `skipped` marker (rather than throwing) so the pair-import
+    // caller can still run the trusted-signer exchange for this pubkey. The
+    // single-account dispatcher converts skipped → throw so its old
+    // "flash error on duplicate" UI still fires.
     const existing = store.get(pubkey)
-    if (existing && existing.type === 'nsec') throw new Error('ACCOUNT_EXISTS')
+    if (existing && existing.type === 'nsec') {
+      return { type: 'nsec', pubkey, skipped: true, reason: 'ACCOUNT_EXISTS' }
+    }
     const meta = await resolveMetadata(pubkey)
     const picture = meta.picture || existing?.picture || await seededAvatarDataUrl(pubkey)
     const record = {
@@ -513,8 +524,14 @@ export class AccountImport extends HTMLElement {
   async #prepareNpub (npub) {
     const pubkey = nostr.pubkeyFromNpub(npub)
     // npub is the weakest form (read-only), so it can never overwrite an
-    // existing entry — any nsec/bunker/npub at this pubkey wins.
-    if (store.get(pubkey)) throw new Error('ACCOUNT_EXISTS')
+    // existing entry — any nsec/bunker/npub at this pubkey wins. Returns
+    // a `skipped` marker rather than throwing so the pair-import caller
+    // can still account for the pubkey (though npub items skip the
+    // trusted-signer exchange anyway — neither side has a signer key
+    // for a read-only entry).
+    if (store.get(pubkey)) {
+      return { type: 'npub', pubkey, skipped: true, reason: 'ACCOUNT_EXISTS' }
+    }
     const meta = await resolveMetadata(pubkey)
     const picture = meta.picture || await seededAvatarDataUrl(pubkey)
     const record = {
@@ -566,9 +583,18 @@ export class AccountImport extends HTMLElement {
       const existing = store.get(pubkey)
       // A bunker import can replace another bunker entry (URL/secret
       // refresh) or upgrade a read-only npub; an existing nsec is strictly
-      // more capable, so we reject that case.
+      // more capable, so we reject that case. Returns a `skipped` marker
+      // (rather than throwing) so the pair-import caller can still run the
+      // trusted-signer exchange for this pubkey. Close the in-flight handle
+      // first — we won't be committing it, and leaving it on token.cleanups
+      // would close a stale handle later.
       if (existing && existing.type !== 'bunker' && existing.type !== 'npub') {
-        throw new Error('ACCOUNT_EXISTS')
+        cleanup()
+        if (token) {
+          const idx = token.cleanups.indexOf(cleanup)
+          if (idx >= 0) token.cleanups.splice(idx, 1)
+        }
+        return { type: 'bunker', pubkey, skipped: true, reason: 'ACCOUNT_EXISTS' }
       }
       const meta = await resolveMetadata(pubkey)
       if (token?.cancelled) throw new Error('IMPORT_CANCELLED')
@@ -623,10 +649,14 @@ export class AccountImport extends HTMLElement {
   // — the peer-signer list the pair flow received from the source. Omitted
   // for single-account dispatch paths (no peer to receive trust from).
   async #commitPrepared (prepared, options = {}) {
-    if (!prepared.length) return
     const { trustedSigners: incomingTrust = null } = options
+    if (!prepared.length && !incomingTrust?.length) return
     const needsSecretsPersist = prepared.some(p => p.type !== 'npub')
-    if (needsSecretsPersist) await passkey.ensureRegistered()
+    // ensureRegistered if EITHER we'll write secrets (largeBlob) OR encrypt
+    // the trusted-signers list (vault-key encryption). The all-duplicates
+    // pair flow lands here with prepared empty but incomingTrust non-empty,
+    // and we still need the vault unlocked to call vaultEncrypt.
+    if (needsSecretsPersist || incomingTrust?.length) await passkey.ensureRegistered()
 
     // Snapshots are taken AFTER ensureRegistered so a first-time registration
     // is the baseline we'd revert to (an empty pool) rather than a not-yet-
@@ -775,7 +805,15 @@ export class AccountImport extends HTMLElement {
       // list, so the LAST imported entry ends up topmost. Reversing the
       // iteration order makes the source's [A, B, ...] order preserved on
       // the target ([A, B, ...existing]) instead of mirrored.
+      //
+      // A prepare result with `skipped: true` is a duplicate the local
+      // precedence rules reject (existing-nsec wins, etc.). We keep its
+      // pubkey around because the trust-exchange below STILL runs for it
+      // — both sides hold the same account, so peers should be able to
+      // trust each other's signer for it regardless of which side first
+      // claimed the secret.
       const prepared = []
+      const skipped = []
       const errors = []
       for (let i = accounts.length - 1; i >= 0; i--) {
         if (token?.cancelled) throw new Error('IMPORT_CANCELLED')
@@ -796,7 +834,15 @@ export class AccountImport extends HTMLElement {
           // Stash the source's announced signer pubkey for this account so
           // we can fold it into the trusted-signers write at commit time.
           if (sourceSignerPubkey) p.sourceSignerPubkey = sourceSignerPubkey
-          prepared.push(p)
+          if (p.skipped) {
+            skipped.push(p)
+            // Surface the duplicate as a warning row in the post-import
+            // toast (same shape as a parse error), preserving the prior
+            // behavior the user expects.
+            errors.push(p.reason)
+          } else {
+            prepared.push(p)
+          }
         } catch (err) {
           if (err?.message === 'IMPORT_CANCELLED') throw err
           // Don't abort the whole batch on a single bad entry — the user
@@ -809,14 +855,18 @@ export class AccountImport extends HTMLElement {
         if (remaining > 0) showRemaining()
       }
 
-      if (!prepared.length) throw new Error('IMPORT_FAILED')
+      // IMPORT_FAILED only when we have nothing to act on at all — neither
+      // an item to commit nor a duplicate to trust-exchange about. An
+      // all-duplicates payload still proceeds: trust exchange happens for
+      // any non-npub item with a resolved pubkey.
+      if (!prepared.length && !skipped.length) throw new Error('IMPORT_FAILED')
       if (token?.cancelled) throw new Error('IMPORT_CANCELLED')
 
       // Phase 2 — unlock the vault (passkey prompt #1) so we can derive
-      // each non-npub account's signer keypair. The pubkeys then travel
-      // back over the session in `register_trusted_signers`; the seckeys
-      // stay on this device and ride into the same writeBlob as the
-      // imported secrets below.
+      // each non-npub account's signer keypair (or look up the existing
+      // one for duplicates). The pubkeys then travel back over the session
+      // in `register_trusted_signers`; the seckeys stay on this device and
+      // ride into the same writeBlob as the imported secrets below.
       await passkey.ensureRegistered()
       if (token?.cancelled) throw new Error('IMPORT_CANCELLED')
 
@@ -827,6 +877,27 @@ export class AccountImport extends HTMLElement {
         const { seckey, pubkey } = await secrets.deriveAccountSignerKeypair(p.pubkey)
         p.signerSeckey = seckey
         ourSigners.push({ accountPubkey: p.pubkey, signerPubkey: pubkey })
+        if (p.sourceSignerPubkey) {
+          incomingTrust.push({
+            accountPubkey: p.pubkey,
+            pubkey: p.sourceSignerPubkey,
+            platform: sourcePlatform
+          })
+        }
+      }
+      // Duplicates: account already lives on this device, so the signer
+      // key is already in the pool (loaded from the TLV blob on unlock).
+      // Look up the pubkey rather than re-deriving — the bytes would
+      // match (derivation is deterministic over `accountPubkey`), but
+      // pool lookup is cheaper and matches the "existing identity"
+      // semantics. npub duplicates are skipped: neither side carries a
+      // signer key for read-only accounts.
+      for (const p of skipped) {
+        if (p.type === 'npub') continue
+        const existingSignerPubkey = secrets.getSignerPubkey(p.pubkey)
+        if (existingSignerPubkey) {
+          ourSigners.push({ accountPubkey: p.pubkey, signerPubkey: existingSignerPubkey })
+        }
         if (p.sourceSignerPubkey) {
           incomingTrust.push({
             accountPubkey: p.pubkey,
