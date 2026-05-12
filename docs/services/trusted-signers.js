@@ -2,14 +2,13 @@ import * as secrets from './secrets.js'
 
 const KEY = 'ez-vault:trusted-signers'
 
-// Per-account trust list, encrypted in localStorage with the vault key.
-// Each account (non-npub) can have many trusted peer signers — typically
-// one per paired device. The plaintext shape is:
+// Flat device-level trust list, encrypted in localStorage with the vault
+// key. Each entry is one peer device's signer pubkey — the device-local
+// keypair the peer derived from its own passkey PRF. Plaintext shape:
 //
-//   { [accountPubkey]: [{ pubkey, platform, addedAt }, ...] }
+//   [{ pubkey, platform, addedAt }, ...]
 //
-// where `pubkey` is the peer's per-account signer pubkey (the device-local
-// keypair the peer derived for that account), `platform` is the short
+// `pubkey` is the peer's device signer pubkey, `platform` is the short
 // "OS / browser" label the peer announced over the pair channel, and
 // `addedAt` is unix seconds for ordering / future UI.
 //
@@ -25,23 +24,23 @@ function notify () {
   }
 }
 
-function readMap () {
+function readList () {
   const raw = localStorage.getItem(KEY)
-  if (!raw) return {}
-  if (!secrets.isUnlocked()) return {}
+  if (!raw) return []
+  if (!secrets.isUnlocked()) return []
   try {
     const plain = secrets.vaultDecrypt(raw)
     const parsed = JSON.parse(plain)
-    return parsed && typeof parsed === 'object' ? parsed : {}
+    return Array.isArray(parsed) ? parsed : []
   } catch (err) {
     console.warn('trusted-signers decrypt failed', err?.message ?? err)
-    return {}
+    return []
   }
 }
 
-function writeMap (map) {
+function writeList (list) {
   if (!secrets.isUnlocked()) throw new Error('VAULT_LOCKED')
-  const sealed = secrets.vaultEncrypt(JSON.stringify(map))
+  const sealed = secrets.vaultEncrypt(JSON.stringify(list))
   localStorage.setItem(KEY, sealed)
   notify()
 }
@@ -51,49 +50,34 @@ export function subscribe (fn) {
   return () => listeners.delete(fn)
 }
 
-// Append one trusted signer to the list for `accountPubkey`. No-op when
-// a signer with the same pubkey is already present for this account so
-// re-pairing the same device doesn't duplicate entries.
-export function add (accountPubkey, { pubkey, platform }) {
-  if (!accountPubkey || !pubkey) return
-  const map = readMap()
-  const list = map[accountPubkey] || []
+// Append one trusted signer. No-op when a signer with the same pubkey is
+// already present so re-pairing the same device doesn't duplicate entries.
+export function add ({ pubkey, platform }) {
+  if (!pubkey) return
+  const list = readList()
   if (list.some(e => e.pubkey === pubkey)) return
   list.push({ pubkey, platform: platform || '', addedAt: Math.floor(Date.now() / 1000) })
-  map[accountPubkey] = list
-  writeMap(map)
+  writeList(list)
 }
 
-// Bulk append — single write for the whole pair batch. Skips duplicates
-// the same way `add` does.
+// Bulk append — single write for a batch. Skips duplicates the same way
+// `add` does. The batch parameter is mostly there for parity with the
+// commit path; today the pair flow only ever adds one peer at a time.
 export function addMany (entries) {
   if (!entries?.length) return
-  const map = readMap()
+  const list = readList()
   let dirty = false
   for (const e of entries) {
-    if (!e?.accountPubkey || !e?.pubkey) continue
-    const list = map[e.accountPubkey] || []
+    if (!e?.pubkey) continue
     if (list.some(x => x.pubkey === e.pubkey)) continue
     list.push({ pubkey: e.pubkey, platform: e.platform || '', addedAt: Math.floor(Date.now() / 1000) })
-    map[e.accountPubkey] = list
     dirty = true
   }
-  if (dirty) writeMap(map)
+  if (dirty) writeList(list)
 }
 
-export function listFor (accountPubkey) {
-  const map = readMap()
-  return map[accountPubkey] ? [...map[accountPubkey]] : []
-}
-
-// Drops the trust list for an account. Used when the account itself is
-// removed so the localStorage entry doesn't accumulate orphans.
-export function removeForAccount (accountPubkey) {
-  if (!accountPubkey) return
-  const map = readMap()
-  if (!(accountPubkey in map)) return
-  delete map[accountPubkey]
-  writeMap(map)
+export function list () {
+  return readList()
 }
 
 // Read the raw ciphertext as it currently sits on disk. Used by the import

@@ -11,6 +11,8 @@
   gap: 18px;
 }
 
+/* The three toolbar buttons (New Account, Add Account, Sync Devices) share a
+   single row. New Account takes half; Add and Sync split the other half. */
 .accounts-actions {
   display: flex;
   flex-wrap: wrap;
@@ -18,37 +20,31 @@
 }
 
 .accounts-actions .primary-action {
-  flex: 1 1 calc(50% - 5px);
-  min-width: 100px;
+  flex: 1 1 0;
+  min-width: 0;
+}
+.accounts-actions #create-account-btn {
+  flex-grow: 2;
 }
 
 /* The HTML `hidden` attribute is normally `display: none`, but the class
-   above overrides it on specificity. Restore the intent so toggling
+   below overrides it on specificity. Restore the intent so toggling
    `hidden` from JS actually hides the button. */
 .primary-action[hidden] {
   display: none;
 }
 
-/* Short labels stay hidden by default; the :has() rule below swaps them in
-   only when all three buttons are sharing one row. */
+/* New Account's label always shown in full; Add and Sync use the short
+   labels by default since they only have half the row. */
 .primary-action .text-short {
   display: none;
 }
-
-/* When the Export button is visible, switch Import + Export to their short
-   labels and weight flex so the New Account button keeps half the row
-   while Import + Export share the other half (25% each). */
-.accounts-actions:has(#export-account-btn:not([hidden])) .primary-action {
-  flex: 1 1 0;
-  min-width: 0;
-}
-.accounts-actions:has(#export-account-btn:not([hidden])) #create-account-btn {
-  flex-grow: 2;
-}
-.accounts-actions:has(#export-account-btn:not([hidden])) .text-full {
+#add-account-btn .text-full,
+#sync-devices-btn .text-full {
   display: none;
 }
-.accounts-actions:has(#export-account-btn:not([hidden])) .text-short {
+#add-account-btn .text-short,
+#sync-devices-btn .text-short {
   display: inline;
 }
 
@@ -82,17 +78,32 @@
 /* When a single button gets too narrow to comfortably fit its label
    alongside the icon, drop the icon and let the text take the whole
    button. Thresholds are tuned per label length: "New Account" needs more
-   room than "Import" / "Export". */
+   room than "Add" / "Sync". */
 @container (max-width: 130px) {
   #create-account-btn .glyph { display: none; }
 }
 @container (max-width: 90px) {
-  #import-account-btn .glyph,
-  #export-account-btn .glyph { display: none; }
+  #add-account-btn .glyph,
+  #sync-devices-btn .glyph { display: none; }
 }
 
 .primary-action:active {
   background-color: oklch(0.38 0.1 274.76);
+}
+
+/* "On" state — applied by JS while the button's feature owns the screen
+   (panel open or create flow in progress). Looks like a stuck-pressed
+   button so the user can tell which UI is currently active without us
+   needing a sub-route. */
+.primary-action.is-active {
+  background-color: oklch(0.45 0.13 274.76);
+  box-shadow: inset 0 2px 4px oklch(0 0 0 / 0.3);
+}
+
+/* While one feature is active, the other two are disabled to prevent
+   kicking off a conflicting flow. */
+.primary-action:disabled {
+  opacity: 0.45;
 }
 
 .primary-action .glyph {

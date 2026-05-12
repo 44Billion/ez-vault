@@ -11,7 +11,7 @@ import {
 
 export { buildNostrpairUrl, parseNostrpairInput, extractBunkerClientKey }
 
-// kind for NIP-46 nostr-connect events; we reuse the same event kind (and the
+// kind for NIP-46 nostr-connect events; we reuse the same event kind (and
 // NIP-44 framing) for nostrpair so any NIP-46-aware relay accepts our traffic.
 const NIP46_KIND = 24133
 
@@ -79,37 +79,37 @@ function tryDecodeFrame (event, seckey) {
   }
 }
 
-// Source-side session: we hold the keys and act as the "remote signer" in
-// NIP-46 terms. A fresh ephemeral key is generated per session — the URL we
-// emit binds the pairing to that key, never to a user account. We accept
-// exactly two RPC methods: `connect` (with the URL's one-use secret) and
-// `import_accounts` (custom). Anything else gets rejected so a compromised
-// target client can't piggyback signing operations onto a pairing channel.
-export class ExportSession {
+// Host-side session (Device 1 in the UI). We hold the channel keys and act
+// as the "remote signer" in NIP-46 terms: a fresh ephemeral key is
+// generated per session and the URL we emit binds the pairing to that key,
+// never to a user account. Accepted RPCs:
+//   1. `connect` — burns the URL's one-use secret, locks the channel to
+//      the joiner's pubkey.
+//   2. `register_trusted_signer` — joiner announces its device signer
+//      pubkey; we stash it (via the caller's onTrustedSignerReceived
+//      handler) and ack.
+//   3. `exchange_accounts` — symmetric account swap. Joiner sends its
+//      selected accounts as params; we reply with our own selected
+//      accounts after the user confirms the pairing code.
+// Anything else gets rejected so a compromised joiner can't piggyback
+// signing operations onto a pairing channel.
+export class HostSession {
   #ephSecretKey
   #ephPubkey
   #secret
   #relay
   #handlers
   #sub = null
-  #clientPubkey = null
-  #pendingImport = null
+  #joinerPubkey = null
   #closed = false
   #connectTimer = null
-  // One-shot resolver for the trusted-signer round-trip the target fires
-  // after it has the import_accounts reply in hand. Set on demand by
-  // `awaitTrustedSignerExchange`; the `register_trusted_signers` handler
-  // below flips the received flag and resolves whoever's waiting.
-  #trustExchangeReceived = false
-  #trustExchangeResolve = null
-  #trustExchangeReject = null
 
-  constructor ({ onTargetConnected, onPairingCode, onError, onTrustedSignersReceived } = {}) {
+  constructor ({ onJoinerConnected, onPairingCode, onError, onTrustedSignerReceived, onExchangeRequest } = {}) {
     this.#ephSecretKey = generateSecretKey()
     this.#ephPubkey = getPublicKey(this.#ephSecretKey)
     this.#secret = randomHex(SECRET_BYTES)
     this.#relay = pairingRelay
-    this.#handlers = { onTargetConnected, onPairingCode, onError, onTrustedSignersReceived }
+    this.#handlers = { onJoinerConnected, onPairingCode, onError, onTrustedSignerReceived, onExchangeRequest }
   }
 
   get url () {
@@ -143,106 +143,104 @@ export class ExportSession {
       if (suppliedSecret !== this.#secret) {
         return this.#reply(event.pubkey, req.id, null, 'invalid secret')
       }
-      // First successful connect locks the channel to that client pubkey;
+      // First successful connect locks the channel to that joiner pubkey;
       // any later traffic from a different pubkey is silently ignored. This
       // prevents a second client that scraped the URL off-relay from racing
       // in and stealing the pairing.
-      if (this.#clientPubkey && this.#clientPubkey !== event.pubkey) return
-      this.#clientPubkey = event.pubkey
+      if (this.#joinerPubkey && this.#joinerPubkey !== event.pubkey) return
+      this.#joinerPubkey = event.pubkey
       clearTimeout(this.#connectTimer)
       this.#connectTimer = null
-      this.#handlers.onTargetConnected?.()
-      return this.#reply(event.pubkey, req.id, 'ack', null)
-    }
-
-    if (event.pubkey !== this.#clientPubkey) return
-
-    if (req.method === 'import_accounts') {
+      this.#handlers.onJoinerConnected?.()
+      await this.#reply(event.pubkey, req.id, 'ack', null)
+      // Surface the pairing code now that both keys are known — the host's
+      // display goes up immediately so the joiner's user has something to
+      // read while we wait for register_trusted_signer + exchange_accounts.
       const code = await derivePairingCode(this.#ephSecretKey, event.pubkey)
-      this.#pendingImport = { id: req.id, code }
       this.#handlers.onPairingCode?.(code)
       return
     }
 
-    // Target's follow-up after it received and validated the import_accounts
-    // reply: it now sends back its own per-account signer pubkeys so the
-    // source can store them as trusted. Params shape:
-    //   { platform: 'macOS / Chrome', signers: [{ accountPubkey, signerPubkey }, ...] }
-    // We reply 'ack' once the handler has stashed them.
-    if (req.method === 'register_trusted_signers') {
+    if (event.pubkey !== this.#joinerPubkey) return
+
+    // Joiner announces its device signer pubkey before any account work.
+    // Params shape: { platform: 'macOS / Chrome', signerPubkey }
+    // The caller's handler may also return its OWN { signerPubkey, platform }
+    // so we can publish a `register_trusted_signer` request back through the
+    // channel — symmetry keeps the trust relationship two-sided.
+    if (req.method === 'register_trusted_signer') {
       const params = req.params && typeof req.params === 'object' ? req.params : {}
       const platform = typeof params.platform === 'string' ? params.platform : ''
-      const signers = Array.isArray(params.signers) ? params.signers : []
+      const signerPubkey = typeof params.signerPubkey === 'string' ? params.signerPubkey : ''
+      if (!signerPubkey) {
+        return this.#reply(event.pubkey, req.id, null, 'missing signerPubkey')
+      }
+      let ourTrust
       try {
-        await this.#handlers.onTrustedSignersReceived?.({ platform, signers })
+        ourTrust = await this.#handlers.onTrustedSignerReceived?.({ platform, signerPubkey })
       } catch (err) {
-        return this.#reply(event.pubkey, req.id, null, err?.message || 'register_trusted_signers failed')
+        return this.#reply(event.pubkey, req.id, null, err?.message || 'register_trusted_signer failed')
       }
       await this.#reply(event.pubkey, req.id, 'ack', null)
-      this.#trustExchangeReceived = true
-      this.#trustExchangeResolve?.()
-      this.#trustExchangeResolve = null
-      this.#trustExchangeReject = null
+      // Publish our own register_trusted_signer back. We don't await an ack;
+      // the joiner's #onEvent loop will pick it up and respond, and the
+      // result of that response isn't load-bearing for the host's flow.
+      if (ourTrust?.signerPubkey) {
+        await publishFrame({
+          seckey: this.#ephSecretKey,
+          toPubkey: event.pubkey,
+          payload: {
+            id: randomHex(8),
+            method: 'register_trusted_signer',
+            params: { platform: ourTrust.platform || '', signerPubkey: ourTrust.signerPubkey }
+          },
+          relay: this.#relay
+        })
+      }
       return
+    }
+
+    // Joiner's account exchange request. Params: { code, platform, accounts }.
+    // `code` is the pairing code the user read off OUR display and typed on
+    // the joiner; we validate it against our own derivation (same shared
+    // ECDH state) before replying. Mismatch → error reply, channel stays
+    // open so the user can retype. Match → caller's onExchangeRequest
+    // returns the envelope { platform, accounts } we send back.
+    if (req.method === 'exchange_accounts') {
+      const params = req.params && typeof req.params === 'object' ? req.params : {}
+      const typedCode = typeof params.code === 'string' ? params.code : ''
+      const platform = typeof params.platform === 'string' ? params.platform : ''
+      const accounts = Array.isArray(params.accounts) ? params.accounts : []
+      const code = await derivePairingCode(this.#ephSecretKey, event.pubkey)
+      if (typedCode !== code) {
+        return this.#reply(event.pubkey, req.id, null, 'invalid pairing code')
+      }
+      let outgoing
+      try {
+        outgoing = await this.#handlers.onExchangeRequest?.({ platform, accounts })
+      } catch (err) {
+        return this.#reply(event.pubkey, req.id, null, err?.message || 'exchange_accounts failed')
+      }
+      const envelope = outgoing && typeof outgoing === 'object'
+        ? { platform: outgoing.platform || '', accounts: Array.isArray(outgoing.accounts) ? outgoing.accounts : [] }
+        : { platform: '', accounts: [] }
+      return this.#reply(event.pubkey, req.id, JSON.stringify(envelope), null)
     }
 
     // Per spec: any single-account NIP-46 method (sign_event, nip04_*,
     // nip44_*, get_public_key, get_relays, ...) is meaningless on a pairing
-    // channel. Reply with an explicit error so the target sees why instead
+    // channel. Reply with an explicit error so the joiner sees why instead
     // of timing out.
     if (req.id != null) {
       this.#reply(event.pubkey, req.id, null, 'method not supported on nostrpair channel')
     }
   }
 
-  // Caller passes in the user-typed code AND the envelope to send. The
-  // envelope is `{ platform, accounts }` where `accounts` is the per-account
-  // tuple list produced by `buildExportPayload`. Returns true on a code
-  // match (and the envelope gets delivered), false on mismatch (the channel
-  // stays open so the user can try again). The session does NOT close
-  // here — it stays alive for the target's follow-up `register_trusted_signers`
-  // request, which the source acks on; the caller closes the session after
-  // that round-trip.
-  async confirmImport (typedCode, envelope) {
-    if (!this.#pendingImport || !this.#clientPubkey) return false
-    const { id, code } = this.#pendingImport
-    if (typedCode !== code) {
-      // Don't reveal the correct code by replying; let the caller flash an
-      // error and keep the pending request alive for a retry.
-      return false
-    }
-    await this.#reply(this.#clientPubkey, id, JSON.stringify(envelope), null)
-    this.#pendingImport = null
-    return true
-  }
-
-  // Active cancel: if the target is waiting on import_accounts, send the
-  // empty-envelope+error reply documented in the spec so the target stops
-  // waiting and surfaces the cancellation cleanly. Then tear down.
-  async cancel () {
-    if (this.#pendingImport && this.#clientPubkey) {
-      const { id } = this.#pendingImport
-      this.#pendingImport = null
-      try {
-        await this.#reply(this.#clientPubkey, id, JSON.stringify({ platform: '', accounts: [] }), 'cancelled by source')
-      } catch { /* noop — we're closing anyway */ }
-    }
+  // Active cancel: tear down the relay subscription. The joiner sees
+  // pending requests reject on SYNC_TIMEOUT (for connect) or on its own
+  // cancel, so there's no in-flight reply to send back here.
+  cancel () {
     this.close()
-  }
-
-  // Resolves once the target has sent `register_trusted_signers` and we've
-  // acked it. Race-safe: if the RPC already arrived before the caller
-  // awaits, the returned promise resolves immediately; otherwise it
-  // resolves when the inbound handler does. Single-awaiter — a second
-  // call to this method abandons the prior promise (we don't need
-  // fan-out and the usage site is exactly one caller). `close()` rejects
-  // any pending wait with `IMPORT_CANCELLED`.
-  awaitTrustedSignerExchange () {
-    if (this.#trustExchangeReceived) return Promise.resolve()
-    return new Promise((resolve, reject) => {
-      this.#trustExchangeResolve = resolve
-      this.#trustExchangeReject = reject
-    })
   }
 
   close () {
@@ -252,9 +250,6 @@ export class ExportSession {
     this.#connectTimer = null
     try { this.#sub?.close() } catch { /* noop */ }
     this.#sub = null
-    this.#trustExchangeReject?.(new Error('IMPORT_CANCELLED'))
-    this.#trustExchangeResolve = null
-    this.#trustExchangeReject = null
   }
 
   #reply (toPubkey, id, result, error) {
@@ -268,12 +263,15 @@ export class ExportSession {
   }
 }
 
-// Target-side session: scan the URL, generate our own ephemeral client key,
-// connect to the source's relay, send `connect` then `import_accounts`, and
-// surface the pairing code so the user can read it on this device and type it
-// on the source. Resolves with the array of {nsec|npub|bunker://} strings the
-// source replied with; rejects on cancel / error / timeout.
-export class ImportSession {
+// Joiner-side session (Device 2 in the UI). Scans the URL, generates an
+// ephemeral client key, connects to the host's relay, then drives the
+// three-step protocol from the request side: `connect` → `register_trusted_signer`
+// → `exchange_accounts`. Resolves once the host has replied to
+// exchange_accounts (with its own envelope); rejects on cancel / error /
+// timeout. Inbound register_trusted_signer requests from the host are
+// surfaced via onTrustedSignerReceived so the caller can write the host's
+// signer pubkey to its trust list and ack.
+export class JoinerSession {
   #ephSecretKey
   #ephPubkey
   #remotePubkey
@@ -283,6 +281,15 @@ export class ImportSession {
   #sub = null
   #pending = new Map()
   #closed = false
+
+  // One-shot resolver for the host's inbound `register_trusted_signer`
+  // request; set by `awaitPeerTrustedSigner`, fulfilled by `#onEvent`
+  // when the host's request lands. Race-safe: if the request arrives
+  // before the caller awaits, we stash the value and resolve immediately
+  // when the caller asks.
+  #peerSignerReceived = null
+  #peerSignerResolve = null
+  #peerSignerReject = null
 
   constructor (url, { onPairingCode, onConnected, onError } = {}) {
     const parsed = parseNostrpairInput(url)
@@ -294,40 +301,57 @@ export class ImportSession {
     this.#handlers = { onPairingCode, onConnected, onError }
   }
 
-  async run () {
+  async connect () {
     this.#startSubscription()
     await this.#request('connect', [this.#remotePubkey, this.#secret], { timeoutMs: CONNECT_TIMEOUT_MS })
     this.#handlers.onConnected?.()
 
-    // Surface the pairing code as soon as we have both keys — no need to wait
-    // for the source's reply to import_accounts. The user can already start
-    // walking it over to the other device.
+    // Surface the pairing code as soon as we have both keys — the host's
+    // reply to register_trusted_signer / exchange_accounts doesn't need to
+    // arrive first. The user can already start walking it over to the host.
     const code = await derivePairingCode(this.#ephSecretKey, this.#remotePubkey)
     this.#handlers.onPairingCode?.(code)
-
-    // No timeout on import_accounts: this resolves only after the source user
-    // types the matching code, which is bounded by human attention, not by
-    // protocol timing. close() / cancel() rejects the pending promise so the
-    // caller can still drop out cleanly.
-    const resultJson = await this.#request('import_accounts', [])
-    let parsed
-    try { parsed = JSON.parse(resultJson) } catch { throw new Error('IMPORT_BAD_RESPONSE') }
-    // Envelope shape: { platform, accounts: [[bareKey], [bareKey, signerPubkey], ...] }.
-    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.accounts)) {
-      throw new Error('IMPORT_BAD_RESPONSE')
-    }
-    return { platform: typeof parsed.platform === 'string' ? parsed.platform : '', accounts: parsed.accounts }
   }
 
-  // Round-trip for the trusted-signer exchange that follows import_accounts.
-  // Caller passes `{ platform, signers }` — our platform label + the
-  // [{accountPubkey, signerPubkey}, ...] list — and we wait for the source's
-  // 'ack' before resolving. Source rejects via reply.error if it couldn't
-  // store; we surface that as a rejected promise.
-  async registerTrustedSigners (params) {
-    const result = await this.#request('register_trusted_signers', params)
-    if (result !== 'ack') throw new Error('REGISTER_TRUSTED_SIGNERS_FAILED')
-    return result
+  // Bidirectional trust exchange in one shot. Sends our device's
+  // `register_trusted_signer` request (with `params = { platform,
+  // signerPubkey }`), awaits the host's ack, and also awaits the host's
+  // own inbound `register_trusted_signer` request. The host publishes
+  // theirs unprompted right after acking ours, so both directions
+  // converge in the same round-trip. Returns the peer's
+  // `{ platform, signerPubkey }` which the caller folds into the
+  // commit's trusted-signers write.
+  async exchangeTrust (params) {
+    const ackPromise = this.#request('register_trusted_signer', params)
+      .then(result => {
+        if (result !== 'ack') throw new Error('REGISTER_TRUSTED_SIGNER_FAILED')
+      })
+    const peerPromise = this.#awaitPeerTrustedSigner()
+    const [, peer] = await Promise.all([ackPromise, peerPromise])
+    return peer
+  }
+
+  #awaitPeerTrustedSigner () {
+    if (this.#peerSignerReceived) return Promise.resolve(this.#peerSignerReceived)
+    return new Promise((resolve, reject) => {
+      this.#peerSignerResolve = resolve
+      this.#peerSignerReject = reject
+    })
+  }
+
+  // Send the account-exchange request and wait for the host's matching
+  // envelope. Params: `{ code, platform, accounts }`. The host validates
+  // `code` against its own ECDH-derived value before replying — mismatch
+  // surfaces as a rejected promise. The reply carries the host's
+  // `{ platform, accounts }` envelope.
+  async exchangeAccounts (params) {
+    const resultJson = await this.#request('exchange_accounts', params)
+    let parsed
+    try { parsed = JSON.parse(resultJson) } catch { throw new Error('SYNC_BAD_RESPONSE') }
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.accounts)) {
+      throw new Error('SYNC_BAD_RESPONSE')
+    }
+    return { platform: typeof parsed.platform === 'string' ? parsed.platform : '', accounts: parsed.accounts }
   }
 
   close () {
@@ -337,9 +361,12 @@ export class ImportSession {
     this.#sub = null
     for (const { reject, timer } of this.#pending.values()) {
       clearTimeout(timer)
-      reject(new Error('IMPORT_CANCELLED'))
+      reject(new Error('SYNC_CANCELLED'))
     }
     this.#pending.clear()
+    this.#peerSignerReject?.(new Error('SYNC_CANCELLED'))
+    this.#peerSignerResolve = null
+    this.#peerSignerReject = null
   }
 
   #startSubscription () {
@@ -347,24 +374,56 @@ export class ImportSession {
     this.#sub = pool.subscribeMany(
       [this.#relay],
       { kinds: [NIP46_KIND], '#p': [this.#ephPubkey], authors: [this.#remotePubkey], since },
-      { onevent: (e) => this.#onEvent(e) }
+      { onevent: (e) => this.#onEvent(e).catch(err => this.#handlers.onError?.(err)) }
     )
   }
 
-  #onEvent (event) {
+  async #onEvent (event) {
     if (this.#closed) return
     if (event.pubkey !== this.#remotePubkey) return
-    const reply = tryDecodeFrame(event, this.#ephSecretKey)
-    if (!reply || reply.id == null) return
-    const pending = this.#pending.get(reply.id)
-    if (!pending) return
-    this.#pending.delete(reply.id)
-    clearTimeout(pending.timer)
-    if (reply.error) {
-      pending.reject(new Error(typeof reply.error === 'string' ? reply.error : 'IMPORT_REJECTED'))
+    const frame = tryDecodeFrame(event, this.#ephSecretKey)
+    if (!frame) return
+
+    // Inbound request from the host (the symmetric register_trusted_signer
+    // it publishes after acking ours). Stash the peer signer for whoever
+    // is awaiting `exchangeTrust`, then ack.
+    if (frame.method === 'register_trusted_signer' && frame.id != null) {
+      const params = frame.params && typeof frame.params === 'object' ? frame.params : {}
+      const platform = typeof params.platform === 'string' ? params.platform : ''
+      const signerPubkey = typeof params.signerPubkey === 'string' ? params.signerPubkey : ''
+      if (!signerPubkey) {
+        await publishFrame({
+          seckey: this.#ephSecretKey,
+          toPubkey: this.#remotePubkey,
+          payload: { id: frame.id, result: null, error: 'missing signerPubkey' },
+          relay: this.#relay
+        })
+        return
+      }
+      this.#peerSignerReceived = { platform, signerPubkey }
+      this.#peerSignerResolve?.(this.#peerSignerReceived)
+      this.#peerSignerResolve = null
+      this.#peerSignerReject = null
+      await publishFrame({
+        seckey: this.#ephSecretKey,
+        toPubkey: this.#remotePubkey,
+        payload: { id: frame.id, result: 'ack', error: null },
+        relay: this.#relay
+      })
       return
     }
-    pending.resolve(reply.result)
+
+    // Reply to one of our own outbound requests.
+    if (frame.id == null) return
+    const pending = this.#pending.get(frame.id)
+    if (!pending) return
+    this.#pending.delete(frame.id)
+    clearTimeout(pending.timer)
+    if (frame.error) {
+      pending.reject(new Error(typeof frame.error === 'string' ? frame.error : 'SYNC_REJECTED'))
+      return
+    }
+    pending.resolve(frame.result)
   }
 
   #request (method, params, { timeoutMs } = {}) {
@@ -372,7 +431,7 @@ export class ImportSession {
       const id = randomHex(8)
       const timer = timeoutMs
         ? setTimeout(() => {
-          if (this.#pending.delete(id)) reject(new Error('IMPORT_TIMEOUT'))
+          if (this.#pending.delete(id)) reject(new Error('SYNC_TIMEOUT'))
         }, timeoutMs)
         : null
       this.#pending.set(id, { resolve, reject, timer })
@@ -391,8 +450,8 @@ export class ImportSession {
   }
 }
 
-// Build the array of strings the source returns from `import_accounts`. Each
-// entry is one of: nsec1... (hex secret converted to bech32), npub1... (read-
+// Build the array of strings carried in `exchange_accounts`. Each entry
+// is one of: nsec1... (hex secret converted to bech32), npub1... (read-
 // only), or bunker://...#client_key=... where the URL fragment carries the
 // per-account persistent client key. The fragment is local-only — the bunker
 // itself never sees it because relays don't transmit URL fragments — so it's
@@ -401,16 +460,12 @@ export class ImportSession {
 // `secretEntries` is the snapshot returned by `passkey.openSecrets()` — the
 // caller has just performed a fresh passkey reauth to obtain the raw key
 // material. Threading it in explicitly keeps the secret-extraction call
-// site visible at the export boundary.
+// site visible at the sync boundary.
 //
-// Each account becomes a tuple in the returned array:
-//   - npub:        [bareKey]
-//   - nsec/bunker: [bareKey, signerPubkey]
-// The `signerPubkey` is the source device's per-account signer pubkey,
-// looked up via `getSignerPubkey(accountPubkey)`. It travels with the
-// secret material so the target can store it as a trusted signer in the
-// same atomic commit it stores the account itself.
-export function buildExportPayload (accounts, secretEntries, { nsecFromHex, npubFromPubkey, getSignerPubkey }) {
+// Each account becomes a single bare string in the returned array. There is
+// no per-account signer pubkey here anymore — the device-level signer is
+// exchanged once via `register_trusted_signer` ahead of this call.
+export function buildSyncAccountList (accounts, secretEntries, { nsecFromHex, npubFromPubkey }) {
   const nsecByPubkey = new Map()
   const clientKeyByPubkey = new Map()
   for (const e of secretEntries) {
@@ -422,16 +477,13 @@ export function buildExportPayload (accounts, secretEntries, { nsecFromHex, npub
     if (acc.type === 'nsec') {
       const seckey = nsecByPubkey.get(acc.pubkey)
       if (!seckey) continue
-      const signerPubkey = getSignerPubkey?.(acc.pubkey)
-      out.push(signerPubkey ? [nsecFromHex(seckey), signerPubkey] : [nsecFromHex(seckey)])
+      out.push(nsecFromHex(seckey))
     } else if (acc.type === 'npub') {
-      out.push([npubFromPubkey(acc.pubkey)])
+      out.push(npubFromPubkey(acc.pubkey))
     } else if (acc.type === 'bunker') {
       const clientKey = clientKeyByPubkey.get(acc.pubkey)
       if (!clientKey) continue
-      const bareKey = buildBunkerUrlWithClientKey(acc.bunker, clientKey)
-      const signerPubkey = getSignerPubkey?.(acc.pubkey)
-      out.push(signerPubkey ? [bareKey, signerPubkey] : [bareKey])
+      out.push(buildBunkerUrlWithClientKey(acc.bunker, clientKey))
     }
   }
   return out

@@ -13,20 +13,20 @@ import { encodeTlv, decodeTlv } from '../helpers/tlv.js'
 
 const TLV_NSEC = 0x01
 const TLV_BUNKER = 0x02
-const TLV_SIGNER = 0x03
+const TLV_DEVICE_SIGNER = 0x04
 const TLV_PADDING = 0x00
 
 // `entries` shape:
-//   { type: 'nsec',   pubkey: hex32, seckey:    hex32 }
-//   { type: 'bunker', pubkey: hex32, clientKey: hex32 }
-//   { type: 'signer', pubkey: hex32, seckey:    hex32 }
+//   { type: 'nsec',          pubkey: hex32, seckey:    hex32 }
+//   { type: 'bunker',        pubkey: hex32, clientKey: hex32 }
+//   { type: 'device-signer', seckey: hex32 }
 //
 // nsec records carry only the seckey (32 bytes); the pubkey is derivable.
 // bunker records carry pubkey || clientKey (64 bytes) since the pubkey is
 // what the bunker decides — we can't recompute it locally.
-// signer records carry accountPubkey || signerSeckey (64 bytes): the
-// accountPubkey is the *user's* nostr pubkey this signer key belongs to
-// (one signer key per non-npub account, per device).
+// device-signer records carry just the 32-byte seckey: a single key per
+// device, used to sign the trusted-signer exchange in the pairing flow
+// (and, in future, signer-to-signer messaging).
 //
 // When the entry list is empty we still emit one zero-length padding
 // record. NIP-44 rejects empty plaintext, and we *want* to overwrite the
@@ -42,11 +42,8 @@ export function encodeSecretEntries (entries) {
       value.set(hexToBytes(e.pubkey), 0)
       value.set(hexToBytes(e.clientKey), 32)
       records.push([TLV_BUNKER, value])
-    } else if (e.type === 'signer') {
-      const value = new Uint8Array(64)
-      value.set(hexToBytes(e.pubkey), 0)
-      value.set(hexToBytes(e.seckey), 32)
-      records.push([TLV_SIGNER, value])
+    } else if (e.type === 'device-signer') {
+      records.push([TLV_DEVICE_SIGNER, hexToBytes(e.seckey)])
     }
   }
   if (!records.length) records.push([TLV_PADDING, new Uint8Array(0)])
@@ -72,12 +69,11 @@ export function decodeSecretEntries (bytes) {
       clientKey: bytesToHex(v.slice(32, 64))
     })
   }
-  for (const v of tlv[TLV_SIGNER] || []) {
-    if (v.length !== 64) continue
+  for (const v of tlv[TLV_DEVICE_SIGNER] || []) {
+    if (v.length !== 32) continue
     entries.push({
-      type: 'signer',
-      pubkey: bytesToHex(v.slice(0, 32)),
-      seckey: bytesToHex(v.slice(32, 64))
+      type: 'device-signer',
+      seckey: bytesToHex(v)
     })
   }
   return entries

@@ -1,42 +1,60 @@
 import './components/account-list.js'
-import './components/account-import.js'
-import './components/account-export.js'
+import './components/account-add.js'
+import './components/sync/sync-panel.js'
 import './components/shared/accordion-panel.js'
 import './components/shared/toast.js'
 import './components/activity-log.js'
 import './components/lock-overlay.js'
-import * as store from './services/accounts-store.js'
 import * as secrets from './services/secrets.js'
 import { rehydrateAll } from './services/profile-rehydrator.js'
 import { initMessenger } from './services/messenger.js'
 
 const list = document.querySelector('account-list')
-const importPanel = document.querySelector('account-import')
-const exportPanel = document.querySelector('account-export')
+const addPanel = document.querySelector('account-add')
+const syncPanel = document.querySelector('sync-panel')
 const createBtn = document.getElementById('create-account-btn')
-const importBtn = document.getElementById('import-account-btn')
-const exportBtn = document.getElementById('export-account-btn')
+const addBtn = document.getElementById('add-account-btn')
+const syncBtn = document.getElementById('sync-devices-btn')
 
-// Hand the export panel the references it needs to drive the rest of the UI:
-// the list (selection mode + selected pubkeys) and the toolbar buttons it
-// disables for the duration of the export flow.
-exportPanel.list = list
-exportPanel.toolbarButtons = [createBtn, importBtn, exportBtn]
+// Each toolbar button represents one mutually-exclusive feature. The
+// owning component disables the *other* two while its feature is open,
+// and flips its own button to .is-active so the user can tell which
+// feature owns the screen (we deliberately don't have sub-routes).
+list.toolbarButtons = [addBtn, syncBtn]
+list.createButton = createBtn
 
-// Import disables only the Export button while it's open
-importPanel.toolbarButtons = [exportBtn]
+addPanel.toolbarButtons = [createBtn, syncBtn]
+addPanel.activeButton = addBtn
 
-createBtn.addEventListener('click', () => list.startCreate())
-importBtn.addEventListener('click', () => importPanel.open())
-exportBtn.addEventListener('click', () => exportPanel.open())
+syncPanel.list = list
+syncPanel.toolbarButtons = [createBtn, addBtn]
+syncPanel.activeButton = syncBtn
 
-function refreshExportVisibility () {
-  // Per spec, the Export button only shows once there's something to export.
-  exportBtn.hidden = store.list().length === 0
-}
-
-store.subscribe(refreshExportVisibility)
-refreshExportVisibility()
+// When the button is already active, route the click to the feature's own
+// cancel ("X") control instead of re-opening. Lets the toolbar button act
+// as a quick toggle and keeps the cancel logic in one place (each flow's
+// X handler already knows how to abort in-flight work).
+createBtn.addEventListener('click', () => {
+  if (createBtn.classList.contains('is-active')) {
+    list.querySelector('account-avatar[mode="creating"] button[data-action="cancel-create"]')?.click()
+  } else {
+    list.startCreate()
+  }
+})
+addBtn.addEventListener('click', () => {
+  if (addBtn.classList.contains('is-active')) {
+    addPanel.querySelector('button[data-action="cancel"]')?.click()
+  } else {
+    addPanel.open()
+  }
+})
+syncBtn.addEventListener('click', () => {
+  if (syncBtn.classList.contains('is-active')) {
+    syncPanel.querySelector('.panel-cancel')?.click()
+  } else {
+    syncPanel.open()
+  }
+})
 
 // Bunker rehydrate needs the per-account client key from `secrets`, so the
 // initial pass only succeeds if the vault is already unlocked (typical only

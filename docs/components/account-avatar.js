@@ -163,7 +163,7 @@ const STYLES = /* css */`
     height: 16px;
     display: block;
   }
-  /* Export-selection: parent list flips the [selecting] attribute on each
+  /* Sync-selection: parent list flips the [selecting] attribute on each
      tile. We hide all per-tile controls (so the avatar acts as one big
      toggle target), dim un-selected tiles, and overlay a check on selected
      ones. The list owns selection state and click handling. */
@@ -456,13 +456,6 @@ export class AccountAvatar extends HTMLElement {
       this.#setMode(MODE.NORMAL)
       store.add(record)
       secrets.setNsecSecret(record.pubkey, newSeckey)
-      // Derive + adopt the per-account signer key. Deterministic from the
-      // vault key + accountPubkey; persisting it in the TLV blob (rather
-      // than re-deriving on each unlock) gives it the same encrypted-at-rest
-      // posture as the nsec seckey and pins the signer pubkey against any
-      // future change to the derivation function.
-      const signerSeckey = await secrets.deriveAccountSignerSecret(record.pubkey)
-      secrets.setSignerSecret(record.pubkey, signerSeckey)
       await passkey.writeSecretsBlob()
     } catch (err) {
       console.error(err)

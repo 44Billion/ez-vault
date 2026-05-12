@@ -17,19 +17,19 @@
               <span class="glyph"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5l0 14" /><path d="M5 12l14 0" /></svg></span>
               <span>New Account</span>
             </button>
-            <button id="import-account-btn" type="button" class="primary-action">
+            <button id="add-account-btn" type="button" class="primary-action">
               <span class="glyph"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5l0 14" /><path d="M16 15l-4 4" /><path d="M8 15l4 4" /></svg></span>
-              <span class="text-full">Import Account</span>
-              <span class="text-short">Import</span>
+              <span class="text-full">Add Account</span>
+              <span class="text-short">Add</span>
             </button>
-            <button id="export-account-btn" type="button" class="primary-action" hidden>
-              <span class="glyph"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5l0 14" /><path d="M16 9l-4 -4" /><path d="M8 9l4 -4" /></svg></span>
-              <span class="text-full">Export Account</span>
-              <span class="text-short">Export</span>
+            <button id="sync-devices-btn" type="button" class="primary-action">
+              <span class="glyph"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 9a1 1 0 0 1 1 -1h6a1 1 0 0 1 1 1v10a1 1 0 0 1 -1 1h-6a1 1 0 0 1 -1 -1v-10z" /><path d="M18 8v-3a1 1 0 0 0 -1 -1h-13a1 1 0 0 0 -1 1v12a1 1 0 0 0 1 1h9" /><path d="M16 9h2" /></svg></span>
+              <span class="text-full">Sync Devices</span>
+              <span class="text-short">Sync</span>
             </button>
           </div>
-          <account-import></account-import>
-          <account-export></account-export>
+          <account-add></account-add>
+          <sync-panel></sync-panel>
         </div>
         <account-list class="accounts-list"></account-list>
       </section>
