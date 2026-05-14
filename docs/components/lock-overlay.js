@@ -136,6 +136,12 @@ export class LockOverlay extends HTMLElement {
     try {
       await passkey.unlock()
       // Visibility flips automatically via the secrets subscription.
+      // Fire-and-forget any staged icon refresh — piggybacks on the UV
+      // prompt the unlock just triggered, in case `signalCurrentUserDetails`
+      // isn't fully silent on some platform.
+      passkey.flushPendingIconUpdate().catch(err => {
+        console.warn('icon signal failed', err?.message ?? err)
+      })
     } catch (err) {
       console.error('passkey unlock failed', err?.message ?? err)
       toast.error('Could not unlock', err?.message ?? '')

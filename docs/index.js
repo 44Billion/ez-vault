@@ -6,6 +6,7 @@ import './components/shared/toast.js'
 import './components/activity-log.js'
 import './components/lock-overlay.js'
 import * as secrets from './services/secrets.js'
+import * as passkey from './services/passkey.js'
 import { rehydrateAll } from './services/profile-rehydrator.js'
 import { initMessenger } from './services/messenger.js'
 
@@ -69,3 +70,13 @@ secrets.subscribe(() => {
 })
 rehydrateAll()
 initMessenger()
+
+// If we boot into a locked state, take the opportunity to compare the live
+// favicon against what was stored at the last passkey registration/signal.
+// Any difference is staged for `lock-overlay` to push via
+// `signalCurrentUserDetails` right after the user unlocks.
+if (passkey.hasPasskey() && !secrets.isUnlocked()) {
+  passkey.checkForIconUpdate().catch(err => {
+    console.warn('icon update check failed', err?.message ?? err)
+  })
+}

@@ -2,6 +2,8 @@ import { nip44, getPublicKey } from 'nostr-tools'
 import { hexToBytes, bytesToHex } from './nostr.js'
 import { decodeSecretEntries } from './secret-blob.js'
 import { base64ToBytes } from '../helpers/base64.js'
+import { detectPlatform } from '../helpers/platform.js'
+import { fetchFaviconBase64 } from '../helpers/favicon.js'
 import * as secrets from './secrets.js'
 
 // EZ Vault's passkey integration. One passkey custodies the encryption key
@@ -14,7 +16,12 @@ import * as secrets from './secrets.js'
 //
 // Syncing is intentionally discouraged — `residentKey: 'discouraged'` keeps
 // the credential non-discoverable and we always address it by the
-// credentialId persisted in localStorage.
+// credentialId persisted in localStorage. Some authenticators still promote
+// the credential to discoverable and sync it across devices; to make sure a
+// fresh registration on a second device can't *overwrite* the first one (the
+// spec mandates overwrite when `(rpId, user.id)` collide for a discoverable
+// credential), we randomize `user.id` per registration and persist it so we
+// can later target the credential via `signalCurrentUserDetails`.
 //
 // LargeBlob and PRF are best-effort across authenticators:
 // - largeBlob may refuse to write (legacy double-prompt cancellation, or
@@ -30,15 +37,21 @@ const CREATE_HINTS = ['client-device']
 const GET_TRANSPORTS = ['internal']
 
 const CRED_ID_KEY = 'ez-vault:passkey:credential-id'
+const USER_ID_KEY = 'ez-vault:passkey:user-id'
+const ICON_KEY = 'ez-vault:passkey:icon'
 const PRF_BACKUP_KEY = 'ez-vault:passkey:prf'
 const BLOB_FALLBACK_KEY = 'ez-vault:passkey:blob'
 
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
 const PRF_SALT_BYTES = textEncoder.encode(PRF_SALT)
-// The user.id is meant to disambiguate multiple users of the RP on one
-// authenticator. We have one logical "vault user", so a stable label is fine.
-const USER_ID = textEncoder.encode('ez-vault')
+
+// Staged on page-load when a favicon change is detected against the stored
+// copy. Flushed by `flushPendingIconUpdate()` right after a successful unlock
+// — that timing piggybacks on the user-verification prompt the unlock just
+// triggered, in case any platform decides `signalCurrentUserDetails` is not
+// fully silent.
+let pendingIconUpdate = null
 
 function bufferToUint8 (value) {
   if (!value) return null
@@ -85,6 +98,33 @@ function descriptorFromCredentialId (credentialId) {
   }
 }
 
+function generateUserId () {
+  // Spec recommends <= 64 random bytes, opaque, non-correlatable across RPs.
+  return crypto.getRandomValues(new Uint8Array(64))
+}
+
+function readStoredUserId () {
+  const stored = localStorage.getItem(USER_ID_KEY)
+  if (!stored) return null
+  try {
+    return { bytes: base64UrlDecode(stored), base64url: stored }
+  } catch {
+    return null
+  }
+}
+
+// Some authenticators only surface `user.name` (not `displayName`), so we
+// pack a platform hint plus a short slice of the random user.id into it.
+// The suffix makes multiple synced entries distinguishable in the
+// authenticator UI ("macOS / Safari (a3f9c1)" vs "iOS / Safari (b7c204)").
+function buildUserName (userId) {
+  const platform = detectPlatform()
+  const known = !/unknown OS|unknown browser/.test(platform)
+  const base = known ? platform : RP_NAME
+  const suffix = base64UrlEncode(userId).slice(0, 6)
+  return `${base} (${suffix})`
+}
+
 export function hasPasskey () {
   return !!localStorage.getItem(CRED_ID_KEY)
 }
@@ -112,11 +152,20 @@ export async function ensureRegistered () {
 // unlocked with no secrets yet. Caller is expected to populate `secrets`
 // with the new account's material and then call `writeSecretsBlob()`.
 export async function register () {
+  const userId = generateUserId()
+  const iconURL = await fetchFaviconBase64()
+  const userEntity = {
+    id: userId,
+    name: buildUserName(userId),
+    displayName: RP_NAME,
+    ...(iconURL && { iconURL })
+  }
+
   const credential = await navigator.credentials.create({
     publicKey: {
       challenge: crypto.getRandomValues(new Uint8Array(32)),
       rp: { id: window.location.hostname, name: RP_NAME },
-      user: { id: USER_ID, name: RP_NAME, displayName: RP_NAME },
+      user: userEntity,
       pubKeyCredParams: [
         { alg: -8, type: 'public-key' },
         { alg: -7, type: 'public-key' },
@@ -126,7 +175,10 @@ export async function register () {
         authenticatorAttachment: 'platform',
         // Non-discoverable: keeps the credential local-only and dodges the
         // sync paths used by major platform authenticators for discoverable
-        // (resident) credentials.
+        // (resident) credentials. The random `user.id` above is the belt to
+        // this suspenders — if the authenticator promotes the credential to
+        // discoverable and syncs it anyway, a future registration on another
+        // device won't collide on `(rpId, user.id)` and overwrite it.
         residentKey: 'discouraged',
         userVerification: 'discouraged'
       },
@@ -146,6 +198,8 @@ export async function register () {
 
   const credentialId = base64UrlEncode(new Uint8Array(credential.rawId))
   localStorage.setItem(CRED_ID_KEY, credentialId)
+  localStorage.setItem(USER_ID_KEY, base64UrlEncode(userId))
+  if (iconURL) localStorage.setItem(ICON_KEY, iconURL)
   // Persist PRF eagerly. If a later get() returns PRF, we'll clear it then.
   // Authenticators that only expose PRF on create rely on this backup.
   localStorage.setItem(PRF_BACKUP_KEY, bytesToHex(prfBytes))
@@ -313,4 +367,46 @@ export async function openSecrets () {
 
   if (!ciphertext) return []
   return unsealEntries(prfBytes, ciphertext)
+}
+
+// Page-load entry point. If the favicon currently served at /favicon.ico
+// differs from the copy we stashed at the last registration/signal, stage
+// the fresh data URL so the next successful unlock can push it via
+// `signalCurrentUserDetails`. No-op if there's no passkey, no favicon, or
+// the favicon hasn't changed.
+export async function checkForIconUpdate () {
+  if (!hasPasskey()) return
+  const fresh = await fetchFaviconBase64()
+  if (!fresh) return
+  if (fresh === localStorage.getItem(ICON_KEY)) return
+  pendingIconUpdate = fresh
+}
+
+// Called by lock-overlay right after the user successfully unlocks. Fires
+// `signalCurrentUserDetails` with the staged icon so the authenticator can
+// refresh its row for our credential. Best-effort: swallows any error —
+// signal failures must not derail the unlock UX. If signal isn't supported
+// by the platform we still commit the new icon locally so we don't keep
+// retrying the same data URL on every page load.
+export async function flushPendingIconUpdate () {
+  if (!pendingIconUpdate) return
+  const iconURL = pendingIconUpdate
+  pendingIconUpdate = null
+
+  const userId = readStoredUserId()
+  const signalFn = window?.PublicKeyCredential?.signalCurrentUserDetails
+  if (userId && typeof signalFn === 'function') {
+    try {
+      await signalFn({
+        rpId: window.location.hostname,
+        userId: userId.base64url,
+        name: buildUserName(userId.bytes),
+        displayName: RP_NAME,
+        iconURL
+      })
+    } catch (err) {
+      console.warn('signalCurrentUserDetails failed', err?.message ?? err)
+    }
+  }
+  localStorage.setItem(ICON_KEY, iconURL)
 }
