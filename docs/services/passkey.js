@@ -125,6 +125,52 @@ function buildUserName (userId) {
   return `${base} (${suffix})`
 }
 
+// Some platforms (notably older Android/Chrome and certain WebView contexts)
+// only surface PRF on the assertion ceremony, not on creation. After a fresh
+// `create()` that came back without PRF, this re-prompts via `get()` against
+// the credential we just minted. `userVerification: 'discouraged'` lets
+// platforms that cache UV across a recent create() skip the second prompt.
+async function fetchPrfViaGet (rawId) {
+  try {
+    const credential = await navigator.credentials.get({
+      publicKey: {
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        rpId: window.location.hostname,
+        allowCredentials: [{
+          id: new Uint8Array(rawId),
+          type: 'public-key',
+          transports: GET_TRANSPORTS
+        }],
+        userVerification: 'discouraged'
+      },
+      extensions: {
+        prf: { eval: { first: PRF_SALT_BYTES } }
+      }
+    })
+    return extractPrfBytes(extractExtensions(credential))
+  } catch (err) {
+    console.warn('PRF follow-up get() failed', err?.message ?? err)
+    return null
+  }
+}
+
+// Tell the platform to discard the credential we just created — used when a
+// fresh registration cannot yield PRF and the credential is therefore
+// useless to us. Best-effort: silently no-ops if the API isn't supported,
+// and swallows errors so the caller's meaningful throw is never masked.
+async function discardCredential (rawId) {
+  const signalFn = window?.PublicKeyCredential?.signalUnknownCredential
+  if (typeof signalFn !== 'function') return
+  try {
+    await signalFn({
+      rpId: window.location.hostname,
+      credentialId: base64UrlEncode(new Uint8Array(rawId))
+    })
+  } catch (err) {
+    console.warn('signalUnknownCredential failed', err?.message ?? err)
+  }
+}
+
 export function hasPasskey () {
   return !!localStorage.getItem(CRED_ID_KEY)
 }
@@ -193,8 +239,18 @@ export async function register () {
   if (credential.authenticatorAttachment !== 'platform') throw new Error('PASSKEY_NOT_PLATFORM')
 
   const ext = extractExtensions(credential)
-  const prfBytes = extractPrfBytes(ext)
-  if (!prfBytes?.length) throw new Error('PASSKEY_PRF_REQUIRED')
+  let prfBytes = extractPrfBytes(ext)
+  // Some platforms (e.g. older Android/Chrome) only expose PRF on get(),
+  // not on create(). Try one assertion against the just-minted credential
+  // before giving up on this passkey.
+  if (!prfBytes?.length) prfBytes = await fetchPrfViaGet(credential.rawId)
+  if (!prfBytes?.length) {
+    // Credential is useless to us without PRF — best-effort tell the
+    // authenticator to forget it so the user isn't left with a dangling
+    // entry, then bail.
+    await discardCredential(credential.rawId)
+    throw new Error('PASSKEY_PRF_REQUIRED')
+  }
 
   const credentialId = base64UrlEncode(new Uint8Array(credential.rawId))
   localStorage.setItem(CRED_ID_KEY, credentialId)
