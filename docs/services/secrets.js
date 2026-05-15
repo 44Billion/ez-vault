@@ -4,7 +4,7 @@ import { BunkerHandle, persistHandleState } from './bunker.js'
 import * as store from './accounts-store.js'
 import { encodeSecretEntries, decodeSecretEntries } from './secret-blob.js'
 import { bytesToBase64, base64ToBytes } from '../helpers/base64.js'
-import { hexToBytes } from './nostr.js'
+import { hexToBytes } from '../helpers/nostr/index.js'
 import { deriveSignerSeckey } from '../helpers/signer-key.js'
 
 // In-memory home for every account's secret material plus the deterministic

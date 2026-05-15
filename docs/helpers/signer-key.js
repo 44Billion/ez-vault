@@ -1,4 +1,4 @@
-import { bytesToHex } from '../services/nostr.js'
+import { bytesToHex } from '../helpers/nostr/index.js'
 
 // Deterministic device signer seckey derivation. Inputs:
 //   - prfBytes: the 32-byte passkey PRF output (same bytes secrets.js uses as
@@ -20,8 +20,8 @@ import { bytesToHex } from '../services/nostr.js'
 // key), so recovery in that scenario means re-pairing devices; storage
 // isn't what saves us there.
 
-const SALT = new TextEncoder().encode('ez-vault/signer/v1')
-const INFO = new TextEncoder().encode('ez-vault/device-signer/v1')
+const SALT = new TextEncoder().encode('ez-vault:signer:v1')
+const INFO = new TextEncoder().encode('ez-vault:device-signer:v1')
 
 export async function deriveSignerSeckey (prfBytes) {
   const ikm = await crypto.subtle.importKey('raw', prfBytes, 'HKDF', false, ['deriveBits'])

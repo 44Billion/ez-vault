@@ -1,6 +1,6 @@
 import * as store from './accounts-store.js'
 import { fetchLatestProfile, fetchRelayListEvent, parseRelayListEvent, freeRelays } from './relays.js'
-import { parseProfileEvent } from './nostr.js'
+import { parseProfileEvent } from '../helpers/nostr/index.js'
 import * as status from './account-status.js'
 import * as secrets from './secrets.js'
 import * as passkey from './passkey.js'

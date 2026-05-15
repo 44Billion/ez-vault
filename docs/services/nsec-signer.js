@@ -1,5 +1,6 @@
 import { getPublicKey, finalizeEvent, nip04, nip44 } from 'nostr-tools'
-import { hexToBytes } from './nostr.js'
+import { bytesToHex, hexToBytes } from '../helpers/nostr/index.js'
+import { deriveSharedKey } from '../helpers/crypto.js'
 import {
   fetchRelayListEvent,
   parseRelayListEvent,
@@ -19,6 +20,34 @@ const nip04Decrypt = nip04.decrypt.bind(nip04)
 // and similar prototype-poking tricks can't reach the key.
 const secretKeys = new WeakMap()
 const createToken = Symbol('createToken')
+
+class SharedKeySigner {
+  #signer
+  #peerPubkey
+  #sharedSignerPromise = null
+
+  constructor (signer, peerPubkey) {
+    this.#signer = signer
+    this.#peerPubkey = peerPubkey
+    Object.preventExtensions(this)
+  }
+
+  async #sharedSigner () {
+    this.#sharedSignerPromise ??= (async () => {
+      const sharedSecretKey = await deriveSharedKey(secretKeys.get(this.#signer), this.#peerPubkey)
+      return NsecSigner.getOrCreate(bytesToHex(sharedSecretKey))
+    })()
+    return this.#sharedSignerPromise
+  }
+
+  async getPublicKey () { return (await this.#sharedSigner()).getPublicKey() }
+  async signEvent (event) { return (await this.#sharedSigner()).signEvent(event) }
+  async nip04Encrypt (peerPubkey, plaintext) { return (await this.#sharedSigner()).nip04Encrypt(peerPubkey, plaintext) }
+  async nip04Decrypt (peerPubkey, ciphertext) { return (await this.#sharedSigner()).nip04Decrypt(peerPubkey, ciphertext) }
+  async nip44Encrypt (peerPubkey, plaintext) { return (await this.#sharedSigner()).nip44Encrypt(peerPubkey, plaintext) }
+  async nip44Decrypt (peerPubkey, ciphertext) { return (await this.#sharedSigner()).nip44Decrypt(peerPubkey, ciphertext) }
+  withSharedKey (peerPubkey) { return new SharedKeySigner(this.#signer, peerPubkey) }
+}
 
 export default class NsecSigner {
   static #signersByPubkey = {}
@@ -115,8 +144,13 @@ export default class NsecSigner {
       nip44GetConversationKey(this.#secretKey, peerPubkey)
     return nip44Decrypt(ciphertext, ck)
   }
+
+  withSharedKey (peerPubkey) {
+    return new SharedKeySigner(this, peerPubkey)
+  }
 }
 
 // Prevent prototype/constructor tampering and method injection.
+Object.freeze(SharedKeySigner.prototype)
 Object.freeze(NsecSigner.prototype)
 Object.freeze(NsecSigner)

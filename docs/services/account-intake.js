@@ -1,5 +1,5 @@
 import * as store from './accounts-store.js'
-import * as nostr from './nostr.js'
+import * as nostr from '../helpers/nostr/index.js'
 import * as secrets from './secrets.js'
 import * as passkey from './passkey.js'
 import * as trustedSigners from './trusted-signers.js'

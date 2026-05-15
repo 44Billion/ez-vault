@@ -40,29 +40,31 @@ export async function publish (event, relays) {
 
 // Subscribe to a filter across multiple relays and return the newest matching
 // event. Closes early 500ms after the first EOSE (or after a hard timeout).
-export function fetchLatestEvent (filter, relays, {
+export function fetchEvents (filter, relays, {
   graceMs = POST_EOSE_GRACE_MS,
   hardTimeoutMs = HARD_TIMEOUT_MS
 } = {}) {
   return new Promise((resolve) => {
-    if (!relays?.length) return resolve(null)
+    if (!relays?.length) return resolve([])
 
-    let latest = null
+    const events = []
     let settled = false
     let graceTimer = null
+    let hardTimer = null
+    let sub = null
 
     const finish = () => {
       if (settled) return
       settled = true
       clearTimeout(graceTimer)
       clearTimeout(hardTimer)
-      try { sub.close() } catch { /* noop */ }
-      resolve(latest)
+      try { sub?.close() } catch { /* noop */ }
+      resolve(events)
     }
 
-    const sub = pool.subscribeMany(relays, filter, {
+    sub = pool.subscribeMany(relays, filter, {
       onevent (event) {
-        if (!latest || event.created_at > latest.created_at) latest = event
+        events.push(event)
       },
       oneose () {
         if (settled || graceTimer) return
@@ -74,8 +76,19 @@ export function fetchLatestEvent (filter, relays, {
       }
     })
 
-    const hardTimer = setTimeout(finish, hardTimeoutMs)
+    hardTimer = setTimeout(finish, hardTimeoutMs)
   })
+}
+
+// Subscribe to a filter across multiple relays and return the newest matching
+// event. Closes early 500ms after the first EOSE (or after a hard timeout).
+export async function fetchLatestEvent (filter, relays, options = {}) {
+  const events = await fetchEvents(filter, relays, options)
+  let latest = null
+  for (const event of events) {
+    if (!latest || event.created_at > latest.created_at) latest = event
+  }
+  return latest
 }
 
 // NIP-65: fetch the user's latest relay-list event (kind:10002) from seed relays.

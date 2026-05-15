@@ -1,5 +1,5 @@
 import { getPublicKey } from 'nostr-tools'
-import { hexToBytes, bytesToHex } from './nostr.js'
+import { hexToBytes, bytesToHex } from '../helpers/nostr/index.js'
 import { encodeTlv, decodeTlv } from '../helpers/tlv.js'
 
 // Wire format for the encrypted secret blob written into the passkey's

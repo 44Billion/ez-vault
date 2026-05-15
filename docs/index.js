@@ -5,10 +5,13 @@ import './components/shared/accordion-panel.js'
 import './components/shared/toast.js'
 import './components/activity-log.js'
 import './components/lock-overlay.js'
+import { cleanupTemporaryStorage } from './services/temporary-storage.js'
 import * as secrets from './services/secrets.js'
 import * as passkey from './services/passkey.js'
 import { rehydrateAll } from './services/profile-rehydrator.js'
 import { initMessenger } from './services/messenger.js'
+
+cleanupTemporaryStorage()
 
 const list = document.querySelector('account-list')
 const addPanel = document.querySelector('account-add')

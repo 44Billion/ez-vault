@@ -1,5 +1,6 @@
 import { BunkerSigner, parseBunkerInput } from 'nostr-tools/nip46'
 import { generateSecretKey } from 'nostr-tools'
+import { bytesToHex, hexToBytes } from '../helpers/nostr/index.js'
 import * as store from './accounts-store.js'
 import * as secrets from './secrets.js'
 import { pool } from './relays.js'
@@ -14,18 +15,6 @@ const IDLE_TIMEOUT_MS = 5 * 60_000
 // instance ("handle.leak = () => …") can't reach them.
 const clientKeysByHandle = new WeakMap()
 const handleCreateToken = Symbol('BunkerHandle-create')
-
-function bytesToHex (bytes) {
-  let s = ''
-  for (const b of bytes) s += b.toString(16).padStart(2, '0')
-  return s
-}
-
-function hexToBytes (hex) {
-  const out = new Uint8Array(hex.length / 2)
-  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16)
-  return out
-}
 
 function withTimeout (promise, ms, label = 'TIMEOUT') {
   return new Promise((resolve, reject) => {
@@ -146,6 +135,7 @@ export class BunkerHandle {
   async nip04Decrypt (pk, ct) { return this.#request(s => s.nip04Decrypt(pk, ct)) }
   async nip44Encrypt (pk, pt) { return this.#request(s => s.nip44Encrypt(pk, pt)) }
   async nip44Decrypt (pk, ct) { return this.#request(s => s.nip44Decrypt(pk, ct)) }
+  withSharedKey (peerPubkey) { return new BunkerSharedKeyHandle(this, peerPubkey) }
 
   // Adopt this freshly-imported handle into the secrets pool. Called by the
   // import flow after `passkey.ensureRegistered()` succeeds. The clientKey
@@ -187,6 +177,28 @@ export class BunkerHandle {
     // connect, in which case we must not issue any further RPC.
     if (this.#closed) throw new Error('BUNKER_CLOSED')
     return fn(signer)
+  }
+
+  async tweakedRequest (tweak, method, params = []) {
+    return this.#request(signer => {
+      const original = signer.sendRequest.bind(signer)
+      signer.sendRequest = function (sentMethod, sentParams) {
+        const saved = JSON.stringify
+        JSON.stringify = function (value, replacer, space) {
+          if (value && value.id && value.method === sentMethod && value.params === sentParams) {
+            return saved({ id: value.id, method: sentMethod, params: sentParams, tweak }, replacer, space)
+          }
+          return saved(value, replacer, space)
+        }
+        try {
+          return original(sentMethod, sentParams)
+        } finally {
+          JSON.stringify = saved
+          signer.sendRequest = original
+        }
+      }
+      return signer[method](...params)
+    })
   }
 
   #getSigner () {
@@ -265,6 +277,30 @@ export class BunkerHandle {
 }
 Object.freeze(BunkerHandle.prototype)
 Object.freeze(BunkerHandle)
+
+class BunkerSharedKeyHandle {
+  #handle
+  #peerPubkey
+
+  constructor (handle, peerPubkey) {
+    this.#handle = handle
+    this.#peerPubkey = peerPubkey
+    Object.preventExtensions(this)
+  }
+
+  #request (method, params = []) {
+    return this.#handle.tweakedRequest(['withSharedKey', this.#peerPubkey], method, params)
+  }
+
+  getPublicKey () { return this.#request('getPublicKey') }
+  signEvent (event) { return this.#request('signEvent', [event]) }
+  nip04Encrypt (pk, pt) { return this.#request('nip04Encrypt', [pk, pt]) }
+  nip04Decrypt (pk, ct) { return this.#request('nip04Decrypt', [pk, ct]) }
+  nip44Encrypt (pk, pt) { return this.#request('nip44Encrypt', [pk, pt]) }
+  nip44Decrypt (pk, ct) { return this.#request('nip44Decrypt', [pk, ct]) }
+  withSharedKey (peerPubkey) { return new BunkerSharedKeyHandle(this, peerPubkey) }
+}
+Object.freeze(BunkerSharedKeyHandle.prototype)
 
 // Import-time entry. Creates a transient handle (generating a fresh
 // persistent client key, or reusing the one supplied by the caller),

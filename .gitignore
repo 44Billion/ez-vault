@@ -17,3 +17,7 @@
 *.vsix
 
 todo
+.agents
+.claude
+.codex
+.kilo

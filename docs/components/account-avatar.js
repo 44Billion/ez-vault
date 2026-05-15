@@ -1,5 +1,5 @@
 import * as store from '../services/accounts-store.js'
-import * as nostr from '../services/nostr.js'
+import * as nostr from '../helpers/nostr/index.js'
 import * as relays from '../services/relays.js'
 import * as accountStatus from '../services/account-status.js'
 import * as messengerLog from '../services/messenger-log/index.js'

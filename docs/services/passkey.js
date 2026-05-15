@@ -1,5 +1,5 @@
 import { nip44, getPublicKey } from 'nostr-tools'
-import { hexToBytes, bytesToHex } from './nostr.js'
+import { hexToBytes, bytesToHex } from '../helpers/nostr/index.js'
 import { decodeSecretEntries } from './secret-blob.js'
 import { base64ToBytes } from '../helpers/base64.js'
 import { detectPlatform } from '../helpers/platform.js'
