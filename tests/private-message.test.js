@@ -1,0 +1,179 @@
+import { afterEach, test } from 'node:test'
+import assert from 'node:assert/strict'
+import {
+  ASK_KIND,
+  REPLY_KIND,
+  TELL_KIND,
+  ask,
+  reply,
+  tell,
+  unwatch,
+  watch,
+  yell
+} from '../docs/helpers/nostr/private-message.js'
+
+const data = new Map()
+globalThis.localStorage = {
+  clear: () => data.clear(),
+  getItem: key => data.has(String(key)) ? data.get(String(key)) : null,
+  removeItem: key => { data.delete(String(key)) },
+  setItem: (key, value) => { data.set(String(key), String(value)) }
+}
+
+afterEach(() => {
+  unwatch()
+  globalThis.localStorage.clear()
+})
+
+function signer (pubkey) {
+  return {
+    getPublicKey: () => pubkey,
+    withSharedKey: () => ({})
+  }
+}
+
+function fakeSubscribeFactory () {
+  const calls = []
+  const closed = []
+  const fakeSubscribe = options => {
+    calls.push(options)
+    return {
+      close: () => closed.push(options)
+    }
+  }
+  return { calls, closed, fakeSubscribe }
+}
+
+test('watch merges overlapping relay subscriptions by channel author', async () => {
+  const { calls, closed, fakeSubscribe } = fakeSubscribeFactory()
+  await watch({
+    channels: ['channel1'],
+    relays: ['wss://a.example'],
+    receiverSigner: signer('receiver'),
+    privateChannelSigner: signer('channel1'),
+    _subscribe: fakeSubscribe
+  })
+  await watch({
+    channels: ['channel1'],
+    relays: ['wss://a.example'],
+    receiverSigner: signer('receiver'),
+    privateChannelSigner: signer('channel1'),
+    _subscribe: fakeSubscribe
+  })
+  await watch({
+    channels: ['channel2'],
+    relays: ['wss://a.example', 'wss://b.example'],
+    receiverSigner: signer('receiver'),
+    privateChannelSigner: signer('channel2'),
+    mode: 'seeder',
+    _subscribe: fakeSubscribe
+  })
+
+  assert.equal(calls.length, 3)
+  assert.deepEqual(calls[0].privateChannelPubkeys, ['channel1'])
+  assert.deepEqual(calls[0].relays, ['wss://a.example'])
+  assert.equal(calls[0].limit, 0)
+  assert.equal(calls[0].liveOnly, true)
+  assert.deepEqual(calls[1].privateChannelPubkeys.sort(), ['channel1', 'channel2'])
+  assert.deepEqual(calls[1].relays, ['wss://a.example'])
+  assert.deepEqual(calls[1].modeByPubkey, { channel1: 'leecher', channel2: 'seeder' })
+  assert.deepEqual(calls[2].privateChannelPubkeys, ['channel2'])
+  assert.deepEqual(calls[2].relays, ['wss://b.example'])
+
+  await new Promise(resolve => setTimeout(resolve, 550))
+  assert.equal(closed.length, 1)
+  assert.deepEqual(closed[0].privateChannelPubkeys, ['channel1'])
+})
+
+test('ask requires watching the sender private channel first', async () => {
+  await assert.rejects(
+    () => ask({
+      senderSigner: signer('sender'),
+      privateChannelSigner: signer('sender-channel'),
+      receiverPubkey: 'receiver',
+      relays: ['wss://relay.example'],
+      message: { code: 'PING' },
+      retry: false,
+      _publish: async () => ({ results: [] })
+    }),
+    /PRIVATE_MESSAGE_NOT_WATCHING/
+  )
+})
+
+test('ask publishes an ask rumor and watch dispatches the reply with its question', async () => {
+  const { calls, fakeSubscribe } = fakeSubscribeFactory()
+  const replies = []
+  let published = null
+  await watch({
+    channels: ['sender-channel'],
+    relays: ['wss://relay.example'],
+    receiverSigner: signer('sender'),
+    privateChannelSigner: signer('sender-channel'),
+    onReply: event => replies.push(event),
+    _subscribe: fakeSubscribe
+  })
+  const result = await ask({
+    senderSigner: signer('sender'),
+    privateChannelSigner: signer('sender-channel'),
+    receiverPubkey: 'receiver',
+    relays: ['wss://relay.example'],
+    message: { code: 'PING', payload: { ok: true } },
+    retry: false,
+    _publish: async options => {
+      published = options
+      return { results: [{ success: true }] }
+    }
+  })
+
+  assert.equal(published.event.kind, ASK_KIND)
+  assert.equal(published.event.sig, undefined)
+  assert.equal(published.receiverTag, 'receiver')
+  assert.deepEqual(published.receivers, ['receiver'])
+  assert.deepEqual(JSON.parse(published.event.content), { code: 'PING', payload: { ok: true } })
+  assert.equal(result.question.id, published.event.id)
+
+  calls[0].onEvent({
+    kind: REPLY_KIND,
+    id: 'reply-id',
+    pubkey: 'receiver',
+    created_at: 1,
+    tags: [['q', result.question.id]],
+    content: JSON.stringify({ payload: 'pong' })
+  }, { created_at: 2 }, { channelPubkey: 'sender-channel' })
+
+  assert.equal(replies.length, 1)
+  assert.equal(replies[0].question.id, result.question.id)
+  assert.equal(replies[0].reply.pubkey, 'receiver')
+  assert.deepEqual(replies[0].payload, { payload: 'pong' })
+})
+
+test('reply tell and yell publish recognizable private message rumors', async () => {
+  const published = []
+  const _publish = async options => {
+    published.push(options)
+    return { results: [] }
+  }
+  const question = {
+    id: 'question-id',
+    pubkey: 'alice',
+    kind: ASK_KIND,
+    created_at: 1,
+    tags: [['r', 'bob']],
+    content: '{}'
+  }
+
+  await reply({ senderSigner: signer('bob'), question, relays: ['wss://relay.example'], payload: 'answer', _publish })
+  await tell({ senderSigner: signer('bob'), receiverPubkey: 'alice', relays: ['wss://relay.example'], payload: 'note', _publish })
+  await yell({ senderSigner: signer('bob'), receiverPubkeys: ['alice', 'carol'], relays: ['wss://relay.example'], payload: 'broadcast', _publish })
+
+  assert.equal(published[0].event.kind, REPLY_KIND)
+  assert.deepEqual(published[0].event.tags, [['q', 'question-id'], ['r', 'alice']])
+  assert.equal(published[0].receiverTag, 'alice')
+  assert.equal(published[1].event.kind, TELL_KIND)
+  assert.deepEqual(published[1].event.tags, [['r', 'alice']])
+  assert.equal(published[1].receiverTag, 'alice')
+  assert.equal(published[2].event.kind, TELL_KIND)
+  assert.deepEqual(published[2].event.tags, [])
+  assert.equal(published[2].receiverTag, '')
+  assert.deepEqual(published[2].receivers, ['alice', 'carol'])
+})

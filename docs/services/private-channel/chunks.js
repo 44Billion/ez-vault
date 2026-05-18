@@ -76,7 +76,11 @@ export function readChunkContent (id, index) {
 }
 
 export function decodeChunkLines (content) {
-  return decoder.decode(base64ToBytes(content)).split('\n').filter(Boolean)
+  return decodeChunkText(content).split('\n').filter(Boolean)
+}
+
+export function decodeChunkText (content) {
+  return decoder.decode(base64ToBytes(content))
 }
 
 export function joinChunksAsBase64 (parts) {
