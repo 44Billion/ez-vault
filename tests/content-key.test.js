@@ -1,8 +1,8 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { generateSecretKey } from 'nostr-tools'
+import { generateSecretKey, getEventHash, verifyEvent } from 'nostr-tools'
 import NsecSigner from '../docs/services/nsec-signer.js'
-import { upsertContentKeyEvent } from '../docs/services/content-key/index.js'
+import { doubleSignEvent, upsertContentKeyEvent } from '../docs/services/content-key/index.js'
 import { makeContentKeyEvent, parseContentKeyEvent, CONTENT_KEY_KIND } from '../docs/services/content-key/event.js'
 import { clearQueryCaches, getIykcProofs, getRelaysByPubkey } from '../docs/helpers/nostr/queries.js'
 import { bytesToHex } from '../docs/helpers/nostr/index.js'
@@ -64,6 +64,41 @@ test('upsertContentKeyEvent signs and publishes to user write relays', async () 
   assert.equal(parseContentKeyEvent(published.event).iykcPubkey, await contentKey.getPublicKey())
   assert.equal(result.event.id, published.event.id)
   assert.deepEqual(result.result, { success: true })
+})
+
+test('doubleSignEvent signs event with per-event imkc proof', async () => {
+  const user = signer()
+  const contentKey = signer()
+  const userPubkey = await user.getPublicKey()
+  const contentPubkey = await contentKey.getPublicKey()
+  const event = {
+    kind: 1,
+    pubkey: 'f'.repeat(64),
+    id: 'e'.repeat(64),
+    sig: 'd'.repeat(128),
+    created_at: 9,
+    tags: [['p', 'peer'], ['imkc', 'old'], ['x', 'kept']],
+    content: 'clear text'
+  }
+
+  const signed = await doubleSignEvent({ userSigner: user, contentKeySigner: contentKey, event })
+  const imkcTag = signed.tags.find(tag => tag[0] === 'imkc')
+  const proofEvent = {
+    kind: signed.kind,
+    pubkey: contentPubkey,
+    created_at: signed.created_at,
+    tags: signed.tags.map(tag => tag[0] === 'imkc' ? ['imkc', contentPubkey] : [...tag]),
+    content: signed.content,
+    sig: imkcTag[2]
+  }
+  proofEvent.id = getEventHash(proofEvent)
+
+  assert.equal(signed.pubkey, userPubkey)
+  assert.deepEqual(imkcTag.slice(0, 2), ['imkc', contentPubkey])
+  assert.equal(signed.tags[1][0], 'imkc')
+  assert.equal(event.tags[1][1], 'old')
+  assert.equal(verifyEvent(proofEvent), true)
+  assert.equal(verifyEvent(signed), true)
 })
 
 test('getIykcProofs fetches content key events from grouped write relays', async () => {
