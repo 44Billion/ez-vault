@@ -147,6 +147,53 @@ test('ask publishes an ask rumor and watch dispatches the reply with its questio
   assert.deepEqual(replies[0].payload, { payload: 'pong' })
 })
 
+test('watch reattaches content key signer to pending ask retries', async () => {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => ({})
+  const published = []
+  const _publish = async options => {
+    published.push(options)
+    return { results: [] }
+  }
+
+  try {
+    await watch({
+      channels: ['sender-channel'],
+      relays: ['wss://relay.example'],
+      receiverSigner: signer('sender'),
+      privateChannelSigner: signer('sender-channel'),
+      _subscribe: fakeSubscribeFactory().fakeSubscribe
+    })
+    await ask({
+      senderSigner: signer('sender'),
+      privateChannelSigner: signer('sender-channel'),
+      receiverPubkey: 'receiver',
+      relays: ['wss://relay.example'],
+      payload: 'ping',
+      retryLimit: 1,
+      retryIntervalMs: 25,
+      _publish
+    })
+
+    unwatch('sender-channel')
+    await watch({
+      channels: ['sender-channel'],
+      relays: ['wss://relay.example'],
+      receiverSigner: signer('sender'),
+      iykcSigner: signer('content'),
+      privateChannelSigner: signer('sender-channel'),
+      _subscribe: fakeSubscribeFactory().fakeSubscribe
+    })
+    await new Promise(resolve => setTimeout(resolve, 60))
+
+    assert.equal(published.length, 2)
+    assert.equal(published[0].imkcSigner, undefined)
+    assert.equal(published[1].imkcSigner.getPublicKey(), 'content')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
 test('reply tell and yell publish recognizable private message rumors', async () => {
   const published = []
   const _publish = async options => {

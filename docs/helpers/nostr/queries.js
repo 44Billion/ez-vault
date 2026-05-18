@@ -2,6 +2,77 @@ import { CONTENT_KEY_KIND, parseContentKeyEvent } from '../../services/content-k
 import { fetchEvents, freeRelays, parseRelayListEvent, seedRelays } from '../../services/relays.js'
 
 const DEFAULT_RELAYS_PER_PUBKEY = 2
+const QUERY_CACHE_MS = 40 * 60 * 1000
+const RELAY_CACHE_MAX_ITEMS = 500
+const IYKC_CACHE_MAX_ITEMS = 10000
+const relaysByPubkey = Object.create(null)
+const relayCacheTimersByPubkey = Object.create(null)
+const relayCacheAddedAtByPubkey = Object.create(null)
+const iykcProofsByPubkey = Object.create(null)
+const iykcCacheTimersByPubkey = Object.create(null)
+const iykcCacheAddedAtByPubkey = Object.create(null)
+
+function hasCachedKey (cache, key) {
+  return Object.prototype.hasOwnProperty.call(cache, key)
+}
+
+function maybeUnref (timer) {
+  timer?.unref?.()
+  return timer
+}
+
+function cloneRelays (relays) {
+  return {
+    read: [...(relays?.read || [])],
+    write: [...(relays?.write || [])]
+  }
+}
+
+function cloneIykcProof (proof) {
+  return proof ? { iykcPubkey: proof.iykcPubkey, iykcProof: proof.iykcProof } : null
+}
+
+function deleteCachedValue (cache, timers, addedAt, key) {
+  clearTimeout(timers[key])
+  delete cache[key]
+  delete timers[key]
+  delete addedAt[key]
+}
+
+function pruneCache (cache, timers, addedAt, maxItems) {
+  const keys = Object.keys(cache)
+  if (keys.length <= maxItems) return
+
+  keys
+    .sort((a, b) => (addedAt[a] || 0) - (addedAt[b] || 0))
+    .slice(0, keys.length - maxItems)
+    .forEach(key => deleteCachedValue(cache, timers, addedAt, key))
+}
+
+function setCachedValue (cache, timers, addedAt, key, value, cacheMs) {
+  cache[key] = value
+  addedAt[key] = Date.now()
+  clearTimeout(timers[key])
+  if (cacheMs > 0) {
+    timers[key] = maybeUnref(setTimeout(() => {
+      deleteCachedValue(cache, timers, addedAt, key)
+    }, cacheMs))
+  } else {
+    delete timers[key]
+  }
+}
+
+function clearCache (cache, timers, addedAt) {
+  for (const timer of Object.values(timers)) clearTimeout(timer)
+  for (const key of Object.keys(cache)) delete cache[key]
+  for (const key of Object.keys(timers)) delete timers[key]
+  for (const key of Object.keys(addedAt)) delete addedAt[key]
+}
+
+export function clearQueryCaches () {
+  clearCache(relaysByPubkey, relayCacheTimersByPubkey, relayCacheAddedAtByPubkey)
+  clearCache(iykcProofsByPubkey, iykcCacheTimersByPubkey, iykcCacheAddedAtByPubkey)
+}
 
 // Given pubkeys and their relay mappings, picks the minimum set of relays
 // that covers all pubkeys (up to maxPerPubkey relays each), preferring
@@ -35,42 +106,65 @@ export function pickRelaysForPubkeys (pubkeys, relaysByPubkey, { maxPerPubkey = 
   return relayToAuthors
 }
 
-export async function getRelaysByPubkey (pubkeys, { _fetchEvents = fetchEvents } = {}) {
+export async function getRelaysByPubkey (pubkeys, { _fetchEvents = fetchEvents, cacheMs = QUERY_CACHE_MS } = {}) {
   const uniquePubkeys = [...new Set(pubkeys)].filter(Boolean)
   if (!uniquePubkeys.length) return {}
 
+  const out = {}
+  const missingPubkeys = []
+  for (const pubkey of uniquePubkeys) {
+    if (hasCachedKey(relaysByPubkey, pubkey)) out[pubkey] = cloneRelays(relaysByPubkey[pubkey])
+    else missingPubkeys.push(pubkey)
+  }
+  if (!missingPubkeys.length) return out
+
   const events = await _fetchEvents({
     kinds: [10002],
-    authors: uniquePubkeys,
-    limit: uniquePubkeys.length
+    authors: missingPubkeys,
+    limit: missingPubkeys.length
   }, seedRelays)
 
   const latestByPubkey = {}
   for (const event of events) {
-    if (!uniquePubkeys.includes(event.pubkey)) continue
+    if (!missingPubkeys.includes(event.pubkey)) continue
     if (!latestByPubkey[event.pubkey] || event.created_at > latestByPubkey[event.pubkey].created_at) {
       latestByPubkey[event.pubkey] = event
     }
   }
 
-  const out = {}
-  for (const pubkey of uniquePubkeys) {
-    out[pubkey] = latestByPubkey[pubkey]
+  for (const pubkey of missingPubkeys) {
+    const relays = latestByPubkey[pubkey]
       ? parseRelayListEvent(latestByPubkey[pubkey])
       : { read: freeRelays.slice(0, 2), write: freeRelays.slice(0, 2) }
+    setCachedValue(relaysByPubkey, relayCacheTimersByPubkey, relayCacheAddedAtByPubkey, pubkey, cloneRelays(relays), cacheMs)
+    out[pubkey] = relays
   }
+  pruneCache(relaysByPubkey, relayCacheTimersByPubkey, relayCacheAddedAtByPubkey, RELAY_CACHE_MAX_ITEMS)
   return out
 }
 
 export async function getIykcProofs (pubkeys, {
   _fetchEvents = fetchEvents,
-  _getRelaysByPubkey = getRelaysByPubkey
+  _getRelaysByPubkey = getRelaysByPubkey,
+  cacheMs = QUERY_CACHE_MS
 } = {}) {
   const uniquePubkeys = [...new Set(pubkeys)].filter(Boolean)
   if (!uniquePubkeys.length) return {}
 
-  const relaysByPubkey = await _getRelaysByPubkey(uniquePubkeys, { _fetchEvents })
-  const relayToAuthors = pickRelaysForPubkeys(uniquePubkeys, relaysByPubkey)
+  const out = {}
+  const missingPubkeys = []
+  for (const pubkey of uniquePubkeys) {
+    if (!hasCachedKey(iykcProofsByPubkey, pubkey)) {
+      missingPubkeys.push(pubkey)
+      continue
+    }
+    const cached = cloneIykcProof(iykcProofsByPubkey[pubkey])
+    if (cached) out[pubkey] = cached
+  }
+  if (!missingPubkeys.length) return out
+
+  const relaysByPubkey = await _getRelaysByPubkey(missingPubkeys, { _fetchEvents, cacheMs })
+  const relayToAuthors = pickRelaysForPubkeys(missingPubkeys, relaysByPubkey)
   const eventGroups = await Promise.all(
     [...relayToAuthors.entries()]
       .map(([relay, authors]) => _fetchEvents({
@@ -89,10 +183,12 @@ export async function getIykcProofs (pubkeys, {
     }
   }
 
-  const out = {}
-  for (const pubkey of uniquePubkeys) {
+  for (const pubkey of missingPubkeys) {
     const entry = latestByPubkey[pubkey]
-    if (entry) out[pubkey] = { iykcPubkey: entry.iykcPubkey, iykcProof: entry.iykcProof }
+    const proof = entry ? { iykcPubkey: entry.iykcPubkey, iykcProof: entry.iykcProof } : null
+    setCachedValue(iykcProofsByPubkey, iykcCacheTimersByPubkey, iykcCacheAddedAtByPubkey, pubkey, cloneIykcProof(proof), cacheMs)
+    if (proof) out[pubkey] = proof
   }
+  pruneCache(iykcProofsByPubkey, iykcCacheTimersByPubkey, iykcCacheAddedAtByPubkey, IYKC_CACHE_MAX_ITEMS)
   return out
 }

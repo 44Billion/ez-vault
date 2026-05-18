@@ -198,6 +198,8 @@ function resetAskRetriesForChannel (channelPubkey, missingChunks = null) {
 function attachPendingAsksForChannel ({ channelPubkey, senderSigner, imkcSigner, privateChannelSigner }) {
   for (const ask of pendingAsks.values()) {
     if (ask.privateChannelPubkey !== channelPubkey) continue
+    // Restored asks only keep serializable state, so watching the channel is
+    // where we reattach the live signer objects needed to retry publishing.
     ask.senderSigner ||= senderSigner
     ask.imkcSigner ||= imkcSigner
     ask.privateChannelSigner ||= privateChannelSigner
@@ -411,7 +413,10 @@ export async function watch ({
       continue
     }
     watchesByChannel.set(channel, next)
-    attachPendingAsksForChannel({ channelPubkey: channel, senderSigner: receiverSigner, privateChannelSigner })
+    // These are our local signers under receiving names. For retrying asks we
+    // use the same keys under sending names: receiverSigner -> senderSigner,
+    // and iykcSigner (our content key) -> imkcSigner.
+    attachPendingAsksForChannel({ channelPubkey: channel, senderSigner: receiverSigner, imkcSigner: iykcSigner, privateChannelSigner })
     changed = true
   }
 
@@ -428,6 +433,13 @@ export function unwatch (channels) {
     stopOnlineWatcher()
     stopOnlineWatcher = null
   }
+}
+
+export function clearChannelState (channelPubkey) {
+  for (const ask of pendingAsks.values()) {
+    if (ask.privateChannelPubkey === channelPubkey) forgetAsk(ask.id)
+  }
+  if (watchesByChannel.has(channelPubkey)) unwatch(channelPubkey)
 }
 
 async function sendPrivateMessage ({

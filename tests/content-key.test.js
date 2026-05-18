@@ -4,15 +4,20 @@ import { generateSecretKey } from 'nostr-tools'
 import NsecSigner from '../docs/services/nsec-signer.js'
 import { upsertContentKeyEvent } from '../docs/services/content-key/index.js'
 import { makeContentKeyEvent, parseContentKeyEvent, CONTENT_KEY_KIND } from '../docs/services/content-key/event.js'
-import { getIykcProofs } from '../docs/helpers/nostr/queries.js'
+import { clearQueryCaches, getIykcProofs, getRelaysByPubkey } from '../docs/helpers/nostr/queries.js'
 import { bytesToHex } from '../docs/helpers/nostr/index.js'
 
 afterEach(() => {
+  clearQueryCaches()
   NsecSigner.releaseAll()
 })
 
 function signer () {
   return NsecSigner.getOrCreate(bytesToHex(generateSecretKey()))
+}
+
+function pubkeyFixture (index) {
+  return index.toString(16).padStart(64, '0')
 }
 
 test('makeContentKeyEvent publishes a verifiable cp proof', async () => {
@@ -90,4 +95,101 @@ test('getIykcProofs fetches content key events from grouped write relays', async
   })
   assert.equal(calls.filter(call => call.filter.kinds[0] === CONTENT_KEY_KIND).length, 2)
   assert.deepEqual(calls.filter(call => call.filter.kinds[0] === CONTENT_KEY_KIND).map(call => call.relays[0]).sort(), ['wss://a.example', 'wss://b.example'])
+})
+
+test('getRelaysByPubkey caches relay lookups per pubkey', async () => {
+  const user = signer()
+  const pubkey = await user.getPublicKey()
+  const relayList = await user.signEvent({
+    kind: 10002,
+    created_at: 6,
+    tags: [['r', 'wss://cached.example', 'write']],
+    content: ''
+  })
+  const calls = []
+  const _fetchEvents = async (filter, relays) => {
+    calls.push({ filter, relays })
+    return [relayList]
+  }
+
+  const first = await getRelaysByPubkey([pubkey], { _fetchEvents })
+  const second = await getRelaysByPubkey([pubkey], { _fetchEvents })
+
+  assert.deepEqual(first, second)
+  assert.deepEqual(second[pubkey].write, ['wss://cached.example'])
+  assert.equal(calls.length, 1)
+})
+
+test('getRelaysByPubkey evicts oldest relay cache entries above the cap', async () => {
+  const pubkeys = Array.from({ length: 501 }, (_value, index) => pubkeyFixture(index))
+  let relayFetches = 0
+  const _fetchEvents = async (filter) => {
+    relayFetches++
+    return filter.authors.map(pubkey => ({
+      kind: 10002,
+      pubkey,
+      created_at: 1,
+      tags: [['r', `wss://${pubkey.slice(-4)}.example`]],
+      content: ''
+    }))
+  }
+
+  await getRelaysByPubkey(pubkeys, { _fetchEvents, cacheMs: 0 })
+  await getRelaysByPubkey([pubkeys[0]], { _fetchEvents, cacheMs: 0 })
+  await getRelaysByPubkey([pubkeys[500]], { _fetchEvents, cacheMs: 0 })
+
+  assert.equal(relayFetches, 2)
+})
+
+test('getIykcProofs caches found and missing content key lookups', async () => {
+  const bob = signer()
+  const carol = signer()
+  const bobContent = signer()
+  const bobPubkey = await bob.getPublicKey()
+  const carolPubkey = await carol.getPublicKey()
+  const bobContentEvent = await makeContentKeyEvent({ userSigner: bob, contentKeySigner: bobContent, createdAt: 7 })
+  const bobRelayList = await bob.signEvent({
+    kind: 10002,
+    created_at: 6,
+    tags: [['r', 'wss://a.example'], ['r', 'wss://b.example']],
+    content: ''
+  })
+  const carolRelayList = await carol.signEvent({
+    kind: 10002,
+    created_at: 6,
+    tags: [['r', 'wss://a.example'], ['r', 'wss://b.example']],
+    content: ''
+  })
+  const calls = []
+  const _fetchEvents = async (filter, relays) => {
+    calls.push({ filter, relays })
+    if (filter.kinds[0] === 10002) return [bobRelayList, carolRelayList]
+    if (filter.kinds[0] === CONTENT_KEY_KIND) return [bobContentEvent]
+    return []
+  }
+
+  const first = await getIykcProofs([bobPubkey, carolPubkey], { _fetchEvents })
+  const callCountAfterFirstFetch = calls.length
+  const second = await getIykcProofs([bobPubkey, carolPubkey], { _fetchEvents })
+
+  assert.deepEqual(second, first)
+  assert.deepEqual(Object.keys(second), [bobPubkey])
+  assert.equal(calls.length, callCountAfterFirstFetch)
+})
+
+test('getIykcProofs evicts oldest proof cache entries above the cap', async () => {
+  const pubkeys = Array.from({ length: 10001 }, (_value, index) => pubkeyFixture(index))
+  let contentKeyFetches = 0
+  const _fetchEvents = async (filter) => {
+    if (filter.kinds[0] === CONTENT_KEY_KIND) contentKeyFetches++
+    return []
+  }
+
+  await getIykcProofs(pubkeys, { _fetchEvents, cacheMs: 0 })
+  const contentKeyFetchesAfterFirstLookup = contentKeyFetches
+  await getIykcProofs([pubkeys[0]], { _fetchEvents, cacheMs: 0 })
+  await getIykcProofs([pubkeys[10000]], { _fetchEvents, cacheMs: 0 })
+
+  assert.ok(contentKeyFetches > contentKeyFetchesAfterFirstLookup)
+  assert.equal(contentKeyFetches, contentKeyFetchesAfterFirstLookup + 2)
 })
