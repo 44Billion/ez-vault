@@ -2,7 +2,7 @@
 // const messenger = await createPrivateMessenger({
 //   userSigner,
 //   contentKeySigner,
-//   channels: [{ signer: privateChannelSigner, relays, mode: 'leecher' }]
+//   channels: [{ signer: privateChannelSigner, relays, mode: 'leecher', seeders: optionalSeederPubkeys }]
 // })
 // for await (const msg of messenger.messages()) handlePrivateMessage(msg)
 // await messenger.ask({ receiverPubkey, payload: { ping: true } })
@@ -10,7 +10,7 @@
 // await messenger.tell({ receiverPubkey, payload: { note: 'hello' } })
 // await messenger.yell({ receiverPubkeys, payload: { notice: 'hello all' } })
 // await messenger.sendEvent({ receiverPubkeys, event: { kind, tags: [], content } })
-// await messenger.update({ channels: nextChannels })
+// await messenger.update({ channels: [{ signer: privateChannelSigner, relays, seeders: nextOptionalSeederPubkeys }] })
 // messenger.clearChannel(channelPubkey)
 //
 // Missed-message recovery:
@@ -18,15 +18,37 @@
 // - Re-watching after reload fetches the gap from lastSeenAt to now.
 // - Browser offline/online events add explicit offline ranges with a small skew.
 // - Ranges older than 7 days are ignored; channel state not watched for 45 days is pruned.
+// - Seeders announce presence every 10min and are used for the relay-uncovered left edge of a missed range.
+// - Configured seeders are all asked; auto-discovered seeders are capped to the 8 most recently active.
+// - Seeder replies can be streamed with createMissingMessageReplyPacker({ messenger, question }).update(seed), then finalize(optionalLastSeed).
 
+import { bytesToBase64 } from '../../helpers/base64.js'
 import * as privateMessage from '../../helpers/nostr/private-message.js'
 import * as privateChannel from '../private-channel/index.js'
 import { createQueue } from './queue.js'
+import {
+  createMissingMessageReplyPacker,
+  MISSING_MESSAGES_ASK_CODE,
+  MISSING_MESSAGES_REPLY_CODE,
+  SEEDER_PRESENCE_CODE
+} from './recovery.js'
+
+export {
+  createMissingMessageReplyPacker,
+  MISSING_MESSAGES_ASK_CODE,
+  MISSING_MESSAGES_REPLY_CODE,
+  SEEDER_PRESENCE_CODE
+} from './recovery.js'
 
 const DEFAULT_OFFLINE_RECOVERY_SECONDS = 7 * 24 * 60 * 60
 const DEFAULT_STALE_CHANNEL_SECONDS = 45 * 24 * 60 * 60
 const DEFAULT_OFFLINE_SKEW_SECONDS = 30
 const DEFAULT_RELOAD_GAP_DELAY_MS = 500
+const DEFAULT_SEEDER_PRESENCE_INTERVAL_MS = 10 * 60 * 1000
+const DEFAULT_SEEDER_ONLINE_SECONDS = 20 * 60
+const DEFAULT_MAX_DYNAMIC_RECOVERY_SEEDERS = 8
+
+const encoder = new TextEncoder()
 
 function nowSeconds () {
   return Math.floor(Date.now() / 1000)
@@ -50,17 +72,27 @@ export class PrivateMessenger {
     staleChannelSeconds = DEFAULT_STALE_CHANNEL_SECONDS,
     offlineSkewSeconds = DEFAULT_OFFLINE_SKEW_SECONDS,
     reloadGapDelayMs = DEFAULT_RELOAD_GAP_DELAY_MS,
+    seederPresenceIntervalMs = DEFAULT_SEEDER_PRESENCE_INTERVAL_MS,
+    seederOnlineSeconds = DEFAULT_SEEDER_ONLINE_SECONDS,
+    maxDynamicRecoverySeeders = DEFAULT_MAX_DYNAMIC_RECOVERY_SEEDERS,
     _privateMessage = privateMessage,
     _privateChannel = privateChannel,
-    _setTimeout = globalThis.setTimeout.bind(globalThis)
+    _setTimeout = globalThis.setTimeout.bind(globalThis),
+    _setInterval = globalThis.setInterval.bind(globalThis),
+    _clearInterval = globalThis.clearInterval.bind(globalThis)
   } = {}) {
     this.offlineRecoverySeconds = offlineRecoverySeconds
     this.staleChannelSeconds = staleChannelSeconds
     this.offlineSkewSeconds = offlineSkewSeconds
     this.reloadGapDelayMs = reloadGapDelayMs
+    this.seederPresenceIntervalMs = seederPresenceIntervalMs
+    this.seederOnlineSeconds = seederOnlineSeconds
+    this.maxDynamicRecoverySeeders = maxDynamicRecoverySeeders
     this._privateMessage = _privateMessage
     this._privateChannel = _privateChannel
     this._setTimeout = _setTimeout
+    this._setInterval = _setInterval
+    this._clearInterval = _clearInterval
 
     this.userSigner = null
     this.contentKeySigner = null
@@ -69,6 +101,7 @@ export class PrivateMessenger {
     this.queue = null
     this.channels = new Map()
     this.stopByChannel = new Map()
+    this.presenceTimers = new Map()
     this.stopOnline = null
     this.stopOffline = null
   }
@@ -91,13 +124,18 @@ export class PrivateMessenger {
     const nextChannels = await this.normalizeChannels(channels, { relays, mode })
     const nextPubkeys = new Set(nextChannels.map(channel => channel.pubkey))
 
-    for (const pubkey of this.channels.keys()) {
-      if (!nextPubkeys.has(pubkey)) this.unwatch(pubkey)
+    for (const pubkey of [...this.channels.keys()]) {
+      if (!nextPubkeys.has(pubkey)) {
+        this.unwatch(pubkey)
+        this.channels.delete(pubkey)
+      }
     }
     for (const channel of nextChannels) this.channels.set(channel.pubkey, channel)
 
     this.cleanupStaleChannels()
-    return this.watch()
+    await this.watch()
+    await this.reconcilePresencePublishers()
+    return this
   }
 
   async normalizeChannels (channels, defaults) {
@@ -111,7 +149,8 @@ export class PrivateMessenger {
         pubkey,
         signer,
         relays: uniq(channel.relays?.length ? channel.relays : defaults.relays),
-        mode: channel.mode || defaults.mode || 'leecher'
+        mode: channel.mode || defaults.mode || 'leecher',
+        seeders: uniq(channel.seeders)
       })
     }
     return out
@@ -151,6 +190,68 @@ export class PrivateMessenger {
     current.lastSeenAt = Math.max(current.lastSeenAt || 0, createdAt || 0)
     state.channels[pubkey] = current
     this.writeState(state)
+  }
+
+  knownSeeders (pubkey) {
+    const channel = this.channels.get(pubkey)
+    if (channel?.seeders?.length) return channel.seeders
+    const activity = this.readState().channels[pubkey]?.seederActivity || {}
+    return Object.keys(activity)
+  }
+
+  recoverySeeders (pubkey) {
+    const channel = this.channels.get(pubkey)
+    const configuredSeeders = channel?.seeders || []
+    if (configuredSeeders.length) return configuredSeeders.filter(seeder => seeder !== this.userPubkey)
+
+    const activity = this.readState().channels[pubkey]?.seederActivity || {}
+    const cutoff = nowSeconds() - this.seederOnlineSeconds
+    return Object.entries(activity)
+      .filter(([seeder, entry]) => seeder !== this.userPubkey && (entry.lastActiveAt || 0) >= cutoff)
+      .sort((a, b) => (b[1].lastActiveAt || 0) - (a[1].lastActiveAt || 0))
+      .slice(0, this.maxDynamicRecoverySeeders)
+      .map(([seeder]) => seeder)
+  }
+
+  markSeederActive (channelPubkey, seederPubkey, { announced = false, at = nowSeconds() } = {}) {
+    const state = this.readState()
+    const current = state.channels[channelPubkey] || {}
+    const activity = current.seederActivity || {}
+    const entry = activity[seederPubkey] || {}
+    activity[seederPubkey] = {
+      ...entry,
+      firstSeenAt: entry.firstSeenAt || at,
+      lastActiveAt: Math.max(entry.lastActiveAt || 0, at)
+    }
+    if (announced) activity[seederPubkey].announcedAt = at
+    current.seederActivity = activity
+    state.channels[channelPubkey] = current
+    this.writeState(state)
+  }
+
+  trackSeederActivity (channelPubkey, message) {
+    const senderPubkey = message.event?.pubkey
+    if (!senderPubkey) return false
+
+    const channel = this.channels.get(channelPubkey)
+    if (!channel) return false
+
+    const activity = this.readState().channels[channelPubkey]?.seederActivity || {}
+    const isPresence = messageCode(message) === SEEDER_PRESENCE_CODE
+    const configuredSeeders = channel.seeders || []
+    const isConfiguredSeeder = configuredSeeders.includes(senderPubkey)
+    const isKnownDynamicSeeder = Boolean(activity[senderPubkey])
+    const at = messageTime(message)
+
+    if (isPresence) {
+      if (configuredSeeders.length && !isConfiguredSeeder) return false
+      this.markSeederActive(channelPubkey, senderPubkey, { announced: true, at })
+      return true
+    }
+
+    if (!isConfiguredSeeder && !isKnownDynamicSeeder) return false
+    this.markSeederActive(channelPubkey, senderPubkey, { at })
+    return true
   }
 
   addOfflineRange (pubkey, start, end) {
@@ -204,14 +305,11 @@ export class PrivateMessenger {
         iykcSigner: this.contentKeySigner,
         privateChannelSigner: channel.signer,
         mode: channel.mode,
-        onAsk: message => this.enqueueRumor('ask', pubkey, message),
-        onReply: message => this.enqueueRumor('reply', pubkey, message),
-        onTell: message => this.enqueueRumor('tell', pubkey, message),
-        onYell: message => this.enqueueRumor('yell', pubkey, message),
-        onMessage: message => {
-          if (eventType(message.event) !== 'message') return
-          this.enqueueRumor('message', pubkey, message)
-        },
+        onAsk: message => this.handleAsk(pubkey, message),
+        onReply: message => this.handleReply(pubkey, message),
+        onTell: message => this.handleTell(pubkey, message),
+        onYell: message => this.handleYell(pubkey, message),
+        onMessage: message => this.handleMessage(pubkey, message),
         onSeed: seed => this.enqueueSeed(pubkey, seed),
         onError: err => console.warn('private-messenger watch failed', err?.message ?? err)
       })
@@ -219,7 +317,8 @@ export class PrivateMessenger {
       this.updateChannelState(pubkey, {
         lastWatchedAt: nowSeconds(),
         mode: channel.mode,
-        relays: channel.relays
+        relays: channel.relays,
+        seeders: channel.seeders
       })
       this.scheduleReloadGap(pubkey)
     }
@@ -232,12 +331,48 @@ export class PrivateMessenger {
     for (const pubkey of channelPubkeys) {
       this.stopByChannel.get(pubkey)?.()
       this.stopByChannel.delete(pubkey)
+      this.stopPresencePublisher(pubkey)
     }
+  }
+
+  handleAsk (channelPubkey, message) {
+    this.trackSeederActivity(channelPubkey, message)
+    this.enqueueRumor('ask', channelPubkey, message)
+  }
+
+  async handleReply (channelPubkey, message) {
+    try {
+      this.trackSeederActivity(channelPubkey, message)
+      if (messageCode(message) === MISSING_MESSAGES_REPLY_CODE) {
+        await this.consumeMissingMessagesReply(channelPubkey, message)
+        return
+      }
+      this.enqueueRumor('reply', channelPubkey, message)
+    } catch (err) {
+      console.warn('private-messenger reply handling failed', err?.message ?? err)
+    }
+  }
+
+  handleTell (channelPubkey, message) {
+    this.trackSeederActivity(channelPubkey, message)
+    this.enqueueRumor('tell', channelPubkey, message)
+  }
+
+  handleYell (channelPubkey, message) {
+    this.trackSeederActivity(channelPubkey, message)
+    if (messageCode(message) === SEEDER_PRESENCE_CODE) return
+    this.enqueueRumor('yell', channelPubkey, message)
+  }
+
+  handleMessage (channelPubkey, message) {
+    if (eventType(message.event) !== 'message') return
+    this.trackSeederActivity(channelPubkey, message)
+    this.enqueueRumor('message', channelPubkey, message)
   }
 
   enqueueRumor (type, channelPubkey, message) {
     const channel = this.channels.get(channelPubkey)
-    if (channel?.mode === 'seeder') return
+    if (channel?.mode === 'seeder' && type !== 'ask') return
     this.markSeen(channelPubkey, message.outer?.created_at || message.event?.created_at || nowSeconds())
     this.queue.enqueue({
       type,
@@ -351,6 +486,59 @@ export class PrivateMessenger {
     })
   }
 
+  async publishSeederPresence (channelPubkey = this.defaultChannelPubkey()) {
+    const channel = this.requireChannel(channelPubkey)
+    const receiverPubkeys = uniq([...this.knownSeeders(channelPubkey), this.userPubkey])
+    return this._privateMessage.yell({
+      senderSigner: this.userSigner,
+      imkcSigner: this.contentKeySigner,
+      privateChannelSigner: channel.signer,
+      receiverPubkeys,
+      relays: channel.relays,
+      expirationSeconds: this.offlineRecoverySeconds,
+      code: SEEDER_PRESENCE_CODE,
+      payload: {}
+    })
+  }
+
+  async startPresencePublisher (channelPubkey) {
+    if (this.presenceTimers.has(channelPubkey)) return
+    try {
+      await this.publishSeederPresence(channelPubkey)
+    } catch (err) {
+      console.warn('private-messenger seeder presence failed', err?.message ?? err)
+    }
+    const timer = this._setInterval(() => {
+      this.publishSeederPresence(channelPubkey).catch(err => {
+        console.warn('private-messenger seeder presence failed', err?.message ?? err)
+      })
+    }, this.seederPresenceIntervalMs)
+    timer?.unref?.()
+    this.presenceTimers.set(channelPubkey, timer)
+  }
+
+  stopPresencePublisher (channelPubkey) {
+    const timer = this.presenceTimers.get(channelPubkey)
+    if (timer) this._clearInterval(timer)
+    this.presenceTimers.delete(channelPubkey)
+  }
+
+  async reconcilePresencePublishers () {
+    const starts = []
+    for (const pubkey of [...this.presenceTimers.keys()]) {
+      if (this.channels.get(pubkey)?.mode !== 'seeder') this.stopPresencePublisher(pubkey)
+    }
+    for (const [pubkey, channel] of this.channels) {
+      if (channel.mode === 'seeder') starts.push(this.startPresencePublisher(pubkey))
+      else this.stopPresencePublisher(pubkey)
+    }
+    await Promise.all(starts)
+  }
+
+  createMissingMessageReplyPacker (options) {
+    return createMissingMessageReplyPacker({ messenger: this, ...options })
+  }
+
   defaultChannelPubkey () {
     return this.channels.keys().next().value
   }
@@ -398,6 +586,83 @@ export class PrivateMessenger {
     }
   }
 
+  async askSeedersForMissingRange (channelPubkey, since, until) {
+    const seeders = this.recoverySeeders(channelPubkey)
+    if (!seeders.length || until < since) return []
+
+    const asks = []
+    for (const seeder of seeders) {
+      try {
+        asks.push(await this.ask({
+          channelPubkey,
+          receiverPubkey: seeder,
+          code: MISSING_MESSAGES_ASK_CODE,
+          payload: { since, until }
+        }))
+      } catch (err) {
+        console.warn('private-messenger seeder recovery ask failed', seeder, err?.message ?? err)
+      }
+    }
+    return asks
+  }
+
+  async askSeedersForRelayLeftEdge (channelPubkey, range, fetchedEvents) {
+    const oldest = oldestCreatedAt(fetchedEvents)
+    const until = oldest == null ? range.end : Math.min(range.end, oldest)
+    if (until < range.start) return []
+    return this.askSeedersForMissingRange(channelPubkey, range.start, until)
+  }
+
+  async consumeMissingMessagesReply (channelPubkey, message) {
+    const payload = message.payload?.payload
+    const jsonl = typeof payload?.jsonl === 'string' ? payload.jsonl : ''
+    if (!jsonl) return
+
+    for (const line of splitJsonl(jsonl)) {
+      const record = parseJson(line, null)
+      if (!record) continue
+      const event = await this.eventFromBackfillRecord(channelPubkey, record)
+      if (!event) continue
+      this.enqueueRumor(eventType(event), channelPubkey, {
+        event,
+        outer: message.outer,
+        meta: { ...(message.meta || {}), channelPubkey, recoveredFromSeeder: message.event?.pubkey || '' },
+        payload: parseEventContent(event)
+      })
+    }
+  }
+
+  async eventFromBackfillRecord (channelPubkey, record) {
+    if (record.event) return record.event
+    if (Number.isInteger(record.kind)) return record
+    if (!record.row || !record.router) return null
+    if (!this._privateChannel.unwrapEvent) throw new Error('PRIVATE_CHANNEL_UNWRAP_UNSUPPORTED')
+
+    const channel = this.requireChannel(channelPubkey)
+    const row = String(record.row).endsWith('\n') ? String(record.row) : `${record.row}\n`
+    const router = {
+      kind: privateChannel.ROUTER_KIND,
+      pubkey: record.router.pubkey,
+      created_at: record.router.created_at || record.outer?.created_at || nowSeconds(),
+      tags: (record.router.tags || []).filter(tag => tag[0] !== 'c').concat([['c', '0', '1']]),
+      content: bytesToBase64(encoder.encode(row))
+    }
+    const outer = {
+      kind: privateChannel.PRIVATE_BROADCAST_KIND,
+      pubkey: record.outer?.pubkey || channelPubkey,
+      created_at: record.outer?.created_at || router.created_at,
+      tags: record.outer?.tags || [],
+      content: await channel.signer.nip44Encrypt(channelPubkey, JSON.stringify(router))
+    }
+    return this._privateChannel.unwrapEvent({
+      receiverSigner: this.userSigner,
+      iykcSigner: this.contentKeySigner,
+      privateChannelSigner: channel.signer,
+      event: outer,
+      receiverPubkey: this.userPubkey
+    })
+  }
+
   async recoverOfflineRanges (channels = [...this.stopByChannel.keys()]) {
     const state = this.readState()
     const now = nowSeconds()
@@ -412,7 +677,7 @@ export class PrivateMessenger {
       for (const range of current.offlineRanges) {
         if (range.end < minStart) continue
         try {
-          await this._privateChannel.fetch({
+          const fetchedEvents = await this._privateChannel.fetch({
             receiverSigner: this.userSigner,
             iykcSigner: this.contentKeySigner,
             privateChannelSigner: channel.signer,
@@ -426,7 +691,8 @@ export class PrivateMessenger {
             onEvent: (event, outer, meta) => this.enqueueRumor(eventType(event), pubkey, { event, outer, meta, payload: parseEventContent(event) }),
             onSeedEvent: seed => this.enqueueSeed(pubkey, seed),
             onError: err => { throw err }
-          })
+          }) || []
+          await this.askSeedersForRelayLeftEdge(pubkey, range, fetchedEvents)
         } catch (err) {
           console.warn('private-messenger recovery failed', pubkey, err?.message ?? err)
           remaining.push(range)
@@ -467,6 +733,7 @@ export class PrivateMessenger {
 
   close () {
     this.unwatch()
+    for (const pubkey of [...this.presenceTimers.keys()]) this.stopPresencePublisher(pubkey)
     this.stopOffline?.()
     this.stopOnline?.()
     this.stopOffline = null
@@ -493,6 +760,27 @@ function eventType (event) {
 
 function parseEventContent (event) {
   try { return JSON.parse(event.content) } catch { return event.content }
+}
+
+function messageCode (message) {
+  return isPlainObject(message.payload) ? message.payload.code || '' : ''
+}
+
+function messageTime (message) {
+  return message.outer?.created_at || message.event?.created_at || nowSeconds()
+}
+
+function oldestCreatedAt (events) {
+  let oldest = null
+  for (const event of events || []) {
+    if (!Number.isFinite(event?.created_at)) continue
+    oldest = oldest == null ? event.created_at : Math.min(oldest, event.created_at)
+  }
+  return oldest
+}
+
+function splitJsonl (jsonl) {
+  return String(jsonl || '').split('\n').filter(Boolean)
 }
 
 export async function createPrivateMessenger (options) {

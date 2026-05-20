@@ -1,7 +1,13 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { ASK_KIND, REPLY_KIND, TELL_KIND } from '../docs/helpers/nostr/private-message.js'
-import { PrivateMessenger } from '../docs/services/private-messenger/index.js'
+import {
+  createMissingMessageReplyPacker,
+  MISSING_MESSAGES_ASK_CODE,
+  MISSING_MESSAGES_REPLY_CODE,
+  PrivateMessenger,
+  SEEDER_PRESENCE_CODE
+} from '../docs/services/private-messenger/index.js'
 
 const data = new Map()
 globalThis.localStorage = {
@@ -205,4 +211,198 @@ test('watch schedules reload-gap recovery and fetches missing channel window', a
   assert.ok(fetches[0].until >= now)
   assert.equal(messenger.nextMessage().event.id, 'ask-id')
   assert.deepEqual(messenger.readState().channels.channel.offlineRanges, [])
+})
+
+test('seeder channels publish presence immediately and on interval', async () => {
+  const pm = fakePrivateMessage()
+  const intervals = []
+  const cleared = []
+  const messenger = await new PrivateMessenger({
+    _privateMessage: pm,
+    _setInterval: (fn, ms) => {
+      const timer = { fn, ms }
+      intervals.push(timer)
+      return timer
+    },
+    _clearInterval: timer => cleared.push(timer)
+  }).init({
+    userSigner: signer('user'),
+    channels: [{ pubkey: 'channel', signer: signer('channel'), relays: ['wss://relay.example'], mode: 'seeder', seeders: ['alice'] }]
+  })
+
+  assert.equal(pm.sent[0].method, 'yell')
+  assert.equal(pm.sent[0].options.code, SEEDER_PRESENCE_CODE)
+  assert.deepEqual(pm.sent[0].options.receiverPubkeys, ['alice', 'user'])
+  assert.equal(intervals[0].ms, 10 * 60 * 1000)
+
+  await intervals[0].fn()
+
+  assert.equal(pm.sent[1].method, 'yell')
+  assert.equal(pm.sent[1].options.code, SEEDER_PRESENCE_CODE)
+
+  messenger.close()
+  assert.deepEqual(cleared, intervals)
+})
+
+test('recovery asks online seeders for the relay-uncovered left edge', async () => {
+  const pm = fakePrivateMessage()
+  const fetches = []
+  let scheduled = null
+  const now = Math.floor(Date.now() / 1000)
+  globalThis.localStorage.setItem('ez-vault:private-messenger:user:state', JSON.stringify({
+    channels: {
+      channel: { lastSeenAt: now - 20, lastWatchedAt: now - 20 }
+    }
+  }))
+  const messenger = await new PrivateMessenger({
+    _privateMessage: pm,
+    _privateChannel: {
+      fetch: async options => {
+        fetches.push(options)
+        options.onEvent({
+          id: 'relay-id',
+          kind: TELL_KIND,
+          pubkey: 'alice',
+          created_at: now - 5,
+          tags: [['r', 'user']],
+          content: '{"payload":"relay"}'
+        }, { id: 'outer-id', created_at: now - 5 }, { channelPubkey: 'channel' })
+        return [{ id: 'outer-id', created_at: now - 5 }]
+      }
+    },
+    _setTimeout: fn => { scheduled = fn }
+  }).init({
+    userSigner: signer('user'),
+    channels: [{ pubkey: 'channel', signer: signer('channel'), relays: ['wss://relay.example'], seeders: ['seeder'] }]
+  })
+
+  pm.watchCalls[0].onYell({
+    event: { id: 'presence-id', kind: TELL_KIND, pubkey: 'seeder', created_at: now - 2, tags: [], content: '{"code":"' + SEEDER_PRESENCE_CODE + '","payload":{}}' },
+    outer: { id: 'presence-outer-id', created_at: now - 2 },
+    meta: { channelPubkey: 'channel' },
+    payload: { code: SEEDER_PRESENCE_CODE, payload: {} },
+    yell: { id: 'presence-id' }
+  })
+
+  assert.equal(messenger.nextMessage(), null)
+
+  await scheduled()
+
+  const ask = pm.sent.find(sent => sent.method === 'ask' && sent.options.code === MISSING_MESSAGES_ASK_CODE)
+  assert.equal(fetches.length, 1)
+  assert.equal(ask.options.receiverPubkey, 'seeder')
+  assert.ok(ask.options.payload.since <= now - 20)
+  assert.equal(ask.options.payload.until, now - 5)
+  assert.equal(messenger.nextMessage().event.id, 'relay-id')
+})
+
+test('recovery asks all configured seeders but caps discovered seeders', async () => {
+  const pm = fakePrivateMessage()
+  const now = Math.floor(Date.now() / 1000)
+  const configuredSeeders = Array.from({ length: 10 }, (_v, index) => `configured-${index}`)
+  const discoveredSeeders = Array.from({ length: 12 }, (_v, index) => `discovered-${index}`)
+  const messenger = await new PrivateMessenger({ _privateMessage: pm }).init({
+    userSigner: signer('user'),
+    channels: [
+      { pubkey: 'configured', signer: signer('configured'), relays: ['wss://relay.example'], seeders: configuredSeeders },
+      { pubkey: 'discovered', signer: signer('discovered'), relays: ['wss://relay.example'] }
+    ]
+  })
+
+  for (const [index, seeder] of discoveredSeeders.entries()) {
+    messenger.markSeederActive('discovered', seeder, { at: now - index })
+  }
+
+  await messenger.askSeedersForMissingRange('configured', now - 20, now - 10)
+  await messenger.askSeedersForMissingRange('discovered', now - 20, now - 10)
+
+  const configuredAsks = pm.sent.filter(sent => sent.method === 'ask' && sent.options.privateChannelSigner.getPublicKey() === 'configured')
+  const discoveredAsks = pm.sent.filter(sent => sent.method === 'ask' && sent.options.privateChannelSigner.getPublicKey() === 'discovered')
+
+  assert.deepEqual(configuredAsks.map(sent => sent.options.receiverPubkey), configuredSeeders)
+  assert.deepEqual(discoveredAsks.map(sent => sent.options.receiverPubkey), discoveredSeeders.slice(0, 8))
+})
+
+test('missing-message replies are consumed internally as recovered queue items', async () => {
+  const pm = fakePrivateMessage()
+  const messenger = await new PrivateMessenger({ _privateMessage: pm }).init({
+    userSigner: signer('user'),
+    channels: [{ pubkey: 'channel', signer: signer('channel'), relays: ['wss://relay.example'], seeders: ['seeder'] }]
+  })
+  const jsonl = `${JSON.stringify({
+    event: {
+      id: 'missed-id',
+      kind: TELL_KIND,
+      pubkey: 'alice',
+      created_at: 1,
+      tags: [['r', 'user']],
+      content: '{"payload":"old"}'
+    }
+  })}\n`
+
+  await pm.watchCalls[0].onReply({
+    event: { id: 'reply-id', kind: REPLY_KIND, pubkey: 'seeder', created_at: 2, tags: [['q', 'question-id']], content: '' },
+    outer: { id: 'reply-outer-id', created_at: 3 },
+    meta: { channelPubkey: 'channel' },
+    payload: { code: MISSING_MESSAGES_REPLY_CODE, payload: { index: 0, done: true, jsonl } },
+    questionId: 'question-id',
+    reply: { id: 'reply-id' }
+  })
+
+  const item = messenger.nextMessage()
+  assert.equal(item.type, 'tell')
+  assert.equal(item.event.id, 'missed-id')
+  assert.deepEqual(item.payload, { payload: 'old' })
+  assert.equal(messenger.nextMessage(), null)
+})
+
+test('missing-message reply packer groups records by count and accepts final input', async () => {
+  const replies = []
+  const question = {
+    id: 'question-id',
+    pubkey: 'user',
+    content: JSON.stringify({ code: MISSING_MESSAGES_ASK_CODE, payload: { since: 5, until: 20 } })
+  }
+  const packer = createMissingMessageReplyPacker({
+    messenger: { reply: async options => replies.push(options) },
+    channelPubkey: 'channel',
+    question,
+    eventsPerChunk: 1
+  })
+  const userRow = JSON.stringify(['user', 'ciphertext'])
+  const otherRow = JSON.stringify(['other', 'ciphertext'])
+
+  await packer.update({
+    event: {
+      id: 'event-id',
+      kind: TELL_KIND,
+      pubkey: 'alice',
+      created_at: 6,
+      tags: [['r', 'user']],
+      content: '{"payload":"first"}'
+    }
+  })
+  await packer.finalize({
+    type: 'seed',
+    channelPubkey: 'channel',
+    outer: { id: 'outer-id', kind: 3560, pubkey: 'channel', created_at: 10, tags: [['expiration', '99']] },
+    router: { kind: 263, pubkey: 'router', created_at: 10, tags: [['f', 'sender'], ['c', '0', '1']] },
+    jsonl: `${userRow}\n${otherRow}\n`
+  })
+
+  assert.equal(replies.length, 2)
+  assert.equal(replies[0].code, MISSING_MESSAGES_REPLY_CODE)
+  assert.equal(replies[0].receiverPubkey, 'user')
+  assert.equal(replies[0].payload.since, 5)
+  assert.equal(replies[0].payload.until, 20)
+  assert.equal(replies[0].payload.done, false)
+  assert.equal(JSON.parse(replies[0].payload.jsonl.trim()).event.id, 'event-id')
+
+  assert.equal(replies[1].payload.done, true)
+  const lines = replies[1].payload.jsonl.trim().split('\n')
+  assert.equal(lines.length, 1)
+  const record = JSON.parse(lines[0])
+  assert.equal(record.row, userRow)
+  assert.equal(record.outer.id, 'outer-id')
+  assert.deepEqual(record.router.tags, [['f', 'sender']])
 })
