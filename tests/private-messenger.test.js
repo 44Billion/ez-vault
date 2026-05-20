@@ -122,6 +122,7 @@ test('private messenger delegates send helpers with scoped signers and relays', 
     assert.equal(sent.options.imkcSigner.getPublicKey(), 'content')
     assert.equal(sent.options.privateChannelSigner.getPublicKey(), 'channel')
     assert.deepEqual(sent.options.relays, ['wss://relay.example'])
+    assert.equal(sent.options.expirationSeconds, 7 * 24 * 60 * 60)
   }
 })
 

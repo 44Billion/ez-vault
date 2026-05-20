@@ -11,6 +11,12 @@
 // await messenger.yell({ receiverPubkeys, payload: { notice: 'hello all' } })
 // await messenger.update({ channels: nextChannels })
 // messenger.clearChannel(channelPubkey)
+//
+// Missed-message recovery:
+// - Each watched channel stores lastSeenAt/lastWatchedAt in localStorage.
+// - Re-watching after reload fetches the gap from lastSeenAt to now.
+// - Browser offline/online events add explicit offline ranges with a small skew.
+// - Ranges older than 7 days are ignored; channel state not watched for 45 days is pruned.
 
 import * as privateMessage from '../../helpers/nostr/private-message.js'
 import * as privateChannel from '../private-channel/index.js'
@@ -270,6 +276,7 @@ export class PrivateMessenger {
       privateChannelSigner: channel.signer,
       receiverPubkey,
       relays: relays || channel.relays,
+      expirationSeconds: this.offlineRecoverySeconds,
       message,
       code,
       payload,
@@ -286,6 +293,7 @@ export class PrivateMessenger {
       question,
       receiverPubkey,
       relays: relays || channel.relays,
+      expirationSeconds: this.offlineRecoverySeconds,
       message,
       code,
       payload,
@@ -301,6 +309,7 @@ export class PrivateMessenger {
       privateChannelSigner: channel.signer,
       receiverPubkey,
       relays: relays || channel.relays,
+      expirationSeconds: this.offlineRecoverySeconds,
       message,
       code,
       payload,
@@ -316,6 +325,7 @@ export class PrivateMessenger {
       privateChannelSigner: channel.signer,
       receiverPubkeys,
       relays: relays || channel.relays,
+      expirationSeconds: this.offlineRecoverySeconds,
       message,
       code,
       payload,

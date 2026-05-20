@@ -80,6 +80,22 @@ test('wrapEvent creates private broadcast events under relay event size limit', 
   assert.equal(globalThis.localStorage.getItem(TEMPORARY_STORAGE_KEYS_KEY), null)
 })
 
+test('wrapEvent supports overriding the outer expiration window', async () => {
+  const alice = signer()
+  const bob = signer()
+  const bobPubkey = await bob.getPublicKey()
+  const before = Math.floor(Date.now() / 1000)
+  const [wrapped] = await wrapEvent({
+    senderSigner: alice,
+    receivers: [bobPubkey],
+    event: eventFixture('hello bob'),
+    expirationSeconds: 7 * 24 * 60 * 60,
+    _getIykcProofs: noContentKeys
+  })
+
+  assert.ok(Number(wrapped.tags[0][1]) >= before + 7 * 24 * 60 * 60)
+})
+
 test('unwrapEvent returns the addressed receiver event or null', async () => {
   const alice = signer()
   const bob = signer()

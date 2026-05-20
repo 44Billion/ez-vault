@@ -13,7 +13,7 @@ export function getJsonlChunkByteSize () {
 }
 
 // Streaming version of wrapEvent
-export async function * wrapEvents ({ senderSigner, imkcSigner, privateChannelSigner = senderSigner, receivers, receiverTag, event, _getIykcProofs = getIykcProofs }) {
+export async function * wrapEvents ({ senderSigner, imkcSigner, privateChannelSigner = senderSigner, receivers, receiverTag, event, expirationSeconds = EXPIRATION_SECONDS, _getIykcProofs = getIykcProofs }) {
   const rowEncryptionSigner = imkcSigner || senderSigner
   if (!senderSigner?.getPublicKey) throw new Error('SENDER_SIGNER_REQUIRED')
   if (!rowEncryptionSigner?.withSharedKey) throw new Error('SIGNER_SHARED_KEY_UNSUPPORTED')
@@ -45,7 +45,7 @@ export async function * wrapEvents ({ senderSigner, imkcSigner, privateChannelSi
       const outer = await privateChannelSigner.signEvent({
         kind: PRIVATE_BROADCAST_KIND,
         created_at: nowSeconds(),
-        tags: [['expiration', String(nowSeconds() + EXPIRATION_SECONDS)]],
+        tags: [['expiration', String(nowSeconds() + expirationSeconds)]],
         content: await privateChannelSigner.nip44Encrypt(channelPubkey, JSON.stringify(router))
       })
       if (eventByteLength(outer) > MAX_EVENT_BYTES) throw new Error('EVENT_TOO_LARGE')
@@ -90,9 +90,9 @@ export async function unwrapEvent ({ receiverSigner, iykcSigner, privateChannelS
   return null
 }
 
-export async function publish ({ senderSigner, imkcSigner, privateChannelSigner = senderSigner, receivers, receiverTag, event, relays, _getIykcProofs = getIykcProofs }) {
+export async function publish ({ senderSigner, imkcSigner, privateChannelSigner = senderSigner, receivers, receiverTag, event, relays, expirationSeconds, _getIykcProofs = getIykcProofs }) {
   const results = []
-  for await (const wrappedEvent of wrapEvents({ senderSigner, imkcSigner, privateChannelSigner, receivers, receiverTag, event, _getIykcProofs })) {
+  for await (const wrappedEvent of wrapEvents({ senderSigner, imkcSigner, privateChannelSigner, receivers, receiverTag, event, expirationSeconds, _getIykcProofs })) {
     results.push(await publishToRelays(wrappedEvent, relays))
   }
   return { results }
