@@ -6,7 +6,6 @@ export const ASK_KIND = 7329
 export const REPLY_KIND = 7330
 export const TELL_KIND = 7331
 
-const BOGUS_PUBKEY = '0'.repeat(64)
 const PENDING_ASKS_KEY = 'ez-vault:private-message:pending-asks'
 const DEFAULT_RETRY_INTERVAL_MS = 2 * 60 * 1000
 const DEFAULT_RETRY_LIMIT = 3
@@ -45,20 +44,35 @@ function parseContent (event) {
   try { return JSON.parse(event.content) } catch { return event.content }
 }
 
-function eventWithId (event) {
-  const id = getEventHash(event)
-  return { ...event, id }
-}
-
-function makeRumor ({ kind, content, tags = [], createdAt = nowSeconds(), id }) {
-  const event = {
+function makeWireRumor ({ kind, content, tags = [], createdAt = nowSeconds() }) {
+  return {
     kind,
-    pubkey: BOGUS_PUBKEY,
     created_at: createdAt,
     tags,
     content
   }
-  return id ? { ...event, id } : eventWithId(event)
+}
+
+async function makeOutgoingRumor ({ senderSigner, kind, content, tags = [], createdAt }) {
+  if (!senderSigner?.getPublicKey) throw new Error('SENDER_SIGNER_REQUIRED')
+  const senderPubkey = await senderSigner.getPublicKey()
+  const wireEvent = makeWireRumor({ kind, content, tags, createdAt })
+  const event = normalizeRumor(wireEvent, senderPubkey)
+  return { event, wireEvent }
+}
+
+function normalizeRumor (event, pubkey) {
+  const normalized = { ...event, pubkey }
+  return { ...normalized, id: getEventHash(normalized) }
+}
+
+function wireRumorFromEvent (event) {
+  // eslint-disable-next-line no-unused-vars
+  const { id, pubkey, sig, ...wireEvent } = event
+  return {
+    ...wireEvent,
+    tags: (event.tags || []).map(tag => [...tag])
+  }
 }
 
 function readTag (event, name) {
@@ -138,13 +152,10 @@ function forgetAsk (id) {
 
 function retryQuestionEvent (ask) {
   const missingChunks = Object.keys(ask.missingChunks || {}).length ? ask.missingChunks : null
-  if (!missingChunks) return ask.question
+  const wireEvent = wireRumorFromEvent(ask.question)
+  if (!missingChunks) return wireEvent
 
-  const parsed = parseContent(ask.question)
-  const content = typeof parsed === 'string'
-    ? JSON.stringify({ payload: parsed, missingChunks })
-    : JSON.stringify({ ...parsed, missingChunks })
-  return { ...ask.question, content, id: ask.question.id }
+  return { ...wireEvent, missingChunks }
 }
 
 function scheduleAskRetry (ask) {
@@ -474,12 +485,13 @@ export async function ask ({
   const privateChannelPubkey = await ownPrivateChannelPubkey(privateChannelSigner)
   assertWatching(privateChannelPubkey)
 
-  const question = makeRumor({
+  const { event: question, wireEvent } = await makeOutgoingRumor({
+    senderSigner,
     kind: ASK_KIND,
     tags: [['r', receiverPubkey]],
     content: normalizeContent(message || { code, payload, content })
   })
-  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers: [receiverPubkey], receiverTag: receiverPubkey, event: question, relays, _publish })
+  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers: [receiverPubkey], receiverTag: receiverPubkey, event: wireEvent, relays, _publish })
 
   const pending = {
     id: question.id,
@@ -524,12 +536,13 @@ export async function reply ({
 }) {
   if (!question?.id) throw new Error('QUESTION_REQUIRED')
   if (!receiverPubkey) throw new Error('RECEIVER_PUBKEY_REQUIRED')
-  const event = makeRumor({
+  const { event, wireEvent } = await makeOutgoingRumor({
+    senderSigner,
     kind: REPLY_KIND,
     tags: [['q', question.id], ['r', receiverPubkey]],
     content: normalizeContent(message || { code, payload, content })
   })
-  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers: [receiverPubkey], receiverTag: receiverPubkey, event, relays, _publish })
+  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers: [receiverPubkey], receiverTag: receiverPubkey, event: wireEvent, relays, _publish })
   return { reply: event, results }
 }
 
@@ -546,12 +559,13 @@ export async function tell ({
   _publish = privateChannel.publish
 }) {
   if (!receiverPubkey) throw new Error('RECEIVER_PUBKEY_REQUIRED')
-  const event = makeRumor({
+  const { event, wireEvent } = await makeOutgoingRumor({
+    senderSigner,
     kind: TELL_KIND,
     tags: [['r', receiverPubkey]],
     content: normalizeContent(message || { code, payload, content })
   })
-  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers: [receiverPubkey], receiverTag: receiverPubkey, event, relays, _publish })
+  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers: [receiverPubkey], receiverTag: receiverPubkey, event: wireEvent, relays, _publish })
   return { tell: event, results }
 }
 
@@ -569,11 +583,12 @@ export async function yell ({
 }) {
   const receivers = uniq(receiverPubkeys)
   if (!receivers.length) throw new Error('NO_RECEIVERS')
-  const event = makeRumor({
+  const { event, wireEvent } = await makeOutgoingRumor({
+    senderSigner,
     kind: TELL_KIND,
     tags: [],
     content: normalizeContent(message || { code, payload, content })
   })
-  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers, receiverTag: '', event, relays, _publish })
+  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers, receiverTag: '', event: wireEvent, relays, _publish })
   return { yell: event, results }
 }

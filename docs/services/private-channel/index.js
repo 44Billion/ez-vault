@@ -1,4 +1,4 @@
-import { generateSecretKey, getPublicKey, finalizeEvent } from 'nostr-tools'
+import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from 'nostr-tools'
 import { getIykcProofs } from '../content-key/index.js'
 import { fetchEvents, pool, publish as publishToRelays } from '../relays.js'
 import { JSONL_CHUNK_BYTES } from './chunk-size.js'
@@ -84,7 +84,8 @@ export async function unwrapEvent ({ receiverSigner, iykcSigner, privateChannelS
     const tweakedSigner = rowReceiverSigner.withSharedKey(sharedKeyPubkey)
     const tweakedPubkey = await tweakedSigner.getPublicKey()
     const decrypted = JSON.parse(await tweakedSigner.nip44Decrypt(tweakedPubkey, ciphertext))
-    return { ...decrypted, pubkey: senderPubkey }
+    const normalized = { ...decrypted, pubkey: senderPubkey }
+    return { ...normalized, id: getEventHash(normalized) }
   }
   return null
 }

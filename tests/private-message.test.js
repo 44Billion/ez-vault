@@ -1,5 +1,6 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
+import { getEventHash } from 'nostr-tools'
 import {
   ASK_KIND,
   REPLY_KIND,
@@ -30,6 +31,10 @@ function signer (pubkey) {
     getPublicKey: () => pubkey,
     withSharedKey: () => ({})
   }
+}
+
+function pubkeyFixture (index) {
+  return index.toString(16).padStart(64, '0')
 }
 
 function fakeSubscribeFactory () {
@@ -104,16 +109,17 @@ test('ask publishes an ask rumor and watch dispatches the reply with its questio
   const { calls, fakeSubscribe } = fakeSubscribeFactory()
   const replies = []
   let published = null
+  const senderPubkey = pubkeyFixture(1)
   await watch({
     channels: ['sender-channel'],
     relays: ['wss://relay.example'],
-    receiverSigner: signer('sender'),
+    receiverSigner: signer(senderPubkey),
     privateChannelSigner: signer('sender-channel'),
     onReply: event => replies.push(event),
     _subscribe: fakeSubscribe
   })
   const result = await ask({
-    senderSigner: signer('sender'),
+    senderSigner: signer(senderPubkey),
     privateChannelSigner: signer('sender-channel'),
     receiverPubkey: 'receiver',
     relays: ['wss://relay.example'],
@@ -127,10 +133,14 @@ test('ask publishes an ask rumor and watch dispatches the reply with its questio
 
   assert.equal(published.event.kind, ASK_KIND)
   assert.equal(published.event.sig, undefined)
+  assert.equal(published.event.id, undefined)
+  assert.equal(published.event.pubkey, undefined)
   assert.equal(published.receiverTag, 'receiver')
   assert.deepEqual(published.receivers, ['receiver'])
   assert.deepEqual(JSON.parse(published.event.content), { code: 'PING', payload: { ok: true } })
-  assert.equal(result.question.id, published.event.id)
+  assert.equal(result.question.pubkey, senderPubkey)
+  assert.equal(result.question.id, getEventHash({ ...published.event, pubkey: senderPubkey }))
+  assert.throws(() => getEventHash(published.event), /wrong or missing properties/)
 
   calls[0].onEvent({
     kind: REPLY_KIND,
@@ -151,6 +161,8 @@ test('watch reattaches content key signer to pending ask retries', async () => {
   const originalFetch = globalThis.fetch
   globalThis.fetch = async () => ({})
   const published = []
+  const senderPubkey = pubkeyFixture(2)
+  let question = null
   const _publish = async options => {
     published.push(options)
     return { results: [] }
@@ -160,12 +172,12 @@ test('watch reattaches content key signer to pending ask retries', async () => {
     await watch({
       channels: ['sender-channel'],
       relays: ['wss://relay.example'],
-      receiverSigner: signer('sender'),
+      receiverSigner: signer(senderPubkey),
       privateChannelSigner: signer('sender-channel'),
       _subscribe: fakeSubscribeFactory().fakeSubscribe
     })
-    await ask({
-      senderSigner: signer('sender'),
+    const result = await ask({
+      senderSigner: signer(senderPubkey),
       privateChannelSigner: signer('sender-channel'),
       receiverPubkey: 'receiver',
       relays: ['wss://relay.example'],
@@ -174,21 +186,32 @@ test('watch reattaches content key signer to pending ask retries', async () => {
       retryIntervalMs: 25,
       _publish
     })
+    question = result.question
 
     unwatch('sender-channel')
+    const secondSubscribe = fakeSubscribeFactory()
     await watch({
       channels: ['sender-channel'],
       relays: ['wss://relay.example'],
-      receiverSigner: signer('sender'),
+      receiverSigner: signer(senderPubkey),
       iykcSigner: signer('content'),
       privateChannelSigner: signer('sender-channel'),
-      _subscribe: fakeSubscribeFactory().fakeSubscribe
+      _subscribe: secondSubscribe.fakeSubscribe
+    })
+    secondSubscribe.calls[0].onChunk({
+      channelPubkey: 'sender-channel',
+      router: { pubkey: 'router-id' },
+      missing: [1]
     })
     await new Promise(resolve => setTimeout(resolve, 60))
 
     assert.equal(published.length, 2)
     assert.equal(published[0].imkcSigner, undefined)
     assert.equal(published[1].imkcSigner.getPublicKey(), 'content')
+    assert.equal(published[1].event.id, undefined)
+    assert.equal(published[1].event.pubkey, undefined)
+    assert.deepEqual(published[1].event.missingChunks, { 'router-id': [1] })
+    assert.equal(getEventHash({ ...published[1].event, pubkey: senderPubkey }), question.id)
   } finally {
     globalThis.fetch = originalFetch
   }
@@ -196,6 +219,7 @@ test('watch reattaches content key signer to pending ask retries', async () => {
 
 test('reply tell and yell publish recognizable private message rumors', async () => {
   const published = []
+  const bobPubkey = pubkeyFixture(3)
   const _publish = async options => {
     published.push(options)
     return { results: [] }
@@ -209,17 +233,23 @@ test('reply tell and yell publish recognizable private message rumors', async ()
     content: '{}'
   }
 
-  await reply({ senderSigner: signer('bob'), question, relays: ['wss://relay.example'], payload: 'answer', _publish })
-  await tell({ senderSigner: signer('bob'), receiverPubkey: 'alice', relays: ['wss://relay.example'], payload: 'note', _publish })
-  await yell({ senderSigner: signer('bob'), receiverPubkeys: ['alice', 'carol'], relays: ['wss://relay.example'], payload: 'broadcast', _publish })
+  const replyResult = await reply({ senderSigner: signer(bobPubkey), question, relays: ['wss://relay.example'], payload: 'answer', _publish })
+  const tellResult = await tell({ senderSigner: signer(bobPubkey), receiverPubkey: 'alice', relays: ['wss://relay.example'], payload: 'note', _publish })
+  const yellResult = await yell({ senderSigner: signer(bobPubkey), receiverPubkeys: ['alice', 'carol'], relays: ['wss://relay.example'], payload: 'broadcast', _publish })
 
   assert.equal(published[0].event.kind, REPLY_KIND)
+  assert.equal(published[0].event.id, undefined)
+  assert.equal(published[0].event.pubkey, undefined)
+  assert.equal(replyResult.reply.pubkey, bobPubkey)
+  assert.equal(replyResult.reply.id, getEventHash({ ...published[0].event, pubkey: bobPubkey }))
   assert.deepEqual(published[0].event.tags, [['q', 'question-id'], ['r', 'alice']])
   assert.equal(published[0].receiverTag, 'alice')
   assert.equal(published[1].event.kind, TELL_KIND)
+  assert.equal(tellResult.tell.id, getEventHash({ ...published[1].event, pubkey: bobPubkey }))
   assert.deepEqual(published[1].event.tags, [['r', 'alice']])
   assert.equal(published[1].receiverTag, 'alice')
   assert.equal(published[2].event.kind, TELL_KIND)
+  assert.equal(yellResult.yell.id, getEventHash({ ...published[2].event, pubkey: bobPubkey }))
   assert.deepEqual(published[2].event.tags, [])
   assert.equal(published[2].receiverTag, '')
   assert.deepEqual(published[2].receivers, ['alice', 'carol'])

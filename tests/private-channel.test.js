@@ -1,6 +1,6 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { generateSecretKey } from 'nostr-tools'
+import { generateSecretKey, getEventHash } from 'nostr-tools'
 import NsecSigner from '../docs/services/nsec-signer.js'
 import {
   EXPIRATION_SECONDS,
@@ -40,6 +40,11 @@ function signer () {
 
 function eventFixture (content = 'hello') {
   return { kind: 1, created_at: 1, tags: [], content }
+}
+
+function unwrappedFixture (event, pubkey) {
+  const unwrapped = { ...event, pubkey }
+  return { ...unwrapped, id: getEventHash(unwrapped) }
 }
 
 async function noContentKeys () {
@@ -82,11 +87,11 @@ test('unwrapEvent returns the addressed receiver event or null', async () => {
   const bobPubkey = await bob.getPublicKey()
   const carolPubkey = await carol.getPublicKey()
   const alicePubkey = await alice.getPublicKey()
-  const original = eventFixture('private')
+  const original = { ...eventFixture('private'), pubkey: '0'.repeat(64), id: 'f'.repeat(64) }
   const [wrapped] = await wrapEvent({ senderSigner: alice, receivers: [bobPubkey, carolPubkey], event: original, _getIykcProofs: noContentKeys })
 
-  assert.deepEqual(await unwrapEvent({ receiverSigner: bob, privateChannelSigner: alice, event: wrapped, receiverPubkey: bobPubkey }), { ...original, pubkey: alicePubkey })
-  assert.deepEqual(await unwrapEvent({ receiverSigner: carol, privateChannelSigner: alice, event: wrapped, receiverPubkey: carolPubkey }), { ...original, pubkey: alicePubkey })
+  assert.deepEqual(await unwrapEvent({ receiverSigner: bob, privateChannelSigner: alice, event: wrapped, receiverPubkey: bobPubkey }), unwrappedFixture(original, alicePubkey))
+  assert.deepEqual(await unwrapEvent({ receiverSigner: carol, privateChannelSigner: alice, event: wrapped, receiverPubkey: carolPubkey }), unwrappedFixture(original, alicePubkey))
   assert.equal(await unwrapEvent({ receiverSigner: bob, privateChannelSigner: alice, event: wrapped, receiverPubkey: await signer().getPublicKey() }), null)
 })
 
@@ -102,7 +107,7 @@ test('unwrapEvent uses imkc tag as the row encryption pubkey', async () => {
 
   assert.equal(router.tags.find(t => t[0] === 'f')?.[1], await alice.getPublicKey())
   assert.equal(router.tags.find(t => t[0] === 'imkc')?.[1], imkcPubkey)
-  assert.deepEqual(await unwrapEvent({ receiverSigner: bob, privateChannelSigner: alice, event: wrapped, receiverPubkey: bobPubkey }), { ...original, pubkey: await alice.getPublicKey() })
+  assert.deepEqual(await unwrapEvent({ receiverSigner: bob, privateChannelSigner: alice, event: wrapped, receiverPubkey: bobPubkey }), unwrappedFixture(original, await alice.getPublicKey()))
 })
 
 test('wrapEvent uses receiver content key rows when iykc is advertised', async () => {
@@ -125,7 +130,7 @@ test('wrapEvent uses receiver content key rows when iykc is advertised', async (
 
   assert.deepEqual(line.slice(0, 1), [bobPubkey])
   assert.deepEqual(line.slice(2), [bobContentPubkey, '7:proof'])
-  assert.deepEqual(await unwrapEvent({ receiverSigner: bob, iykcSigner: bobContent, privateChannelSigner: alice, event: wrapped, receiverPubkey: bobPubkey }), { ...original, pubkey: await alice.getPublicKey() })
+  assert.deepEqual(await unwrapEvent({ receiverSigner: bob, iykcSigner: bobContent, privateChannelSigner: alice, event: wrapped, receiverPubkey: bobPubkey }), unwrappedFixture(original, await alice.getPublicKey()))
   await assert.rejects(
     () => unwrapEvent({ receiverSigner: bob, privateChannelSigner: alice, event: wrapped, receiverPubkey: bobPubkey }),
     /RECEIVER_CONTENT_KEY_REQUIRED/
