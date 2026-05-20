@@ -21,12 +21,56 @@ export const freeRelays = [
 
 const POST_EOSE_GRACE_MS = 500
 const HARD_TIMEOUT_MS = 5000
+const PUBLISH_FIRST_FULFILLMENT_TIMEOUT_MS = 3000
+const PUBLISH_SETTLEMENT_TIMEOUT_MS = 30000
 
 export const pool = new SimplePool()
 
-export async function publish (event, relays) {
-  if (!relays?.length) throw new Error('NO_RELAYS')
-  const settlements = await Promise.allSettled(pool.publish(relays, event))
+function maybeUnref (timer) {
+  timer?.unref?.()
+  return timer
+}
+
+function publishTimeoutError () {
+  return new Error('PUBLISH_TIMEOUT')
+}
+
+function firstFulfillment (promises, timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false
+    let rejected = 0
+    const finish = (success) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(success)
+    }
+    const timer = maybeUnref(setTimeout(() => finish(false), timeoutMs))
+    for (const promise of promises) {
+      Promise.resolve(promise).then(
+        () => finish(true),
+        () => {
+          rejected++
+          if (rejected === promises.length) finish(false)
+        }
+      )
+    }
+  })
+}
+
+function settlePublishPromise (promise, timeoutMs) {
+  let timer = null
+  const publishPromise = Promise.resolve(promise).then(
+    () => ({ status: 'fulfilled' }),
+    reason => ({ status: 'rejected', reason })
+  ).finally(() => clearTimeout(timer))
+  const timeoutPromise = new Promise(resolve => {
+    timer = maybeUnref(setTimeout(() => resolve({ status: 'rejected', reason: publishTimeoutError() }), timeoutMs))
+  })
+  return Promise.race([publishPromise, timeoutPromise])
+}
+
+function publishSummary (settlements, relays) {
   const fulfilled = settlements.filter(r => r.status === 'fulfilled').length
   return {
     success: fulfilled > 0,
@@ -35,6 +79,24 @@ export async function publish (event, relays) {
     errors: settlements
       .map((r, i) => r.status === 'rejected' ? { relay: relays[i], reason: r.reason } : null)
       .filter(Boolean)
+  }
+}
+
+export async function publish (event, relays, {
+  firstFulfillmentTimeoutMs = PUBLISH_FIRST_FULFILLMENT_TIMEOUT_MS,
+  settlementTimeoutMs = PUBLISH_SETTLEMENT_TIMEOUT_MS
+} = {}) {
+  if (!relays?.length) throw new Error('NO_RELAYS')
+  const publishPromises = pool.publish(relays, event)
+  const promise = Promise
+    .all(publishPromises.map(promise => settlePublishPromise(promise, settlementTimeoutMs)))
+    .then(settlements => publishSummary(settlements, relays))
+  const success = await firstFulfillment(publishPromises, firstFulfillmentTimeoutMs)
+
+  return {
+    total: relays.length,
+    success,
+    promise
   }
 }
 
