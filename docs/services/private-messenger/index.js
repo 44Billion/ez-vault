@@ -235,6 +235,7 @@ export class PrivateMessenger {
       event: message.event,
       payload: message.payload,
       question: message.question || null,
+      questionId: message.questionId || null,
       outer: message.outer || null,
       meta: message.meta || null
     })
@@ -261,7 +262,7 @@ export class PrivateMessenger {
     return this.queue.shift()
   }
 
-  async ask ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkey, relays, retry = true, retryLimit, retryIntervalMs, message, code, payload, content }) {
+  async ask ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkey, relays, message, code, payload, content }) {
     const channel = this.requireChannel(channelPubkey)
     return this._privateMessage.ask({
       senderSigner: this.userSigner,
@@ -269,9 +270,6 @@ export class PrivateMessenger {
       privateChannelSigner: channel.signer,
       receiverPubkey,
       relays: relays || channel.relays,
-      retry,
-      retryLimit,
-      retryIntervalMs,
       message,
       code,
       payload,

@@ -86,6 +86,21 @@ test('private messenger watches channels and queues received leecher rumors', as
   assert.equal(item.event.id, 'tell-id')
   assert.deepEqual(item.payload, { payload: 'hi' })
   assert.equal(messenger.readState().channels.channel.lastSeenAt, 11)
+
+  pm.watchCalls[0].onReply({
+    event: { id: 'reply-id', kind: REPLY_KIND, pubkey: 'alice', created_at: 12, tags: [['q', 'question-id']], content: '{"payload":"pong"}' },
+    outer: { id: 'outer-reply-id', created_at: 13 },
+    meta: { channelPubkey: 'channel' },
+    payload: { payload: 'pong' },
+    questionId: 'question-id',
+    reply: { id: 'reply-id' }
+  })
+
+  const reply = messenger.nextMessage()
+  assert.equal(reply.type, 'reply')
+  assert.equal(reply.question, null)
+  assert.equal(reply.questionId, 'question-id')
+  assert.equal(reply.event.id, 'reply-id')
 })
 
 test('private messenger delegates send helpers with scoped signers and relays', async () => {
@@ -96,7 +111,7 @@ test('private messenger delegates send helpers with scoped signers and relays', 
     channels: [{ pubkey: 'channel', signer: signer('channel'), relays: ['wss://relay.example'] }]
   })
 
-  await messenger.ask({ receiverPubkey: 'alice', payload: 'ping', retry: false })
+  await messenger.ask({ receiverPubkey: 'alice', payload: 'ping' })
   await messenger.reply({ question: { id: 'q', pubkey: 'alice' }, payload: 'pong' })
   await messenger.tell({ receiverPubkey: 'alice', payload: 'note' })
   await messenger.yell({ receiverPubkeys: ['alice', 'bob'], payload: 'news' })

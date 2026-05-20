@@ -1,19 +1,15 @@
 import { getEventHash } from 'nostr-tools'
 import * as privateChannel from '../../services/private-channel/index.js'
-import { isOnline, onOnline } from '../network.js'
+import { onOnline } from '../network.js'
 
 export const ASK_KIND = 7329
 export const REPLY_KIND = 7330
 export const TELL_KIND = 7331
 
-const PENDING_ASKS_KEY = 'ez-vault:private-message:pending-asks'
-const DEFAULT_RETRY_INTERVAL_MS = 2 * 60 * 1000
-const DEFAULT_RETRY_LIMIT = 3
 const RESUBSCRIBE_GRACE_MS = 500
 
 const watchesByChannel = new Map()
 const subsByRelay = new Map()
-const pendingAsks = new Map()
 let stopOnlineWatcher = null
 
 function nowSeconds () {
@@ -66,161 +62,8 @@ function normalizeRumor (event, pubkey) {
   return { ...normalized, id: getEventHash(normalized) }
 }
 
-function wireRumorFromEvent (event) {
-  // eslint-disable-next-line no-unused-vars
-  const { id, pubkey, sig, ...wireEvent } = event
-  return {
-    ...wireEvent,
-    tags: (event.tags || []).map(tag => [...tag])
-  }
-}
-
 function readTag (event, name) {
   return event.tags?.find(tag => tag[0] === name)?.[1] || ''
-}
-
-function storedPendingAsks () {
-  if (typeof localStorage === 'undefined') return {}
-  try {
-    const parsed = JSON.parse(localStorage.getItem(PENDING_ASKS_KEY) || '{}')
-    return parsed && typeof parsed === 'object' ? parsed : {}
-  } catch {
-    return {}
-  }
-}
-
-function restoreStoredPendingAsks () {
-  for (const [id, ask] of Object.entries(storedPendingAsks())) {
-    if (!ask?.question || !ask.receiverPubkey || !ask.privateChannelPubkey) continue
-    pendingAsks.set(id, {
-      id,
-      question: ask.question,
-      receiverPubkey: ask.receiverPubkey,
-      receiverTag: ask.receiverTag || ask.receiverPubkey,
-      relays: ask.relays || [],
-      retryLimit: ask.retryLimit || DEFAULT_RETRY_LIMIT,
-      retryIntervalMs: ask.retryIntervalMs || DEFAULT_RETRY_INTERVAL_MS,
-      retryCount: ask.retryCount || 0,
-      missingChunks: ask.missingChunks || {},
-      privateChannelPubkey: ask.privateChannelPubkey,
-      senderSigner: null,
-      imkcSigner: null,
-      privateChannelSigner: null,
-      publish: privateChannel.publish,
-      retryEnabled: true,
-      shouldStore: true,
-      retryTimer: null
-    })
-  }
-}
-
-function writeStoredPendingAsks () {
-  if (typeof localStorage === 'undefined') return
-  const out = {}
-  for (const [id, ask] of pendingAsks) {
-    if (!ask.shouldStore) continue
-    out[id] = {
-      question: ask.question,
-      receiverPubkey: ask.receiverPubkey,
-      receiverTag: ask.receiverTag,
-      relays: ask.relays,
-      retryCount: ask.retryCount,
-      retryLimit: ask.retryLimit,
-      retryIntervalMs: ask.retryIntervalMs,
-      missingChunks: ask.missingChunks,
-      privateChannelPubkey: ask.privateChannelPubkey
-    }
-  }
-  if (Object.keys(out).length) localStorage.setItem(PENDING_ASKS_KEY, JSON.stringify(out))
-  else localStorage.removeItem(PENDING_ASKS_KEY)
-}
-
-restoreStoredPendingAsks()
-
-function clearRetryTimer (ask) {
-  clearTimeout(ask.retryTimer)
-  ask.retryTimer = null
-}
-
-function forgetAsk (id) {
-  const ask = pendingAsks.get(id)
-  if (!ask) return
-  clearRetryTimer(ask)
-  pendingAsks.delete(id)
-  writeStoredPendingAsks()
-}
-
-function retryQuestionEvent (ask) {
-  const missingChunks = Object.keys(ask.missingChunks || {}).length ? ask.missingChunks : null
-  const wireEvent = wireRumorFromEvent(ask.question)
-  if (!missingChunks) return wireEvent
-
-  return { ...wireEvent, missingChunks }
-}
-
-function scheduleAskRetry (ask) {
-  clearRetryTimer(ask)
-  if (!ask.retryLimit || ask.retryCount >= ask.retryLimit) {
-    ask.shouldStore = false
-    writeStoredPendingAsks()
-    return
-  }
-  ask.retryTimer = setTimeout(() => retryAsk(ask.id), ask.retryIntervalMs)
-}
-
-async function retryAsk (id) {
-  const ask = pendingAsks.get(id)
-  if (!ask) return
-
-  ask.retryCount++
-  writeStoredPendingAsks()
-
-  try {
-    if (await isOnline()) {
-      await ask.publish({
-        senderSigner: ask.senderSigner,
-        imkcSigner: ask.imkcSigner,
-        privateChannelSigner: ask.privateChannelSigner,
-        receivers: [ask.receiverPubkey],
-        receiverTag: ask.receiverTag,
-        event: retryQuestionEvent(ask),
-        relays: ask.relays
-      })
-    }
-  } catch (err) {
-    console.warn('private-message ask retry failed', err?.message ?? err)
-  }
-
-  writeStoredPendingAsks()
-  scheduleAskRetry(ask)
-}
-
-function resetAskRetriesForChannel (channelPubkey, missingChunks = null) {
-  for (const ask of pendingAsks.values()) {
-    if (ask.privateChannelPubkey !== channelPubkey) continue
-    ask.retryCount = 0
-    if (ask.retryEnabled) ask.shouldStore = true
-    if (missingChunks?.routerPubkey) ask.missingChunks[missingChunks.routerPubkey] = missingChunks.missing
-    scheduleAskRetry(ask)
-  }
-  writeStoredPendingAsks()
-}
-
-function attachPendingAsksForChannel ({ channelPubkey, senderSigner, imkcSigner, privateChannelSigner }) {
-  for (const ask of pendingAsks.values()) {
-    if (ask.privateChannelPubkey !== channelPubkey) continue
-    // Restored asks only keep serializable state, so watching the channel is
-    // where we reattach the live signer objects needed to retry publishing.
-    ask.senderSigner ||= senderSigner
-    ask.imkcSigner ||= imkcSigner
-    ask.privateChannelSigner ||= privateChannelSigner
-    ask.publish ||= privateChannel.publish
-    if (ask.retryEnabled) {
-      ask.shouldStore = true
-      scheduleAskRetry(ask)
-    }
-  }
-  writeStoredPendingAsks()
 }
 
 async function ownPrivateChannelPubkey (signer) {
@@ -245,9 +88,7 @@ function dispatchWatchedEvent (event, outer, meta) {
     callbacks.onAsk?.({ ...message, question: event })
   } else if (event.kind === REPLY_KIND) {
     const questionId = readTag(event, 'q')
-    const pending = pendingAsks.get(questionId)
-    if (pending) forgetAsk(questionId)
-    callbacks.onReply?.({ ...message, question: pending?.question || null, reply: event })
+    callbacks.onReply?.({ ...message, questionId, reply: event })
   } else if (event.kind === TELL_KIND) {
     const receiverTag = readTag(event, 'r')
     if (receiverTag) callbacks.onTell?.({ ...message, tell: event })
@@ -268,10 +109,6 @@ function recordSeen (channelPubkey, createdAt) {
 }
 
 function handleChunk (chunk) {
-  resetAskRetriesForChannel(chunk.channelPubkey, {
-    routerPubkey: chunk.router.pubkey,
-    missing: chunk.missing
-  })
   watchCallbacks(chunk.channelPubkey).onChunk?.(chunk)
 }
 
@@ -424,10 +261,6 @@ export async function watch ({
       continue
     }
     watchesByChannel.set(channel, next)
-    // These are our local signers under receiving names. For retrying asks we
-    // use the same keys under sending names: receiverSigner -> senderSigner,
-    // and iykcSigner (our content key) -> imkcSigner.
-    attachPendingAsksForChannel({ channelPubkey: channel, senderSigner: receiverSigner, imkcSigner: iykcSigner, privateChannelSigner })
     changed = true
   }
 
@@ -447,9 +280,6 @@ export function unwatch (channels) {
 }
 
 export function clearChannelState (channelPubkey) {
-  for (const ask of pendingAsks.values()) {
-    if (ask.privateChannelPubkey === channelPubkey) forgetAsk(ask.id)
-  }
   if (watchesByChannel.has(channelPubkey)) unwatch(channelPubkey)
 }
 
@@ -476,9 +306,6 @@ export async function ask ({
   code,
   payload,
   content,
-  retry = true,
-  retryLimit = DEFAULT_RETRY_LIMIT,
-  retryIntervalMs = DEFAULT_RETRY_INTERVAL_MS,
   _publish = privateChannel.publish
 }) {
   if (!receiverPubkey) throw new Error('RECEIVER_PUBKEY_REQUIRED')
@@ -492,31 +319,6 @@ export async function ask ({
     content: normalizeContent(message || { code, payload, content })
   })
   const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers: [receiverPubkey], receiverTag: receiverPubkey, event: wireEvent, relays, _publish })
-
-  const pending = {
-    id: question.id,
-    question,
-    receiverPubkey,
-    receiverTag: receiverPubkey,
-    relays,
-    retryLimit: retry ? retryLimit : 0,
-    retryIntervalMs,
-    retryCount: 0,
-    missingChunks: {},
-    privateChannelPubkey,
-    senderSigner,
-    imkcSigner,
-    privateChannelSigner,
-    publish: _publish,
-    retryEnabled: retry && retryLimit > 0,
-    shouldStore: retry && retryLimit > 0,
-    retryTimer: null
-  }
-  pendingAsks.set(question.id, pending)
-  if (pending.shouldStore) {
-    writeStoredPendingAsks()
-    scheduleAskRetry(pending)
-  }
 
   return { question, results }
 }

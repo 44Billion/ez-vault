@@ -98,7 +98,6 @@ test('ask requires watching the sender private channel first', async () => {
       receiverPubkey: 'receiver',
       relays: ['wss://relay.example'],
       message: { code: 'PING' },
-      retry: false,
       _publish: async () => ({ results: [] })
     }),
     /PRIVATE_MESSAGE_NOT_WATCHING/
@@ -124,7 +123,6 @@ test('ask publishes an ask rumor and watch dispatches the reply with its questio
     receiverPubkey: 'receiver',
     relays: ['wss://relay.example'],
     message: { code: 'PING', payload: { ok: true } },
-    retry: false,
     _publish: async options => {
       published = options
       return { results: [{ success: true }] }
@@ -152,69 +150,10 @@ test('ask publishes an ask rumor and watch dispatches the reply with its questio
   }, { created_at: 2 }, { channelPubkey: 'sender-channel' })
 
   assert.equal(replies.length, 1)
-  assert.equal(replies[0].question.id, result.question.id)
+  assert.equal(replies[0].question, undefined)
+  assert.equal(replies[0].questionId, result.question.id)
   assert.equal(replies[0].reply.pubkey, 'receiver')
   assert.deepEqual(replies[0].payload, { payload: 'pong' })
-})
-
-test('watch reattaches content key signer to pending ask retries', async () => {
-  const originalFetch = globalThis.fetch
-  globalThis.fetch = async () => ({})
-  const published = []
-  const senderPubkey = pubkeyFixture(2)
-  let question = null
-  const _publish = async options => {
-    published.push(options)
-    return { results: [] }
-  }
-
-  try {
-    await watch({
-      channels: ['sender-channel'],
-      relays: ['wss://relay.example'],
-      receiverSigner: signer(senderPubkey),
-      privateChannelSigner: signer('sender-channel'),
-      _subscribe: fakeSubscribeFactory().fakeSubscribe
-    })
-    const result = await ask({
-      senderSigner: signer(senderPubkey),
-      privateChannelSigner: signer('sender-channel'),
-      receiverPubkey: 'receiver',
-      relays: ['wss://relay.example'],
-      payload: 'ping',
-      retryLimit: 1,
-      retryIntervalMs: 25,
-      _publish
-    })
-    question = result.question
-
-    unwatch('sender-channel')
-    const secondSubscribe = fakeSubscribeFactory()
-    await watch({
-      channels: ['sender-channel'],
-      relays: ['wss://relay.example'],
-      receiverSigner: signer(senderPubkey),
-      iykcSigner: signer('content'),
-      privateChannelSigner: signer('sender-channel'),
-      _subscribe: secondSubscribe.fakeSubscribe
-    })
-    secondSubscribe.calls[0].onChunk({
-      channelPubkey: 'sender-channel',
-      router: { pubkey: 'router-id' },
-      missing: [1]
-    })
-    await new Promise(resolve => setTimeout(resolve, 60))
-
-    assert.equal(published.length, 2)
-    assert.equal(published[0].imkcSigner, undefined)
-    assert.equal(published[1].imkcSigner.getPublicKey(), 'content')
-    assert.equal(published[1].event.id, undefined)
-    assert.equal(published[1].event.pubkey, undefined)
-    assert.deepEqual(published[1].event.missingChunks, { 'router-id': [1] })
-    assert.equal(getEventHash({ ...published[1].event, pubkey: senderPubkey }), question.id)
-  } finally {
-    globalThis.fetch = originalFetch
-  }
 })
 
 test('reply tell and yell publish recognizable private message rumors', async () => {
