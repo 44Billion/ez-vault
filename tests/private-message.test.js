@@ -7,6 +7,7 @@ import {
   TELL_KIND,
   ask,
   reply,
+  sendEvent,
   tell,
   unwatch,
   watch,
@@ -175,6 +176,13 @@ test('reply tell and yell publish recognizable private message rumors', async ()
   const replyResult = await reply({ senderSigner: signer(bobPubkey), question, relays: ['wss://relay.example'], payload: 'answer', _publish })
   const tellResult = await tell({ senderSigner: signer(bobPubkey), receiverPubkey: 'alice', relays: ['wss://relay.example'], payload: 'note', _publish })
   const yellResult = await yell({ senderSigner: signer(bobPubkey), receiverPubkeys: ['alice', 'carol'], relays: ['wss://relay.example'], payload: 'broadcast', _publish })
+  const rawResult = await sendEvent({
+    senderSigner: signer(bobPubkey),
+    receiverPubkeys: ['alice', 'carol'],
+    relays: ['wss://relay.example'],
+    event: { kind: 9001, created_at: 22, tags: [['x', '1']], content: 'raw' },
+    _publish
+  })
 
   assert.equal(published[0].event.kind, REPLY_KIND)
   assert.equal(published[0].event.id, undefined)
@@ -192,4 +200,15 @@ test('reply tell and yell publish recognizable private message rumors', async ()
   assert.deepEqual(published[2].event.tags, [])
   assert.equal(published[2].receiverTag, '')
   assert.deepEqual(published[2].receivers, ['alice', 'carol'])
+  assert.equal(published[3].event.kind, 9001)
+  assert.equal(published[3].event.created_at, 22)
+  assert.equal(published[3].event.content, 'raw')
+  assert.equal(published[3].event.id, undefined)
+  assert.equal(published[3].event.pubkey, undefined)
+  assert.equal(published[3].event.sig, undefined)
+  assert.deepEqual(published[3].event.tags, [['x', '1']])
+  assert.equal(published[3].receiverTag, '')
+  assert.deepEqual(published[3].receivers, ['alice', 'carol'])
+  assert.equal(rawResult.event.pubkey, bobPubkey)
+  assert.equal(rawResult.event.id, getEventHash({ ...published[3].event, pubkey: bobPubkey }))
 })

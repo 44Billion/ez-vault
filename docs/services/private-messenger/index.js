@@ -9,6 +9,7 @@
 // await messenger.reply({ question: msg.question, payload: { ok: true } })
 // await messenger.tell({ receiverPubkey, payload: { note: 'hello' } })
 // await messenger.yell({ receiverPubkeys, payload: { notice: 'hello all' } })
+// await messenger.sendEvent({ receiverPubkeys, event: { kind, tags: [], content } })
 // await messenger.update({ channels: nextChannels })
 // messenger.clearChannel(channelPubkey)
 //
@@ -207,6 +208,10 @@ export class PrivateMessenger {
         onReply: message => this.enqueueRumor('reply', pubkey, message),
         onTell: message => this.enqueueRumor('tell', pubkey, message),
         onYell: message => this.enqueueRumor('yell', pubkey, message),
+        onMessage: message => {
+          if (eventType(message.event) !== 'message') return
+          this.enqueueRumor('message', pubkey, message)
+        },
         onSeed: seed => this.enqueueSeed(pubkey, seed),
         onError: err => console.warn('private-messenger watch failed', err?.message ?? err)
       })
@@ -330,6 +335,19 @@ export class PrivateMessenger {
       code,
       payload,
       content
+    })
+  }
+
+  async sendEvent ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkeys, relays, event }) {
+    const channel = this.requireChannel(channelPubkey)
+    return this._privateMessage.sendEvent({
+      senderSigner: this.userSigner,
+      imkcSigner: this.contentKeySigner,
+      privateChannelSigner: channel.signer,
+      receiverPubkeys,
+      relays: relays || channel.relays,
+      expirationSeconds: this.offlineRecoverySeconds,
+      event
     })
   }
 

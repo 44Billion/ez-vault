@@ -55,6 +55,10 @@ function fakePrivateMessage () {
       sent.push({ method: 'yell', options })
       return { yell: { id: 'yell-id', kind: TELL_KIND }, results: [] }
     },
+    sendEvent: async options => {
+      sent.push({ method: 'sendEvent', options })
+      return { event: { id: 'raw-id', kind: 9001 }, results: [] }
+    },
     unwatch: channels => stopped.push(channels),
     clearChannelState: channel => cleared.push(channel)
   }
@@ -101,6 +105,18 @@ test('private messenger watches channels and queues received leecher rumors', as
   assert.equal(reply.question, null)
   assert.equal(reply.questionId, 'question-id')
   assert.equal(reply.event.id, 'reply-id')
+
+  pm.watchCalls[0].onMessage({
+    event: { id: 'raw-id', kind: 9001, pubkey: 'alice', created_at: 14, tags: [], content: 'raw' },
+    outer: { id: 'outer-raw-id', created_at: 15 },
+    meta: { channelPubkey: 'channel' },
+    payload: 'raw'
+  })
+
+  const raw = messenger.nextMessage()
+  assert.equal(raw.type, 'message')
+  assert.equal(raw.event.id, 'raw-id')
+  assert.equal(raw.payload, 'raw')
 })
 
 test('private messenger delegates send helpers with scoped signers and relays', async () => {
@@ -115,8 +131,9 @@ test('private messenger delegates send helpers with scoped signers and relays', 
   await messenger.reply({ question: { id: 'q', pubkey: 'alice' }, payload: 'pong' })
   await messenger.tell({ receiverPubkey: 'alice', payload: 'note' })
   await messenger.yell({ receiverPubkeys: ['alice', 'bob'], payload: 'news' })
+  await messenger.sendEvent({ receiverPubkeys: ['alice', 'bob'], event: { kind: 9001, created_at: 1, tags: [], content: 'raw' } })
 
-  assert.deepEqual(pm.sent.map(s => s.method), ['ask', 'reply', 'tell', 'yell'])
+  assert.deepEqual(pm.sent.map(s => s.method), ['ask', 'reply', 'tell', 'yell', 'sendEvent'])
   for (const sent of pm.sent) {
     assert.equal(sent.options.senderSigner.getPublicKey(), 'user')
     assert.equal(sent.options.imkcSigner.getPublicKey(), 'content')

@@ -49,10 +49,29 @@ function makeWireRumor ({ kind, content, tags = [], createdAt = nowSeconds() }) 
   }
 }
 
+function makeWireEvent (event) {
+  if (!event || typeof event !== 'object') throw new Error('EVENT_REQUIRED')
+  if (!Number.isInteger(event.kind)) throw new Error('EVENT_KIND_REQUIRED')
+  return {
+    kind: event.kind,
+    created_at: Number.isInteger(event.created_at) ? event.created_at : nowSeconds(),
+    tags: (event.tags || []).map(tag => [...tag]),
+    content: String(event.content ?? '')
+  }
+}
+
 async function makeOutgoingRumor ({ senderSigner, kind, content, tags = [], createdAt }) {
   if (!senderSigner?.getPublicKey) throw new Error('SENDER_SIGNER_REQUIRED')
   const senderPubkey = await senderSigner.getPublicKey()
   const wireEvent = makeWireRumor({ kind, content, tags, createdAt })
+  const event = normalizeRumor(wireEvent, senderPubkey)
+  return { event, wireEvent }
+}
+
+async function makeOutgoingEvent ({ senderSigner, event: rumor }) {
+  if (!senderSigner?.getPublicKey) throw new Error('SENDER_SIGNER_REQUIRED')
+  const senderPubkey = await senderSigner.getPublicKey()
+  const wireEvent = makeWireEvent(rumor)
   const event = normalizeRumor(wireEvent, senderPubkey)
   return { event, wireEvent }
 }
@@ -398,4 +417,21 @@ export async function yell ({
   })
   const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers, receiverTag: '', event: wireEvent, relays, expirationSeconds, _publish })
   return { yell: event, results }
+}
+
+export async function sendEvent ({
+  senderSigner,
+  imkcSigner,
+  privateChannelSigner = senderSigner,
+  receiverPubkeys,
+  relays,
+  event: rumor,
+  expirationSeconds,
+  _publish = privateChannel.publish
+}) {
+  const receivers = uniq(receiverPubkeys)
+  if (!receivers.length) throw new Error('NO_RECEIVERS')
+  const { event, wireEvent } = await makeOutgoingEvent({ senderSigner, event: rumor })
+  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers, receiverTag: '', event: wireEvent, relays, expirationSeconds, _publish })
+  return { event, results }
 }
