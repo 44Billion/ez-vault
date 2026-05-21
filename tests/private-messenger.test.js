@@ -2,6 +2,7 @@ import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { ASK_KIND, REPLY_KIND, TELL_KIND } from '../docs/helpers/nostr/private-message.js'
 import {
+  createEventReplyPacker,
   createMissingMessageReplyPacker,
   MISSING_MESSAGES_ASK_CODE,
   MISSING_MESSAGES_REPLY_CODE,
@@ -405,4 +406,35 @@ test('missing-message reply packer groups records by count and accepts final inp
   assert.equal(record.row, userRow)
   assert.equal(record.outer.id, 'outer-id')
   assert.deepEqual(record.router.tags, [['f', 'sender']])
+})
+
+test('event reply packer streams regular event lists', async () => {
+  const replies = []
+  const question = { id: 'question-id', pubkey: 'peer', content: '' }
+  const packer = createEventReplyPacker({
+    messenger: { reply: async options => replies.push(options) },
+    channelPubkey: 'channel',
+    question,
+    code: 'eventSync_test',
+    payload: { collection: 'local-db' },
+    eventsPerChunk: 2
+  })
+
+  await packer.update([
+    { id: 'event-1', kind: 1, pubkey: 'alice', created_at: 1, tags: [], content: 'one' },
+    { id: 'event-2', kind: 1, pubkey: 'alice', created_at: 2, tags: [], content: 'two' }
+  ])
+  await packer.finalize({ id: 'event-3', kind: 1, pubkey: 'alice', created_at: 3, tags: [], content: 'three' })
+
+  assert.equal(replies.length, 2)
+  assert.equal(replies[0].code, 'eventSync_test')
+  assert.equal(replies[0].receiverPubkey, 'peer')
+  assert.deepEqual(replies[0].payload.collection, 'local-db')
+  assert.equal(replies[0].payload.index, 0)
+  assert.equal(replies[0].payload.done, false)
+  assert.deepEqual(replies[0].payload.jsonl.trim().split('\n').map(line => JSON.parse(line).event.id), ['event-1', 'event-2'])
+
+  assert.equal(replies[1].payload.index, 1)
+  assert.equal(replies[1].payload.done, true)
+  assert.deepEqual(replies[1].payload.jsonl.trim().split('\n').map(line => JSON.parse(line).event.id), ['event-3'])
 })

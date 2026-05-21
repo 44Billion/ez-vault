@@ -87,21 +87,29 @@ function backfillRequestRange (question, since, until) {
   }
 }
 
-export function createMissingMessageReplyPacker ({
+function eventRecordsFromInput (input) {
+  if (!input) return []
+  if (Array.isArray(input)) return input.flatMap(eventRecordsFromInput)
+  const event = input.event || (Number.isInteger(input.kind) ? input : null)
+  return event ? [{ event }] : []
+}
+
+export function createEventReplyPacker ({
   messenger,
   channelPubkey,
   question,
   receiverPubkey = question?.pubkey,
-  since,
-  until,
-  eventsPerChunk = DEFAULT_EVENTS_PER_CHUNK
+  code,
+  payload = {},
+  eventsPerChunk = DEFAULT_EVENTS_PER_CHUNK,
+  recordsFromInput = eventRecordsFromInput
 }) {
   if (!messenger?.reply) throw new Error('MESSENGER_REQUIRED')
   if (!question?.id) throw new Error('QUESTION_REQUIRED')
   if (!receiverPubkey) throw new Error('RECEIVER_PUBKEY_REQUIRED')
+  if (!code) throw new Error('REPLY_CODE_REQUIRED')
   if (!Number.isSafeInteger(eventsPerChunk) || eventsPerChunk < 1) throw new Error('INVALID_EVENTS_PER_CHUNK')
 
-  const range = backfillRequestRange(question, since, until)
   let chunk = ''
   let chunkEvents = 0
   let index = 0
@@ -115,10 +123,9 @@ export function createMissingMessageReplyPacker ({
       channelPubkey,
       question,
       receiverPubkey,
-      code: MISSING_MESSAGES_REPLY_CODE,
+      code,
       payload: {
-        since: range.since,
-        until: range.until,
+        ...payload,
         index: index++,
         done,
         jsonl
@@ -141,14 +148,12 @@ export function createMissingMessageReplyPacker ({
 
   async function update (input) {
     if (finalized) throw new Error('PACKER_FINALIZED')
-    await appendRecords(backfillRecordsFromInput(input, { receiverPubkey, since: range.since, until: range.until }))
+    await appendRecords(await recordsFromInput(input))
   }
 
   async function finalize (input) {
     if (finalized) return
-    if (input != null) {
-      await appendRecords(backfillRecordsFromInput(input, { receiverPubkey, since: range.since, until: range.until }), { final: true })
-    }
+    if (input != null) await appendRecords(await recordsFromInput(input), { final: true })
     finalized = true
     await publish(true)
   }
@@ -157,4 +162,31 @@ export function createMissingMessageReplyPacker ({
     update,
     finalize
   }
+}
+
+export function createMissingMessageReplyPacker ({
+  messenger,
+  channelPubkey,
+  question,
+  receiverPubkey = question?.pubkey,
+  since,
+  until,
+  eventsPerChunk = DEFAULT_EVENTS_PER_CHUNK
+}) {
+  if (!messenger?.reply) throw new Error('MESSENGER_REQUIRED')
+  if (!question?.id) throw new Error('QUESTION_REQUIRED')
+  if (!receiverPubkey) throw new Error('RECEIVER_PUBKEY_REQUIRED')
+  if (!Number.isSafeInteger(eventsPerChunk) || eventsPerChunk < 1) throw new Error('INVALID_EVENTS_PER_CHUNK')
+
+  const range = backfillRequestRange(question, since, until)
+  return createEventReplyPacker({
+    messenger,
+    channelPubkey,
+    question,
+    receiverPubkey,
+    code: MISSING_MESSAGES_REPLY_CODE,
+    payload: { since: range.since, until: range.until },
+    eventsPerChunk,
+    recordsFromInput: input => backfillRecordsFromInput(input, { receiverPubkey, since: range.since, until: range.until })
+  })
 }

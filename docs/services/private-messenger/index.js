@@ -21,12 +21,14 @@
 // - Seeders announce presence every 10min and are used for the relay-uncovered left edge of a missed range.
 // - Configured seeders are all asked; auto-discovered seeders are capped to the 8 most recently active.
 // - Seeder replies can be streamed with createMissingMessageReplyPacker({ messenger, question }).update(seed), then finalize(optionalLastSeed).
+// - For other event-list replies, use createEventReplyPacker({ messenger, question, code }).update(event).
 
 import { bytesToBase64 } from '../../helpers/base64.js'
 import * as privateMessage from '../../helpers/nostr/private-message.js'
 import * as privateChannel from '../private-channel/index.js'
 import { createQueue } from '../web-storage-queue.js'
 import {
+  createEventReplyPacker,
   createMissingMessageReplyPacker,
   MISSING_MESSAGES_ASK_CODE,
   MISSING_MESSAGES_REPLY_CODE,
@@ -35,6 +37,7 @@ import {
 
 export { createQueue } from '../web-storage-queue.js'
 export {
+  createEventReplyPacker,
   createMissingMessageReplyPacker,
   MISSING_MESSAGES_ASK_CODE,
   MISSING_MESSAGES_REPLY_CODE,
@@ -538,6 +541,10 @@ export class PrivateMessenger {
 
   createMissingMessageReplyPacker (options) {
     return createMissingMessageReplyPacker({ messenger: this, ...options })
+  }
+
+  createEventReplyPacker (options) {
+    return createEventReplyPacker({ messenger: this, ...options })
   }
 
   defaultChannelPubkey () {
