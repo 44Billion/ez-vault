@@ -25,7 +25,7 @@
 import { bytesToBase64 } from '../../helpers/base64.js'
 import * as privateMessage from '../../helpers/nostr/private-message.js'
 import * as privateChannel from '../private-channel/index.js'
-import { createQueue } from './queue.js'
+import { createQueue } from '../web-storage-queue.js'
 import {
   createMissingMessageReplyPacker,
   MISSING_MESSAGES_ASK_CODE,
@@ -33,6 +33,7 @@ import {
   SEEDER_PRESENCE_CODE
 } from './recovery.js'
 
+export { createQueue } from '../web-storage-queue.js'
 export {
   createMissingMessageReplyPacker,
   MISSING_MESSAGES_ASK_CODE,
