@@ -1,4 +1,5 @@
 import { bytesToBase64, base64ToBytes } from '../../helpers/base64.js'
+import { verifyContentKeyProof } from '../content-key/event.js'
 import { getTemporaryItem, removeTemporaryItems, setTemporaryItem } from '../temporary-storage.js'
 import { JSONL_CHUNK_BYTES } from './chunk-size.js'
 
@@ -17,32 +18,41 @@ function tempKey (id, index) {
   return `${STORAGE_PREFIX}${id}:${index}`
 }
 
+function verifiedContentKey ({ iykcPubkey = '', iykcProof = '' } = {}) {
+  if (!iykcPubkey) return { iykcPubkey: '', iykcProof: '' }
+  if (iykcProof && !verifyContentKeyProof({ iykcPubkey, iykcProof })) {
+    return { iykcPubkey: '', iykcProof: '' }
+  }
+  return { iykcPubkey, iykcProof }
+}
+
 function receiverRecord (receiver, receiverContentKeys) {
   if (typeof receiver === 'string') {
-    const contentKey = receiverContentKeys[receiver] || {}
+    const contentKey = verifiedContentKey(receiverContentKeys[receiver])
     return {
       receiverPubkey: receiver,
-      iykcPubkey: contentKey.iykcPubkey || '',
-      iykcProof: contentKey.iykcProof || ''
+      ...contentKey
     }
   }
 
   if (Array.isArray(receiver)) {
     const [receiverPubkey, iykcPubkey = '', iykcProof = ''] = receiver
-    const contentKey = receiverContentKeys[receiverPubkey] || {}
+    const explicitContentKey = verifiedContentKey({ iykcPubkey, iykcProof })
+    const fetchedContentKey = verifiedContentKey(receiverContentKeys[receiverPubkey])
+    const contentKey = explicitContentKey.iykcPubkey ? explicitContentKey : fetchedContentKey
     return {
       receiverPubkey,
-      iykcPubkey: iykcPubkey || contentKey.iykcPubkey || '',
-      iykcProof: iykcProof || contentKey.iykcProof || ''
+      ...contentKey
     }
   }
 
   const receiverPubkey = receiver?.receiverPubkey || receiver?.pubkey || ''
-  const contentKey = receiverContentKeys[receiverPubkey] || {}
+  const explicitContentKey = verifiedContentKey(receiver)
+  const fetchedContentKey = verifiedContentKey(receiverContentKeys[receiverPubkey])
+  const contentKey = explicitContentKey.iykcPubkey ? explicitContentKey : fetchedContentKey
   return {
     receiverPubkey,
-    iykcPubkey: receiver?.iykcPubkey || contentKey.iykcPubkey || '',
-    iykcProof: receiver?.iykcProof || contentKey.iykcProof || ''
+    ...contentKey
   }
 }
 

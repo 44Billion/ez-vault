@@ -18,6 +18,27 @@ function prooflessContentKeyEvent ({ createdAt = nowSeconds(), contentPubkey }) 
   }
 }
 
+function parseIykcProof (iykcProof) {
+  const [createdAtText, cpProof, ...rest] = String(iykcProof || '').split(':')
+  const createdAt = Number(createdAtText)
+  if (rest.length || !Number.isSafeInteger(createdAt) || createdAt < 0 || !HEX_SIG.test(cpProof || '')) return null
+  return { createdAt, cpProof }
+}
+
+export function verifyContentKeyProof ({ iykcPubkey, iykcProof } = {}) {
+  if (!HEX_PUBKEY.test(iykcPubkey || '')) return false
+  const proof = parseIykcProof(iykcProof)
+  if (!proof) return false
+
+  const proofEvent = {
+    ...prooflessContentKeyEvent({ createdAt: proof.createdAt, contentPubkey: iykcPubkey }),
+    pubkey: iykcPubkey,
+    sig: proof.cpProof
+  }
+  proofEvent.id = getEventHash(proofEvent)
+  return verifyEvent(proofEvent)
+}
+
 export async function makeContentKeyEvent ({ userSigner, contentKeySigner, createdAt = nowSeconds() }) {
   if (!userSigner?.getPublicKey || !userSigner?.signEvent) throw new Error('USER_SIGNER_REQUIRED')
   if (!contentKeySigner?.getPublicKey || !contentKeySigner?.signEvent) throw new Error('CONTENT_KEY_SIGNER_REQUIRED')
@@ -42,16 +63,11 @@ export function parseContentKeyEvent (event) {
   const [name, contentPubkey, cpProof] = event.tags[0]
   if (name !== 'cp' || !HEX_PUBKEY.test(contentPubkey) || !HEX_SIG.test(cpProof)) return null
 
-  const proofEvent = {
-    ...prooflessContentKeyEvent({ createdAt: event.created_at, contentPubkey }),
-    pubkey: contentPubkey,
-    sig: cpProof
-  }
-  proofEvent.id = getEventHash(proofEvent)
-  if (!verifyEvent(proofEvent)) return null
+  const iykcProof = `${event.created_at}:${cpProof}`
+  if (!verifyContentKeyProof({ iykcPubkey: contentPubkey, iykcProof })) return null
 
   return {
     iykcPubkey: contentPubkey,
-    iykcProof: `${event.created_at}:${cpProof}`
+    iykcProof
   }
 }

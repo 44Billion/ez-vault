@@ -12,6 +12,7 @@ import {
   wrapEvent,
   wrapEvents
 } from '../docs/services/private-channel/index.js'
+import { makeContentKeyEvent, parseContentKeyEvent } from '../docs/services/content-key/event.js'
 import { TEMPORARY_STORAGE_KEYS_KEY } from '../docs/services/temporary-storage.js'
 import { bytesToHex } from '../docs/helpers/nostr/index.js'
 
@@ -131,26 +132,51 @@ test('wrapEvent uses receiver content key rows when iykc is advertised', async (
   const bob = signer()
   const bobContent = signer()
   const bobPubkey = await bob.getPublicKey()
-  const bobContentPubkey = await bobContent.getPublicKey()
+  const contentKeyEvent = await makeContentKeyEvent({ userSigner: bob, contentKeySigner: bobContent, createdAt: 7 })
+  const contentKey = parseContentKeyEvent(contentKeyEvent)
   const original = eventFixture('private')
   const [wrapped] = await wrapEvent({
     senderSigner: alice,
     receivers: [bobPubkey],
     event: original,
     _getIykcProofs: async () => ({
-      [bobPubkey]: { iykcPubkey: bobContentPubkey, iykcProof: '7:proof' }
+      [bobPubkey]: contentKey
     })
   })
   const router = JSON.parse(await alice.nip44Decrypt(await alice.getPublicKey(), wrapped.content))
   const line = JSON.parse(new TextDecoder().decode(Buffer.from(router.content, 'base64')).trim())
 
   assert.deepEqual(line.slice(0, 1), [bobPubkey])
-  assert.deepEqual(line.slice(2), [bobContentPubkey, '7:proof'])
+  assert.deepEqual(line.slice(2), [contentKey.iykcPubkey, contentKey.iykcProof])
   assert.deepEqual(await unwrapEvent({ receiverSigner: bob, iykcSigner: bobContent, privateChannelSigner: alice, event: wrapped, receiverPubkey: bobPubkey }), unwrappedFixture(original, await alice.getPublicKey()))
   await assert.rejects(
     () => unwrapEvent({ receiverSigner: bob, privateChannelSigner: alice, event: wrapped, receiverPubkey: bobPubkey }),
     /RECEIVER_CONTENT_KEY_REQUIRED/
   )
+})
+
+test('wrapEvent falls back to receiver main key when iykc proof is invalid', async () => {
+  const alice = signer()
+  const bob = signer()
+  const bobContent = signer()
+  const bobPubkey = await bob.getPublicKey()
+  const original = eventFixture('private')
+  const [wrapped] = await wrapEvent({
+    senderSigner: alice,
+    receivers: [bobPubkey],
+    event: original,
+    _getIykcProofs: async () => ({
+      [bobPubkey]: {
+        iykcPubkey: await bobContent.getPublicKey(),
+        iykcProof: `7:${'f'.repeat(128)}`
+      }
+    })
+  })
+  const router = JSON.parse(await alice.nip44Decrypt(await alice.getPublicKey(), wrapped.content))
+  const line = JSON.parse(new TextDecoder().decode(Buffer.from(router.content, 'base64')).trim())
+
+  assert.equal(line.length, 2)
+  assert.deepEqual(await unwrapEvent({ receiverSigner: bob, privateChannelSigner: alice, event: wrapped, receiverPubkey: bobPubkey }), unwrappedFixture(original, await alice.getPublicKey()))
 })
 
 test('wrapEvent chunks large jsonl without oversize events and unwraps reassembled bytes', async () => {

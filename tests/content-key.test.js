@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { generateSecretKey, getEventHash, verifyEvent } from 'nostr-tools'
 import NsecSigner from '../docs/services/nsec-signer.js'
 import { doubleSignEvent, upsertContentKeyEvent } from '../docs/services/content-key/index.js'
-import { makeContentKeyEvent, parseContentKeyEvent, CONTENT_KEY_KIND } from '../docs/services/content-key/event.js'
+import { makeContentKeyEvent, parseContentKeyEvent, verifyContentKeyProof, CONTENT_KEY_KIND } from '../docs/services/content-key/event.js'
 import { clearQueryCaches, getIykcProofs, getRelaysByPubkey } from '../docs/helpers/nostr/queries.js'
 import { bytesToHex } from '../docs/helpers/nostr/index.js'
 
@@ -31,6 +31,7 @@ test('makeContentKeyEvent publishes a verifiable cp proof', async () => {
   assert.deepEqual(event.tags[0].slice(0, 2), ['cp', await contentKey.getPublicKey()])
   assert.equal(parsed.iykcPubkey, await contentKey.getPublicKey())
   assert.equal(parsed.iykcProof, `${event.created_at}:${event.tags[0][2]}`)
+  assert.equal(verifyContentKeyProof(parsed), true)
 })
 
 test('parseContentKeyEvent rejects events with extra tags or bad proofs', async () => {
@@ -40,6 +41,7 @@ test('parseContentKeyEvent rejects events with extra tags or bad proofs', async 
 
   assert.equal(parseContentKeyEvent({ ...event, tags: event.tags.concat([['x', 'nope']]) }), null)
   assert.equal(parseContentKeyEvent({ ...event, tags: [['cp', event.tags[0][1], 'f'.repeat(128)]] }), null)
+  assert.equal(verifyContentKeyProof({ iykcPubkey: event.tags[0][1], iykcProof: `${event.created_at}:${'f'.repeat(128)}` }), false)
 })
 
 test('upsertContentKeyEvent signs and publishes to user write relays', async () => {
