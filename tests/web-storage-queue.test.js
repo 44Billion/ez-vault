@@ -373,6 +373,44 @@ test('queue evicts older items when maxBytes would be exceeded', () => {
   assert.equal(queue.shift(), null)
 })
 
+test('queue can evict from the tail when configured', () => {
+  const queue = createQueue({ prefix: 'test', maxBytes: 450, evictionPolicy: 'lifo' })
+  queue.push({ value: 'a'.repeat(120) })
+  queue.push({ value: 'b'.repeat(120) })
+  queue.push({ value: 'c'.repeat(120) })
+
+  assert.deepEqual(queue.shift().value, 'a'.repeat(120))
+  assert.deepEqual(queue.shift().value, 'c'.repeat(120))
+  assert.equal(queue.shift(), null)
+})
+
+test('queue rejects unknown eviction policies', () => {
+  assert.throws(() => createQueue({ prefix: 'test', evictionPolicy: 'random' }), /QUEUE_INVALID_EVICTION_POLICY/)
+})
+
+test('setAt evicts to fit without evicting the item being replaced', () => {
+  const queue = createQueue({ prefix: 'test', maxBytes: 450, evictionPolicy: 'fifo' })
+  queue.push({ value: 'a'.repeat(120) })
+  queue.push({ value: 'b'.repeat(120) })
+
+  assert.equal(queue.setAt(0, { value: 'A'.repeat(200) }), 0)
+
+  assert.deepEqual(queue.shift().value, 'A'.repeat(200))
+  assert.equal(queue.shift(), null)
+})
+
+test('insertAt evicts to fit before inserting the new item', () => {
+  const queue = createQueue({ prefix: 'test', maxBytes: 540, evictionPolicy: 'fifo' })
+  queue.push({ value: 'a'.repeat(120) })
+  queue.push({ value: 'b'.repeat(120) })
+
+  assert.equal(queue.insertAt(1, { value: 'X'.repeat(200) }), 1)
+
+  assert.deepEqual(queue.shift().value, 'b'.repeat(120))
+  assert.deepEqual(queue.shift().value, 'X'.repeat(200))
+  assert.equal(queue.shift(), null)
+})
+
 test('queue rejects items larger than maxBytes', () => {
   const queue = createQueue({ prefix: 'test', maxBytes: 80 })
 

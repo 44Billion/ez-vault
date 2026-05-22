@@ -126,8 +126,8 @@ export class PrivateMessenger {
     this.contentKeySigner = contentKeySigner || null
     this.userPubkey = await userSigner.getPublicKey()
     this.prefix = `ez-vault:private-messenger:${this.userPubkey}`
-    this.queue = createQueue({ prefix: this.prefix, maxBytes: this.messageQueueMaxBytes })
-    this.seedQueue = createQueue({ prefix: `${this.prefix}:seeds`, maxBytes: this.seedQueueMaxBytes })
+    this.queue = createQueue({ prefix: this.prefix, maxBytes: this.messageQueueMaxBytes, evictionPolicy: 'fifo' })
+    this.seedQueue = createQueue({ prefix: `${this.prefix}:seeds`, maxBytes: this.seedQueueMaxBytes, evictionPolicy: 'fifo' })
     this.cleanupStaleChannels()
     await this.update({ userSigner, contentKeySigner, channels, relays, mode })
     return this

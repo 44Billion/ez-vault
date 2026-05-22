@@ -3,12 +3,18 @@ const ITEM_WRAPPER = 'web-storage-queue:item:v1'
 const DEFAULT_EVICTION_SLACK_RATIO = 0.1
 const MAX_EVICTION_SLACK_BYTES = 64 * 1024 // 64 KiB
 
-export function createQueue ({ prefix, storageArea = globalThis.localStorage, maxBytes } = {}) {
+export function createQueue ({
+  prefix,
+  storageArea = globalThis.localStorage,
+  maxBytes,
+  evictionPolicy = 'opposite-end' // 'opposite-end' = push evicts from head, unshift evicts from tail
+} = {}) {
   const stateKey = `${prefix}:queue`
   const operationKey = `${prefix}:queue:operation`
   const itemPrefix = `${prefix}:queue:item:`
   const waiters = new Set()
   const configuredMaxBytes = Number.isSafeInteger(maxBytes) && maxBytes > 0 ? maxBytes : Infinity
+  const configuredEvictionPolicy = normalizeEvictionPolicy(evictionPolicy)
   let sessionMaxBytes = configuredMaxBytes
 
   function storage () {
@@ -32,6 +38,23 @@ export function createQueue ({ prefix, storageArea = globalThis.localStorage, ma
 
   function hasByteLimit () {
     return Number.isFinite(sessionMaxBytes)
+  }
+
+  function normalizeEvictionPolicy (policy) {
+    if (policy === 'opposite-end' || policy === undefined || policy === null) return 'opposite-end'
+    if (policy === 'fifo' || policy === 'head') return 'head'
+    if (policy === 'lifo' || policy === 'tail') return 'tail'
+    throw new Error('QUEUE_INVALID_EVICTION_POLICY')
+  }
+
+  function evictionDirectionFor (operation, { index = 0, length = 0 } = {}) {
+    if (configuredEvictionPolicy === 'head') return 'head'
+    if (configuredEvictionPolicy === 'tail') return 'tail'
+    if (operation === 'unshift') return 'tail'
+    if (operation === 'setAt' || operation === 'insertAt') {
+      return index <= length / 2 ? 'tail' : 'head'
+    }
+    return 'head'
   }
 
   function evictionSlackBytes () {
@@ -110,52 +133,85 @@ export function createQueue ({ prefix, storageArea = globalThis.localStorage, ma
     return recovered
   }
 
-  function evictOneFromHead (state) {
-    while (state.head < state.tail) {
-      const key = itemKey(state.head)
-      const stored = readStoredItem(state.head)
-      state.head++
-      writeState(state, { keepEmpty: true })
-      if (!stored) continue
-      storage().removeItem(key)
-      state.usedBytes = Math.max(0, state.usedBytes - stored.byteSize)
-      writeState(state)
-      return true
-    }
-    return false
+  function protectedIdsFrom (options) {
+    if (!options?.protectedIds) return new Set()
+    if (options.protectedIds instanceof Set) return options.protectedIds
+    return new Set(options.protectedIds)
   }
 
-  function evictOneFromTail (state) {
-    while (state.tail > state.head) {
-      const id = state.tail - 1
+  function trimHead (state, protectedIds = new Set()) {
+    while (
+      state.head < state.tail &&
+      !protectedIds.has(state.head) &&
+      !storage().getItem(itemKey(state.head))
+    ) {
+      state.head++
+    }
+  }
+
+  function trimTail (state, protectedIds = new Set()) {
+    while (
+      state.tail > state.head &&
+      !protectedIds.has(state.tail - 1) &&
+      !storage().getItem(itemKey(state.tail - 1))
+    ) {
+      state.tail--
+    }
+  }
+
+  function evictOneFromHead (state, options = {}) {
+    const protectedIds = protectedIdsFrom(options)
+    trimHead(state, protectedIds)
+    for (let id = state.head; id < state.tail; id++) {
+      if (protectedIds.has(id)) continue
       const key = itemKey(id)
       const stored = readStoredItem(id)
-      state.tail--
-      writeState(state, { keepEmpty: true })
       if (!stored) continue
       storage().removeItem(key)
       state.usedBytes = Math.max(0, state.usedBytes - stored.byteSize)
+      if (id === state.head) trimHead(state, protectedIds)
       writeState(state)
       return true
     }
     return false
   }
 
-  function evictToBytes (state, targetBytes, { direction = 'head' } = {}) {
+  function evictOneFromTail (state, options = {}) {
+    const protectedIds = protectedIdsFrom(options)
+    trimTail(state, protectedIds)
+    for (let id = state.tail - 1; id >= state.head; id--) {
+      if (protectedIds.has(id)) continue
+      const key = itemKey(id)
+      const stored = readStoredItem(id)
+      if (!stored) continue
+      storage().removeItem(key)
+      state.usedBytes = Math.max(0, state.usedBytes - stored.byteSize)
+      if (id === state.tail - 1) trimTail(state, protectedIds)
+      writeState(state)
+      return true
+    }
+    return false
+  }
+
+  function evictToBytes (state, targetBytes, options = {}) {
     if (!hasByteLimit()) return state
+    const { direction = 'head' } = options
     const evictOne = direction === 'tail' ? evictOneFromTail : evictOneFromHead
     while (state.usedBytes > targetBytes) {
-      if (!evictOne(state)) break
+      if (!evictOne(state, options)) break
     }
     return state
   }
 
-  function evictToFit (state, requiredBytes, { direction = 'head' } = {}) {
+  function evictToFit (state, requiredBytes, options = {}) {
     if (!hasByteLimit()) return state
+    const { direction = 'head' } = options
     if (requiredBytes > sessionMaxBytes) throw new Error('QUEUE_ITEM_TOO_LARGE')
     const targetBytes = targetBytesAfterWrite(requiredBytes)
     while (state.usedBytes + requiredBytes > targetBytes) {
-      const evicted = direction === 'tail' ? evictOneFromTail(state) : evictOneFromHead(state)
+      const evicted = direction === 'tail'
+        ? evictOneFromTail(state, options)
+        : evictOneFromHead(state, options)
       if (!evicted) break
     }
     if (state.usedBytes + requiredBytes > sessionMaxBytes) throw new Error('QUEUE_CAPACITY_EXCEEDED')
@@ -164,7 +220,7 @@ export function createQueue ({ prefix, storageArea = globalThis.localStorage, ma
 
   function recoverByteLimit (state) {
     if (!hasByteLimit()) return state
-    return evictToBytes(state, Math.min(sessionMaxBytes, targetBytesAfterWrite(0)))
+    return evictToBytes(state, Math.min(sessionMaxBytes, targetBytesAfterWrite(0)), { direction: evictionDirectionFor('recover') })
   }
 
   function readState () {
@@ -321,24 +377,44 @@ export function createQueue ({ prefix, storageArea = globalThis.localStorage, ma
 
   function push (item) {
     const state = readState()
-    const id = state.tail
-    const stored = itemForStorage(id, item)
+    const direction = evictionDirectionFor('push')
+    let id = state.tail
+    let stored = itemForStorage(id, item)
     if (hasByteLimit() && stored.byteSize > sessionMaxBytes) throw new Error('QUEUE_ITEM_TOO_LARGE')
-    state.tail++
+    if (direction === 'tail') {
+      evictToFit(state, stored.byteSize, { direction })
+      id = state.tail
+      stored = itemForStorage(id, item)
+      if (hasByteLimit() && stored.byteSize > sessionMaxBytes) throw new Error('QUEUE_ITEM_TOO_LARGE')
+    }
+    state.tail = id + 1
     writeState(state)
-    writeItem(id, item, state)
+    writeItem(id, item, state, {
+      direction,
+      protectedIds: new Set([id])
+    })
     wake()
     return lengthFromState(state)
   }
 
   function unshift (item) {
     const state = readState()
-    const id = state.head - 1
-    const stored = itemForStorage(id, item)
+    const direction = evictionDirectionFor('unshift')
+    let id = state.head - 1
+    let stored = itemForStorage(id, item)
     if (hasByteLimit() && stored.byteSize > sessionMaxBytes) throw new Error('QUEUE_ITEM_TOO_LARGE')
+    if (direction === 'head') {
+      evictToFit(state, stored.byteSize, { direction })
+      id = state.head - 1
+      stored = itemForStorage(id, item)
+      if (hasByteLimit() && stored.byteSize > sessionMaxBytes) throw new Error('QUEUE_ITEM_TOO_LARGE')
+    }
     state.head = id
     writeState(state)
-    writeItem(id, item, state, { direction: 'tail' })
+    writeItem(id, item, state, {
+      direction,
+      protectedIds: new Set([id])
+    })
     wake()
     return lengthFromState(state)
   }
@@ -378,8 +454,13 @@ export function createQueue ({ prefix, storageArea = globalThis.localStorage, ma
 
   function setAt (index, item) {
     const state = readState()
-    assertIndex(index, lengthFromState(state))
-    writeItem(state.head + index, item, state, { evict: false })
+    const length = lengthFromState(state)
+    assertIndex(index, length)
+    const id = state.head + index
+    writeItem(id, item, state, {
+      direction: evictionDirectionFor('setAt', { index, length }),
+      protectedIds: new Set([id])
+    })
     wake()
     return index
   }
@@ -389,10 +470,16 @@ export function createQueue ({ prefix, storageArea = globalThis.localStorage, ma
     const length = lengthFromState(state)
     assertIndex(index, length, { allowEnd: true })
 
-    const slot = state.head + index
-    const stored = itemForStorage(slot, item)
+    let slot = state.head + index
+    let stored = itemForStorage(slot, item)
     if (hasByteLimit() && stored.byteSize > sessionMaxBytes) throw new Error('QUEUE_ITEM_TOO_LARGE')
-    if (hasByteLimit() && state.usedBytes + stored.byteSize > sessionMaxBytes) throw new Error('QUEUE_CAPACITY_EXCEEDED')
+    evictToFit(state, stored.byteSize, { direction: evictionDirectionFor('insertAt', { index, length }) })
+    const nextLength = lengthFromState(state)
+    const nextIndex = Math.min(index, nextLength)
+    slot = state.head + nextIndex
+    stored = itemForStorage(slot, item)
+    if (hasByteLimit() && stored.byteSize > sessionMaxBytes) throw new Error('QUEUE_ITEM_TOO_LARGE')
+    evictToFit(state, stored.byteSize, { direction: evictionDirectionFor('insertAt', { index: nextIndex, length: nextLength }) })
     state.tail++
     writeState(state)
     writeOperation({
@@ -406,7 +493,7 @@ export function createQueue ({ prefix, storageArea = globalThis.localStorage, ma
     })
     finishInsert(readOperation())
     wake()
-    return index
+    return nextIndex
   }
 
   function insertWhere (predicate, item, { appendIfMissing = false } = {}) {
