@@ -20,6 +20,7 @@
 // - Ranges older than 7 days are ignored; channel state not watched for 45 days is pruned.
 // - Seeders announce presence every 10min and are used for the relay-uncovered left edge of a missed range.
 // - Configured seeders are all asked; auto-discovered seeders are capped to the 8 most recently active.
+// - Seeder channels store reconstructed router events in a separate web-storage queue and auto-reply to recovery asks.
 // - Seeder replies can be streamed with createMissingMessageReplyPacker({ messenger, question }).update(seed), then finalize(optionalLastSeed).
 // - For other event-list replies, use createEventReplyPacker({ messenger, question, code }).update(event).
 
@@ -28,6 +29,7 @@ import * as privateMessage from '../../helpers/nostr/private-message.js'
 import * as privateChannel from '../private-channel/index.js'
 import { createQueue } from '../web-storage-queue.js'
 import {
+  compactSeedRouter,
   createEventReplyPacker,
   createMissingMessageReplyPacker,
   MISSING_MESSAGES_ASK_CODE,
@@ -37,6 +39,7 @@ import {
 
 export { createQueue } from '../web-storage-queue.js'
 export {
+  compactSeedRouter,
   createEventReplyPacker,
   createMissingMessageReplyPacker,
   MISSING_MESSAGES_ASK_CODE,
@@ -103,6 +106,7 @@ export class PrivateMessenger {
     this.userPubkey = ''
     this.prefix = ''
     this.queue = null
+    this.seedQueue = null
     this.channels = new Map()
     this.stopByChannel = new Map()
     this.presenceTimers = new Map()
@@ -117,6 +121,7 @@ export class PrivateMessenger {
     this.userPubkey = await userSigner.getPublicKey()
     this.prefix = `ez-vault:private-messenger:${this.userPubkey}`
     this.queue = createQueue({ prefix: this.prefix })
+    this.seedQueue = createQueue({ prefix: `${this.prefix}:seeds` })
     this.cleanupStaleChannels()
     await this.update({ userSigner, contentKeySigner, channels, relays, mode })
     return this
@@ -339,9 +344,17 @@ export class PrivateMessenger {
     }
   }
 
-  handleAsk (channelPubkey, message) {
-    this.trackSeederActivity(channelPubkey, message)
-    this.enqueueRumor('ask', channelPubkey, message)
+  async handleAsk (channelPubkey, message) {
+    try {
+      this.trackSeederActivity(channelPubkey, message)
+      if (this.channels.get(channelPubkey)?.mode === 'seeder' && messageCode(message) === MISSING_MESSAGES_ASK_CODE) {
+        await this.replyWithStoredSeeds(channelPubkey, message)
+        return
+      }
+      this.enqueueRumor('ask', channelPubkey, message)
+    } catch (err) {
+      console.warn('private-messenger ask handling failed', err?.message ?? err)
+    }
   }
 
   async handleReply (channelPubkey, message) {
@@ -392,16 +405,16 @@ export class PrivateMessenger {
   }
 
   enqueueSeed (channelPubkey, seed) {
-    this.markSeen(channelPubkey, seed.outer?.created_at || nowSeconds())
-    this.queue.enqueue({
+    const router = compactSeedRouter(seed.router)
+    this.markSeen(channelPubkey, router.created_at || seed.outer?.created_at || nowSeconds())
+    this.seedQueue.enqueue({
       type: 'seed',
       channelPubkey,
       receivedAt: nowSeconds(),
-      jsonl: seed.jsonl,
-      router: seed.router,
-      outer: seed.outer,
+      router,
       meta: { channelPubkey: seed.channelPubkey }
     })
+    this.pruneStoredSeeds(channelPubkey)
   }
 
   messages () {
@@ -621,6 +634,25 @@ export class PrivateMessenger {
     return this.askSeedersForMissingRange(channelPubkey, range.start, until)
   }
 
+  async replyWithStoredSeeds (channelPubkey, message) {
+    const payload = isPlainObject(message.payload?.payload) ? message.payload.payload : {}
+    const since = Number.isFinite(payload.since) ? payload.since : undefined
+    const until = Number.isFinite(payload.until) ? payload.until : undefined
+    const packer = this.createMissingMessageReplyPacker({
+      channelPubkey,
+      question: message.event,
+      receiverPubkey: message.event?.pubkey,
+      since,
+      until
+    })
+
+    for await (const seed of this.seedQueue.storedItems()) {
+      if (seed.channelPubkey !== channelPubkey) continue
+      await packer.update(seed)
+    }
+    await packer.finalize()
+  }
+
   async consumeMissingMessagesReply (channelPubkey, message) {
     const payload = message.payload?.payload
     const jsonl = typeof payload?.jsonl === 'string' ? payload.jsonl : ''
@@ -643,17 +675,16 @@ export class PrivateMessenger {
   async eventFromBackfillRecord (channelPubkey, record) {
     if (record.event) return record.event
     if (Number.isInteger(record.kind)) return record
-    if (!record.row || !record.router) return null
+    if (!record.router?.content && (!record.row || !record.router)) return null
     if (!this._privateChannel.unwrapEvent) throw new Error('PRIVATE_CHANNEL_UNWRAP_UNSUPPORTED')
 
     const channel = this.requireChannel(channelPubkey)
-    const row = String(record.row).endsWith('\n') ? String(record.row) : `${record.row}\n`
     const router = {
       kind: privateChannel.ROUTER_KIND,
       pubkey: record.router.pubkey,
       created_at: record.router.created_at || record.outer?.created_at || nowSeconds(),
       tags: (record.router.tags || []).filter(tag => tag[0] !== 'c').concat([['c', '0', '1']]),
-      content: bytesToBase64(encoder.encode(row))
+      content: record.router.content || bytesToBase64(encoder.encode(String(record.row).endsWith('\n') ? String(record.row) : `${record.row}\n`))
     }
     const outer = {
       kind: privateChannel.PRIVATE_BROADCAST_KIND,
@@ -721,6 +752,7 @@ export class PrivateMessenger {
     this.channels.delete(pubkey)
     this.removeChannelState(pubkey)
     this.queue.removeWhere(item => item.channelPubkey === pubkey)
+    this.seedQueue.removeWhere(item => item.channelPubkey === pubkey)
   }
 
   clearQueue () {
@@ -735,8 +767,17 @@ export class PrivateMessenger {
       if ((channel.lastWatchedAt || 0) >= cutoff) continue
       delete state.channels[pubkey]
       this.queue?.removeWhere(item => item.channelPubkey === pubkey)
+      this.seedQueue?.removeWhere(item => item.channelPubkey === pubkey)
     }
     this.writeState(state)
+  }
+
+  pruneStoredSeeds (channelPubkey) {
+    const cutoff = nowSeconds() - this.offlineRecoverySeconds
+    this.seedQueue?.removeWhere(item => {
+      if (channelPubkey && item.channelPubkey !== channelPubkey) return false
+      return (item.router?.created_at || item.receivedAt || 0) < cutoff
+    })
   }
 
   close () {

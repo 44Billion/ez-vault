@@ -1,8 +1,12 @@
+import { bytesToBase64, base64ToBytes } from '../../helpers/base64.js'
+
 export const SEEDER_PRESENCE_CODE = 'seederPresence_9xfzc7e65ju'
 export const MISSING_MESSAGES_ASK_CODE = 'missingMessages_8mj8qayg7e3'
 export const MISSING_MESSAGES_REPLY_CODE = 'missingMessages_roau5o03bim'
 
 const DEFAULT_EVENTS_PER_CHUNK = 100
+const encoder = new TextEncoder()
+const decoder = new TextDecoder()
 
 function nowSeconds () {
   return Math.floor(Date.now() / 1000)
@@ -20,21 +24,19 @@ function splitJsonl (jsonl) {
   return String(jsonl || '').split('\n').filter(Boolean)
 }
 
+function decodeJsonl (content) {
+  try { return decoder.decode(base64ToBytes(content || '')) } catch { return '' }
+}
+
+function encodeJsonlRow (row) {
+  return bytesToBase64(encoder.encode(String(row).endsWith('\n') ? row : `${row}\n`))
+}
+
 function eventInRange (event, since, until) {
   if (!Number.isFinite(event?.created_at)) return true
   if (since != null && event.created_at < since) return false
   if (until != null && event.created_at > until) return false
   return true
-}
-
-function compactOuter (outer = {}) {
-  return {
-    id: outer.id,
-    kind: outer.kind,
-    pubkey: outer.pubkey,
-    created_at: outer.created_at,
-    tags: outer.tags || []
-  }
 }
 
 function compactRouter (router = {}) {
@@ -43,6 +45,22 @@ function compactRouter (router = {}) {
     pubkey: router.pubkey,
     created_at: router.created_at,
     tags: (router.tags || []).filter(tag => tag[0] !== 'c')
+  }
+}
+
+export function compactSeedRouter (router = {}) {
+  return {
+    ...compactRouter(router),
+    content: router.content || ''
+  }
+}
+
+function routerWithSingleRow (router, row) {
+  const compact = compactRouter(router)
+  return {
+    ...compact,
+    tags: compact.tags.concat([['c', '0', '1']]),
+    content: encodeJsonlRow(row)
   }
 }
 
@@ -56,22 +74,18 @@ function recordReceiverPubkey (line) {
 }
 
 function backfillRecordsFromSeed (seed, { receiverPubkey, since, until }) {
-  if (!eventInRange(seed.outer, since, until)) return []
+  if (!eventInRange(seed.router, since, until)) return []
   const records = []
-  for (const row of splitJsonl(seed.jsonl)) {
+  for (const row of splitJsonl(seed.jsonl || decodeJsonl(seed.router?.content))) {
     if (receiverPubkey && recordReceiverPubkey(row) !== receiverPubkey) continue
-    records.push({
-      outer: compactOuter(seed.outer),
-      router: compactRouter(seed.router),
-      row
-    })
+    records.push({ router: routerWithSingleRow(seed.router, row) })
   }
   return records
 }
 
 function backfillRecordsFromInput (input, options) {
   if (!input) return []
-  if (input.jsonl) return backfillRecordsFromSeed(input, options)
+  if (input.router?.content || input.jsonl) return backfillRecordsFromSeed(input, options)
 
   const event = input.event || (Number.isInteger(input.kind) ? input : null)
   if (!event || !eventInRange(event, options.since, options.until)) return []

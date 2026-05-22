@@ -314,6 +314,19 @@ test('reverseItems consumes from the end', async () => {
   await iterator.return()
 })
 
+test('storedItems scans stored items without consuming them', async () => {
+  const queue = createQueue({ prefix: 'test' })
+  queue.push({ value: 'first' })
+  queue.push({ value: 'second' })
+
+  const values = []
+  for await (const item of queue.storedItems()) values.push(item.value)
+
+  assert.deepEqual(values, ['first', 'second'])
+  assert.deepEqual(queue.shift().value, 'first')
+  assert.deepEqual(queue.shift().value, 'second')
+})
+
 test('clear removes queued items state and pending operation metadata', () => {
   const queue = createQueue({ prefix: 'test' })
   queue.push({ value: 'first' })

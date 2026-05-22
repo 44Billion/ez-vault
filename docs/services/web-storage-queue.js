@@ -296,6 +296,14 @@ export function createQueue ({ prefix, storageArea = globalThis.localStorage }) 
     }
   }
 
+  async function * storedItems () {
+    const state = readState()
+    for (let id = state.head; id < state.tail; id++) {
+      const item = readItem(id)
+      if (item) yield item
+    }
+  }
+
   function removeWhere (predicate) {
     const state = readState()
     // Bulk predicate removal leaves holes on purpose; shift/pop skip them, and
@@ -329,6 +337,7 @@ export function createQueue ({ prefix, storageArea = globalThis.localStorage }) 
     shift,
     items,
     reverseItems,
+    storedItems,
     setAt,
     insertAt,
     insertWhere,

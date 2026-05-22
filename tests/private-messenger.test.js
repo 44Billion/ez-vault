@@ -29,6 +29,17 @@ function signer (pubkey) {
   }
 }
 
+function channelSigner (pubkey) {
+  return {
+    ...signer(pubkey),
+    nip44Encrypt: async (_pubkey, content) => content
+  }
+}
+
+function jsonlContent (...rows) {
+  return Buffer.from(`${rows.join('\n')}\n`).toString('base64')
+}
+
 function fakePrivateMessage () {
   const watchCalls = []
   const stopped = []
@@ -245,6 +256,56 @@ test('seeder channels publish presence immediately and on interval', async () =>
   assert.deepEqual(cleared, intervals)
 })
 
+test('seeder channels store router seeds separately and answer missing-message asks', async () => {
+  const pm = fakePrivateMessage()
+  const now = Math.floor(Date.now() / 1000)
+  const messenger = await new PrivateMessenger({ _privateMessage: pm }).init({
+    userSigner: signer('seeder'),
+    channels: [{ pubkey: 'channel', signer: signer('channel'), relays: ['wss://relay.example'], mode: 'seeder' }]
+  })
+  const userRow = JSON.stringify(['user', 'ciphertext'])
+  const otherRow = JSON.stringify(['other', 'ciphertext'])
+
+  pm.watchCalls[0].onSeed({
+    channelPubkey: 'channel',
+    outer: { id: 'outer-id', kind: 3560, pubkey: 'channel', created_at: now },
+    router: {
+      kind: 263,
+      pubkey: 'router',
+      created_at: now,
+      tags: [['f', 'alice'], ['c', '0', '1']],
+      content: jsonlContent(userRow, otherRow)
+    }
+  })
+
+  assert.equal(messenger.nextMessage(), null)
+
+  await pm.watchCalls[0].onAsk({
+    event: {
+      id: 'question-id',
+      kind: ASK_KIND,
+      pubkey: 'user',
+      created_at: now,
+      tags: [['r', 'seeder']],
+      content: JSON.stringify({ code: MISSING_MESSAGES_ASK_CODE, payload: { since: now - 5, until: now + 5 } })
+    },
+    outer: { id: 'ask-outer-id', created_at: now },
+    meta: { channelPubkey: 'channel' },
+    payload: { code: MISSING_MESSAGES_ASK_CODE, payload: { since: now - 5, until: now + 5 } },
+    question: { id: 'question-id' }
+  })
+
+  const reply = pm.sent.find(sent => sent.method === 'reply' && sent.options.code === MISSING_MESSAGES_REPLY_CODE)
+  assert.equal(reply.options.receiverPubkey, 'user')
+  assert.equal(reply.options.payload.done, true)
+  const records = reply.options.payload.jsonl.trim().split('\n').map(line => JSON.parse(line))
+  assert.equal(records.length, 1)
+  assert.equal(records[0].outer, undefined)
+  assert.equal(Buffer.from(records[0].router.content, 'base64').toString(), `${userRow}\n`)
+  assert.deepEqual(records[0].router.tags, [['f', 'alice'], ['c', '0', '1']])
+  assert.equal(messenger.nextMessage(), null)
+})
+
 test('recovery asks online seeders for the relay-uncovered left edge', async () => {
   const pm = fakePrivateMessage()
   const fetches = []
@@ -357,6 +418,55 @@ test('missing-message replies are consumed internally as recovered queue items',
   assert.equal(messenger.nextMessage(), null)
 })
 
+test('missing-message replies can recover router-only seed records', async () => {
+  const pm = fakePrivateMessage()
+  let unwrapCall = null
+  const messenger = await new PrivateMessenger({
+    _privateMessage: pm,
+    _privateChannel: {
+      unwrapEvent: async options => {
+        unwrapCall = options
+        return {
+          id: 'missed-id',
+          kind: TELL_KIND,
+          pubkey: 'alice',
+          created_at: 1,
+          tags: [['r', 'user']],
+          content: '{"payload":"old"}'
+        }
+      }
+    }
+  }).init({
+    userSigner: signer('user'),
+    channels: [{ pubkey: 'channel', signer: channelSigner('channel'), relays: ['wss://relay.example'], seeders: ['seeder'] }]
+  })
+  const userRow = JSON.stringify(['user', 'ciphertext'])
+  const jsonl = `${JSON.stringify({
+    router: {
+      kind: 263,
+      pubkey: 'router',
+      created_at: 1,
+      tags: [['f', 'alice'], ['c', '0', '1']],
+      content: jsonlContent(userRow)
+    }
+  })}\n`
+
+  await pm.watchCalls[0].onReply({
+    event: { id: 'reply-id', kind: REPLY_KIND, pubkey: 'seeder', created_at: 2, tags: [['q', 'question-id']], content: '' },
+    outer: { id: 'reply-outer-id', created_at: 3 },
+    meta: { channelPubkey: 'channel' },
+    payload: { code: MISSING_MESSAGES_REPLY_CODE, payload: { index: 0, done: true, jsonl } },
+    questionId: 'question-id',
+    reply: { id: 'reply-id' }
+  })
+
+  const syntheticRouter = JSON.parse(unwrapCall.event.content)
+  assert.equal(syntheticRouter.content, jsonlContent(userRow))
+  assert.deepEqual(syntheticRouter.tags, [['f', 'alice'], ['c', '0', '1']])
+  assert.equal(messenger.nextMessage().event.id, 'missed-id')
+  assert.equal(messenger.nextMessage(), null)
+})
+
 test('missing-message reply packer groups records by count and accepts final input', async () => {
   const replies = []
   const question = {
@@ -403,9 +513,9 @@ test('missing-message reply packer groups records by count and accepts final inp
   const lines = replies[1].payload.jsonl.trim().split('\n')
   assert.equal(lines.length, 1)
   const record = JSON.parse(lines[0])
-  assert.equal(record.row, userRow)
-  assert.equal(record.outer.id, 'outer-id')
-  assert.deepEqual(record.router.tags, [['f', 'sender']])
+  assert.equal(record.outer, undefined)
+  assert.equal(Buffer.from(record.router.content, 'base64').toString(), `${userRow}\n`)
+  assert.deepEqual(record.router.tags, [['f', 'sender'], ['c', '0', '1']])
 })
 
 test('event reply packer streams regular event lists', async () => {
