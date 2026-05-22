@@ -297,7 +297,7 @@ test('seeder channels store router seeds separately and answer missing-message a
 
   const reply = pm.sent.find(sent => sent.method === 'reply' && sent.options.code === MISSING_MESSAGES_REPLY_CODE)
   assert.equal(reply.options.receiverPubkey, 'user')
-  assert.equal(reply.options.payload.done, true)
+  assert.equal(reply.options.payload.isLast, true)
   const records = reply.options.payload.jsonl.trim().split('\n').map(line => JSON.parse(line))
   assert.equal(records.length, 1)
   assert.equal(records[0].outer, undefined)
@@ -406,7 +406,7 @@ test('missing-message replies are consumed internally as recovered queue items',
     event: { id: 'reply-id', kind: REPLY_KIND, pubkey: 'seeder', created_at: 2, tags: [['q', 'question-id']], content: '' },
     outer: { id: 'reply-outer-id', created_at: 3 },
     meta: { channelPubkey: 'channel' },
-    payload: { code: MISSING_MESSAGES_REPLY_CODE, payload: { index: 0, done: true, jsonl } },
+    payload: { code: MISSING_MESSAGES_REPLY_CODE, payload: { index: 0, isLast: true, jsonl } },
     questionId: 'question-id',
     reply: { id: 'reply-id' }
   })
@@ -455,7 +455,7 @@ test('missing-message replies can recover router-only seed records', async () =>
     event: { id: 'reply-id', kind: REPLY_KIND, pubkey: 'seeder', created_at: 2, tags: [['q', 'question-id']], content: '' },
     outer: { id: 'reply-outer-id', created_at: 3 },
     meta: { channelPubkey: 'channel' },
-    payload: { code: MISSING_MESSAGES_REPLY_CODE, payload: { index: 0, done: true, jsonl } },
+    payload: { code: MISSING_MESSAGES_REPLY_CODE, payload: { index: 0, isLast: true, jsonl } },
     questionId: 'question-id',
     reply: { id: 'reply-id' }
   })
@@ -506,10 +506,10 @@ test('missing-message reply packer groups records by count and accepts final inp
   assert.equal(replies[0].receiverPubkey, 'user')
   assert.equal(replies[0].payload.since, 5)
   assert.equal(replies[0].payload.until, 20)
-  assert.equal(replies[0].payload.done, false)
+  assert.equal(replies[0].payload.isLast, false)
   assert.equal(JSON.parse(replies[0].payload.jsonl.trim()).event.id, 'event-id')
 
-  assert.equal(replies[1].payload.done, true)
+  assert.equal(replies[1].payload.isLast, true)
   const lines = replies[1].payload.jsonl.trim().split('\n')
   assert.equal(lines.length, 1)
   const record = JSON.parse(lines[0])
@@ -541,10 +541,10 @@ test('event reply packer streams regular event lists', async () => {
   assert.equal(replies[0].receiverPubkey, 'peer')
   assert.deepEqual(replies[0].payload.collection, 'local-db')
   assert.equal(replies[0].payload.index, 0)
-  assert.equal(replies[0].payload.done, false)
+  assert.equal(replies[0].payload.isLast, false)
   assert.deepEqual(replies[0].payload.jsonl.trim().split('\n').map(line => JSON.parse(line).event.id), ['event-1', 'event-2'])
 
   assert.equal(replies[1].payload.index, 1)
-  assert.equal(replies[1].payload.done, true)
+  assert.equal(replies[1].payload.isLast, true)
   assert.deepEqual(replies[1].payload.jsonl.trim().split('\n').map(line => JSON.parse(line).event.id), ['event-3'])
 })

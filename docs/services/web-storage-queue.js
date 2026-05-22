@@ -1,8 +1,15 @@
-export function createQueue ({ prefix, storageArea = globalThis.localStorage }) {
+const encoder = new TextEncoder()
+const ITEM_WRAPPER = 'web-storage-queue:item:v1'
+const DEFAULT_EVICTION_SLACK_RATIO = 0.1
+const MAX_EVICTION_SLACK_BYTES = 64 * 1024 // 64 KiB
+
+export function createQueue ({ prefix, storageArea = globalThis.localStorage, maxBytes } = {}) {
   const stateKey = `${prefix}:queue`
   const operationKey = `${prefix}:queue:operation`
   const itemPrefix = `${prefix}:queue:item:`
   const waiters = new Set()
+  const configuredMaxBytes = Number.isSafeInteger(maxBytes) && maxBytes > 0 ? maxBytes : Infinity
+  let sessionMaxBytes = configuredMaxBytes
 
   function storage () {
     return storageArea
@@ -15,7 +22,40 @@ export function createQueue ({ prefix, storageArea = globalThis.localStorage }) 
   function normalizeState (state) {
     const head = Number.isSafeInteger(state.head) ? state.head : 0
     const tail = Number.isSafeInteger(state.tail) && state.tail >= head ? state.tail : head
-    return { head, tail }
+    const usedBytes = Number.isSafeInteger(state.usedBytes) && state.usedBytes >= 0 ? state.usedBytes : 0
+    return { head, tail, usedBytes }
+  }
+
+  function byteLength (value) {
+    return encoder.encode(String(value)).length
+  }
+
+  function hasByteLimit () {
+    return Number.isFinite(sessionMaxBytes)
+  }
+
+  function evictionSlackBytes () {
+    if (!hasByteLimit()) return 0
+    return Math.min(Math.max(1, Math.floor(sessionMaxBytes * DEFAULT_EVICTION_SLACK_RATIO)), MAX_EVICTION_SLACK_BYTES)
+  }
+
+  function targetBytesAfterWrite (requiredBytes) {
+    if (!hasByteLimit()) return Infinity
+    return Math.max(requiredBytes, sessionMaxBytes - evictionSlackBytes())
+  }
+
+  function isQuotaExceeded (err) {
+    return err?.name === 'QuotaExceededError' ||
+      err?.name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
+      err?.code === 22 ||
+      err?.code === 1014 ||
+      /quota/i.test(err?.message || '')
+  }
+
+  function lowerSessionMaxBytes (requiredBytes) {
+    if (!hasByteLimit()) return
+    const next = Math.max(requiredBytes, Math.floor(sessionMaxBytes * 0.8))
+    if (next < sessionMaxBytes) sessionMaxBytes = next
   }
 
   function recoverHead (state) {
@@ -42,6 +82,91 @@ export function createQueue ({ prefix, storageArea = globalThis.localStorage }) 
     return recovered
   }
 
+  function readStoredItemFromRaw (raw) {
+    if (!raw) return null
+    try {
+      const parsed = JSON.parse(raw)
+      if (parsed?.__type === ITEM_WRAPPER && parsed.item && Number.isSafeInteger(parsed.byteSize)) {
+        return { item: parsed.item, byteSize: parsed.byteSize }
+      }
+      return { item: parsed, byteSize: byteLength(raw) }
+    } catch {
+      return { item: null, byteSize: byteLength(raw) }
+    }
+  }
+
+  function readStoredItem (id) {
+    return readStoredItemFromRaw(storage().getItem(itemKey(id)))
+  }
+
+  function recoverUsage (state) {
+    let usedBytes = 0
+    for (let id = state.head; id < state.tail; id++) {
+      const stored = readStoredItem(id)
+      if (stored) usedBytes += stored.byteSize
+    }
+    const recovered = { ...state, usedBytes }
+    if (usedBytes !== state.usedBytes) writeState(recovered)
+    return recovered
+  }
+
+  function evictOneFromHead (state) {
+    while (state.head < state.tail) {
+      const key = itemKey(state.head)
+      const stored = readStoredItem(state.head)
+      state.head++
+      writeState(state, { keepEmpty: true })
+      if (!stored) continue
+      storage().removeItem(key)
+      state.usedBytes = Math.max(0, state.usedBytes - stored.byteSize)
+      writeState(state)
+      return true
+    }
+    return false
+  }
+
+  function evictOneFromTail (state) {
+    while (state.tail > state.head) {
+      const id = state.tail - 1
+      const key = itemKey(id)
+      const stored = readStoredItem(id)
+      state.tail--
+      writeState(state, { keepEmpty: true })
+      if (!stored) continue
+      storage().removeItem(key)
+      state.usedBytes = Math.max(0, state.usedBytes - stored.byteSize)
+      writeState(state)
+      return true
+    }
+    return false
+  }
+
+  function evictToBytes (state, targetBytes, { direction = 'head' } = {}) {
+    if (!hasByteLimit()) return state
+    const evictOne = direction === 'tail' ? evictOneFromTail : evictOneFromHead
+    while (state.usedBytes > targetBytes) {
+      if (!evictOne(state)) break
+    }
+    return state
+  }
+
+  function evictToFit (state, requiredBytes, { direction = 'head' } = {}) {
+    if (!hasByteLimit()) return state
+    if (requiredBytes > sessionMaxBytes) throw new Error('QUEUE_ITEM_TOO_LARGE')
+    const targetBytes = targetBytesAfterWrite(requiredBytes)
+    while (state.usedBytes + requiredBytes > targetBytes) {
+      const evicted = direction === 'tail' ? evictOneFromTail(state) : evictOneFromHead(state)
+      if (!evicted) break
+    }
+    if (state.usedBytes + requiredBytes > sessionMaxBytes) throw new Error('QUEUE_CAPACITY_EXCEEDED')
+    return state
+  }
+
+  function recoverByteLimit (state) {
+    if (!hasByteLimit()) return state
+    return evictToBytes(state, Math.min(sessionMaxBytes, targetBytesAfterWrite(0)))
+  }
+
   function readState () {
     let parsed = {}
     try {
@@ -49,7 +174,7 @@ export function createQueue ({ prefix, storageArea = globalThis.localStorage }) 
     } catch {
       parsed = {}
     }
-    return recoverTail(recoverHead(recoverOperation(normalizeState(parsed))))
+    return recoverByteLimit(recoverUsage(recoverTail(recoverHead(recoverOperation(normalizeState(parsed))))))
   }
 
   function writeState (state, { keepEmpty = false } = {}) {
@@ -66,8 +191,47 @@ export function createQueue ({ prefix, storageArea = globalThis.localStorage }) 
     if (!Number.isSafeInteger(index) || index < 0 || index > max) throw new Error('QUEUE_INDEX_OUT_OF_RANGE')
   }
 
-  function writeItem (id, item) {
-    storage().setItem(itemKey(id), JSON.stringify({ id, ...item }))
+  function itemForStorage (id, item) {
+    const storedItem = { id, ...item }
+    let byteSize = 0
+    let raw = ''
+    while (true) {
+      raw = JSON.stringify({ __type: ITEM_WRAPPER, byteSize, item: storedItem })
+      const nextByteSize = byteLength(raw)
+      if (nextByteSize === byteSize) break
+      byteSize = nextByteSize
+    }
+    return { raw, byteSize, item: storedItem }
+  }
+
+  function setItemRaw (key, raw, state, requiredBytes, options) {
+    try {
+      storage().setItem(key, raw)
+    } catch (err) {
+      if (!isQuotaExceeded(err) || !hasByteLimit()) throw err
+      lowerSessionMaxBytes(requiredBytes)
+      if (options.evict === false) throw err
+      evictToFit(state, requiredBytes, options)
+      storage().setItem(key, raw)
+    }
+  }
+
+  function writeItem (id, item, state, options = {}) {
+    const previous = readStoredItem(id)
+    const stored = itemForStorage(id, item)
+    const previousByteSize = previous?.byteSize || 0
+    const delta = stored.byteSize - previousByteSize
+    if (hasByteLimit() && stored.byteSize > sessionMaxBytes) throw new Error('QUEUE_ITEM_TOO_LARGE')
+    if (delta > 0) {
+      if (options.evict === false) {
+        if (hasByteLimit() && state.usedBytes + delta > sessionMaxBytes) throw new Error('QUEUE_CAPACITY_EXCEEDED')
+      } else {
+        evictToFit(state, delta, options)
+      }
+    }
+    setItemRaw(itemKey(id), stored.raw, state, Math.max(delta, stored.byteSize), options)
+    state.usedBytes = Math.max(0, state.usedBytes - previousByteSize + stored.byteSize)
+    writeState(state, { keepEmpty: true })
   }
 
   function moveItem (from, to) {
@@ -78,9 +242,7 @@ export function createQueue ({ prefix, storageArea = globalThis.localStorage }) 
   }
 
   function readItem (id) {
-    const raw = storage().getItem(itemKey(id))
-    if (!raw) return null
-    try { return JSON.parse(raw) } catch { return null }
+    return readStoredItem(id)?.item || null
   }
 
   function readOperation () {
@@ -120,7 +282,7 @@ export function createQueue ({ prefix, storageArea = globalThis.localStorage }) 
 
   function finishInsert (operation) {
     let current = operation
-    const state = { head: current.head, tail: current.tail }
+    const state = { head: current.head, tail: current.tail, usedBytes: current.usedBytes || 0 }
     writeState(state)
 
     while (current.cursor > current.slot) {
@@ -129,7 +291,7 @@ export function createQueue ({ prefix, storageArea = globalThis.localStorage }) 
       writeOperation(current)
     }
 
-    writeItem(current.slot, current.item)
+    writeItem(current.slot, current.item, state, { evict: false })
     clearOperation()
     writeState(state)
     return state
@@ -137,7 +299,7 @@ export function createQueue ({ prefix, storageArea = globalThis.localStorage }) 
 
   function finishRemove (operation) {
     let current = operation
-    const state = { head: current.head, tail: current.tail }
+    const state = { head: current.head, tail: current.tail, usedBytes: current.usedBytes || 0 }
     writeState(state, { keepEmpty: true })
 
     while (current.cursor < current.tail) {
@@ -160,9 +322,11 @@ export function createQueue ({ prefix, storageArea = globalThis.localStorage }) 
   function push (item) {
     const state = readState()
     const id = state.tail
+    const stored = itemForStorage(id, item)
+    if (hasByteLimit() && stored.byteSize > sessionMaxBytes) throw new Error('QUEUE_ITEM_TOO_LARGE')
     state.tail++
     writeState(state)
-    writeItem(id, item)
+    writeItem(id, item, state)
     wake()
     return lengthFromState(state)
   }
@@ -170,9 +334,11 @@ export function createQueue ({ prefix, storageArea = globalThis.localStorage }) 
   function unshift (item) {
     const state = readState()
     const id = state.head - 1
+    const stored = itemForStorage(id, item)
+    if (hasByteLimit() && stored.byteSize > sessionMaxBytes) throw new Error('QUEUE_ITEM_TOO_LARGE')
     state.head = id
     writeState(state)
-    writeItem(id, item)
+    writeItem(id, item, state, { direction: 'tail' })
     wake()
     return lengthFromState(state)
   }
@@ -181,13 +347,14 @@ export function createQueue ({ prefix, storageArea = globalThis.localStorage }) 
     const state = readState()
     while (state.head < state.tail) {
       const key = itemKey(state.head)
-      const raw = storage().getItem(key)
+      const stored = readStoredItem(state.head)
       state.head++
       writeState(state, { keepEmpty: true })
       storage().removeItem(key)
+      if (stored) state.usedBytes = Math.max(0, state.usedBytes - stored.byteSize)
       writeState(state)
-      if (!raw) continue
-      try { return JSON.parse(raw) } catch { /* skip malformed item */ }
+      if (!stored?.item) continue
+      return stored.item
     }
     return null
   }
@@ -197,13 +364,14 @@ export function createQueue ({ prefix, storageArea = globalThis.localStorage }) 
     while (state.tail > state.head) {
       const id = state.tail - 1
       const key = itemKey(id)
-      const raw = storage().getItem(key)
+      const stored = readStoredItem(id)
       state.tail--
       writeState(state, { keepEmpty: true })
       storage().removeItem(key)
+      if (stored) state.usedBytes = Math.max(0, state.usedBytes - stored.byteSize)
       writeState(state)
-      if (!raw) continue
-      try { return JSON.parse(raw) } catch { /* skip malformed item */ }
+      if (!stored?.item) continue
+      return stored.item
     }
     return null
   }
@@ -211,7 +379,7 @@ export function createQueue ({ prefix, storageArea = globalThis.localStorage }) 
   function setAt (index, item) {
     const state = readState()
     assertIndex(index, lengthFromState(state))
-    writeItem(state.head + index, item)
+    writeItem(state.head + index, item, state, { evict: false })
     wake()
     return index
   }
@@ -222,12 +390,16 @@ export function createQueue ({ prefix, storageArea = globalThis.localStorage }) 
     assertIndex(index, length, { allowEnd: true })
 
     const slot = state.head + index
+    const stored = itemForStorage(slot, item)
+    if (hasByteLimit() && stored.byteSize > sessionMaxBytes) throw new Error('QUEUE_ITEM_TOO_LARGE')
+    if (hasByteLimit() && state.usedBytes + stored.byteSize > sessionMaxBytes) throw new Error('QUEUE_CAPACITY_EXCEEDED')
     state.tail++
     writeState(state)
     writeOperation({
       type: 'insert',
       head: state.head,
       tail: state.tail,
+      usedBytes: state.usedBytes,
       slot,
       cursor: state.tail - 1,
       item
@@ -257,21 +429,22 @@ export function createQueue ({ prefix, storageArea = globalThis.localStorage }) 
     assertIndex(index, length)
 
     const slot = state.head + index
-    const raw = storage().getItem(itemKey(slot))
+    const stored = readStoredItem(slot)
     state.tail--
+    if (stored) state.usedBytes = Math.max(0, state.usedBytes - stored.byteSize)
     writeState(state, { keepEmpty: true })
     writeOperation({
       type: 'remove',
       head: state.head,
       tail: state.tail,
+      usedBytes: state.usedBytes,
       slot,
       cursor: slot
     })
     finishRemove(readOperation())
     wake()
 
-    if (!raw) return null
-    try { return JSON.parse(raw) } catch { return null }
+    return stored?.item || null
   }
 
   async function * items () {
@@ -304,20 +477,33 @@ export function createQueue ({ prefix, storageArea = globalThis.localStorage }) 
     }
   }
 
+  async function * reverseStoredItems () {
+    const state = readState()
+    for (let id = state.tail - 1; id >= state.head; id--) {
+      const item = readItem(id)
+      if (item) yield item
+    }
+  }
+
   function removeWhere (predicate) {
     const state = readState()
     // Bulk predicate removal leaves holes on purpose; shift/pop skip them, and
     // callers that need contiguous positions can use removeAt for compaction.
     for (let id = state.head; id < state.tail; id++) {
       const key = itemKey(id)
-      const raw = storage().getItem(key)
-      if (!raw) continue
+      const stored = readStoredItem(id)
+      if (!stored) continue
       try {
-        if (predicate(JSON.parse(raw))) storage().removeItem(key)
+        if (predicate(stored.item)) {
+          storage().removeItem(key)
+          state.usedBytes = Math.max(0, state.usedBytes - stored.byteSize)
+        }
       } catch {
         storage().removeItem(key)
+        state.usedBytes = Math.max(0, state.usedBytes - stored.byteSize)
       }
     }
+    writeState(state)
   }
 
   function clear () {
@@ -338,6 +524,7 @@ export function createQueue ({ prefix, storageArea = globalThis.localStorage }) 
     items,
     reverseItems,
     storedItems,
+    reverseStoredItems,
     setAt,
     insertAt,
     insertWhere,

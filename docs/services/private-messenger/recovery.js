@@ -129,7 +129,7 @@ export function createEventReplyPacker ({
   let index = 0
   let finalized = false
 
-  async function publish (done) {
+  async function publish (isLast) {
     const jsonl = chunk
     chunk = ''
     chunkEvents = 0
@@ -141,7 +141,7 @@ export function createEventReplyPacker ({
       payload: {
         ...payload,
         index: index++,
-        done,
+        isLast,
         jsonl
       }
     })

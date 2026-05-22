@@ -54,6 +54,8 @@ const DEFAULT_RELOAD_GAP_DELAY_MS = 500
 const DEFAULT_SEEDER_PRESENCE_INTERVAL_MS = 10 * 60 * 1000
 const DEFAULT_SEEDER_ONLINE_SECONDS = 20 * 60
 const DEFAULT_MAX_DYNAMIC_RECOVERY_SEEDERS = 8
+const DEFAULT_MESSAGE_QUEUE_MAX_BYTES = 1024 * 1024 // 1 MiB
+const DEFAULT_SEED_QUEUE_MAX_BYTES = 3 * 1024 * 1024 // 3 MiB
 
 const encoder = new TextEncoder()
 
@@ -82,6 +84,8 @@ export class PrivateMessenger {
     seederPresenceIntervalMs = DEFAULT_SEEDER_PRESENCE_INTERVAL_MS,
     seederOnlineSeconds = DEFAULT_SEEDER_ONLINE_SECONDS,
     maxDynamicRecoverySeeders = DEFAULT_MAX_DYNAMIC_RECOVERY_SEEDERS,
+    messageQueueMaxBytes = DEFAULT_MESSAGE_QUEUE_MAX_BYTES,
+    seedQueueMaxBytes = DEFAULT_SEED_QUEUE_MAX_BYTES,
     _privateMessage = privateMessage,
     _privateChannel = privateChannel,
     _setTimeout = globalThis.setTimeout.bind(globalThis),
@@ -95,6 +99,8 @@ export class PrivateMessenger {
     this.seederPresenceIntervalMs = seederPresenceIntervalMs
     this.seederOnlineSeconds = seederOnlineSeconds
     this.maxDynamicRecoverySeeders = maxDynamicRecoverySeeders
+    this.messageQueueMaxBytes = messageQueueMaxBytes
+    this.seedQueueMaxBytes = seedQueueMaxBytes
     this._privateMessage = _privateMessage
     this._privateChannel = _privateChannel
     this._setTimeout = _setTimeout
@@ -120,8 +126,8 @@ export class PrivateMessenger {
     this.contentKeySigner = contentKeySigner || null
     this.userPubkey = await userSigner.getPublicKey()
     this.prefix = `ez-vault:private-messenger:${this.userPubkey}`
-    this.queue = createQueue({ prefix: this.prefix })
-    this.seedQueue = createQueue({ prefix: `${this.prefix}:seeds` })
+    this.queue = createQueue({ prefix: this.prefix, maxBytes: this.messageQueueMaxBytes })
+    this.seedQueue = createQueue({ prefix: `${this.prefix}:seeds`, maxBytes: this.seedQueueMaxBytes })
     this.cleanupStaleChannels()
     await this.update({ userSigner, contentKeySigner, channels, relays, mode })
     return this

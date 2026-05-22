@@ -36,6 +36,11 @@ function setJson (key, value) {
   globalThis.localStorage.setItem(key, JSON.stringify(value))
 }
 
+function assertQueueState (expected) {
+  const state = JSON.parse(globalThis.localStorage.getItem('test:queue'))
+  for (const [key, value] of Object.entries(expected)) assert.equal(state[key], value)
+}
+
 function createStorageArea () {
   const store = new Map()
   return {
@@ -44,6 +49,23 @@ function createStorageArea () {
     removeItem: key => store.delete(String(key)),
     setItem: (key, value) => store.set(String(key), String(value)),
     get length () { return store.size }
+  }
+}
+
+function createQuotaStorageArea ({ failOnItemWrite = 1 } = {}) {
+  const storageArea = createStorageArea()
+  let itemWrites = 0
+  return {
+    ...storageArea,
+    setItem: (key, value) => {
+      if (String(key).startsWith('test:queue:item:')) itemWrites++
+      if (itemWrites === failOnItemWrite && String(key).startsWith('test:queue:item:')) {
+        const err = new Error('Quota exceeded')
+        err.name = 'QuotaExceededError'
+        throw err
+      }
+      storageArea.setItem(key, value)
+    }
   }
 }
 
@@ -82,7 +104,7 @@ test('queue repairs a failed enqueue that only persisted the tail reservation', 
   failNextItemWrite = true
 
   assert.throws(() => queue.enqueue({ value: 'failed' }), /ITEM_WRITE_FAILED/)
-  assert.deepEqual(JSON.parse(globalThis.localStorage.getItem('test:queue')), { head: 0, tail: 1 })
+  assertQueueState({ head: 0, tail: 1 })
 
   const recovered = createQueue({ prefix: 'test' })
 
@@ -95,7 +117,7 @@ test('queue repairs a failed unshift that only persisted the head reservation', 
   failNextItemWrite = true
 
   assert.throws(() => queue.unshift({ value: 'failed' }), /ITEM_WRITE_FAILED/)
-  assert.deepEqual(JSON.parse(globalThis.localStorage.getItem('test:queue')), { head: -1, tail: 0 })
+  assertQueueState({ head: -1, tail: 0 })
 
   const recovered = createQueue({ prefix: 'test' })
 
@@ -109,7 +131,7 @@ test('queue repairs a failed shift that only persisted the head advance', () => 
   failNextItemRemove = true
 
   assert.throws(() => queue.shift(), /ITEM_REMOVE_FAILED/)
-  assert.deepEqual(JSON.parse(globalThis.localStorage.getItem('test:queue')), { head: 1, tail: 1 })
+  assertQueueState({ head: 1, tail: 1 })
   assert.notEqual(globalThis.localStorage.getItem('test:queue:item:0'), null)
 
   const recovered = createQueue({ prefix: 'test' })
@@ -145,7 +167,7 @@ test('queue repairs a failed pop that only persisted the tail retreat', () => {
   failNextItemRemove = true
 
   assert.throws(() => queue.pop(), /ITEM_REMOVE_FAILED/)
-  assert.deepEqual(JSON.parse(globalThis.localStorage.getItem('test:queue')), { head: 0, tail: 0 })
+  assertQueueState({ head: 0, tail: 0 })
   assert.notEqual(globalThis.localStorage.getItem('test:queue:item:0'), null)
 
   const recovered = createQueue({ prefix: 'test' })
@@ -325,6 +347,61 @@ test('storedItems scans stored items without consuming them', async () => {
   assert.deepEqual(values, ['first', 'second'])
   assert.deepEqual(queue.shift().value, 'first')
   assert.deepEqual(queue.shift().value, 'second')
+})
+
+test('reverseStoredItems scans stored items from the end without consuming them', async () => {
+  const queue = createQueue({ prefix: 'test' })
+  queue.push({ value: 'first' })
+  queue.push({ value: 'second' })
+
+  const values = []
+  for await (const item of queue.reverseStoredItems()) values.push(item.value)
+
+  assert.deepEqual(values, ['second', 'first'])
+  assert.deepEqual(queue.shift().value, 'first')
+  assert.deepEqual(queue.shift().value, 'second')
+})
+
+test('queue evicts older items when maxBytes would be exceeded', () => {
+  const queue = createQueue({ prefix: 'test', maxBytes: 450 })
+  queue.push({ value: 'a'.repeat(120) })
+  queue.push({ value: 'b'.repeat(120) })
+  queue.push({ value: 'c'.repeat(120) })
+
+  assert.deepEqual(queue.shift().value, 'b'.repeat(120))
+  assert.deepEqual(queue.shift().value, 'c'.repeat(120))
+  assert.equal(queue.shift(), null)
+})
+
+test('queue rejects items larger than maxBytes', () => {
+  const queue = createQueue({ prefix: 'test', maxBytes: 80 })
+
+  assert.throws(() => queue.push({ value: 'too-large'.repeat(20) }), /QUEUE_ITEM_TOO_LARGE/)
+  assert.equal(queue.shift(), null)
+})
+
+test('queue enforces maxBytes when opening an existing queue', () => {
+  const queue = createQueue({ prefix: 'test' })
+  queue.push({ value: 'a'.repeat(120) })
+  queue.push({ value: 'b'.repeat(120) })
+  queue.push({ value: 'c'.repeat(120) })
+
+  const bounded = createQueue({ prefix: 'test', maxBytes: 450 })
+
+  assert.deepEqual(bounded.shift().value, 'b'.repeat(120))
+  assert.deepEqual(bounded.shift().value, 'c'.repeat(120))
+  assert.equal(bounded.shift(), null)
+})
+
+test('queue retries once with a lower session byte limit after quota errors', () => {
+  const storageArea = createQuotaStorageArea({ failOnItemWrite: 2 })
+  const queue = createQueue({ prefix: 'test', storageArea, maxBytes: 450 })
+
+  queue.push({ value: 'evicted-after-quota'.repeat(5) })
+  queue.push({ value: 'survives-quota-retry'.repeat(5) })
+
+  assert.deepEqual(queue.shift().value, 'survives-quota-retry'.repeat(5))
+  assert.equal(queue.shift(), null)
 })
 
 test('clear removes queued items state and pending operation metadata', () => {
