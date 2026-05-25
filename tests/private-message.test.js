@@ -7,6 +7,7 @@ import {
   TELL_KIND,
   ask,
   broadcastRumor,
+  parseRumorContent,
   reply,
   tell,
   unwatch,
@@ -157,7 +158,8 @@ test('ask publishes an ask rumor and watch dispatches the reply with its questio
   assert.equal(published.event.pubkey, undefined)
   assert.equal(published.receiverTag, 'receiver')
   assert.deepEqual(published.receivers, ['receiver'])
-  assert.deepEqual(JSON.parse(published.event.content), { code: 'PING', payload: { ok: true } })
+  assert.deepEqual(JSON.parse(published.event.content), { ok: true })
+  assert.deepEqual(published.event.tags, [['r', 'receiver'], ['h', 'PING']])
   assert.equal(result.question.pubkey, senderPubkey)
   assert.equal(result.question.id, getEventHash({ ...published.event, pubkey: senderPubkey }))
   assert.throws(() => getEventHash(published.event), /wrong or missing properties/)
@@ -168,7 +170,7 @@ test('ask publishes an ask rumor and watch dispatches the reply with its questio
     pubkey: 'receiver',
     created_at: 1,
     tags: [['q', result.question.id]],
-    content: JSON.stringify({ payload: 'pong' })
+    content: 'pong'
   }, { created_at: 2 }, { channelPubkey: 'sender-channel' })
 
   assert.equal(replies.length, 1)
@@ -249,4 +251,15 @@ test('broadcastRumor validates normalized unsigned rumors before publishing', as
   )
 
   assert.equal(published, false)
+})
+
+test('parseRumorContent only reads h tags for private message kinds', () => {
+  assert.deepEqual(
+    parseRumorContent({ kind: TELL_KIND, tags: [['h', 'NOTE']], content: 'hello' }),
+    { payload: 'hello', code: 'NOTE' }
+  )
+  assert.deepEqual(
+    parseRumorContent({ kind: 9001, content: JSON.stringify(['hello', 'NOTE']) }),
+    ['hello', 'NOTE']
+  )
 })

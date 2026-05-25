@@ -499,7 +499,7 @@ export class PrivateMessenger {
     return this.queue.shift()
   }
 
-  async ask ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkey, relays, message, code, payload, content }) {
+  async ask ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkey, relays, message, code, payload, error, content }) {
     const channel = this.requireChannel(channelPubkey)
     return this._privateMessage.ask({
       senderSigner: this.userSigner,
@@ -511,11 +511,12 @@ export class PrivateMessenger {
       message,
       code,
       payload,
+      error,
       content
     })
   }
 
-  async reply ({ channelPubkey = this.defaultChannelPubkey(), question, receiverPubkey, relays, message, code, payload, content }) {
+  async reply ({ channelPubkey = this.defaultChannelPubkey(), question, receiverPubkey, relays, message, code, payload, error, content }) {
     const channel = this.requireChannel(channelPubkey)
     return this._privateMessage.reply({
       senderSigner: this.userSigner,
@@ -528,11 +529,12 @@ export class PrivateMessenger {
       message,
       code,
       payload,
+      error,
       content
     })
   }
 
-  async tell ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkey, relays, message, code, payload, content }) {
+  async tell ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkey, relays, message, code, payload, error, content }) {
     const channel = this.requireChannel(channelPubkey)
     return this._privateMessage.tell({
       senderSigner: this.userSigner,
@@ -544,11 +546,12 @@ export class PrivateMessenger {
       message,
       code,
       payload,
+      error,
       content
     })
   }
 
-  async yell ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkeys, relays, message, code, payload, content }) {
+  async yell ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkeys, relays, message, code, payload, error, content }) {
     const channel = this.requireChannel(channelPubkey)
     return this._privateMessage.yell({
       senderSigner: this.userSigner,
@@ -560,6 +563,7 @@ export class PrivateMessenger {
       message,
       code,
       payload,
+      error,
       content
     })
   }
@@ -881,11 +885,13 @@ function eventType (event) {
 }
 
 function parseEventContent (event) {
-  try { return JSON.parse(event.content) } catch { return event.content }
+  return privateMessage.parseRumorContent(event)
 }
 
 function messageCode (message) {
-  return isPlainObject(message.payload) ? message.payload.code || '' : ''
+  return isPlainObject(message.payload) && Object.prototype.hasOwnProperty.call(message.payload, 'code')
+    ? message.payload.code
+    : null
 }
 
 function messageTime (message) {

@@ -7,6 +7,7 @@ export const REPLY_KIND = 7330
 export const TELL_KIND = 7331
 
 const RESUBSCRIBE_GRACE_MS = 500
+const PRIVATE_MESSAGE_KINDS = [ASK_KIND, REPLY_KIND, TELL_KIND]
 
 const watchesByChannel = new Map()
 const subsByRelay = new Map()
@@ -26,18 +27,58 @@ function setEquals (a, b) {
   return true
 }
 
-function normalizeContent (message = {}) {
-  if (typeof message === 'string') return message
-  if (message.content != null) return String(message.content)
-  const content = {}
-  if (message.code) content.code = message.code
-  if ('payload' in message) content.payload = message.payload
-  if ('error' in message) content.error = message.error
-  return JSON.stringify(content)
+function normalizePayloadContent (payload) {
+  if (payload == null || payload === '') return ''
+  if (typeof payload === 'string') return payload
+  return JSON.stringify(payload)
 }
 
-function parseContent (event) {
-  try { return JSON.parse(event.content) } catch { return event.content }
+function normalizeMessage (message = {}) {
+  if (typeof message === 'string') return { content: normalizePayloadContent(message), code: '', error: '' }
+  const hasPayload = Object.prototype.hasOwnProperty.call(message, 'payload')
+  const payload = hasPayload ? message.payload : message.content
+  return {
+    content: normalizePayloadContent(payload),
+    code: message.code == null ? '' : String(message.code),
+    error: message.error == null ? '' : String(message.error)
+  }
+}
+
+function addHeaderTag (tags, { code, error }) {
+  const out = cloneTags(tags)
+  if (!code && !error) return out
+  const header = ['h', code || '']
+  if (error) header.push(error)
+  return out.concat([header])
+}
+
+function makeMessageRumor ({ kind, tags, message }) {
+  const normalized = normalizeMessage(message)
+  return {
+    kind,
+    tags: addHeaderTag(tags, normalized),
+    content: normalized.content
+  }
+}
+
+function parsePayloadContent (content) {
+  if (content === '') return null
+  try { return JSON.parse(content) } catch { return content }
+}
+
+function parseMessageContent (event) {
+  const payload = parsePayloadContent(event.content)
+  const header = event.tags?.find(tag => tag[0] === 'h') || []
+  const message = {}
+  if (payload !== null) message.payload = payload
+  if (header[1]) message.code = header[1]
+  if (header[2]) message.error = header[2]
+  return message
+}
+
+export function parseRumorContent (event) {
+  if (PRIVATE_MESSAGE_KINDS.includes(event.kind)) return parseMessageContent(event)
+  return parsePayloadContent(event.content)
 }
 
 function cloneTags (tags) {
@@ -86,7 +127,7 @@ function watchCallbacks (channelPubkey) {
 
 function dispatchWatchedEvent (event, outer, meta) {
   const callbacks = watchCallbacks(meta.channelPubkey)
-  const payload = parseContent(event)
+  const payload = parseRumorContent(event)
   const message = { event, outer, meta, payload }
 
   if (event.kind === ASK_KIND) {
@@ -318,6 +359,7 @@ export async function ask ({
   message,
   code,
   payload,
+  error,
   content,
   expirationSeconds,
   _publish = privateChannel.publish
@@ -328,11 +370,11 @@ export async function ask ({
 
   const { event: question, wireEvent } = await makeOutgoingRumor({
     senderSigner,
-    rumor: {
+    rumor: makeMessageRumor({
       kind: ASK_KIND,
       tags: [['r', receiverPubkey]],
-      content: normalizeContent(message || { code, payload, content })
-    }
+      message: message || { code, payload, error, content }
+    })
   })
   const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers: [receiverPubkey], receiverTag: receiverPubkey, event: wireEvent, relays, expirationSeconds, _publish })
 
@@ -349,6 +391,7 @@ export async function reply ({
   message,
   code,
   payload,
+  error,
   content,
   expirationSeconds,
   _publish = privateChannel.publish
@@ -357,11 +400,11 @@ export async function reply ({
   if (!receiverPubkey) throw new Error('RECEIVER_PUBKEY_REQUIRED')
   const { event, wireEvent } = await makeOutgoingRumor({
     senderSigner,
-    rumor: {
+    rumor: makeMessageRumor({
       kind: REPLY_KIND,
       tags: [['q', question.id], ['r', receiverPubkey]],
-      content: normalizeContent(message || { code, payload, content })
-    }
+      message: message || { code, payload, error, content }
+    })
   })
   const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers: [receiverPubkey], receiverTag: receiverPubkey, event: wireEvent, relays, expirationSeconds, _publish })
   return { reply: event, results }
@@ -376,6 +419,7 @@ export async function tell ({
   message,
   code,
   payload,
+  error,
   content,
   expirationSeconds,
   _publish = privateChannel.publish
@@ -383,11 +427,11 @@ export async function tell ({
   if (!receiverPubkey) throw new Error('RECEIVER_PUBKEY_REQUIRED')
   const { event, wireEvent } = await makeOutgoingRumor({
     senderSigner,
-    rumor: {
+    rumor: makeMessageRumor({
       kind: TELL_KIND,
       tags: [['r', receiverPubkey]],
-      content: normalizeContent(message || { code, payload, content })
-    }
+      message: message || { code, payload, error, content }
+    })
   })
   const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers: [receiverPubkey], receiverTag: receiverPubkey, event: wireEvent, relays, expirationSeconds, _publish })
   return { tell: event, results }
@@ -402,6 +446,7 @@ export async function yell ({
   message,
   code,
   payload,
+  error,
   content,
   expirationSeconds,
   _publish = privateChannel.publish
@@ -410,11 +455,11 @@ export async function yell ({
   if (!receivers.length) throw new Error('NO_RECEIVERS')
   const { event, wireEvent } = await makeOutgoingRumor({
     senderSigner,
-    rumor: {
+    rumor: makeMessageRumor({
       kind: TELL_KIND,
       tags: [],
-      content: normalizeContent(message || { code, payload, content })
-    }
+      message: message || { code, payload, error, content }
+    })
   })
   const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers, receiverTag: '', event: wireEvent, relays, expirationSeconds, _publish })
   return { yell: event, results }

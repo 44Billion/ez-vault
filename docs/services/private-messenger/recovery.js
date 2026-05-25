@@ -1,4 +1,5 @@
 import { bytesToBase64, base64ToBytes } from '../../helpers/base64.js'
+import { ASK_KIND, parseRumorContent } from '../../helpers/nostr/private-message.js'
 
 export const SEEDER_PRESENCE_CODE = 'seederPresence_9xfz'
 export const MISSING_MESSAGES_ASK_CODE = 'missingMessages_8mj8'
@@ -17,7 +18,7 @@ function isPlainObject (value) {
 }
 
 function parseEventContent (event) {
-  try { return JSON.parse(event.content) } catch { return event.content }
+  return parseRumorContent(event)
 }
 
 function splitJsonl (jsonl) {
@@ -84,7 +85,7 @@ function compactRoutersFromSeed (seed, { receiverPubkey, since, until }) {
 }
 
 function backfillRequestRange (question, since, until) {
-  const content = parseEventContent(question || {})
+  const content = parseEventContent({ ...question, kind: ASK_KIND })
   const payload = isPlainObject(content?.payload) ? content.payload : {}
   return {
     since: since ?? payload.since ?? 0,
@@ -109,7 +110,6 @@ export function createEventReplyPacker ({
   if (!messenger?.reply) throw new Error('MESSENGER_REQUIRED')
   if (!question?.id) throw new Error('QUESTION_REQUIRED')
   if (!receiverPubkey) throw new Error('RECEIVER_PUBKEY_REQUIRED')
-  if (!code) throw new Error('REPLY_CODE_REQUIRED')
   if (!Number.isSafeInteger(eventsPerChunk) || eventsPerChunk < 1) throw new Error('INVALID_EVENTS_PER_CHUNK')
 
   let chunk = ''

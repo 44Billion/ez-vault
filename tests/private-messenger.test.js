@@ -95,7 +95,7 @@ test('private messenger watches channels and queues received leecher rumors', as
   assert.equal(pm.watchCalls[0].mode, 'leecher')
 
   pm.watchCalls[0].onTell({
-    event: { id: 'tell-id', kind: TELL_KIND, pubkey: 'alice', created_at: 10, tags: [['r', 'user']], content: '{"payload":"hi"}' },
+    event: { id: 'tell-id', kind: TELL_KIND, pubkey: 'alice', created_at: 10, tags: [['r', 'user']], content: 'hi' },
     outer: { id: 'outer-id', created_at: 11 },
     meta: { channelPubkey: 'channel' },
     payload: { payload: 'hi' },
@@ -110,7 +110,7 @@ test('private messenger watches channels and queues received leecher rumors', as
   assert.equal(messenger.readState().channels.channel.lastSeenAt, 11)
 
   pm.watchCalls[0].onReply({
-    event: { id: 'reply-id', kind: REPLY_KIND, pubkey: 'alice', created_at: 12, tags: [['q', 'question-id']], content: '{"payload":"pong"}' },
+    event: { id: 'reply-id', kind: REPLY_KIND, pubkey: 'alice', created_at: 12, tags: [['q', 'question-id']], content: 'pong' },
     outer: { id: 'outer-reply-id', created_at: 13 },
     meta: { channelPubkey: 'channel' },
     payload: { payload: 'pong' },
@@ -125,16 +125,16 @@ test('private messenger watches channels and queues received leecher rumors', as
   assert.equal(reply.event.id, 'reply-id')
 
   pm.watchCalls[0].onMessage({
-    event: { id: 'raw-id', kind: 9001, pubkey: 'alice', created_at: 14, tags: [], content: 'raw' },
+    event: { id: 'raw-id', kind: 9001, pubkey: 'alice', created_at: 14, tags: [], content: JSON.stringify(['raw-payload', 'not-a-private-message-code']) },
     outer: { id: 'outer-raw-id', created_at: 15 },
     meta: { channelPubkey: 'channel' },
-    payload: 'raw'
+    payload: ['raw-payload', 'not-a-private-message-code']
   })
 
   const raw = messenger.nextMessage()
   assert.equal(raw.type, 'message')
   assert.equal(raw.event.id, 'raw-id')
-  assert.equal(raw.payload, 'raw')
+  assert.deepEqual(raw.payload, ['raw-payload', 'not-a-private-message-code'])
 })
 
 test('private messenger forwards watch errors to the configured error handler', async () => {
@@ -286,7 +286,7 @@ test('watch schedules reload-gap recovery and fetches missing channel window', a
           pubkey: 'alice',
           created_at: now - 5,
           tags: [['r', 'user']],
-          content: '{"payload":"missed"}'
+          content: 'missed'
         }, { id: 'outer-id', created_at: now - 5 }, { channelPubkey: 'channel' })
       }
     },
@@ -367,8 +367,8 @@ test('seeder channels store router seeds separately and answer missing-message a
       kind: ASK_KIND,
       pubkey: 'user',
       created_at: now,
-      tags: [['r', 'seeder']],
-      content: JSON.stringify({ code: MISSING_MESSAGES_ASK_CODE, payload: { since: now - 5, until: now + 5 } })
+      tags: [['r', 'seeder'], ['h', MISSING_MESSAGES_ASK_CODE]],
+      content: JSON.stringify({ since: now - 5, until: now + 5 })
     },
     outer: { id: 'ask-outer-id', created_at: now },
     meta: { channelPubkey: 'channel' },
@@ -408,7 +408,7 @@ test('recovery asks online seeders for the relay-uncovered left edge', async () 
           pubkey: 'alice',
           created_at: now - 5,
           tags: [['r', 'user']],
-          content: '{"payload":"relay"}'
+          content: 'relay'
         }, { id: 'outer-id', created_at: now - 5 }, { channelPubkey: 'channel' })
         return [{ id: 'outer-id', created_at: now - 5 }]
       }
@@ -420,7 +420,7 @@ test('recovery asks online seeders for the relay-uncovered left edge', async () 
   })
 
   pm.watchCalls[0].onYell({
-    event: { id: 'presence-id', kind: TELL_KIND, pubkey: 'seeder', created_at: now - 2, tags: [], content: '{"code":"' + SEEDER_PRESENCE_CODE + '","payload":{}}' },
+    event: { id: 'presence-id', kind: TELL_KIND, pubkey: 'seeder', created_at: now - 2, tags: [['h', SEEDER_PRESENCE_CODE]], content: '{}' },
     outer: { id: 'presence-outer-id', created_at: now - 2 },
     meta: { channelPubkey: 'channel' },
     payload: { code: SEEDER_PRESENCE_CODE, payload: {} },
@@ -478,9 +478,8 @@ test('missing-message replies ignore raw event rows', async () => {
     pubkey: 'alice',
     created_at: 1,
     tags: [['r', 'user']],
-    content: '{"payload":"old"}'
+    content: 'old'
   })}\n`
-
   await pm.watchCalls[0].onReply({
     event: { id: 'reply-id', kind: REPLY_KIND, pubkey: 'seeder', created_at: 2, tags: [['q', 'question-id']], content: '' },
     outer: { id: 'reply-outer-id', created_at: 3 },
@@ -507,7 +506,7 @@ test('missing-message replies can recover router-only seed records', async () =>
           pubkey: 'alice',
           created_at: 1,
           tags: [['r', 'user']],
-          content: '{"payload":"old"}'
+          content: 'old'
         }
       }
     }
@@ -523,7 +522,6 @@ test('missing-message replies can recover router-only seed records', async () =>
     tags: [['f', 'alice'], ['c', '0', '1']],
     content: jsonlContent(userRow)
   })}\n`
-
   await pm.watchCalls[0].onReply({
     event: { id: 'reply-id', kind: REPLY_KIND, pubkey: 'seeder', created_at: 2, tags: [['q', 'question-id']], content: '' },
     outer: { id: 'reply-outer-id', created_at: 3 },
@@ -545,7 +543,8 @@ test('missing-message reply packer streams compact seed routers only', async () 
   const question = {
     id: 'question-id',
     pubkey: 'user',
-    content: JSON.stringify({ code: MISSING_MESSAGES_ASK_CODE, payload: { since: 5, until: 20 } })
+    tags: [['h', MISSING_MESSAGES_ASK_CODE]],
+    content: JSON.stringify({ since: 5, until: 20 })
   }
   const packer = createMissingMessageReplyPacker({
     messenger: { reply: async options => replies.push(options) },
@@ -562,7 +561,7 @@ test('missing-message reply packer streams compact seed routers only', async () 
     pubkey: 'alice',
     created_at: 6,
     tags: [['r', 'user']],
-    content: '{"payload":"first"}'
+    content: 'first'
   })
   await packer.finalize({
     type: 'seed',
