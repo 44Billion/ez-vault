@@ -23,10 +23,9 @@
 // - Seeders announce presence every 10min and are used for the relay-uncovered left edge of a missed range.
 // - Configured seeders are all asked; auto-discovered seeders are capped to the 8 most recently active.
 // - Seeder channels store reconstructed router events in a separate web-storage queue and auto-reply to recovery asks.
-// - Seeder replies can be streamed with createMissingMessageReplyPacker({ messenger, question }).update(seed), then finalize(optionalLastSeed).
+// - Seeder replies stream compact routers with createMissingMessageReplyPacker({ messenger, question }).update(seed), then finalize(optionalLastSeed).
 // - For other event-list replies, use createEventReplyPacker({ messenger, question, code }).update(event).
 
-import { bytesToBase64 } from '../../helpers/base64.js'
 import * as privateMessage from '../../helpers/nostr/private-message.js'
 import * as privateChannel from '../private-channel/index.js'
 import { createQueue } from '../web-storage-queue.js'
@@ -58,8 +57,6 @@ const DEFAULT_SEEDER_ONLINE_SECONDS = 20 * 60
 const DEFAULT_MAX_DYNAMIC_RECOVERY_SEEDERS = 8
 const DEFAULT_MESSAGE_QUEUE_MAX_BYTES = 1024 * 1024 // 1 MiB
 const DEFAULT_SEED_QUEUE_MAX_BYTES = 3 * 1024 * 1024 // 3 MiB
-
-const encoder = new TextEncoder()
 
 function defaultOnError (err) {
   console.warn('private-messenger failed', err?.message ?? err)
@@ -750,24 +747,22 @@ export class PrivateMessenger {
   }
 
   async eventFromBackfillRecord (channelPubkey, record) {
-    if (record.event) return record.event
-    if (Number.isInteger(record.kind)) return record
-    if (!record.router?.content && (!record.row || !record.router)) return null
+    if (!isPrivateChannelRouter(record)) return null
     if (!this._privateChannel.unwrapEvent) throw new Error('PRIVATE_CHANNEL_UNWRAP_UNSUPPORTED')
 
     const channel = this.requireChannel(channelPubkey)
     const router = {
       kind: privateChannel.ROUTER_KIND,
-      pubkey: record.router.pubkey,
-      created_at: record.router.created_at || record.outer?.created_at || nowSeconds(),
-      tags: (record.router.tags || []).filter(tag => tag[0] !== 'c').concat([['c', '0', '1']]),
-      content: record.router.content || bytesToBase64(encoder.encode(String(record.row).endsWith('\n') ? String(record.row) : `${record.row}\n`))
+      pubkey: record.pubkey,
+      created_at: record.created_at || nowSeconds(),
+      tags: (record.tags || []).filter(tag => tag[0] !== 'c').concat([['c', '0', '1']]),
+      content: record.content
     }
     const outer = {
       kind: privateChannel.PRIVATE_BROADCAST_KIND,
-      pubkey: record.outer?.pubkey || channelPubkey,
-      created_at: record.outer?.created_at || router.created_at,
-      tags: record.outer?.tags || [],
+      pubkey: channelPubkey,
+      created_at: router.created_at,
+      tags: [],
       content: await channel.signer.nip44Encrypt(channelPubkey, JSON.stringify(router))
     }
     return this._privateChannel.unwrapEvent({
@@ -904,6 +899,12 @@ function oldestCreatedAt (events) {
     oldest = oldest == null ? event.created_at : Math.min(oldest, event.created_at)
   }
   return oldest
+}
+
+function isPrivateChannelRouter (event) {
+  return event?.kind === privateChannel.ROUTER_KIND &&
+    typeof event.content === 'string' &&
+    event.tags?.some(tag => tag[0] === 'c')
 }
 
 function splitJsonl (jsonl) {

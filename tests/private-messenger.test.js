@@ -381,9 +381,9 @@ test('seeder channels store router seeds separately and answer missing-message a
   assert.equal(reply.options.payload.isLast, true)
   const records = reply.options.payload.jsonl.trim().split('\n').map(line => JSON.parse(line))
   assert.equal(records.length, 1)
-  assert.equal(records[0].outer, undefined)
-  assert.equal(Buffer.from(records[0].router.content, 'base64').toString(), `${userRow}\n`)
-  assert.deepEqual(records[0].router.tags, [['f', 'alice'], ['c', '0', '1']])
+  assert.equal(records[0].kind, 263)
+  assert.equal(Buffer.from(records[0].content, 'base64').toString(), `${userRow}\n`)
+  assert.deepEqual(records[0].tags, [['f', 'alice'], ['c', '0', '1']])
   assert.equal(messenger.nextMessage(), null)
 })
 
@@ -466,21 +466,19 @@ test('recovery asks all configured seeders but caps discovered seeders', async (
   assert.deepEqual(discoveredAsks.map(sent => sent.options.receiverPubkey), discoveredSeeders.slice(0, 8))
 })
 
-test('missing-message replies are consumed internally as recovered queue items', async () => {
+test('missing-message replies ignore raw event rows', async () => {
   const pm = fakePrivateMessage()
   const messenger = await new PrivateMessenger({ _privateMessage: pm }).init({
     userSigner: signer('user'),
     channels: [{ pubkey: 'channel', signer: signer('channel'), relays: ['wss://relay.example'], seeders: ['seeder'] }]
   })
   const jsonl = `${JSON.stringify({
-    event: {
-      id: 'missed-id',
-      kind: TELL_KIND,
-      pubkey: 'alice',
-      created_at: 1,
-      tags: [['r', 'user']],
-      content: '{"payload":"old"}'
-    }
+    id: 'missed-id',
+    kind: TELL_KIND,
+    pubkey: 'alice',
+    created_at: 1,
+    tags: [['r', 'user']],
+    content: '{"payload":"old"}'
   })}\n`
 
   await pm.watchCalls[0].onReply({
@@ -492,10 +490,6 @@ test('missing-message replies are consumed internally as recovered queue items',
     reply: { id: 'reply-id' }
   })
 
-  const item = messenger.nextMessage()
-  assert.equal(item.type, 'tell')
-  assert.equal(item.event.id, 'missed-id')
-  assert.deepEqual(item.payload, { payload: 'old' })
   assert.equal(messenger.nextMessage(), null)
 })
 
@@ -523,13 +517,11 @@ test('missing-message replies can recover router-only seed records', async () =>
   })
   const userRow = JSON.stringify(['user', 'ciphertext'])
   const jsonl = `${JSON.stringify({
-    router: {
-      kind: 263,
-      pubkey: 'router',
-      created_at: 1,
-      tags: [['f', 'alice'], ['c', '0', '1']],
-      content: jsonlContent(userRow)
-    }
+    kind: 263,
+    pubkey: 'router',
+    created_at: 1,
+    tags: [['f', 'alice'], ['c', '0', '1']],
+    content: jsonlContent(userRow)
   })}\n`
 
   await pm.watchCalls[0].onReply({
@@ -548,7 +540,7 @@ test('missing-message replies can recover router-only seed records', async () =>
   assert.equal(messenger.nextMessage(), null)
 })
 
-test('missing-message reply packer groups records by count and accepts final input', async () => {
+test('missing-message reply packer streams compact seed routers only', async () => {
   const replies = []
   const question = {
     id: 'question-id',
@@ -565,38 +557,38 @@ test('missing-message reply packer groups records by count and accepts final inp
   const otherRow = JSON.stringify(['other', 'ciphertext'])
 
   await packer.update({
-    event: {
-      id: 'event-id',
-      kind: TELL_KIND,
-      pubkey: 'alice',
-      created_at: 6,
-      tags: [['r', 'user']],
-      content: '{"payload":"first"}'
-    }
+    id: 'event-id',
+    kind: TELL_KIND,
+    pubkey: 'alice',
+    created_at: 6,
+    tags: [['r', 'user']],
+    content: '{"payload":"first"}'
   })
   await packer.finalize({
     type: 'seed',
     channelPubkey: 'channel',
     outer: { id: 'outer-id', kind: 3560, pubkey: 'channel', created_at: 10, tags: [['expiration', '99']] },
-    router: { kind: 263, pubkey: 'router', created_at: 10, tags: [['f', 'sender'], ['c', '0', '1']] },
-    jsonl: `${userRow}\n${otherRow}\n`
+    router: {
+      kind: 263,
+      pubkey: 'router',
+      created_at: 10,
+      tags: [['f', 'sender'], ['c', '0', '1']],
+      content: jsonlContent(userRow, otherRow)
+    }
   })
 
-  assert.equal(replies.length, 2)
+  assert.equal(replies.length, 1)
   assert.equal(replies[0].code, MISSING_MESSAGES_REPLY_CODE)
   assert.equal(replies[0].receiverPubkey, 'user')
   assert.equal(replies[0].payload.since, 5)
   assert.equal(replies[0].payload.until, 20)
-  assert.equal(replies[0].payload.isLast, false)
-  assert.equal(JSON.parse(replies[0].payload.jsonl.trim()).event.id, 'event-id')
-
-  assert.equal(replies[1].payload.isLast, true)
-  const lines = replies[1].payload.jsonl.trim().split('\n')
+  assert.equal(replies[0].payload.isLast, true)
+  const lines = replies[0].payload.jsonl.trim().split('\n')
   assert.equal(lines.length, 1)
   const record = JSON.parse(lines[0])
-  assert.equal(record.outer, undefined)
-  assert.equal(Buffer.from(record.router.content, 'base64').toString(), `${userRow}\n`)
-  assert.deepEqual(record.router.tags, [['f', 'sender'], ['c', '0', '1']])
+  assert.equal(record.kind, 263)
+  assert.equal(Buffer.from(record.content, 'base64').toString(), `${userRow}\n`)
+  assert.deepEqual(record.tags, [['f', 'sender'], ['c', '0', '1']])
 })
 
 test('event reply packer streams regular event lists', async () => {
@@ -611,10 +603,8 @@ test('event reply packer streams regular event lists', async () => {
     eventsPerChunk: 2
   })
 
-  await packer.update([
-    { id: 'event-1', kind: 1, pubkey: 'alice', created_at: 1, tags: [], content: 'one' },
-    { id: 'event-2', kind: 1, pubkey: 'alice', created_at: 2, tags: [], content: 'two' }
-  ])
+  await packer.update({ id: 'event-1', kind: 1, pubkey: 'alice', created_at: 1, tags: [], content: 'one' })
+  await packer.update({ id: 'event-2', kind: 1, pubkey: 'alice', created_at: 2, tags: [], content: 'two' })
   await packer.finalize({ id: 'event-3', kind: 1, pubkey: 'alice', created_at: 3, tags: [], content: 'three' })
 
   assert.equal(replies.length, 2)
@@ -623,9 +613,9 @@ test('event reply packer streams regular event lists', async () => {
   assert.deepEqual(replies[0].payload.collection, 'local-db')
   assert.equal(replies[0].payload.index, 0)
   assert.equal(replies[0].payload.isLast, false)
-  assert.deepEqual(replies[0].payload.jsonl.trim().split('\n').map(line => JSON.parse(line).event.id), ['event-1', 'event-2'])
+  assert.deepEqual(replies[0].payload.jsonl.trim().split('\n').map(line => JSON.parse(line).id), ['event-1', 'event-2'])
 
   assert.equal(replies[1].payload.index, 1)
   assert.equal(replies[1].payload.isLast, true)
-  assert.deepEqual(replies[1].payload.jsonl.trim().split('\n').map(line => JSON.parse(line).event.id), ['event-3'])
+  assert.deepEqual(replies[1].payload.jsonl.trim().split('\n').map(line => JSON.parse(line).id), ['event-3'])
 })

@@ -134,6 +134,7 @@ function privateChannelPubkeyList ({ privateChannelPubkey, privateChannelPubkeys
 
 function parseJsonlRows (jsonl) {
   return String(jsonl || '').split('\n').filter(Boolean).map((line, index) => {
+    // eslint-disable-next-line no-unused-vars
     const [receiverPubkey, _ciphertext, iykcPubkey = '', iykcProof = ''] = JSON.parse(line)
     return { index, receiverPubkey, iykcPubkey, iykcProof }
   })

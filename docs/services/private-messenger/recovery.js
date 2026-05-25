@@ -1,8 +1,8 @@
 import { bytesToBase64, base64ToBytes } from '../../helpers/base64.js'
 
-export const SEEDER_PRESENCE_CODE = 'seederPresence_9xfzc7e65ju'
-export const MISSING_MESSAGES_ASK_CODE = 'missingMessages_8mj8qayg7e3'
-export const MISSING_MESSAGES_REPLY_CODE = 'missingMessages_roau5o03bim'
+export const SEEDER_PRESENCE_CODE = 'seederPresence_9xfz'
+export const MISSING_MESSAGES_ASK_CODE = 'missingMessages_8mj8'
+export const MISSING_MESSAGES_REPLY_CODE = 'missingMessages_roau'
 
 const DEFAULT_EVENTS_PER_CHUNK = 100
 const encoder = new TextEncoder()
@@ -73,23 +73,14 @@ function recordReceiverPubkey (line) {
   }
 }
 
-function backfillRecordsFromSeed (seed, { receiverPubkey, since, until }) {
-  if (!eventInRange(seed.router, since, until)) return []
+function compactRoutersFromSeed (seed, { receiverPubkey, since, until }) {
+  if (!seed?.router?.content || !eventInRange(seed.router, since, until)) return []
   const records = []
-  for (const row of splitJsonl(seed.jsonl || decodeJsonl(seed.router?.content))) {
+  for (const row of splitJsonl(decodeJsonl(seed.router.content))) {
     if (receiverPubkey && recordReceiverPubkey(row) !== receiverPubkey) continue
-    records.push({ router: routerWithSingleRow(seed.router, row) })
+    records.push(routerWithSingleRow(seed.router, row))
   }
   return records
-}
-
-function backfillRecordsFromInput (input, options) {
-  if (!input) return []
-  if (input.router?.content || input.jsonl) return backfillRecordsFromSeed(input, options)
-
-  const event = input.event || (Number.isInteger(input.kind) ? input : null)
-  if (!event || !eventInRange(event, options.since, options.until)) return []
-  return [{ event }]
 }
 
 function backfillRequestRange (question, since, until) {
@@ -101,11 +92,8 @@ function backfillRequestRange (question, since, until) {
   }
 }
 
-function eventRecordsFromInput (input) {
-  if (!input) return []
-  if (Array.isArray(input)) return input.flatMap(eventRecordsFromInput)
-  const event = input.event || (Number.isInteger(input.kind) ? input : null)
-  return event ? [{ event }] : []
+function eventRecordFromInput (event) {
+  return Number.isInteger(event?.kind) ? [event] : []
 }
 
 export function createEventReplyPacker ({
@@ -116,7 +104,7 @@ export function createEventReplyPacker ({
   code,
   payload = {},
   eventsPerChunk = DEFAULT_EVENTS_PER_CHUNK,
-  recordsFromInput = eventRecordsFromInput
+  recordsFromInput = eventRecordFromInput
 }) {
   if (!messenger?.reply) throw new Error('MESSENGER_REQUIRED')
   if (!question?.id) throw new Error('QUESTION_REQUIRED')
@@ -201,6 +189,6 @@ export function createMissingMessageReplyPacker ({
     code: MISSING_MESSAGES_REPLY_CODE,
     payload: { since: range.since, until: range.until },
     eventsPerChunk,
-    recordsFromInput: input => backfillRecordsFromInput(input, { receiverPubkey, since: range.since, until: range.until })
+    recordsFromInput: seed => compactRoutersFromSeed(seed, { receiverPubkey, since: range.since, until: range.until })
   })
 }
