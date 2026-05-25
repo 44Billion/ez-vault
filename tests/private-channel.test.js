@@ -116,15 +116,54 @@ test('unwrapEvent uses imkc tag as the row encryption pubkey', async () => {
   const alice = signer()
   const imkc = signer()
   const bob = signer()
+  const alicePubkey = await alice.getPublicKey()
   const bobPubkey = await bob.getPublicKey()
   const imkcPubkey = await imkc.getPublicKey()
+  const imkcProof = parseContentKeyEvent(await makeContentKeyEvent({ userSigner: alice, contentKeySigner: imkc, createdAt: 7 }))
   const original = eventFixture('private')
   const [wrapped] = await wrapEvent({ senderSigner: alice, imkcSigner: imkc, receivers: [bobPubkey], event: original, _getIykcProofs: noContentKeys })
   const router = JSON.parse(await alice.nip44Decrypt(await alice.getPublicKey(), wrapped.content))
 
-  assert.equal(router.tags.find(t => t[0] === 'f')?.[1], await alice.getPublicKey())
+  assert.equal(router.tags.find(t => t[0] === 'f')?.[1], alicePubkey)
   assert.equal(router.tags.find(t => t[0] === 'imkc')?.[1], imkcPubkey)
-  assert.deepEqual(await unwrapEvent({ receiverSigner: bob, privateChannelSigner: alice, event: wrapped, receiverPubkey: bobPubkey }), unwrappedFixture(original, await alice.getPublicKey()))
+  assert.deepEqual(
+    await unwrapEvent({
+      receiverSigner: bob,
+      privateChannelSigner: alice,
+      event: wrapped,
+      receiverPubkey: bobPubkey,
+      _getIykcProofs: async () => ({ [alicePubkey]: imkcProof })
+    }),
+    unwrappedFixture(original, alicePubkey)
+  )
+})
+
+test('unwrapEvent rejects sender imkc keys not advertised by the sender', async () => {
+  const alice = signer()
+  const oldImkc = signer()
+  const newImkc = signer()
+  const bob = signer()
+  const alicePubkey = await alice.getPublicKey()
+  const bobPubkey = await bob.getPublicKey()
+  const newImkcProof = parseContentKeyEvent(await makeContentKeyEvent({ userSigner: alice, contentKeySigner: newImkc, createdAt: 8 }))
+  const [wrapped] = await wrapEvent({
+    senderSigner: alice,
+    imkcSigner: oldImkc,
+    receivers: [bobPubkey],
+    event: eventFixture('private'),
+    _getIykcProofs: noContentKeys
+  })
+
+  await assert.rejects(
+    () => unwrapEvent({
+      receiverSigner: bob,
+      privateChannelSigner: alice,
+      event: wrapped,
+      receiverPubkey: bobPubkey,
+      _getIykcProofs: async () => ({ [alicePubkey]: newImkcProof })
+    }),
+    /INVALID_SENDER_CONTENT_KEY/
+  )
 })
 
 test('wrapEvent uses receiver content key rows when iykc is advertised', async () => {

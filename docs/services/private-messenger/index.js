@@ -2,7 +2,8 @@
 // const messenger = await createPrivateMessenger({
 //   userSigner,
 //   contentKeySigner,
-//   channels: [{ signer: privateChannelSigner, relays, mode: 'leecher', seeders: optionalSeederPubkeys }]
+//   channels: [{ signer: privateChannelSigner, relays, mode: 'leecher', seeders: optionalSeederPubkeys }],
+//   onError: err => reportPrivateMessengerError(err)
 // })
 // for await (const msg of messenger.messages()) handlePrivateMessage(msg)
 // await messenger.ask({ receiverPubkey, payload: { ping: true } })
@@ -59,6 +60,10 @@ const DEFAULT_SEED_QUEUE_MAX_BYTES = 3 * 1024 * 1024 // 3 MiB
 
 const encoder = new TextEncoder()
 
+function defaultOnError (err) {
+  console.warn('private-messenger failed', err?.message ?? err)
+}
+
 function nowSeconds () {
   return Math.floor(Date.now() / 1000)
 }
@@ -86,6 +91,7 @@ export class PrivateMessenger {
     maxDynamicRecoverySeeders = DEFAULT_MAX_DYNAMIC_RECOVERY_SEEDERS,
     messageQueueMaxBytes = DEFAULT_MESSAGE_QUEUE_MAX_BYTES,
     seedQueueMaxBytes = DEFAULT_SEED_QUEUE_MAX_BYTES,
+    onError = defaultOnError,
     _privateMessage = privateMessage,
     _privateChannel = privateChannel,
     _setTimeout = globalThis.setTimeout.bind(globalThis),
@@ -101,6 +107,7 @@ export class PrivateMessenger {
     this.maxDynamicRecoverySeeders = maxDynamicRecoverySeeders
     this.messageQueueMaxBytes = messageQueueMaxBytes
     this.seedQueueMaxBytes = seedQueueMaxBytes
+    this.onError = onError
     this._privateMessage = _privateMessage
     this._privateChannel = _privateChannel
     this._setTimeout = _setTimeout
@@ -326,7 +333,7 @@ export class PrivateMessenger {
         onYell: message => this.handleYell(pubkey, message),
         onMessage: message => this.handleMessage(pubkey, message),
         onSeed: seed => this.enqueueSeed(pubkey, seed),
-        onError: err => console.warn('private-messenger watch failed', err?.message ?? err)
+        onError: err => this.onError?.(err)
       })
       this.stopByChannel.set(pubkey, stop)
       this.updateChannelState(pubkey, {
@@ -739,7 +746,7 @@ export class PrivateMessenger {
           }) || []
           await this.askSeedersForRelayLeftEdge(pubkey, range, fetchedEvents)
         } catch (err) {
-          console.warn('private-messenger recovery failed', pubkey, err?.message ?? err)
+          this.onError?.(err)
           remaining.push(range)
         }
       }

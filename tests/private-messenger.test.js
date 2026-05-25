@@ -137,6 +137,20 @@ test('private messenger watches channels and queues received leecher rumors', as
   assert.equal(raw.payload, 'raw')
 })
 
+test('private messenger forwards watch errors to the configured error handler', async () => {
+  const pm = fakePrivateMessage()
+  const errors = []
+  await new PrivateMessenger({ _privateMessage: pm, onError: err => errors.push(err) }).init({
+    userSigner: signer('user'),
+    channels: [{ signer: signer('channel'), relays: ['wss://relay.example'] }]
+  })
+
+  pm.watchCalls[0].onError(new Error('INVALID_SENDER_CONTENT_KEY'))
+
+  assert.equal(errors.length, 1)
+  assert.equal(errors[0].message, 'INVALID_SENDER_CONTENT_KEY')
+})
+
 test('private messenger delegates send helpers with scoped signers and relays', async () => {
   const pm = fakePrivateMessage()
   const messenger = await new PrivateMessenger({ _privateMessage: pm }).init({
