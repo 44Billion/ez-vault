@@ -11,7 +11,7 @@
 // await messenger.reply({ question: msg.question, payload: { ok: true } })
 // await messenger.tell({ receiverPubkey, payload: { note: 'hello' } })
 // await messenger.yell({ receiverPubkeys, payload: { notice: 'hello all' } })
-// await messenger.sendEvent({ receiverPubkeys, event: { kind, tags: [], content } })
+// await messenger.broadcastRumor({ receiverPubkeys, rumor: { kind, tags: [], content } })
 // await messenger.update({ channels: [{ signer: privateChannelSigner, relays, seeders: nextOptionalSeederPubkeys }] })
 // messenger.clearChannel(channelPubkey)
 //
@@ -564,16 +564,16 @@ export class PrivateMessenger {
     })
   }
 
-  async sendEvent ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkeys, relays, event }) {
+  async broadcastRumor ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkeys, relays, rumor }) {
     const channel = this.requireChannel(channelPubkey)
-    return this._privateMessage.sendEvent({
+    return this._privateMessage.broadcastRumor({
       senderSigner: this.userSigner,
       imkcSigner: this.contentKeySigner,
       privateChannelSigner: channel.signer,
       receiverPubkeys,
       relays: relays || channel.relays,
       expirationSeconds: this.offlineRecoverySeconds,
-      event
+      rumor
     })
   }
 

@@ -6,8 +6,8 @@ import {
   REPLY_KIND,
   TELL_KIND,
   ask,
+  broadcastRumor,
   reply,
-  sendEvent,
   tell,
   unwatch,
   watch,
@@ -197,11 +197,11 @@ test('reply tell and yell publish recognizable private message rumors', async ()
   const replyResult = await reply({ senderSigner: signer(bobPubkey), question, relays: ['wss://relay.example'], payload: 'answer', _publish })
   const tellResult = await tell({ senderSigner: signer(bobPubkey), receiverPubkey: 'alice', relays: ['wss://relay.example'], payload: 'note', _publish })
   const yellResult = await yell({ senderSigner: signer(bobPubkey), receiverPubkeys: ['alice', 'carol'], relays: ['wss://relay.example'], payload: 'broadcast', _publish })
-  const rawResult = await sendEvent({
+  const rawResult = await broadcastRumor({
     senderSigner: signer(bobPubkey),
     receiverPubkeys: ['alice', 'carol'],
     relays: ['wss://relay.example'],
-    event: { kind: 9001, created_at: 22, tags: [['x', '1']], content: 'raw' },
+    rumor: { kind: 9001, created_at: 22, tags: [['x', '1']], content: 'raw' },
     _publish
   })
 
@@ -230,6 +230,23 @@ test('reply tell and yell publish recognizable private message rumors', async ()
   assert.deepEqual(published[3].event.tags, [['x', '1']])
   assert.equal(published[3].receiverTag, '')
   assert.deepEqual(published[3].receivers, ['alice', 'carol'])
-  assert.equal(rawResult.event.pubkey, bobPubkey)
-  assert.equal(rawResult.event.id, getEventHash({ ...published[3].event, pubkey: bobPubkey }))
+  assert.equal(rawResult.rumor.pubkey, bobPubkey)
+  assert.equal(rawResult.rumor.id, getEventHash({ ...published[3].event, pubkey: bobPubkey }))
+})
+
+test('broadcastRumor validates normalized unsigned rumors before publishing', async () => {
+  let published = false
+
+  await assert.rejects(
+    () => broadcastRumor({
+      senderSigner: signer(pubkeyFixture(4)),
+      receiverPubkeys: ['alice'],
+      relays: ['wss://relay.example'],
+      rumor: { kind: 9001, created_at: 22, tags: ['not-a-tag'], content: 'raw' },
+      _publish: async () => { published = true }
+    }),
+    /INVALID_RUMOR/
+  )
+
+  assert.equal(published, false)
 })

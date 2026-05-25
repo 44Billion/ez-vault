@@ -73,9 +73,9 @@ function fakePrivateMessage () {
       sent.push({ method: 'yell', options })
       return { yell: { id: 'yell-id', kind: TELL_KIND }, results: [] }
     },
-    sendEvent: async options => {
-      sent.push({ method: 'sendEvent', options })
-      return { event: { id: 'raw-id', kind: 9001 }, results: [] }
+    broadcastRumor: async options => {
+      sent.push({ method: 'broadcastRumor', options })
+      return { rumor: { id: 'raw-id', kind: 9001 }, results: [] }
     },
     unwatch: channels => stopped.push(channels),
     clearChannelState: channel => cleared.push(channel)
@@ -230,9 +230,9 @@ test('private messenger delegates send helpers with scoped signers and relays', 
   await messenger.reply({ question: { id: 'q', pubkey: 'alice' }, payload: 'pong' })
   await messenger.tell({ receiverPubkey: 'alice', payload: 'note' })
   await messenger.yell({ receiverPubkeys: ['alice', 'bob'], payload: 'news' })
-  await messenger.sendEvent({ receiverPubkeys: ['alice', 'bob'], event: { kind: 9001, created_at: 1, tags: [], content: 'raw' } })
+  await messenger.broadcastRumor({ receiverPubkeys: ['alice', 'bob'], rumor: { kind: 9001, created_at: 1, tags: [], content: 'raw' } })
 
-  assert.deepEqual(pm.sent.map(s => s.method), ['ask', 'reply', 'tell', 'yell', 'sendEvent'])
+  assert.deepEqual(pm.sent.map(s => s.method), ['ask', 'reply', 'tell', 'yell', 'broadcastRumor'])
   for (const sent of pm.sent) {
     assert.equal(sent.options.senderSigner.getPublicKey(), 'user')
     assert.equal(sent.options.imkcSigner.getPublicKey(), 'content')

@@ -1,4 +1,4 @@
-import { getEventHash } from 'nostr-tools'
+import { getEventHash, validateEvent } from 'nostr-tools'
 import * as privateChannel from '../../services/private-channel/index.js'
 import { onOnline } from '../network.js'
 
@@ -40,44 +40,30 @@ function parseContent (event) {
   try { return JSON.parse(event.content) } catch { return event.content }
 }
 
-function makeWireRumor ({ kind, content, tags = [], createdAt = nowSeconds() }) {
-  return {
-    kind,
-    created_at: createdAt,
-    tags,
-    content
-  }
+function cloneTags (tags) {
+  if (!Array.isArray(tags)) return tags
+  return tags.map(tag => Array.isArray(tag) ? [...tag] : tag)
 }
 
-function makeWireEvent (event) {
-  if (!event || typeof event !== 'object') throw new Error('EVENT_REQUIRED')
-  if (!Number.isInteger(event.kind)) throw new Error('EVENT_KIND_REQUIRED')
-  return {
-    kind: event.kind,
-    created_at: Number.isInteger(event.created_at) ? event.created_at : nowSeconds(),
-    tags: (event.tags || []).map(tag => [...tag]),
-    content: String(event.content ?? '')
-  }
-}
-
-async function makeOutgoingRumor ({ senderSigner, kind, content, tags = [], createdAt }) {
+async function makeOutgoingRumor ({ senderSigner, rumor }) {
   if (!senderSigner?.getPublicKey) throw new Error('SENDER_SIGNER_REQUIRED')
   const senderPubkey = await senderSigner.getPublicKey()
-  const wireEvent = makeWireRumor({ kind, content, tags, createdAt })
-  const event = normalizeRumor(wireEvent, senderPubkey)
-  return { event, wireEvent }
-}
-
-async function makeOutgoingEvent ({ senderSigner, event: rumor }) {
-  if (!senderSigner?.getPublicKey) throw new Error('SENDER_SIGNER_REQUIRED')
-  const senderPubkey = await senderSigner.getPublicKey()
-  const wireEvent = makeWireEvent(rumor)
+  // This is what gets sent. Id and pubkey are added later by recipient.
+  const wireEvent = {
+    kind: rumor.kind,
+    tags: cloneTags(rumor.tags),
+    content: rumor.content,
+    created_at: rumor.created_at !== undefined
+      ? rumor.created_at
+      : nowSeconds()
+  }
   const event = normalizeRumor(wireEvent, senderPubkey)
   return { event, wireEvent }
 }
 
 function normalizeRumor (event, pubkey) {
   const normalized = { ...event, pubkey }
+  if (!validateEvent(normalized)) throw new Error('INVALID_RUMOR')
   return { ...normalized, id: getEventHash(normalized) }
 }
 
@@ -342,9 +328,11 @@ export async function ask ({
 
   const { event: question, wireEvent } = await makeOutgoingRumor({
     senderSigner,
-    kind: ASK_KIND,
-    tags: [['r', receiverPubkey]],
-    content: normalizeContent(message || { code, payload, content })
+    rumor: {
+      kind: ASK_KIND,
+      tags: [['r', receiverPubkey]],
+      content: normalizeContent(message || { code, payload, content })
+    }
   })
   const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers: [receiverPubkey], receiverTag: receiverPubkey, event: wireEvent, relays, expirationSeconds, _publish })
 
@@ -369,9 +357,11 @@ export async function reply ({
   if (!receiverPubkey) throw new Error('RECEIVER_PUBKEY_REQUIRED')
   const { event, wireEvent } = await makeOutgoingRumor({
     senderSigner,
-    kind: REPLY_KIND,
-    tags: [['q', question.id], ['r', receiverPubkey]],
-    content: normalizeContent(message || { code, payload, content })
+    rumor: {
+      kind: REPLY_KIND,
+      tags: [['q', question.id], ['r', receiverPubkey]],
+      content: normalizeContent(message || { code, payload, content })
+    }
   })
   const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers: [receiverPubkey], receiverTag: receiverPubkey, event: wireEvent, relays, expirationSeconds, _publish })
   return { reply: event, results }
@@ -393,9 +383,11 @@ export async function tell ({
   if (!receiverPubkey) throw new Error('RECEIVER_PUBKEY_REQUIRED')
   const { event, wireEvent } = await makeOutgoingRumor({
     senderSigner,
-    kind: TELL_KIND,
-    tags: [['r', receiverPubkey]],
-    content: normalizeContent(message || { code, payload, content })
+    rumor: {
+      kind: TELL_KIND,
+      tags: [['r', receiverPubkey]],
+      content: normalizeContent(message || { code, payload, content })
+    }
   })
   const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers: [receiverPubkey], receiverTag: receiverPubkey, event: wireEvent, relays, expirationSeconds, _publish })
   return { tell: event, results }
@@ -418,27 +410,29 @@ export async function yell ({
   if (!receivers.length) throw new Error('NO_RECEIVERS')
   const { event, wireEvent } = await makeOutgoingRumor({
     senderSigner,
-    kind: TELL_KIND,
-    tags: [],
-    content: normalizeContent(message || { code, payload, content })
+    rumor: {
+      kind: TELL_KIND,
+      tags: [],
+      content: normalizeContent(message || { code, payload, content })
+    }
   })
   const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers, receiverTag: '', event: wireEvent, relays, expirationSeconds, _publish })
   return { yell: event, results }
 }
 
-export async function sendEvent ({
+export async function broadcastRumor ({
   senderSigner,
   imkcSigner,
   privateChannelSigner = senderSigner,
   receiverPubkeys,
   relays,
-  event: rumor,
+  rumor,
   expirationSeconds,
   _publish = privateChannel.publish
 }) {
   const receivers = uniq(receiverPubkeys)
   if (!receivers.length) throw new Error('NO_RECEIVERS')
-  const { event, wireEvent } = await makeOutgoingEvent({ senderSigner, event: rumor })
+  const { event, wireEvent } = await makeOutgoingRumor({ senderSigner, rumor })
   const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers, receiverTag: '', event: wireEvent, relays, expirationSeconds, _publish })
-  return { event, results }
+  return { rumor: event, results }
 }
