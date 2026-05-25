@@ -29,7 +29,13 @@ function cloneRelays (relays) {
 }
 
 function cloneIykcProof (proof) {
-  return proof ? { iykcPubkey: proof.iykcPubkey, iykcProof: proof.iykcProof } : null
+  return proof
+    ? {
+        iykcPubkey: proof.iykcPubkey,
+        iykcProof: proof.iykcProof,
+        staleIykcProofs: (proof.staleIykcProofs || []).map(stale => ({ ...stale }))
+      }
+    : null
 }
 
 function deleteCachedValue (cache, timers, addedAt, key) {
@@ -185,7 +191,9 @@ export async function getIykcProofs (pubkeys, {
 
   for (const pubkey of missingPubkeys) {
     const entry = latestByPubkey[pubkey]
-    const proof = entry ? { iykcPubkey: entry.iykcPubkey, iykcProof: entry.iykcProof } : null
+    const proof = entry
+      ? { iykcPubkey: entry.iykcPubkey, iykcProof: entry.iykcProof, staleIykcProofs: entry.staleIykcProofs || [] }
+      : null
     setCachedValue(iykcProofsByPubkey, iykcCacheTimersByPubkey, iykcCacheAddedAtByPubkey, pubkey, cloneIykcProof(proof), cacheMs)
     if (proof) out[pubkey] = proof
   }

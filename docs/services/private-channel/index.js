@@ -68,7 +68,10 @@ async function assertSenderContentKey ({ router, _getIykcProofs = getIykcProofs 
   if (!imkcPubkey) return { senderPubkey, imkcPubkey: '' }
 
   const senderContentKeys = await _getIykcProofs([senderPubkey])
-  if (senderContentKeys?.[senderPubkey]?.iykcPubkey !== imkcPubkey) {
+  const advertised = senderContentKeys?.[senderPubkey]
+  const isCurrent = advertised?.iykcPubkey === imkcPubkey
+  const isStale = advertised?.staleIykcProofs?.some(stale => stale.iykcPubkey === imkcPubkey)
+  if (!isCurrent && !isStale) {
     throw new Error('INVALID_SENDER_CONTENT_KEY')
   }
   return { senderPubkey, imkcPubkey }

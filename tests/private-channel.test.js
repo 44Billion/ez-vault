@@ -166,6 +166,41 @@ test('unwrapEvent rejects sender imkc keys not advertised by the sender', async 
   )
 })
 
+test('unwrapEvent accepts stale sender imkc keys advertised in zz tags', async () => {
+  const alice = signer()
+  const staleImkc = signer()
+  const currentImkc = signer()
+  const bob = signer()
+  const alicePubkey = await alice.getPublicKey()
+  const bobPubkey = await bob.getPublicKey()
+  const contentKeyEvent = await makeContentKeyEvent({
+    userSigner: alice,
+    contentKeySigner: currentImkc,
+    createdAt: 9,
+    staleContentKeys: [{ iykcPubkey: await staleImkc.getPublicKey(), removedAt: 8 }]
+  })
+  const contentKeys = parseContentKeyEvent(contentKeyEvent)
+  const original = eventFixture('private')
+  const [wrapped] = await wrapEvent({
+    senderSigner: alice,
+    imkcSigner: staleImkc,
+    receivers: [bobPubkey],
+    event: original,
+    _getIykcProofs: noContentKeys
+  })
+
+  assert.deepEqual(
+    await unwrapEvent({
+      receiverSigner: bob,
+      privateChannelSigner: alice,
+      event: wrapped,
+      receiverPubkey: bobPubkey,
+      _getIykcProofs: async () => ({ [alicePubkey]: contentKeys })
+    }),
+    unwrappedFixture(original, alicePubkey)
+  )
+})
+
 test('wrapEvent uses receiver content key rows when iykc is advertised', async () => {
   const alice = signer()
   const bob = signer()

@@ -18,9 +18,9 @@ function tempKey (id, index) {
   return `${STORAGE_PREFIX}${id}:${index}`
 }
 
-function verifiedContentKey ({ iykcPubkey = '', iykcProof = '' } = {}) {
+function verifiedContentKey ({ ownerPubkey = '', iykcPubkey = '', iykcProof = '' } = {}) {
   if (!iykcPubkey) return { iykcPubkey: '', iykcProof: '' }
-  if (iykcProof && !verifyContentKeyProof({ iykcPubkey, iykcProof })) {
+  if (iykcProof && !verifyContentKeyProof({ ownerPubkey, iykcPubkey, iykcProof })) {
     return { iykcPubkey: '', iykcProof: '' }
   }
   return { iykcPubkey, iykcProof }
@@ -28,7 +28,7 @@ function verifiedContentKey ({ iykcPubkey = '', iykcProof = '' } = {}) {
 
 function receiverRecord (receiver, receiverContentKeys) {
   if (typeof receiver === 'string') {
-    const contentKey = verifiedContentKey(receiverContentKeys[receiver])
+    const contentKey = verifiedContentKey({ ownerPubkey: receiver, ...receiverContentKeys[receiver] })
     return {
       receiverPubkey: receiver,
       ...contentKey
@@ -37,8 +37,8 @@ function receiverRecord (receiver, receiverContentKeys) {
 
   if (Array.isArray(receiver)) {
     const [receiverPubkey, iykcPubkey = '', iykcProof = ''] = receiver
-    const explicitContentKey = verifiedContentKey({ iykcPubkey, iykcProof })
-    const fetchedContentKey = verifiedContentKey(receiverContentKeys[receiverPubkey])
+    const explicitContentKey = verifiedContentKey({ ownerPubkey: receiverPubkey, iykcPubkey, iykcProof })
+    const fetchedContentKey = verifiedContentKey({ ownerPubkey: receiverPubkey, ...receiverContentKeys[receiverPubkey] })
     const contentKey = explicitContentKey.iykcPubkey ? explicitContentKey : fetchedContentKey
     return {
       receiverPubkey,
@@ -47,8 +47,8 @@ function receiverRecord (receiver, receiverContentKeys) {
   }
 
   const receiverPubkey = receiver?.receiverPubkey || receiver?.pubkey || ''
-  const explicitContentKey = verifiedContentKey(receiver)
-  const fetchedContentKey = verifiedContentKey(receiverContentKeys[receiverPubkey])
+  const explicitContentKey = verifiedContentKey({ ownerPubkey: receiverPubkey, ...receiver })
+  const fetchedContentKey = verifiedContentKey({ ownerPubkey: receiverPubkey, ...receiverContentKeys[receiverPubkey] })
   const contentKey = explicitContentKey.iykcPubkey ? explicitContentKey : fetchedContentKey
   return {
     receiverPubkey,
