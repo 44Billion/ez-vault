@@ -3,6 +3,7 @@
 //   userSigner,
 //   contentKeySigner,
 //   channels: [{ signer: privateChannelSigner, relays, mode: 'leecher', seeders: optionalSeederPubkeys }],
+//   onContentKeyChange: event => reviewContentKeyUse(event),
 //   onError: err => reportPrivateMessengerError(err)
 // })
 // for await (const msg of messenger.messages()) handlePrivateMessage(msg)
@@ -91,6 +92,7 @@ export class PrivateMessenger {
     maxDynamicRecoverySeeders = DEFAULT_MAX_DYNAMIC_RECOVERY_SEEDERS,
     messageQueueMaxBytes = DEFAULT_MESSAGE_QUEUE_MAX_BYTES,
     seedQueueMaxBytes = DEFAULT_SEED_QUEUE_MAX_BYTES,
+    onContentKeyChange,
     onError = defaultOnError,
     _privateMessage = privateMessage,
     _privateChannel = privateChannel,
@@ -107,6 +109,7 @@ export class PrivateMessenger {
     this.maxDynamicRecoverySeeders = maxDynamicRecoverySeeders
     this.messageQueueMaxBytes = messageQueueMaxBytes
     this.seedQueueMaxBytes = seedQueueMaxBytes
+    this.onContentKeyChange = onContentKeyChange
     this.onError = onError
     this._privateMessage = _privateMessage
     this._privateChannel = _privateChannel
@@ -117,6 +120,7 @@ export class PrivateMessenger {
     this.userSigner = null
     this.contentKeySigner = null
     this.userPubkey = ''
+    this.contentKeyPubkey = ''
     this.prefix = ''
     this.queue = null
     this.seedQueue = null
@@ -132,6 +136,7 @@ export class PrivateMessenger {
     this.userSigner = userSigner
     this.contentKeySigner = contentKeySigner || null
     this.userPubkey = await userSigner.getPublicKey()
+    this.contentKeyPubkey = await this.contentKeySigner?.getPublicKey?.() || ''
     this.prefix = `ez-vault:private-messenger:${this.userPubkey}`
     this.queue = createQueue({ prefix: this.prefix, maxBytes: this.messageQueueMaxBytes, evictionPolicy: 'fifo' })
     this.seedQueue = createQueue({ prefix: `${this.prefix}:seeds`, maxBytes: this.seedQueueMaxBytes, evictionPolicy: 'fifo' })
@@ -143,6 +148,7 @@ export class PrivateMessenger {
   async update ({ userSigner = this.userSigner, contentKeySigner = this.contentKeySigner, channels = [...this.channels.values()], relays = [], mode = 'leecher' } = {}) {
     if (userSigner) this.userSigner = userSigner
     this.contentKeySigner = contentKeySigner || null
+    this.contentKeyPubkey = await this.contentKeySigner?.getPublicKey?.() || ''
     const nextChannels = await this.normalizeChannels(channels, { relays, mode })
     const nextPubkeys = new Set(nextChannels.map(channel => channel.pubkey))
 
@@ -276,6 +282,63 @@ export class PrivateMessenger {
     return true
   }
 
+  contentKeyStatus (contentKeyPubkey) {
+    if (!contentKeyPubkey) return 'none'
+    return contentKeyPubkey === this.contentKeyPubkey ? 'known' : 'unknown'
+  }
+
+  handleContentKeyUsage (channelPubkey, usage) {
+    const direction = usage.direction === 'sent' ? 'sent' : 'received'
+    const contentKeyPubkey = usage.contentKeyPubkey || ''
+    const state = this.readState()
+    const current = state.channels[channelPubkey] || {}
+    const contentKeyUsage = current.contentKeyUsage || {}
+    const previous = contentKeyUsage[direction] || null
+
+    const contentKeyStatus = this.contentKeyStatus(contentKeyPubkey)
+    if (
+      previous &&
+      (previous.contentKeyPubkey || '') === contentKeyPubkey &&
+      previous.contentKeyStatus === contentKeyStatus
+    ) {
+      return false
+    }
+    const event = {
+      type: 'content-key-change',
+      channelPubkey,
+      direction,
+      keyRole: usage.keyRole || (direction === 'sent' ? 'sender' : 'receiver'),
+      contentKeyPubkey,
+      hasContentKey: Boolean(contentKeyPubkey),
+      contentKeyStatus,
+      previousContentKeyPubkey: previous?.contentKeyPubkey ?? null,
+      previousContentKeyStatus: previous?.contentKeyStatus ?? null,
+      senderPubkey: usage.senderPubkey || '',
+      receiverPubkey: usage.receiverPubkey || '',
+      receiverPubkeys: usage.receiverPubkeys || [],
+      counterpartyPubkey: direction === 'sent' ? (usage.receiverPubkey || '') : (usage.senderPubkey || ''),
+      isBroadcast: Boolean(usage.isBroadcast),
+      outerId: usage.outer?.id || '',
+      outerCreatedAt: usage.outer?.created_at || 0,
+      routerPubkey: usage.router?.pubkey || '',
+      routerCreatedAt: usage.router?.created_at || 0
+    }
+
+    contentKeyUsage[direction] = {
+      contentKeyPubkey,
+      contentKeyStatus,
+      changedAt: nowSeconds(),
+      senderPubkey: event.senderPubkey,
+      receiverPubkey: event.receiverPubkey,
+      isBroadcast: event.isBroadcast
+    }
+    current.contentKeyUsage = contentKeyUsage
+    state.channels[channelPubkey] = current
+    this.writeState(state)
+    this.onContentKeyChange?.(event)
+    return true
+  }
+
   addOfflineRange (pubkey, start, end) {
     const now = nowSeconds()
     const minStart = now - this.offlineRecoverySeconds
@@ -333,6 +396,7 @@ export class PrivateMessenger {
         onYell: message => this.handleYell(pubkey, message),
         onMessage: message => this.handleMessage(pubkey, message),
         onSeed: seed => this.enqueueSeed(pubkey, seed),
+        onContentKeyUsage: usage => this.handleContentKeyUsage(pubkey, usage),
         onError: err => this.onError?.(err)
       })
       this.stopByChannel.set(pubkey, stop)
@@ -742,6 +806,7 @@ export class PrivateMessenger {
             modeByPubkey: { [pubkey]: channel.mode },
             onEvent: (event, outer, meta) => this.enqueueRumor(eventType(event), pubkey, { event, outer, meta, payload: parseEventContent(event) }),
             onSeedEvent: seed => this.enqueueSeed(pubkey, seed),
+            onContentKeyUsage: usage => this.handleContentKeyUsage(pubkey, usage),
             onError: err => { throw err }
           }) || []
           await this.askSeedersForRelayLeftEdge(pubkey, range, fetchedEvents)

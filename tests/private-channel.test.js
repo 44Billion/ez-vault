@@ -8,6 +8,7 @@ import {
   MAX_EVENT_BYTES,
   PRIVATE_BROADCAST_KIND,
   ROUTER_KIND,
+  subscribe,
   unwrapEvent,
   wrapEvent,
   wrapEvents
@@ -15,6 +16,7 @@ import {
 import { makeContentKeyEvent, parseContentKeyEvent } from '../docs/services/content-key/event.js'
 import { TEMPORARY_STORAGE_KEYS_KEY } from '../docs/services/temporary-storage.js'
 import { bytesToHex } from '../docs/helpers/nostr/index.js'
+import { pool } from '../docs/services/relays.js'
 
 if (!globalThis.localStorage) {
   const data = new Map()
@@ -199,6 +201,49 @@ test('unwrapEvent accepts stale sender imkc keys advertised in zz tags', async (
     }),
     unwrappedFixture(original, alicePubkey)
   )
+})
+
+test('subscribe emits content key usage for own sent direct messages', async () => {
+  const originalSubscribeMany = pool.subscribeMany
+  let handlers = null
+  pool.subscribeMany = (_relays, _filter, nextHandlers) => {
+    handlers = nextHandlers
+    return { close: () => {} }
+  }
+
+  try {
+    const alice = signer()
+    const bob = signer()
+    const bobPubkey = await bob.getPublicKey()
+    const [wrapped] = await wrapEvent({
+      senderSigner: alice,
+      receivers: [bobPubkey],
+      receiverTag: bobPubkey,
+      event: eventFixture('private'),
+      _getIykcProofs: noContentKeys
+    })
+    const usages = []
+    const delivered = []
+
+    subscribe({
+      receiverSigner: alice,
+      privateChannelSigner: alice,
+      receiverPubkey: await alice.getPublicKey(),
+      relays: ['wss://relay.example'],
+      onContentKeyUsage: usage => usages.push(usage),
+      onEvent: event => delivered.push(event)
+    })
+    await handlers.onevent(wrapped)
+
+    assert.equal(usages.length, 1)
+    assert.equal(usages[0].direction, 'sent')
+    assert.equal(usages[0].senderPubkey, await alice.getPublicKey())
+    assert.equal(usages[0].receiverPubkey, bobPubkey)
+    assert.equal(usages[0].contentKeyPubkey, '')
+    assert.equal(delivered.length, 0)
+  } finally {
+    pool.subscribeMany = originalSubscribeMany
+  }
 })
 
 test('wrapEvent uses receiver content key rows when iykc is advertised', async () => {

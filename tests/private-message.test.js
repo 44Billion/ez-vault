@@ -105,6 +105,27 @@ test('ask requires watching the sender private channel first', async () => {
   )
 })
 
+test('watch dispatches content key usage callbacks', async () => {
+  const { calls, fakeSubscribe } = fakeSubscribeFactory()
+  const usages = []
+  await watch({
+    channels: ['channel1'],
+    relays: ['wss://relay.example'],
+    receiverSigner: signer('receiver'),
+    privateChannelSigner: signer('channel1'),
+    onContentKeyUsage: usage => usages.push(usage),
+    _subscribe: fakeSubscribe
+  })
+
+  calls[0].onContentKeyUsage({
+    channelPubkey: 'channel1',
+    direction: 'sent',
+    contentKeyPubkey: ''
+  })
+
+  assert.deepEqual(usages, [{ channelPubkey: 'channel1', direction: 'sent', contentKeyPubkey: '' }])
+})
+
 test('ask publishes an ask rumor and watch dispatches the reply with its question', async () => {
   const { calls, fakeSubscribe } = fakeSubscribeFactory()
   const replies = []

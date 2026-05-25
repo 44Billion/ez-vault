@@ -132,6 +132,47 @@ function privateChannelPubkeyList ({ privateChannelPubkey, privateChannelPubkeys
   ].filter(Boolean))]
 }
 
+function parseJsonlRows (jsonl) {
+  return String(jsonl || '').split('\n').filter(Boolean).map((line, index) => {
+    const [receiverPubkey, _ciphertext, iykcPubkey = '', iykcProof = ''] = JSON.parse(line)
+    return { index, receiverPubkey, iykcPubkey, iykcProof }
+  })
+}
+
+function emitContentKeyUsage ({ outer, router, channelPubkey, receiverPubkey, jsonl, onContentKeyUsage }) {
+  if (!receiverPubkey || !onContentKeyUsage) return
+
+  const senderPubkey = readSenderTag(router)
+  const routerReceiverPubkey = readReceiverTag(router)
+  const rows = parseJsonlRows(jsonl)
+  const receiverPubkeys = [...new Set(rows.map(row => row.receiverPubkey).filter(Boolean))]
+  const isBroadcast = !routerReceiverPubkey
+  const base = { outer, router, channelPubkey, senderPubkey, routerReceiverPubkey, receiverPubkeys, isBroadcast }
+
+  if (senderPubkey === receiverPubkey) {
+    onContentKeyUsage({
+      ...base,
+      direction: 'sent',
+      keyRole: 'sender',
+      receiverPubkey: routerReceiverPubkey || '',
+      contentKeyPubkey: readImkcTag(router)
+    })
+  }
+
+  for (const row of rows) {
+    if (row.receiverPubkey !== receiverPubkey) continue
+    onContentKeyUsage({
+      ...base,
+      direction: 'received',
+      keyRole: 'receiver',
+      receiverPubkey: row.receiverPubkey,
+      contentKeyPubkey: row.iykcPubkey,
+      iykcProof: row.iykcProof,
+      rowIndex: row.index
+    })
+  }
+}
+
 function createProcessor ({
   receiverSigner,
   iykcSigner,
@@ -143,6 +184,7 @@ function createProcessor ({
   onChunk,
   onEvent,
   onSeedEvent,
+  onContentKeyUsage,
   onError,
   _getIykcProofs = getIykcProofs
 }) {
@@ -157,7 +199,8 @@ function createProcessor ({
 
       const router = JSON.parse(await channelSigner.nip44Decrypt(channelPubkey, outer.content))
       if (router.kind !== ROUTER_KIND) return
-      if (receiverPubkey && readReceiverTag(router) && readReceiverTag(router) !== receiverPubkey) return
+      const senderPubkey = readSenderTag(router)
+      if (receiverPubkey && readReceiverTag(router) && readReceiverTag(router) !== receiverPubkey && senderPubkey !== receiverPubkey) return
       const { index, total } = readChunkTag(router)
       const bucket = chunks.get(router.pubkey) ?? { total, parts: [] }
       bucket.total = total
@@ -179,6 +222,7 @@ function createProcessor ({
       const joinedRouter = { ...router, content: joined, tags: router.tags.filter(t => t[0] !== 'c').concat([['c', '0', '1']]) }
       const jsonl = decodeChunkText(joined)
       await assertSenderContentKey({ router: joinedRouter, _getIykcProofs })
+      emitContentKeyUsage({ outer, router: joinedRouter, channelPubkey, receiverPubkey, jsonl, onContentKeyUsage })
       if (channelMode === 'seeder') onSeedEvent?.({ outer, router: joinedRouter, channelPubkey, jsonl })
 
       if (!receiverSigner) return
@@ -191,7 +235,7 @@ function createProcessor ({
   }
 }
 
-export async function fetch ({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelSignersByPubkey, privateChannelPubkey, privateChannelPubkeys, receiverPubkey, relays, onChunk, onEvent, onSeedEvent, onError, since, until, limit, mode = 'leecher', modeByPubkey, _getIykcProofs = getIykcProofs }) {
+export async function fetch ({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelSignersByPubkey, privateChannelPubkey, privateChannelPubkeys, receiverPubkey, relays, onChunk, onEvent, onSeedEvent, onContentKeyUsage, onError, since, until, limit, mode = 'leecher', modeByPubkey, _getIykcProofs = getIykcProofs }) {
   if (!relays?.length) throw new Error('NO_RELAYS')
   const authors = privateChannelPubkeyList({ privateChannelPubkey, privateChannelPubkeys })
   const filter = { kinds: [PRIVATE_BROADCAST_KIND] }
@@ -202,12 +246,12 @@ export async function fetch ({ receiverSigner, iykcSigner, privateChannelSigner 
 
   const events = await fetchEvents(filter, relays)
   events.sort((a, b) => a.created_at - b.created_at)
-  const processOuterEvent = createProcessor({ receiverSigner, iykcSigner, privateChannelSigner, privateChannelSignersByPubkey, receiverPubkey, mode, modeByPubkey, onChunk, onEvent, onSeedEvent, onError, _getIykcProofs })
+  const processOuterEvent = createProcessor({ receiverSigner, iykcSigner, privateChannelSigner, privateChannelSignersByPubkey, receiverPubkey, mode, modeByPubkey, onChunk, onEvent, onSeedEvent, onContentKeyUsage, onError, _getIykcProofs })
   for (const event of events) await processOuterEvent(event)
   return events
 }
 
-export function subscribe ({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelSignersByPubkey, privateChannelPubkey, privateChannelPubkeys, receiverPubkey, relays, onChunk, onEvent, onSeedEvent, onError, onEose, since = nowSeconds() - 5, limit, liveOnly = false, mode = 'leecher', modeByPubkey, _getIykcProofs = getIykcProofs }) {
+export function subscribe ({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelSignersByPubkey, privateChannelPubkey, privateChannelPubkeys, receiverPubkey, relays, onChunk, onEvent, onSeedEvent, onContentKeyUsage, onError, onEose, since = nowSeconds() - 5, limit, liveOnly = false, mode = 'leecher', modeByPubkey, _getIykcProofs = getIykcProofs }) {
   if (!relays?.length) throw new Error('NO_RELAYS')
   if (receiverSigner && !receiverSigner?.withSharedKey) throw new Error('RECEIVER_SIGNER_SHARED_KEY_UNSUPPORTED')
   if (!privateChannelSigner && !privateChannelSignersByPubkey) throw new Error('PRIVATE_CHANNEL_SIGNER_REQUIRED')
@@ -216,7 +260,7 @@ export function subscribe ({ receiverSigner, iykcSigner, privateChannelSigner = 
   const filter = { kinds: [PRIVATE_BROADCAST_KIND], since }
   if (authors.length) filter.authors = authors
   if (limit != null) filter.limit = limit
-  const processOuterEvent = createProcessor({ receiverSigner, iykcSigner, privateChannelSigner, privateChannelSignersByPubkey, receiverPubkey, mode, modeByPubkey, onChunk, onEvent, onSeedEvent, onError, _getIykcProofs })
+  const processOuterEvent = createProcessor({ receiverSigner, iykcSigner, privateChannelSigner, privateChannelSignersByPubkey, receiverPubkey, mode, modeByPubkey, onChunk, onEvent, onSeedEvent, onContentKeyUsage, onError, _getIykcProofs })
   let eosed = false
 
   return pool.subscribeMany(relays, filter, {

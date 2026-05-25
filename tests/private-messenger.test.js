@@ -151,6 +151,73 @@ test('private messenger forwards watch errors to the configured error handler', 
   assert.equal(errors[0].message, 'INVALID_SENDER_CONTENT_KEY')
 })
 
+test('private messenger reports content key usage changes for sent and received messages', async () => {
+  const pm = fakePrivateMessage()
+  const changes = []
+  const messenger = await new PrivateMessenger({ _privateMessage: pm, onContentKeyChange: event => changes.push(event) }).init({
+    userSigner: signer('user'),
+    contentKeySigner: signer('content'),
+    channels: [{ signer: signer('channel'), relays: ['wss://relay.example'] }]
+  })
+  const base = {
+    channelPubkey: 'channel',
+    outer: { id: 'outer-id', created_at: 20 },
+    router: { pubkey: 'router-id', created_at: 19 },
+    senderPubkey: 'user',
+    receiverPubkeys: ['alice']
+  }
+
+  pm.watchCalls[0].onContentKeyUsage({
+    ...base,
+    direction: 'sent',
+    keyRole: 'sender',
+    receiverPubkey: 'alice',
+    contentKeyPubkey: '',
+    isBroadcast: false
+  })
+  pm.watchCalls[0].onContentKeyUsage({
+    ...base,
+    direction: 'sent',
+    keyRole: 'sender',
+    receiverPubkey: 'alice',
+    contentKeyPubkey: '',
+    isBroadcast: false
+  })
+  pm.watchCalls[0].onContentKeyUsage({
+    ...base,
+    direction: 'sent',
+    keyRole: 'sender',
+    receiverPubkey: '',
+    receiverPubkeys: ['alice', 'bob'],
+    contentKeyPubkey: 'unknown-content',
+    isBroadcast: true
+  })
+  pm.watchCalls[0].onContentKeyUsage({
+    ...base,
+    direction: 'received',
+    keyRole: 'receiver',
+    senderPubkey: 'alice',
+    receiverPubkey: 'user',
+    contentKeyPubkey: 'content',
+    isBroadcast: false
+  })
+
+  assert.equal(changes.length, 3)
+  assert.equal(changes[0].direction, 'sent')
+  assert.equal(changes[0].contentKeyStatus, 'none')
+  assert.equal(changes[0].counterpartyPubkey, 'alice')
+  assert.equal(changes[1].direction, 'sent')
+  assert.equal(changes[1].contentKeyStatus, 'unknown')
+  assert.equal(changes[1].previousContentKeyPubkey, '')
+  assert.equal(changes[1].isBroadcast, true)
+  assert.deepEqual(changes[1].receiverPubkeys, ['alice', 'bob'])
+  assert.equal(changes[2].direction, 'received')
+  assert.equal(changes[2].contentKeyStatus, 'known')
+  assert.equal(changes[2].counterpartyPubkey, 'alice')
+  assert.equal(messenger.readState().channels.channel.contentKeyUsage.sent.contentKeyPubkey, 'unknown-content')
+  assert.equal(messenger.readState().channels.channel.contentKeyUsage.received.contentKeyPubkey, 'content')
+})
+
 test('private messenger delegates send helpers with scoped signers and relays', async () => {
   const pm = fakePrivateMessage()
   const messenger = await new PrivateMessenger({ _privateMessage: pm }).init({

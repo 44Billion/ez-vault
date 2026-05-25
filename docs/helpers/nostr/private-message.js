@@ -121,6 +121,10 @@ function dispatchSeedEvent (seed) {
   watchCallbacks(seed.channelPubkey).onSeed?.(seed)
 }
 
+function dispatchContentKeyUsage (usage) {
+  watchCallbacks(usage.channelPubkey).onContentKeyUsage?.(usage)
+}
+
 function recordSeen (channelPubkey, createdAt) {
   const watch = watchesByChannel.get(channelPubkey)
   if (!watch) return
@@ -197,6 +201,7 @@ function rebuildSubscriptions ({ _subscribe = privateChannel.subscribe } = {}) {
         recordSeen(seed.channelPubkey, seed.outer.created_at)
         dispatchSeedEvent(seed)
       },
+      onContentKeyUsage: dispatchContentKeyUsage,
       onError: err => firstWatch.callbacks.onError?.(err)
     })
 
@@ -224,6 +229,7 @@ async function recoverWatchedChannels ({ _fetch = privateChannel.fetch } = {}) {
         dispatchWatchedEvent(event, outer, meta)
       },
       onSeedEvent: dispatchSeedEvent,
+      onContentKeyUsage: dispatchContentKeyUsage,
       onError: err => watch.callbacks.onError?.(err)
     })
   }
@@ -252,6 +258,7 @@ export async function watch ({
   onMessage,
   onSeed,
   onChunk,
+  onContentKeyUsage,
   onError,
   since = nowSeconds(),
   _subscribe = privateChannel.subscribe
@@ -259,7 +266,7 @@ export async function watch ({
   if (!relays?.length) throw new Error('NO_RELAYS')
   const channelList = uniq(channels?.length ? channels : [await ownPrivateChannelPubkey(privateChannelSigner)])
   const ownPubkey = receiverPubkey || await receiverSigner?.getPublicKey?.()
-  const callbacks = { onAsk, onReply, onTell, onYell, onMessage, onSeed, onChunk, onError }
+  const callbacks = { onAsk, onReply, onTell, onYell, onMessage, onSeed, onChunk, onContentKeyUsage, onError }
 
   let changed = false
   for (const channel of channelList) {
