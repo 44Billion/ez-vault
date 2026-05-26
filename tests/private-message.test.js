@@ -1,10 +1,11 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { getEventHash } from 'nostr-tools'
+import { finalizeEvent, generateSecretKey, getEventHash } from 'nostr-tools'
 import {
   ASK_KIND,
   REPLY_KIND,
   TELL_KIND,
+  broadcastEvent,
   ask,
   broadcastRumor,
   parseRumorContent,
@@ -206,6 +207,14 @@ test('reply tell and yell publish recognizable private message rumors', async ()
     rumor: { kind: 9001, created_at: 22, tags: [['x', '1']], content: 'raw' },
     _publish
   })
+  const signedEvent = finalizeEvent({ kind: 9002, created_at: 23, tags: [['x', '2']], content: 'signed' }, generateSecretKey())
+  const signedResult = await broadcastEvent({
+    senderSigner: signer(bobPubkey),
+    receiverPubkeys: ['alice', 'carol'],
+    relays: ['wss://relay.example'],
+    event: signedEvent,
+    _publish
+  })
 
   assert.equal(published[0].event.kind, REPLY_KIND)
   assert.equal(published[0].event.id, undefined)
@@ -234,6 +243,9 @@ test('reply tell and yell publish recognizable private message rumors', async ()
   assert.deepEqual(published[3].receivers, ['alice', 'carol'])
   assert.equal(rawResult.rumor.pubkey, bobPubkey)
   assert.equal(rawResult.rumor.id, getEventHash({ ...published[3].event, pubkey: bobPubkey }))
+  assert.deepEqual(published[4].event, signedEvent)
+  assert.deepEqual(published[4].receivers, ['alice', 'carol'])
+  assert.deepEqual(signedResult.event, signedEvent)
 })
 
 test('broadcastRumor validates normalized unsigned rumors before publishing', async () => {
@@ -248,6 +260,34 @@ test('broadcastRumor validates normalized unsigned rumors before publishing', as
       _publish: async () => { published = true }
     }),
     /INVALID_RUMOR/
+  )
+
+  assert.equal(published, false)
+})
+
+test('broadcastEvent refuses unsigned or invalid signed events', async () => {
+  const valid = finalizeEvent({ kind: 9002, created_at: 23, tags: [], content: 'signed' }, generateSecretKey())
+  let published = false
+
+  await assert.rejects(
+    () => broadcastEvent({
+      senderSigner: signer(pubkeyFixture(5)),
+      receiverPubkeys: ['alice'],
+      relays: ['wss://relay.example'],
+      event: { ...valid, content: 'tampered' },
+      _publish: async () => { published = true }
+    }),
+    /INVALID_SIGNED_EVENT/
+  )
+  await assert.rejects(
+    () => broadcastEvent({
+      senderSigner: signer(pubkeyFixture(5)),
+      receiverPubkeys: ['alice'],
+      relays: ['wss://relay.example'],
+      event: { kind: 9002, created_at: 23, tags: [], content: 'unsigned' },
+      _publish: async () => { published = true }
+    }),
+    /INVALID_SIGNED_EVENT/
   )
 
   assert.equal(published, false)

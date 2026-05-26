@@ -1,4 +1,4 @@
-import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from 'nostr-tools'
+import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash, validateEvent, verifyEvent } from 'nostr-tools'
 import { getIykcProofs } from '../content-key/index.js'
 import { fetchEvents, pool, publish as publishToRelays } from '../relays.js'
 import { JSONL_CHUNK_BYTES } from './chunk-size.js'
@@ -8,6 +8,9 @@ import { eventByteLength, makeRouterEvent, nowSeconds, readChunkTag, readImkcTag
 import { createReceivedChunkStore, DEFAULT_RECEIVED_CHUNK_MAX_BYTES, DEFAULT_RECEIVED_CHUNK_TTL_MS } from './received-chunks.js'
 
 export { EXPIRATION_SECONDS, MAX_EVENT_BYTES, PRIVATE_BROADCAST_KIND, ROUTER_KIND } from './constants.js'
+
+const DEFAULT_IGNORED_GROUP_TTL_MS = 30 * 60 * 1000
+const DEFAULT_IGNORED_GROUP_MAX_ENTRIES = 5000
 
 export function getJsonlChunkByteSize () {
   return JSONL_CHUNK_BYTES
@@ -91,12 +94,24 @@ function parseRecipientEnvelope (line, index = 0) {
   return { index, receiverPubkey, ciphertext, iykcPubkey, iykcProof }
 }
 
+function isSignedEvent (event) {
+  return Object.prototype.hasOwnProperty.call(event || {}, 'sig')
+}
+
+function assertValidSignedInnerEvent (event) {
+  if (!validateEvent(event) || event.id !== getEventHash(event) || !verifyEvent(event)) {
+    throw new Error('INVALID_SIGNED_INNER_EVENT')
+  }
+  return event
+}
+
 async function unwrapRecipientEnvelope ({ envelope, receiverSigner, iykcSigner, receiverPubkey, senderPubkey, senderEncryptionPubkey }) {
   if (receiverPubkey && envelope.receiverPubkey !== receiverPubkey) return null
   const rowReceiverSigner = envelope.iykcPubkey ? iykcSigner : receiverSigner
   if (!rowReceiverSigner?.nip44Decrypt) throw new Error('RECEIVER_CONTENT_KEY_REQUIRED')
   if (envelope.iykcPubkey && rowReceiverSigner.getPublicKey && await rowReceiverSigner.getPublicKey() !== envelope.iykcPubkey) return null
   const decrypted = JSON.parse(await rowReceiverSigner.nip44Decrypt(senderEncryptionPubkey, envelope.ciphertext))
+  if (isSignedEvent(decrypted)) return assertValidSignedInnerEvent(decrypted)
   const normalized = { ...decrypted, pubkey: senderPubkey }
   return { ...normalized, id: getEventHash(normalized) }
 }
@@ -153,6 +168,37 @@ function privateChannelPubkeyList ({ privateChannelPubkey, privateChannelPubkeys
     ...(privateChannelPubkeys || []),
     ...(privateChannelPubkey ? [privateChannelPubkey] : [])
   ].filter(Boolean))]
+}
+
+function createTtlSet ({ ttlMs, maxEntries }) {
+  const entries = new Map()
+
+  function prune (now = Date.now()) {
+    if (Number.isFinite(ttlMs)) {
+      for (const [key, expiresAt] of entries) {
+        if (expiresAt > now) break
+        entries.delete(key)
+      }
+    }
+    if (Number.isFinite(maxEntries)) {
+      while (entries.size > maxEntries) entries.delete(entries.keys().next().value)
+    }
+  }
+
+  return {
+    add (key) {
+      if (!key || maxEntries <= 0 || ttlMs <= 0) return
+      const now = Date.now()
+      const expiresAt = Number.isFinite(ttlMs) ? now + ttlMs : Infinity
+      if (entries.has(key)) entries.delete(key)
+      entries.set(key, expiresAt)
+      prune(now)
+    },
+    has (key) {
+      prune()
+      return entries.has(key)
+    }
+  }
 }
 
 function contentKeyUsageBase ({ outer, router, channelPubkey, receiverPubkeys = [] }) {
@@ -213,6 +259,8 @@ function createProcessor ({
   receivedChunkTtlMs = DEFAULT_RECEIVED_CHUNK_TTL_MS,
   receivedChunkMaxBytes = DEFAULT_RECEIVED_CHUNK_MAX_BYTES,
   receivedChunkStorageArea,
+  ignoredGroupTtlMs = DEFAULT_IGNORED_GROUP_TTL_MS,
+  ignoredGroupMaxEntries = DEFAULT_IGNORED_GROUP_MAX_ENTRIES,
   _getIykcProofs = getIykcProofs
 }) {
   const receivedChunks = createReceivedChunkStore({
@@ -220,9 +268,13 @@ function createProcessor ({
     maxBytes: receivedChunkMaxBytes,
     storageArea: receivedChunkStorageArea
   })
-  const ignoredGroups = new Set()
+  const ignoredGroups = createTtlSet({
+    ttlMs: ignoredGroupTtlMs,
+    maxEntries: ignoredGroupMaxEntries
+  })
 
   return async function processOuterEvent (outer) {
+    let groupKey = ''
     try {
       const channelPubkey = outer.pubkey || await privateChannelSigner?.getPublicKey?.()
       const channelSigner = readSignerFromMap(privateChannelSignersByPubkey, channelPubkey) || privateChannelSigner
@@ -234,7 +286,7 @@ function createProcessor ({
       const senderPubkey = readSenderTag(router)
       if (receiverPubkey && readReceiverTag(router) && readReceiverTag(router) !== receiverPubkey && senderPubkey !== receiverPubkey) return
       const { index, total } = readChunkTag(router)
-      const groupKey = receivedChunks.groupKeyFor(channelPubkey, router.pubkey)
+      groupKey = receivedChunks.groupKeyFor(channelPubkey, router.pubkey)
       if (ignoredGroups.has(groupKey)) return
 
       const { imkcPubkey } = await assertSenderContentKey({ router, _getIykcProofs })
@@ -321,12 +373,16 @@ function createProcessor ({
 
       receivedChunks.removeGroup(groupKey)
     } catch (err) {
+      if (err?.message === 'INVALID_SIGNED_INNER_EVENT' && groupKey) {
+        ignoredGroups.add(groupKey)
+        receivedChunks.removeGroup(groupKey)
+      }
       onError?.(err)
     }
   }
 }
 
-export async function fetch ({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelSignersByPubkey, privateChannelPubkey, privateChannelPubkeys, receiverPubkey, relays, onChunk, onEvent, onSeedEvent, onContentKeyUsage, onError, since, until, limit, mode = 'leecher', modeByPubkey, receivedChunkTtlMs = DEFAULT_RECEIVED_CHUNK_TTL_MS, receivedChunkMaxBytes = DEFAULT_RECEIVED_CHUNK_MAX_BYTES, receivedChunkStorageArea, _getIykcProofs = getIykcProofs }) {
+export async function fetch ({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelSignersByPubkey, privateChannelPubkey, privateChannelPubkeys, receiverPubkey, relays, onChunk, onEvent, onSeedEvent, onContentKeyUsage, onError, since, until, limit, mode = 'leecher', modeByPubkey, receivedChunkTtlMs = DEFAULT_RECEIVED_CHUNK_TTL_MS, receivedChunkMaxBytes = DEFAULT_RECEIVED_CHUNK_MAX_BYTES, receivedChunkStorageArea, ignoredGroupTtlMs = DEFAULT_IGNORED_GROUP_TTL_MS, ignoredGroupMaxEntries = DEFAULT_IGNORED_GROUP_MAX_ENTRIES, _getIykcProofs = getIykcProofs }) {
   if (!relays?.length) throw new Error('NO_RELAYS')
   const authors = privateChannelPubkeyList({ privateChannelPubkey, privateChannelPubkeys })
   const filter = { kinds: [PRIVATE_BROADCAST_KIND] }
@@ -337,12 +393,12 @@ export async function fetch ({ receiverSigner, iykcSigner, privateChannelSigner 
 
   const events = await fetchEvents(filter, relays)
   events.sort((a, b) => a.created_at - b.created_at)
-  const processOuterEvent = createProcessor({ receiverSigner, iykcSigner, privateChannelSigner, privateChannelSignersByPubkey, receiverPubkey, mode, modeByPubkey, onChunk, onEvent, onSeedEvent, onContentKeyUsage, onError, receivedChunkTtlMs, receivedChunkMaxBytes, receivedChunkStorageArea, _getIykcProofs })
+  const processOuterEvent = createProcessor({ receiverSigner, iykcSigner, privateChannelSigner, privateChannelSignersByPubkey, receiverPubkey, mode, modeByPubkey, onChunk, onEvent, onSeedEvent, onContentKeyUsage, onError, receivedChunkTtlMs, receivedChunkMaxBytes, receivedChunkStorageArea, ignoredGroupTtlMs, ignoredGroupMaxEntries, _getIykcProofs })
   for (const event of events) await processOuterEvent(event)
   return events
 }
 
-export function subscribe ({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelSignersByPubkey, privateChannelPubkey, privateChannelPubkeys, receiverPubkey, relays, onChunk, onEvent, onSeedEvent, onContentKeyUsage, onError, onEose, since = nowSeconds() - 5, limit, liveOnly = false, mode = 'leecher', modeByPubkey, receivedChunkTtlMs = DEFAULT_RECEIVED_CHUNK_TTL_MS, receivedChunkMaxBytes = DEFAULT_RECEIVED_CHUNK_MAX_BYTES, receivedChunkStorageArea, _getIykcProofs = getIykcProofs }) {
+export function subscribe ({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelSignersByPubkey, privateChannelPubkey, privateChannelPubkeys, receiverPubkey, relays, onChunk, onEvent, onSeedEvent, onContentKeyUsage, onError, onEose, since = nowSeconds() - 5, limit, liveOnly = false, mode = 'leecher', modeByPubkey, receivedChunkTtlMs = DEFAULT_RECEIVED_CHUNK_TTL_MS, receivedChunkMaxBytes = DEFAULT_RECEIVED_CHUNK_MAX_BYTES, receivedChunkStorageArea, ignoredGroupTtlMs = DEFAULT_IGNORED_GROUP_TTL_MS, ignoredGroupMaxEntries = DEFAULT_IGNORED_GROUP_MAX_ENTRIES, _getIykcProofs = getIykcProofs }) {
   if (!relays?.length) throw new Error('NO_RELAYS')
   if (receiverSigner && !receiverSigner?.nip44Decrypt) throw new Error('RECEIVER_SIGNER_NIP44_DECRYPT_UNSUPPORTED')
   if (!privateChannelSigner && !privateChannelSignersByPubkey) throw new Error('PRIVATE_CHANNEL_SIGNER_REQUIRED')
@@ -351,7 +407,7 @@ export function subscribe ({ receiverSigner, iykcSigner, privateChannelSigner = 
   const filter = { kinds: [PRIVATE_BROADCAST_KIND], since }
   if (authors.length) filter.authors = authors
   if (limit != null) filter.limit = limit
-  const processOuterEvent = createProcessor({ receiverSigner, iykcSigner, privateChannelSigner, privateChannelSignersByPubkey, receiverPubkey, mode, modeByPubkey, onChunk, onEvent, onSeedEvent, onContentKeyUsage, onError, receivedChunkTtlMs, receivedChunkMaxBytes, receivedChunkStorageArea, _getIykcProofs })
+  const processOuterEvent = createProcessor({ receiverSigner, iykcSigner, privateChannelSigner, privateChannelSignersByPubkey, receiverPubkey, mode, modeByPubkey, onChunk, onEvent, onSeedEvent, onContentKeyUsage, onError, receivedChunkTtlMs, receivedChunkMaxBytes, receivedChunkStorageArea, ignoredGroupTtlMs, ignoredGroupMaxEntries, _getIykcProofs })
   let eosed = false
 
   return pool.subscribeMany(relays, filter, {

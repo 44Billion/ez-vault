@@ -3,7 +3,7 @@ import { JSONL_CHUNK_BYTES } from './chunk-size.js'
 
 export const DEFAULT_RECEIVED_CHUNK_TTL_MS = 60 * 60 * 1000 // 1 hour
 // For illustration purposes: A 280-character rumor would take approximately
-// 23 chunks (~0.65 MiB) to be sent if encrypted to 1000 partificipants
+// 23 chunks (~0.65 MiB) to be sent if encrypted to 1000 participants.
 export const DEFAULT_RECEIVED_CHUNK_MAX_BYTES = Math.min(JSONL_CHUNK_BYTES * 64, 3 * 1024 * 1024 /* 3 MiB cap */)
 
 const DEFAULT_PREFIX = 'ez-vault:private-channel:received'

@@ -1,4 +1,4 @@
-import { getEventHash, validateEvent } from 'nostr-tools'
+import { getEventHash, validateEvent, verifyEvent } from 'nostr-tools'
 import * as privateChannel from '../../services/private-channel/index.js'
 import { onOnline } from '../network.js'
 
@@ -106,6 +106,13 @@ function normalizeRumor (event, pubkey) {
   const normalized = { ...event, pubkey }
   if (!validateEvent(normalized)) throw new Error('INVALID_RUMOR')
   return { ...normalized, id: getEventHash(normalized) }
+}
+
+function assertValidSignedEvent (event) {
+  if (!validateEvent(event) || event.id !== getEventHash(event) || !verifyEvent(event)) {
+    throw new Error('INVALID_SIGNED_EVENT')
+  }
+  return event
 }
 
 function readTag (event, name) {
@@ -234,6 +241,8 @@ function rebuildSubscriptions ({ _subscribe = privateChannel.subscribe } = {}) {
       receivedChunkTtlMs: maxWatchNumber(channelList, 'receivedChunkTtlMs'),
       receivedChunkMaxBytes: maxWatchNumber(channelList, 'receivedChunkMaxBytes'),
       receivedChunkStorageArea: firstWatchValue(channelList, 'receivedChunkStorageArea'),
+      ignoredGroupTtlMs: maxWatchNumber(channelList, 'ignoredGroupTtlMs'),
+      ignoredGroupMaxEntries: maxWatchNumber(channelList, 'ignoredGroupMaxEntries'),
       limit: 0,
       since: nowSeconds(),
       liveOnly: true,
@@ -271,6 +280,8 @@ async function recoverWatchedChannels ({ _fetch = privateChannel.fetch } = {}) {
       receivedChunkTtlMs: watch.receivedChunkTtlMs,
       receivedChunkMaxBytes: watch.receivedChunkMaxBytes,
       receivedChunkStorageArea: watch.receivedChunkStorageArea,
+      ignoredGroupTtlMs: watch.ignoredGroupTtlMs,
+      ignoredGroupMaxEntries: watch.ignoredGroupMaxEntries,
       onChunk: handleChunk,
       onEvent: (event, outer, meta) => {
         watch.lastSeenAt = Math.max(watch.lastSeenAt || 0, outer.created_at || 0)
@@ -311,6 +322,8 @@ export async function watch ({
   receivedChunkTtlMs,
   receivedChunkMaxBytes,
   receivedChunkStorageArea,
+  ignoredGroupTtlMs,
+  ignoredGroupMaxEntries,
   since = nowSeconds(),
   _subscribe = privateChannel.subscribe
 }) {
@@ -331,6 +344,8 @@ export async function watch ({
       receivedChunkTtlMs,
       receivedChunkMaxBytes,
       receivedChunkStorageArea,
+      ignoredGroupTtlMs,
+      ignoredGroupMaxEntries,
       callbacks,
       since,
       lastSeenAt: since
@@ -342,7 +357,9 @@ export async function watch ({
       current.mode === next.mode &&
       current.receivedChunkTtlMs === next.receivedChunkTtlMs &&
       current.receivedChunkMaxBytes === next.receivedChunkMaxBytes &&
-      current.receivedChunkStorageArea === next.receivedChunkStorageArea
+      current.receivedChunkStorageArea === next.receivedChunkStorageArea &&
+      current.ignoredGroupTtlMs === next.ignoredGroupTtlMs &&
+      current.ignoredGroupMaxEntries === next.ignoredGroupMaxEntries
     ) {
       current.callbacks = callbacks
       continue
@@ -514,4 +531,21 @@ export async function broadcastRumor ({
   const { event, wireEvent } = await makeOutgoingRumor({ senderSigner, rumor })
   const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers, receiverTag: '', event: wireEvent, relays, expirationSeconds, _publish })
   return { rumor: event, results }
+}
+
+export async function broadcastEvent ({
+  senderSigner,
+  imkcSigner,
+  privateChannelSigner = senderSigner,
+  receiverPubkeys,
+  relays,
+  event,
+  expirationSeconds,
+  _publish = privateChannel.publish
+}) {
+  const receivers = uniq(receiverPubkeys)
+  if (!receivers.length) throw new Error('NO_RECEIVERS')
+  const wireEvent = assertValidSignedEvent({ ...event, tags: cloneTags(event?.tags) })
+  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers, receiverTag: '', event: wireEvent, relays, expirationSeconds, _publish })
+  return { event: wireEvent, results }
 }

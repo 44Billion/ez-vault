@@ -1,6 +1,6 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { generateSecretKey, getEventHash } from 'nostr-tools'
+import { finalizeEvent, generateSecretKey, getEventHash } from 'nostr-tools'
 import NsecSigner from '../docs/services/nsec-signer.js'
 import {
   EXPIRATION_SECONDS,
@@ -87,7 +87,7 @@ test('wrapEvent creates private broadcast events under relay event size limit', 
 })
 
 test('received chunk default cap is proportional to private-channel chunk size', () => {
-  assert.equal(DEFAULT_RECEIVED_CHUNK_MAX_BYTES, getJsonlChunkByteSize() * 32)
+  assert.equal(DEFAULT_RECEIVED_CHUNK_MAX_BYTES, Math.min(getJsonlChunkByteSize() * 64, 3 * 1024 * 1024))
 })
 
 test('wrapEvent supports overriding the outer expiration window', async () => {
@@ -119,6 +119,52 @@ test('unwrapEvent returns the addressed receiver event or null', async () => {
   assert.deepEqual(await unwrapEvent({ receiverSigner: bob, privateChannelSigner: alice, event: wrapped, receiverPubkey: bobPubkey }), unwrappedFixture(original, alicePubkey))
   assert.deepEqual(await unwrapEvent({ receiverSigner: carol, privateChannelSigner: alice, event: wrapped, receiverPubkey: carolPubkey }), unwrappedFixture(original, alicePubkey))
   assert.equal(await unwrapEvent({ receiverSigner: bob, privateChannelSigner: alice, event: wrapped, receiverPubkey: await signer().getPublicKey() }), null)
+})
+
+test('unwrapEvent preserves valid signed inner events', async () => {
+  const alice = signer()
+  const bob = signer()
+  const authorSecret = generateSecretKey()
+  const bobPubkey = await bob.getPublicKey()
+  const signed = finalizeEvent({ kind: 9002, created_at: 2, tags: [['x', '1']], content: 'signed' }, authorSecret)
+  const [wrapped] = await wrapEvent({ senderSigner: alice, receivers: [bobPubkey], event: signed, _getIykcProofs: noContentKeys })
+
+  assert.deepEqual(await unwrapEvent({ receiverSigner: bob, privateChannelSigner: alice, event: wrapped, receiverPubkey: bobPubkey }), signed)
+})
+
+test('unwrapEvent rejects invalid signed inner events', async () => {
+  const alice = signer()
+  const bob = signer()
+  const bobPubkey = await bob.getPublicKey()
+  const signed = finalizeEvent({ kind: 9002, created_at: 2, tags: [], content: 'signed' }, generateSecretKey())
+  const [wrapped] = await wrapEvent({
+    senderSigner: alice,
+    receivers: [bobPubkey],
+    event: { ...signed, content: 'tampered' },
+    _getIykcProofs: noContentKeys
+  })
+
+  await assert.rejects(
+    () => unwrapEvent({ receiverSigner: bob, privateChannelSigner: alice, event: wrapped, receiverPubkey: bobPubkey }),
+    /INVALID_SIGNED_INNER_EVENT/
+  )
+})
+
+test('unwrapEvent rejects malformed signed inner events', async () => {
+  const alice = signer()
+  const bob = signer()
+  const bobPubkey = await bob.getPublicKey()
+  const [wrapped] = await wrapEvent({
+    senderSigner: alice,
+    receivers: [bobPubkey],
+    event: { kind: 9002, created_at: 2, tags: [], content: 'signed', sig: 42 },
+    _getIykcProofs: noContentKeys
+  })
+
+  await assert.rejects(
+    () => unwrapEvent({ receiverSigner: bob, privateChannelSigner: alice, event: wrapped, receiverPubkey: bobPubkey }),
+    /INVALID_SIGNED_INNER_EVENT/
+  )
 })
 
 test('unwrapEvent uses imkc tag as the row encryption pubkey', async () => {
@@ -379,6 +425,148 @@ test('subscribe buffers out-of-order chunks and unwraps when the missing chunk a
     await handlers.onevent(wrapped[0])
 
     assert.deepEqual(events, [unwrappedFixture(original, await alice.getPublicKey())])
+  } finally {
+    pool.subscribeMany = originalSubscribeMany
+  }
+})
+
+test('subscribe drops invalid signed inner events and emits an error', async () => {
+  const originalSubscribeMany = pool.subscribeMany
+  let handlers = null
+  pool.subscribeMany = (_relays, _filter, nextHandlers) => {
+    handlers = nextHandlers
+    return { close: () => {} }
+  }
+
+  try {
+    const alice = signer()
+    const bob = signer()
+    const bobPubkey = await bob.getPublicKey()
+    const signed = finalizeEvent({ kind: 9002, created_at: 2, tags: [], content: 'signed' }, generateSecretKey())
+    const [wrapped] = await wrapEvent({
+      senderSigner: alice,
+      receivers: [bobPubkey],
+      event: { ...signed, content: 'tampered' },
+      _getIykcProofs: noContentKeys
+    })
+    const events = []
+    const errors = []
+
+    subscribe({
+      receiverSigner: bob,
+      privateChannelSigner: alice,
+      receiverPubkey: bobPubkey,
+      relays: ['wss://relay.example'],
+      onEvent: event => events.push(event),
+      onError: err => errors.push(err),
+      _getIykcProofs: noContentKeys
+    })
+
+    await handlers.onevent(wrapped)
+    await handlers.onevent(wrapped)
+
+    assert.equal(events.length, 0)
+    assert.equal(errors.length, 1)
+    assert.equal(errors[0].message, 'INVALID_SIGNED_INNER_EVENT')
+  } finally {
+    pool.subscribeMany = originalSubscribeMany
+  }
+})
+
+test('subscribe forgets ignored groups after their ttl', async () => {
+  const originalSubscribeMany = pool.subscribeMany
+  const originalNow = Date.now
+  let handlers = null
+  let now = 1000
+  pool.subscribeMany = (_relays, _filter, nextHandlers) => {
+    handlers = nextHandlers
+    return { close: () => {} }
+  }
+  Date.now = () => now
+
+  try {
+    const alice = signer()
+    const bob = signer()
+    const bobPubkey = await bob.getPublicKey()
+    const signed = finalizeEvent({ kind: 9002, created_at: 2, tags: [], content: 'signed' }, generateSecretKey())
+    const [wrapped] = await wrapEvent({
+      senderSigner: alice,
+      receivers: [bobPubkey],
+      event: { ...signed, content: 'tampered' },
+      _getIykcProofs: noContentKeys
+    })
+    const errors = []
+
+    subscribe({
+      receiverSigner: bob,
+      privateChannelSigner: alice,
+      receiverPubkey: bobPubkey,
+      relays: ['wss://relay.example'],
+      ignoredGroupTtlMs: 5,
+      onError: err => errors.push(err),
+      _getIykcProofs: noContentKeys
+    })
+
+    await handlers.onevent(wrapped)
+    now += 4
+    await handlers.onevent(wrapped)
+    now += 2
+    await handlers.onevent(wrapped)
+
+    assert.equal(errors.length, 2)
+    assert.equal(errors[0].message, 'INVALID_SIGNED_INNER_EVENT')
+    assert.equal(errors[1].message, 'INVALID_SIGNED_INNER_EVENT')
+  } finally {
+    Date.now = originalNow
+    pool.subscribeMany = originalSubscribeMany
+  }
+})
+
+test('subscribe evicts old ignored groups when the tombstone cache is full', async () => {
+  const originalSubscribeMany = pool.subscribeMany
+  let handlers = null
+  pool.subscribeMany = (_relays, _filter, nextHandlers) => {
+    handlers = nextHandlers
+    return { close: () => {} }
+  }
+
+  try {
+    const alice = signer()
+    const bob = signer()
+    const bobPubkey = await bob.getPublicKey()
+    const signedA = finalizeEvent({ kind: 9002, created_at: 2, tags: [], content: 'a' }, generateSecretKey())
+    const signedB = finalizeEvent({ kind: 9002, created_at: 3, tags: [], content: 'b' }, generateSecretKey())
+    const [wrappedA] = await wrapEvent({
+      senderSigner: alice,
+      receivers: [bobPubkey],
+      event: { ...signedA, content: 'tampered-a' },
+      _getIykcProofs: noContentKeys
+    })
+    const [wrappedB] = await wrapEvent({
+      senderSigner: alice,
+      receivers: [bobPubkey],
+      event: { ...signedB, content: 'tampered-b' },
+      _getIykcProofs: noContentKeys
+    })
+    const errors = []
+
+    subscribe({
+      receiverSigner: bob,
+      privateChannelSigner: alice,
+      receiverPubkey: bobPubkey,
+      relays: ['wss://relay.example'],
+      ignoredGroupMaxEntries: 1,
+      onError: err => errors.push(err),
+      _getIykcProofs: noContentKeys
+    })
+
+    await handlers.onevent(wrappedA)
+    await handlers.onevent(wrappedA)
+    await handlers.onevent(wrappedB)
+    await handlers.onevent(wrappedA)
+
+    assert.equal(errors.length, 3)
+    assert.ok(errors.every(err => err.message === 'INVALID_SIGNED_INNER_EVENT'))
   } finally {
     pool.subscribeMany = originalSubscribeMany
   }
