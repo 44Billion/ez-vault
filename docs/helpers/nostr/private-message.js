@@ -188,6 +188,21 @@ function modesForChannels (channels) {
   return out
 }
 
+function maxWatchNumber (channels, field) {
+  const values = channels
+    .map(channel => watchesByChannel.get(channel)?.[field])
+    .filter(value => Number.isFinite(value))
+  return values.length ? Math.max(...values) : undefined
+}
+
+function firstWatchValue (channels, field) {
+  for (const channel of channels) {
+    const value = watchesByChannel.get(channel)?.[field]
+    if (value !== undefined) return value
+  }
+  return undefined
+}
+
 function rebuildSubscriptions ({ _subscribe = privateChannel.subscribe } = {}) {
   const desired = desiredRelayState()
 
@@ -216,6 +231,9 @@ function rebuildSubscriptions ({ _subscribe = privateChannel.subscribe } = {}) {
       relays: [relay],
       mode: firstWatch.mode,
       modeByPubkey: modesForChannels(channelList),
+      receivedChunkTtlMs: maxWatchNumber(channelList, 'receivedChunkTtlMs'),
+      receivedChunkMaxBytes: maxWatchNumber(channelList, 'receivedChunkMaxBytes'),
+      receivedChunkStorageArea: firstWatchValue(channelList, 'receivedChunkStorageArea'),
       limit: 0,
       since: nowSeconds(),
       liveOnly: true,
@@ -250,6 +268,9 @@ async function recoverWatchedChannels ({ _fetch = privateChannel.fetch } = {}) {
       since: Math.max(0, (watch.lastSeenAt || watch.since || nowSeconds()) - 1),
       mode: watch.mode,
       modeByPubkey: { [channelPubkey]: watch.mode },
+      receivedChunkTtlMs: watch.receivedChunkTtlMs,
+      receivedChunkMaxBytes: watch.receivedChunkMaxBytes,
+      receivedChunkStorageArea: watch.receivedChunkStorageArea,
       onChunk: handleChunk,
       onEvent: (event, outer, meta) => {
         watch.lastSeenAt = Math.max(watch.lastSeenAt || 0, outer.created_at || 0)
@@ -287,6 +308,9 @@ export async function watch ({
   onChunk,
   onContentKeyUsage,
   onError,
+  receivedChunkTtlMs,
+  receivedChunkMaxBytes,
+  receivedChunkStorageArea,
   since = nowSeconds(),
   _subscribe = privateChannel.subscribe
 }) {
@@ -304,12 +328,22 @@ export async function watch ({
       privateChannelSigner,
       receiverPubkey: ownPubkey,
       mode,
+      receivedChunkTtlMs,
+      receivedChunkMaxBytes,
+      receivedChunkStorageArea,
       callbacks,
       since,
       lastSeenAt: since
     }
     const current = watchesByChannel.get(channel)
-    if (current && setEquals(new Set(current.relays), new Set(next.relays)) && current.mode === next.mode) {
+    if (
+      current &&
+      setEquals(new Set(current.relays), new Set(next.relays)) &&
+      current.mode === next.mode &&
+      current.receivedChunkTtlMs === next.receivedChunkTtlMs &&
+      current.receivedChunkMaxBytes === next.receivedChunkMaxBytes &&
+      current.receivedChunkStorageArea === next.receivedChunkStorageArea
+    ) {
       current.callbacks = callbacks
       continue
     }

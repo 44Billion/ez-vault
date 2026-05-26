@@ -93,6 +93,7 @@ test('private messenger watches channels and queues received leecher rumors', as
   assert.deepEqual(pm.watchCalls[0].channels, ['channel'])
   assert.deepEqual(pm.watchCalls[0].relays, ['wss://relay.example'])
   assert.equal(pm.watchCalls[0].mode, 'leecher')
+  assert.equal(pm.watchCalls[0].receivedChunkTtlMs, 7 * 24 * 60 * 60 * 1000)
 
   pm.watchCalls[0].onTell({
     event: { id: 'tell-id', kind: TELL_KIND, pubkey: 'alice', created_at: 10, tags: [['r', 'user']], content: 'hi' },
@@ -302,6 +303,7 @@ test('watch schedules reload-gap recovery and fetches missing channel window', a
   assert.equal(fetches[0].privateChannelPubkeys[0], 'channel')
   assert.ok(fetches[0].since <= now - 10)
   assert.ok(fetches[0].until >= now)
+  assert.equal(fetches[0].receivedChunkTtlMs, 7 * 24 * 60 * 60 * 1000)
   assert.equal(messenger.nextMessage().event.id, 'ask-id')
   assert.deepEqual(messenger.readState().channels.channel.offlineRanges, [])
 })

@@ -13,6 +13,7 @@ import {
   wrapEvent,
   wrapEvents
 } from '../docs/services/private-channel/index.js'
+import { createReceivedChunkStore, DEFAULT_RECEIVED_CHUNK_MAX_BYTES } from '../docs/services/private-channel/received-chunks.js'
 import { makeContentKeyEvent, parseContentKeyEvent } from '../docs/services/content-key/event.js'
 import { TEMPORARY_STORAGE_KEYS_KEY } from '../docs/services/temporary-storage.js'
 import { bytesToHex } from '../docs/helpers/nostr/index.js'
@@ -23,8 +24,10 @@ if (!globalThis.localStorage) {
   globalThis.localStorage = {
     clear: () => data.clear(),
     getItem: key => data.has(String(key)) ? data.get(String(key)) : null,
+    key: index => [...data.keys()][index] || null,
     removeItem: key => { data.delete(String(key)) },
-    setItem: (key, value) => { data.set(String(key), String(value)) }
+    setItem: (key, value) => { data.set(String(key), String(value)) },
+    get length () { return data.size }
   }
 }
 
@@ -81,6 +84,10 @@ test('wrapEvent creates private broadcast events under relay event size limit', 
   assert.ok(Number(wrapped[0].tags[0][1]) >= before + EXPIRATION_SECONDS)
   assert.ok(new TextEncoder().encode(JSON.stringify(wrapped[0])).length <= MAX_EVENT_BYTES)
   assert.equal(globalThis.localStorage.getItem(TEMPORARY_STORAGE_KEYS_KEY), null)
+})
+
+test('received chunk default cap is proportional to private-channel chunk size', () => {
+  assert.equal(DEFAULT_RECEIVED_CHUNK_MAX_BYTES, getJsonlChunkByteSize() * 32)
 })
 
 test('wrapEvent supports overriding the outer expiration window', async () => {
@@ -334,4 +341,138 @@ test('wrapEvents cleans temporary chunks when the stream is stopped early', asyn
   await stream.return()
 
   assert.equal(globalThis.localStorage.getItem(TEMPORARY_STORAGE_KEYS_KEY), null)
+})
+
+test('subscribe buffers out-of-order chunks and unwraps when the missing chunk arrives', async () => {
+  const originalSubscribeMany = pool.subscribeMany
+  let handlers = null
+  pool.subscribeMany = (_relays, _filter, nextHandlers) => {
+    handlers = nextHandlers
+    return { close: () => {} }
+  }
+
+  try {
+    const alice = signer()
+    const bob = signer()
+    const bobPubkey = await bob.getPublicKey()
+    const original = eventFixture('x'.repeat(getJsonlChunkByteSize()))
+    const wrapped = await wrapEvent({ senderSigner: alice, receivers: [bobPubkey], event: original, _getIykcProofs: noContentKeys })
+    const events = []
+    const chunks = []
+
+    assert.ok(wrapped.length > 1)
+    subscribe({
+      receiverSigner: bob,
+      privateChannelSigner: alice,
+      receiverPubkey: bobPubkey,
+      relays: ['wss://relay.example'],
+      onChunk: chunk => chunks.push(chunk),
+      onEvent: event => events.push(event),
+      _getIykcProofs: noContentKeys
+    })
+
+    for (const event of wrapped.slice(1)) await handlers.onevent(event)
+
+    assert.equal(events.length, 0)
+    assert.ok(chunks.at(-1).missing.includes(0))
+
+    await handlers.onevent(wrapped[0])
+
+    assert.deepEqual(events, [unwrappedFixture(original, await alice.getPublicKey())])
+  } finally {
+    pool.subscribeMany = originalSubscribeMany
+  }
+})
+
+test('received chunk store purges stale incomplete groups', () => {
+  const originalNow = Date.now
+  const storage = (() => {
+    const data = new Map()
+    return {
+      clear: () => data.clear(),
+      getItem: key => data.has(String(key)) ? data.get(String(key)) : null,
+      removeItem: key => { data.delete(String(key)) },
+      setItem: (key, value) => { data.set(String(key), String(value)) },
+      get length () { return data.size }
+    }
+  })()
+  let now = 1000
+  Date.now = () => now
+
+  try {
+    const store = createReceivedChunkStore({
+      prefix: 'test:received-chunks',
+      storageArea: storage,
+      ttlMs: 5
+    })
+    store.put({
+      channelPubkey: 'channel',
+      routerPubkey: 'router',
+      index: 1,
+      total: 2,
+      content: 'abc'
+    })
+
+    assert.ok(storage.length > 0)
+
+    now += 6
+    store.cleanupStale()
+
+    assert.equal(storage.length, 0)
+  } finally {
+    Date.now = originalNow
+  }
+})
+
+test('received chunk store resumes incremental parsing after reload', async () => {
+  const storage = (() => {
+    const data = new Map()
+    return {
+      clear: () => data.clear(),
+      getItem: key => data.has(String(key)) ? data.get(String(key)) : null,
+      removeItem: key => { data.delete(String(key)) },
+      setItem: (key, value) => { data.set(String(key), String(value)) },
+      get length () { return data.size }
+    }
+  })()
+  const line = `${JSON.stringify(['alice', 'ciphertext'])}\n`
+  const first = line.slice(0, 12)
+  const second = line.slice(12)
+  const firstStore = createReceivedChunkStore({
+    prefix: 'test:received-chunks:reload',
+    storageArea: storage
+  })
+  const lines = []
+
+  firstStore.put({
+    channelPubkey: 'channel',
+    routerPubkey: 'router',
+    index: 0,
+    total: 2,
+    content: Buffer.from(first).toString('base64')
+  })
+
+  const firstDrain = await firstStore.drainAvailable('channel:router', { onLine: line => lines.push(line) })
+
+  assert.equal(firstDrain.complete, false)
+  assert.equal(firstDrain.meta.nextIndex, 1)
+  assert.equal(firstDrain.meta.carry, first)
+  assert.deepEqual(lines, [])
+
+  const secondStore = createReceivedChunkStore({
+    prefix: 'test:received-chunks:reload',
+    storageArea: storage
+  })
+  secondStore.put({
+    channelPubkey: 'channel',
+    routerPubkey: 'router',
+    index: 1,
+    total: 2,
+    content: Buffer.from(second).toString('base64')
+  })
+
+  const secondDrain = await secondStore.drainAvailable('channel:router', { onLine: line => lines.push(line) })
+
+  assert.equal(secondDrain.complete, true)
+  assert.deepEqual(lines, [line.trim()])
 })

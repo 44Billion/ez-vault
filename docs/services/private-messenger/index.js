@@ -394,6 +394,7 @@ export class PrivateMessenger {
         onMessage: message => this.handleMessage(pubkey, message),
         onSeed: seed => this.enqueueSeed(pubkey, seed),
         onContentKeyUsage: usage => this.handleContentKeyUsage(pubkey, usage),
+        receivedChunkTtlMs: this.offlineRecoverySeconds * 1000,
         onError: err => this.onError?.(err)
       })
       this.stopByChannel.set(pubkey, stop)
@@ -803,6 +804,7 @@ export class PrivateMessenger {
             until: range.end,
             mode: channel.mode,
             modeByPubkey: { [pubkey]: channel.mode },
+            receivedChunkTtlMs: this.offlineRecoverySeconds * 1000,
             onEvent: (event, outer, meta) => this.enqueueRumor(eventType(event), pubkey, { event, outer, meta, payload: parseEventContent(event) }),
             onSeedEvent: seed => this.enqueueSeed(pubkey, seed),
             onContentKeyUsage: usage => this.handleContentKeyUsage(pubkey, usage),
