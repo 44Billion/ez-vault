@@ -115,10 +115,8 @@ export async function writeChunks ({ rowEncryptionSigner, receivers, receiverCon
 
   for (const receiver of receivers) {
     const row = receiverRecord(receiver, receiverContentKeys)
-    const sharedKeyPubkey = row.iykcPubkey || row.receiverPubkey
-    const tweakedSigner = rowEncryptionSigner.withSharedKey(sharedKeyPubkey)
-    const tweakedPubkey = await tweakedSigner.getPublicKey()
-    const ciphertext = await tweakedSigner.nip44Encrypt(tweakedPubkey, JSON.stringify(event))
+    const peerPubkey = row.iykcPubkey || row.receiverPubkey
+    const ciphertext = await rowEncryptionSigner.nip44Encrypt(peerPubkey, JSON.stringify(event))
     let line = encoder.encode(buildLine(row, ciphertext))
 
     while (line.length) {

@@ -16,7 +16,7 @@ export function getJsonlChunkByteSize () {
 export async function * wrapEvents ({ senderSigner, imkcSigner, privateChannelSigner = senderSigner, receivers, receiverTag, event, expirationSeconds = EXPIRATION_SECONDS, _getIykcProofs = getIykcProofs }) {
   const rowEncryptionSigner = imkcSigner || senderSigner
   if (!senderSigner?.getPublicKey) throw new Error('SENDER_SIGNER_REQUIRED')
-  if (!rowEncryptionSigner?.withSharedKey) throw new Error('SIGNER_SHARED_KEY_UNSUPPORTED')
+  if (!rowEncryptionSigner?.nip44Encrypt) throw new Error('SIGNER_NIP44_ENCRYPT_UNSUPPORTED')
   if (!privateChannelSigner?.getPublicKey || !privateChannelSigner?.nip44Encrypt || !privateChannelSigner?.signEvent) throw new Error('PRIVATE_CHANNEL_SIGNER_REQUIRED')
   if (!Array.isArray(receivers) || !receivers.length) throw new Error('NO_RECEIVERS')
 
@@ -79,7 +79,7 @@ async function assertSenderContentKey ({ router, _getIykcProofs = getIykcProofs 
 
 export async function unwrapEvent ({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, event, receiverPubkey, _getIykcProofs = getIykcProofs }) {
   if (!event || event.kind !== PRIVATE_BROADCAST_KIND) return null
-  if (!receiverSigner?.withSharedKey) throw new Error('RECEIVER_SIGNER_SHARED_KEY_UNSUPPORTED')
+  if (!receiverSigner?.nip44Decrypt) throw new Error('RECEIVER_SIGNER_NIP44_DECRYPT_UNSUPPORTED')
   if (!privateChannelSigner?.getPublicKey || !privateChannelSigner?.nip44Decrypt) throw new Error('PRIVATE_CHANNEL_SIGNER_REQUIRED')
 
   const channelPubkey = await privateChannelSigner.getPublicKey()
@@ -88,17 +88,15 @@ export async function unwrapEvent ({ receiverSigner, iykcSigner, privateChannelS
   if (receiverPubkey && readReceiverTag(router) && readReceiverTag(router) !== receiverPubkey) return null
 
   const { senderPubkey, imkcPubkey } = await assertSenderContentKey({ router, _getIykcProofs })
-  const sharedKeyPubkey = imkcPubkey || senderPubkey
+  const senderEncryptionPubkey = imkcPubkey || senderPubkey
   const lines = decodeChunkLines(router.content)
   for (const line of lines) {
     const [lineReceiver, ciphertext, iykcPubkey] = JSON.parse(line)
     if (receiverPubkey && lineReceiver !== receiverPubkey) continue
     const rowReceiverSigner = iykcPubkey ? iykcSigner : receiverSigner
-    if (!rowReceiverSigner?.withSharedKey) throw new Error('RECEIVER_CONTENT_KEY_REQUIRED')
+    if (!rowReceiverSigner?.nip44Decrypt) throw new Error('RECEIVER_CONTENT_KEY_REQUIRED')
     if (iykcPubkey && rowReceiverSigner.getPublicKey && await rowReceiverSigner.getPublicKey() !== iykcPubkey) continue
-    const tweakedSigner = rowReceiverSigner.withSharedKey(sharedKeyPubkey)
-    const tweakedPubkey = await tweakedSigner.getPublicKey()
-    const decrypted = JSON.parse(await tweakedSigner.nip44Decrypt(tweakedPubkey, ciphertext))
+    const decrypted = JSON.parse(await rowReceiverSigner.nip44Decrypt(senderEncryptionPubkey, ciphertext))
     const normalized = { ...decrypted, pubkey: senderPubkey }
     return { ...normalized, id: getEventHash(normalized) }
   }
@@ -254,7 +252,7 @@ export async function fetch ({ receiverSigner, iykcSigner, privateChannelSigner 
 
 export function subscribe ({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelSignersByPubkey, privateChannelPubkey, privateChannelPubkeys, receiverPubkey, relays, onChunk, onEvent, onSeedEvent, onContentKeyUsage, onError, onEose, since = nowSeconds() - 5, limit, liveOnly = false, mode = 'leecher', modeByPubkey, _getIykcProofs = getIykcProofs }) {
   if (!relays?.length) throw new Error('NO_RELAYS')
-  if (receiverSigner && !receiverSigner?.withSharedKey) throw new Error('RECEIVER_SIGNER_SHARED_KEY_UNSUPPORTED')
+  if (receiverSigner && !receiverSigner?.nip44Decrypt) throw new Error('RECEIVER_SIGNER_NIP44_DECRYPT_UNSUPPORTED')
   if (!privateChannelSigner && !privateChannelSignersByPubkey) throw new Error('PRIVATE_CHANNEL_SIGNER_REQUIRED')
 
   const authors = privateChannelPubkeyList({ privateChannelPubkey, privateChannelPubkeys })
