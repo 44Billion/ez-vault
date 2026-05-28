@@ -23,6 +23,8 @@
     "end": "pkill -f 'python3 server.py'"
   },
   "devDependencies": {
+    "@noble/curves": "2.0.1",
+    "@noble/hashes": "2.0.1",
     "eslint": "^9.39.4",
     "eslint-plugin-html": "^8.1.4",
     "globals": "^17.5.0",

@@ -1,7 +1,8 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { finalizeEvent, generateSecretKey, getEventHash } from 'nostr-tools'
+import { finalizeEvent, generateSecretKey, getEventHash, getPublicKey } from 'nostr-tools'
 import NsecSigner from '../docs/services/nsec-signer.js'
+import { deriveMultiDhConversationKey } from '../docs/helpers/nostr/multi-dh.js'
 import {
   EXPIRATION_SECONDS,
   getJsonlChunkByteSize,
@@ -14,7 +15,7 @@ import {
   wrapEvents
 } from '../docs/services/private-channel/index.js'
 import { createReceivedChunkStore, DEFAULT_RECEIVED_CHUNK_MAX_BYTES } from '../docs/services/private-channel/received-chunks.js'
-import { makeContentKeyEvent, parseContentKeyEvent } from '../docs/services/content-key/event.js'
+import { makeContentKeyEvent, parseContentKeyEvent, verifyContentKeyProof } from '../docs/services/content-key/event.js'
 import { TEMPORARY_STORAGE_KEYS_KEY } from '../docs/services/temporary-storage.js'
 import { bytesToHex } from '../docs/helpers/nostr/index.js'
 import { pool } from '../docs/services/relays.js'
@@ -69,6 +70,150 @@ test('shared-key signer derives matching deniable key from either side', async (
   const sharedPubkey = await aliceShared.getPublicKey()
   const ciphertext = await aliceShared.nip44Encrypt(sharedPubkey, 'secret')
   assert.equal(await bobShared.nip44Decrypt(sharedPubkey, ciphertext), 'secret')
+})
+
+test('multi-DH signer round-trips every content-key mode', async () => {
+  const alice = signer()
+  const bob = signer()
+  const aliceContent = signer()
+  const bobContent = signer()
+  const alicePubkey = await alice.getPublicKey()
+  const bobPubkey = await bob.getPublicKey()
+  const aliceContentPubkey = await aliceContent.getPublicKey()
+  const bobContentPubkey = await bobContent.getPublicKey()
+
+  const cases = [
+    { mode: 'identity' },
+    { mode: 'sender-content', aliceContent },
+    { mode: 'receiver-content', bobContent },
+    { mode: 'both-content', aliceContent, bobContent }
+  ]
+
+  for (const c of cases) {
+    const encrypted = await alice.nip44EncryptMulti({
+      peerPubkey: bobPubkey,
+      peerContentPubkey: c.bobContent ? bobContentPubkey : '',
+      ownContentSigner: c.aliceContent || null,
+      plaintext: c.mode
+    })
+    const decrypted = await bob.nip44DecryptMulti({
+      peerPubkey: alicePubkey,
+      peerContentPubkey: c.aliceContent ? aliceContentPubkey : '',
+      ownContentSigner: c.bobContent || null,
+      ciphertext: encrypted.ciphertext
+    })
+
+    assert.equal(encrypted.mode, c.mode)
+    assert.equal(decrypted.mode, c.mode)
+    assert.equal(decrypted.plaintext, c.mode)
+  }
+})
+
+test('multi-DH conversation key is pair-oriented, not direction-oriented', () => {
+  const aliceSecret = generateSecretKey()
+  const bobSecret = generateSecretKey()
+  const aliceContentSecret = generateSecretKey()
+  const bobContentSecret = generateSecretKey()
+  const alicePubkey = getPublicKey(aliceSecret)
+  const bobPubkey = getPublicKey(bobSecret)
+  const aliceContentPubkey = getPublicKey(aliceContentSecret)
+  const bobContentPubkey = getPublicKey(bobContentSecret)
+  const aliceToBob = deriveMultiDhConversationKey({
+    role: 'sender',
+    identitySecretKey: aliceSecret,
+    identityPubkey: alicePubkey,
+    contentSecretKey: aliceContentSecret,
+    contentPubkey: aliceContentPubkey,
+    peerIdentityPubkey: bobPubkey,
+    peerContentPubkey: bobContentPubkey
+  })
+  const bobReceiving = deriveMultiDhConversationKey({
+    role: 'receiver',
+    identitySecretKey: bobSecret,
+    identityPubkey: bobPubkey,
+    contentSecretKey: bobContentSecret,
+    contentPubkey: bobContentPubkey,
+    peerIdentityPubkey: alicePubkey,
+    peerContentPubkey: aliceContentPubkey
+  })
+  const bobToAlice = deriveMultiDhConversationKey({
+    role: 'sender',
+    identitySecretKey: bobSecret,
+    identityPubkey: bobPubkey,
+    contentSecretKey: bobContentSecret,
+    contentPubkey: bobContentPubkey,
+    peerIdentityPubkey: alicePubkey,
+    peerContentPubkey: aliceContentPubkey
+  })
+  const aliceToBobInChannel = deriveMultiDhConversationKey({
+    role: 'sender',
+    identitySecretKey: aliceSecret,
+    identityPubkey: alicePubkey,
+    contentSecretKey: aliceContentSecret,
+    contentPubkey: aliceContentPubkey,
+    peerIdentityPubkey: bobPubkey,
+    peerContentPubkey: bobContentPubkey,
+    context: { channelPubkey: '1'.repeat(64), protocol: 'private-channel' }
+  })
+  const bobReceivingInChannel = deriveMultiDhConversationKey({
+    role: 'receiver',
+    identitySecretKey: bobSecret,
+    identityPubkey: bobPubkey,
+    contentSecretKey: bobContentSecret,
+    contentPubkey: bobContentPubkey,
+    peerIdentityPubkey: alicePubkey,
+    peerContentPubkey: aliceContentPubkey,
+    context: { protocol: 'private-channel', channelPubkey: '1'.repeat(64) }
+  })
+  const aliceToBobInOtherChannel = deriveMultiDhConversationKey({
+    role: 'sender',
+    identitySecretKey: aliceSecret,
+    identityPubkey: alicePubkey,
+    contentSecretKey: aliceContentSecret,
+    contentPubkey: aliceContentPubkey,
+    peerIdentityPubkey: bobPubkey,
+    peerContentPubkey: bobContentPubkey,
+    context: { protocol: 'private-channel', channelPubkey: '2'.repeat(64) }
+  })
+
+  assert.equal(bytesToHex(aliceToBob.conversationKey), bytesToHex(bobReceiving.conversationKey))
+  assert.equal(bytesToHex(aliceToBob.conversationKey), bytesToHex(bobToAlice.conversationKey))
+  assert.equal(bytesToHex(aliceToBobInChannel.conversationKey), bytesToHex(bobReceivingInChannel.conversationKey))
+  assert.notEqual(bytesToHex(aliceToBob.conversationKey), bytesToHex(aliceToBobInChannel.conversationKey))
+  assert.notEqual(bytesToHex(aliceToBobInChannel.conversationKey), bytesToHex(aliceToBobInOtherChannel.conversationKey))
+})
+
+test('multi-DH self-encryption with a content key still requires the identity key', async () => {
+  const alice = signer()
+  const aliceContent = signer()
+  const wrongIdentity = signer()
+  const alicePubkey = await alice.getPublicKey()
+  const aliceContentPubkey = await aliceContent.getPublicKey()
+
+  const encrypted = await alice.nip44EncryptMulti({
+    peerPubkey: alicePubkey,
+    peerContentPubkey: aliceContentPubkey,
+    ownContentSigner: aliceContent,
+    plaintext: 'note to self'
+  })
+
+  assert.equal(encrypted.mode, 'both-content')
+  assert.equal((await alice.nip44DecryptMulti({
+    peerPubkey: alicePubkey,
+    peerContentPubkey: aliceContentPubkey,
+    ownContentSigner: aliceContent,
+    ciphertext: encrypted.ciphertext
+  })).plaintext, 'note to self')
+
+  await assert.rejects(
+    () => wrongIdentity.nip44DecryptMulti({
+      peerPubkey: alicePubkey,
+      peerContentPubkey: aliceContentPubkey,
+      ownContentSigner: aliceContent,
+      ciphertext: encrypted.ciphertext
+    }),
+    /invalid MAC/
+  )
 })
 
 test('wrapEvent creates private broadcast events under relay event size limit', async () => {
@@ -174,33 +319,31 @@ test('unwrapEvent uses imkc tag as the row encryption pubkey', async () => {
   const alicePubkey = await alice.getPublicKey()
   const bobPubkey = await bob.getPublicKey()
   const imkcPubkey = await imkc.getPublicKey()
-  const imkcProof = parseContentKeyEvent(await makeContentKeyEvent({ userSigner: alice, contentKeySigner: imkc, createdAt: 7 }))
   const original = eventFixture('private')
   const [wrapped] = await wrapEvent({ senderSigner: alice, imkcSigner: imkc, receivers: [bobPubkey], event: original, _getIykcProofs: noContentKeys })
   const router = JSON.parse(await alice.nip44Decrypt(await alice.getPublicKey(), wrapped.content))
+  const imkcTag = router.tags.find(t => t[0] === 'imkc')
 
   assert.equal(router.tags.find(t => t[0] === 'f')?.[1], alicePubkey)
-  assert.equal(router.tags.find(t => t[0] === 'imkc')?.[1], imkcPubkey)
+  assert.equal(imkcTag?.[1], imkcPubkey)
+  assert.equal(verifyContentKeyProof({ ownerPubkey: alicePubkey, contentPubkey: imkcPubkey, proof: imkcTag?.[2] }), true)
   assert.deepEqual(
     await unwrapEvent({
       receiverSigner: bob,
       privateChannelSigner: alice,
       event: wrapped,
-      receiverPubkey: bobPubkey,
-      _getIykcProofs: async () => ({ [alicePubkey]: imkcProof })
+      receiverPubkey: bobPubkey
     }),
     unwrappedFixture(original, alicePubkey)
   )
 })
 
-test('unwrapEvent rejects sender imkc keys not advertised by the sender', async () => {
+test('unwrapEvent rejects sender imkc keys that do not match the ciphertext', async () => {
   const alice = signer()
   const oldImkc = signer()
   const newImkc = signer()
   const bob = signer()
-  const alicePubkey = await alice.getPublicKey()
   const bobPubkey = await bob.getPublicKey()
-  const newImkcProof = parseContentKeyEvent(await makeContentKeyEvent({ userSigner: alice, contentKeySigner: newImkc, createdAt: 8 }))
   const [wrapped] = await wrapEvent({
     senderSigner: alice,
     imkcSigner: oldImkc,
@@ -208,51 +351,59 @@ test('unwrapEvent rejects sender imkc keys not advertised by the sender', async 
     event: eventFixture('private'),
     _getIykcProofs: noContentKeys
   })
+  const channelPubkey = await alice.getPublicKey()
+  const router = JSON.parse(await alice.nip44Decrypt(channelPubkey, wrapped.content))
+  const newImkcPubkey = await newImkc.getPublicKey()
+  const newImkcProof = parseContentKeyEvent(await makeContentKeyEvent({ userSigner: alice, contentKeySigner: newImkc, createdAt: 7 })).iykcProof
+  router.tags = router.tags.map(tag => tag[0] === 'imkc' ? ['imkc', newImkcPubkey, newImkcProof] : tag)
+  const tampered = await alice.signEvent({
+    kind: PRIVATE_BROADCAST_KIND,
+    created_at: wrapped.created_at,
+    tags: wrapped.tags,
+    content: await alice.nip44Encrypt(channelPubkey, JSON.stringify(router))
+  })
 
   await assert.rejects(
     () => unwrapEvent({
       receiverSigner: bob,
       privateChannelSigner: alice,
-      event: wrapped,
-      receiverPubkey: bobPubkey,
-      _getIykcProofs: async () => ({ [alicePubkey]: newImkcProof })
+      event: tampered,
+      receiverPubkey: bobPubkey
     }),
-    /INVALID_SENDER_CONTENT_KEY/
+    /invalid MAC/
   )
 })
 
-test('unwrapEvent accepts stale sender imkc keys advertised in zz tags', async () => {
+test('unwrapEvent rejects sender imkc rows without valid proofs', async () => {
   const alice = signer()
-  const staleImkc = signer()
-  const currentImkc = signer()
+  const imkc = signer()
   const bob = signer()
-  const alicePubkey = await alice.getPublicKey()
   const bobPubkey = await bob.getPublicKey()
-  const contentKeyEvent = await makeContentKeyEvent({
-    userSigner: alice,
-    contentKeySigner: currentImkc,
-    createdAt: 9,
-    staleContentKeys: [{ iykcPubkey: await staleImkc.getPublicKey(), removedAt: 8 }]
-  })
-  const contentKeys = parseContentKeyEvent(contentKeyEvent)
-  const original = eventFixture('private')
   const [wrapped] = await wrapEvent({
     senderSigner: alice,
-    imkcSigner: staleImkc,
+    imkcSigner: imkc,
     receivers: [bobPubkey],
-    event: original,
+    event: eventFixture('private'),
     _getIykcProofs: noContentKeys
   })
+  const channelPubkey = await alice.getPublicKey()
+  const router = JSON.parse(await alice.nip44Decrypt(channelPubkey, wrapped.content))
+  router.tags = router.tags.map(tag => tag[0] === 'imkc' ? ['imkc', tag[1]] : tag)
+  const tampered = await alice.signEvent({
+    kind: PRIVATE_BROADCAST_KIND,
+    created_at: wrapped.created_at,
+    tags: wrapped.tags,
+    content: await alice.nip44Encrypt(channelPubkey, JSON.stringify(router))
+  })
 
-  assert.deepEqual(
-    await unwrapEvent({
+  await assert.rejects(
+    () => unwrapEvent({
       receiverSigner: bob,
       privateChannelSigner: alice,
-      event: wrapped,
-      receiverPubkey: bobPubkey,
-      _getIykcProofs: async () => ({ [alicePubkey]: contentKeys })
+      event: tampered,
+      receiverPubkey: bobPubkey
     }),
-    unwrappedFixture(original, alicePubkey)
+    /INVALID_IMKC_PROOF/
   )
 })
 
@@ -327,28 +478,123 @@ test('wrapEvent uses receiver content key rows when iykc is advertised', async (
   )
 })
 
-test('wrapEvent falls back to receiver main key when iykc proof is invalid', async () => {
+test('wrapEvent accepts explicit receiver content keys with valid proofs', async () => {
   const alice = signer()
   const bob = signer()
   const bobContent = signer()
   const bobPubkey = await bob.getPublicKey()
+  const contentKey = parseContentKeyEvent(await makeContentKeyEvent({ userSigner: bob, contentKeySigner: bobContent, createdAt: 7 }))
   const original = eventFixture('private')
   const [wrapped] = await wrapEvent({
     senderSigner: alice,
-    receivers: [bobPubkey],
+    receivers: [[bobPubkey, contentKey.iykcPubkey, contentKey.iykcProof]],
     event: original,
-    _getIykcProofs: async () => ({
-      [bobPubkey]: {
-        iykcPubkey: await bobContent.getPublicKey(),
-        iykcProof: `7:${'f'.repeat(128)}`
-      }
-    })
+    _getIykcProofs: noContentKeys
   })
   const router = JSON.parse(await alice.nip44Decrypt(await alice.getPublicKey(), wrapped.content))
   const line = JSON.parse(new TextDecoder().decode(Buffer.from(router.content, 'base64')).trim())
 
-  assert.equal(line.length, 2)
-  assert.deepEqual(await unwrapEvent({ receiverSigner: bob, privateChannelSigner: alice, event: wrapped, receiverPubkey: bobPubkey }), unwrappedFixture(original, await alice.getPublicKey()))
+  assert.equal(line.length, 4)
+  assert.deepEqual(await unwrapEvent({ receiverSigner: bob, iykcSigner: bobContent, privateChannelSigner: alice, event: wrapped, receiverPubkey: bobPubkey }), unwrappedFixture(original, await alice.getPublicKey()))
+})
+
+test('wrapEvent rejects explicit receiver content keys without valid proofs', async () => {
+  const alice = signer()
+  const bob = signer()
+  const bobContent = signer()
+  const bobPubkey = await bob.getPublicKey()
+  const bobContentPubkey = await bobContent.getPublicKey()
+
+  await assert.rejects(
+    () => wrapEvent({
+      senderSigner: alice,
+      receivers: [[bobPubkey, bobContentPubkey]],
+      event: eventFixture('private'),
+      _getIykcProofs: noContentKeys
+    }),
+    /INVALID_IYKC_PROOF/
+  )
+})
+
+test('unwrapEvent rejects receiver iykc rows without valid proofs', async () => {
+  const alice = signer()
+  const bob = signer()
+  const bobContent = signer()
+  const bobPubkey = await bob.getPublicKey()
+  const contentKey = parseContentKeyEvent(await makeContentKeyEvent({ userSigner: bob, contentKeySigner: bobContent, createdAt: 7 }))
+  const original = eventFixture('private')
+  const [wrapped] = await wrapEvent({
+    senderSigner: alice,
+    receivers: [[bobPubkey, contentKey.iykcPubkey, contentKey.iykcProof]],
+    event: original,
+    _getIykcProofs: noContentKeys
+  })
+  const channelPubkey = await alice.getPublicKey()
+  const router = JSON.parse(await alice.nip44Decrypt(channelPubkey, wrapped.content))
+  const [receiverPubkey, ciphertext, iykcPubkey] = JSON.parse(new TextDecoder().decode(Buffer.from(router.content, 'base64')).trim())
+  router.content = Buffer.from(`${JSON.stringify([receiverPubkey, ciphertext, iykcPubkey, '7:bad'])}\n`).toString('base64')
+  const tampered = await alice.signEvent({
+    kind: PRIVATE_BROADCAST_KIND,
+    created_at: wrapped.created_at,
+    tags: wrapped.tags,
+    content: await alice.nip44Encrypt(channelPubkey, JSON.stringify(router))
+  })
+
+  await assert.rejects(
+    () => unwrapEvent({ receiverSigner: bob, iykcSigner: bobContent, privateChannelSigner: alice, event: tampered, receiverPubkey: bobPubkey }),
+    /INVALID_IYKC_PROOF/
+  )
+})
+
+test('subscribe only emits receiver content key usage after iykc proof validation', async () => {
+  const originalSubscribeMany = pool.subscribeMany
+  let handlers = null
+  pool.subscribeMany = (_relays, _filter, nextHandlers) => {
+    handlers = nextHandlers
+    return { close: () => {} }
+  }
+
+  try {
+    const alice = signer()
+    const bob = signer()
+    const bobContent = signer()
+    const bobPubkey = await bob.getPublicKey()
+    const contentKey = parseContentKeyEvent(await makeContentKeyEvent({ userSigner: bob, contentKeySigner: bobContent, createdAt: 7 }))
+    const [wrapped] = await wrapEvent({
+      senderSigner: alice,
+      receivers: [[bobPubkey, contentKey.iykcPubkey, contentKey.iykcProof]],
+      event: eventFixture('private'),
+      _getIykcProofs: noContentKeys
+    })
+    const channelPubkey = await alice.getPublicKey()
+    const router = JSON.parse(await alice.nip44Decrypt(channelPubkey, wrapped.content))
+    const [receiverPubkey, ciphertext, iykcPubkey] = JSON.parse(new TextDecoder().decode(Buffer.from(router.content, 'base64')).trim())
+    router.content = Buffer.from(`${JSON.stringify([receiverPubkey, ciphertext, iykcPubkey, '7:bad'])}\n`).toString('base64')
+    const tampered = await alice.signEvent({
+      kind: PRIVATE_BROADCAST_KIND,
+      created_at: wrapped.created_at,
+      tags: wrapped.tags,
+      content: await alice.nip44Encrypt(channelPubkey, JSON.stringify(router))
+    })
+    const usages = []
+    const errors = []
+
+    subscribe({
+      privateChannelSigner: alice,
+      receiverPubkey: bobPubkey,
+      relays: ['wss://relay.example'],
+      onContentKeyUsage: usage => usages.push(usage),
+      onError: err => errors.push(err)
+    })
+
+    await handlers.onevent(tampered)
+
+    assert.deepEqual(usages, [])
+    assert.equal(errors.length, 1)
+    assert.equal(errors[0].message, 'INVALID_IYKC_PROOF')
+  } finally {
+    pool.subscribeMany = originalSubscribeMany
+  }
 })
 
 test('wrapEvent chunks large jsonl without oversize events and unwraps reassembled bytes', async () => {
@@ -370,6 +616,7 @@ test('wrapEvent chunks large jsonl without oversize events and unwraps reassembl
   assert.equal(routers[0].kind, ROUTER_KIND)
   assert.equal(routers[0].tags.find(t => t[0] === 'r')?.[1], bobPubkey)
   assert.equal(routers[0].tags.find(t => t[0] === 'imkc')?.[1], imkcPubkey)
+  assert.ok(routers[0].tags.find(t => t[0] === 'imkc')?.[2])
   assert.equal(routers.length, Number(routers[0].tags.find(t => t[0] === 'c')[2]))
 })
 

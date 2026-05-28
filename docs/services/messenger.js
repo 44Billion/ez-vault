@@ -2,6 +2,7 @@ import { ask, reply } from '../helpers/window-message.js'
 import { serializeError } from '../helpers/error.js'
 import * as store from './accounts-store.js'
 import * as signer from './signer.js'
+import * as nostrvault from './nostrvault.js'
 import * as log from './messenger-log/index.js'
 
 // Read-only disclosures — the result is publicly derivable, so logging them
@@ -106,16 +107,17 @@ function onPortMessage (e) {
   if (code === 'REPLY') return
   if (!handshakeComplete) return
   if (code === 'NIP07') return handleNip07(e)
+  if (code === 'NOSTRVAULT') return handleNostrVault(e)
 }
 
-async function handleNip07 (e) {
+async function handleSignerRequest (e, { code, run }) {
   const { pubkey, method, params = [], app = {} } = e.data.payload ?? {}
   const eventKind = method === 'sign_event'
     ? params?.[0]?.kind
     : undefined
 
   const logBase = {
-    code: 'NIP07',
+    code,
     pubkey,
     method,
     app: { id: app.id ?? '', name: app.name ?? '', icon: app.icon ?? '' },
@@ -126,7 +128,7 @@ async function handleNip07 (e) {
   const shouldLog = !UNLOGGED_METHODS.has(method)
 
   try {
-    const payload = await signer.run({ pubkey, method, params })
+    const payload = await run({ pubkey, method, params })
     if (shouldLog) {
       log.append({ ...logBase, status: 'success', params, result: payload })
     }
@@ -143,4 +145,12 @@ async function handleNip07 (e) {
     }
     reply(e, { error: serialized }, { to: launcherPort })
   }
+}
+
+async function handleNip07 (e) {
+  return handleSignerRequest(e, { code: 'NIP07', run: signer.run })
+}
+
+async function handleNostrVault (e) {
+  return handleSignerRequest(e, { code: 'NOSTRVAULT', run: nostrvault.run })
 }

@@ -150,10 +150,10 @@ test('private messenger forwards watch errors to the configured error handler', 
     channels: [{ signer: signer('channel'), relays: ['wss://relay.example'] }]
   })
 
-  pm.watchCalls[0].onError(new Error('INVALID_SENDER_CONTENT_KEY'))
+  pm.watchCalls[0].onError(new Error('RECEIVER_MULTI_DH_UNSUPPORTED'))
 
   assert.equal(errors.length, 1)
-  assert.equal(errors[0].message, 'INVALID_SENDER_CONTENT_KEY')
+  assert.equal(errors[0].message, 'RECEIVER_MULTI_DH_UNSUPPORTED')
 })
 
 test('private messenger reports content key usage changes for sent and received messages', async () => {

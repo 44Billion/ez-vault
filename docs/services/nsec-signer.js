@@ -1,6 +1,7 @@
 import { getPublicKey, finalizeEvent, nip04, nip44 } from 'nostr-tools'
 import { bytesToHex, hexToBytes } from '../helpers/nostr/index.js'
 import { deriveSharedKey } from '../helpers/crypto.js'
+import { deriveMultiDhConversationKey } from '../helpers/nostr/multi-dh.js'
 import {
   fetchRelayListEvent,
   parseRelayListEvent,
@@ -46,6 +47,8 @@ class SharedKeySigner {
   async nip04Decrypt (peerPubkey, ciphertext) { return (await this.#sharedSigner()).nip04Decrypt(peerPubkey, ciphertext) }
   async nip44Encrypt (peerPubkey, plaintext) { return (await this.#sharedSigner()).nip44Encrypt(peerPubkey, plaintext) }
   async nip44Decrypt (peerPubkey, ciphertext) { return (await this.#sharedSigner()).nip44Decrypt(peerPubkey, ciphertext) }
+  async nip44EncryptMulti (options) { return (await this.#sharedSigner()).nip44EncryptMulti(options) }
+  async nip44DecryptMulti (options) { return (await this.#sharedSigner()).nip44DecryptMulti(options) }
   withSharedKey (peerPubkey) { return new SharedKeySigner(this.#signer, peerPubkey) }
 }
 
@@ -143,6 +146,59 @@ export default class NsecSigner {
     const ck = this.#conversationKeys[peerPubkey] ??=
       nip44GetConversationKey(this.#secretKey, peerPubkey)
     return nip44Decrypt(ciphertext, ck)
+  }
+
+  async #contentKeyMaterial (contentSigner) {
+    if (!contentSigner) return { contentPubkey: '', contentSecretKey: null }
+    if (!secretKeys.has(contentSigner)) throw new Error('CONTENT_SIGNER_UNSUPPORTED')
+    return {
+      contentPubkey: await contentSigner.getPublicKey(),
+      contentSecretKey: secretKeys.get(contentSigner)
+    }
+  }
+
+  async nip44EncryptMulti ({ peerPubkey, peerContentPubkey = '', ownContentSigner, plaintext, context }) {
+    const { contentPubkey, contentSecretKey } = await this.#contentKeyMaterial(ownContentSigner)
+    const { mode, conversationKey } = deriveMultiDhConversationKey({
+      role: 'sender',
+      identitySecretKey: this.#secretKey,
+      identityPubkey: this.#pubkey,
+      contentSecretKey,
+      contentPubkey,
+      peerIdentityPubkey: peerPubkey,
+      peerContentPubkey,
+      context
+    })
+    return {
+      ciphertext: conversationKey
+        ? nip44Encrypt(plaintext, conversationKey)
+        : this.nip44Encrypt(peerPubkey, plaintext),
+      mode,
+      ownContentPubkey: contentPubkey,
+      peerContentPubkey: peerContentPubkey || ''
+    }
+  }
+
+  async nip44DecryptMulti ({ peerPubkey, peerContentPubkey = '', ownContentSigner, ciphertext, context }) {
+    const { contentPubkey, contentSecretKey } = await this.#contentKeyMaterial(ownContentSigner)
+    const { mode, conversationKey } = deriveMultiDhConversationKey({
+      role: 'receiver',
+      identitySecretKey: this.#secretKey,
+      identityPubkey: this.#pubkey,
+      contentSecretKey,
+      contentPubkey,
+      peerIdentityPubkey: peerPubkey,
+      peerContentPubkey,
+      context
+    })
+    return {
+      plaintext: conversationKey
+        ? nip44Decrypt(ciphertext, conversationKey)
+        : this.nip44Decrypt(peerPubkey, ciphertext),
+      mode,
+      ownContentPubkey: contentPubkey,
+      peerContentPubkey: peerContentPubkey || ''
+    }
   }
 
   withSharedKey (peerPubkey) {

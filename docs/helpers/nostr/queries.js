@@ -8,7 +8,7 @@ const IYKC_CACHE_MAX_ITEMS = 10000
 const relaysByPubkey = Object.create(null)
 const relayCacheTimersByPubkey = Object.create(null)
 const relayCacheAddedAtByPubkey = Object.create(null)
-const iykcProofsByPubkey = Object.create(null)
+const contentKeysByPubkey = Object.create(null)
 const iykcCacheTimersByPubkey = Object.create(null)
 const iykcCacheAddedAtByPubkey = Object.create(null)
 
@@ -28,12 +28,11 @@ function cloneRelays (relays) {
   }
 }
 
-function cloneIykcProof (proof) {
-  return proof
+function cloneContentKey (contentKey) {
+  return contentKey
     ? {
-        iykcPubkey: proof.iykcPubkey,
-        iykcProof: proof.iykcProof,
-        staleIykcProofs: (proof.staleIykcProofs || []).map(stale => ({ ...stale }))
+        iykcPubkey: contentKey.iykcPubkey,
+        iykcProof: contentKey.iykcProof
       }
     : null
 }
@@ -77,7 +76,7 @@ function clearCache (cache, timers, addedAt) {
 
 export function clearQueryCaches () {
   clearCache(relaysByPubkey, relayCacheTimersByPubkey, relayCacheAddedAtByPubkey)
-  clearCache(iykcProofsByPubkey, iykcCacheTimersByPubkey, iykcCacheAddedAtByPubkey)
+  clearCache(contentKeysByPubkey, iykcCacheTimersByPubkey, iykcCacheAddedAtByPubkey)
 }
 
 // Given pubkeys and their relay mappings, picks the minimum set of relays
@@ -160,11 +159,11 @@ export async function getIykcProofs (pubkeys, {
   const out = {}
   const missingPubkeys = []
   for (const pubkey of uniquePubkeys) {
-    if (!hasCachedKey(iykcProofsByPubkey, pubkey)) {
+    if (!hasCachedKey(contentKeysByPubkey, pubkey)) {
       missingPubkeys.push(pubkey)
       continue
     }
-    const cached = cloneIykcProof(iykcProofsByPubkey[pubkey])
+    const cached = cloneContentKey(contentKeysByPubkey[pubkey])
     if (cached) out[pubkey] = cached
   }
   if (!missingPubkeys.length) return out
@@ -192,11 +191,11 @@ export async function getIykcProofs (pubkeys, {
   for (const pubkey of missingPubkeys) {
     const entry = latestByPubkey[pubkey]
     const proof = entry
-      ? { iykcPubkey: entry.iykcPubkey, iykcProof: entry.iykcProof, staleIykcProofs: entry.staleIykcProofs || [] }
+      ? { iykcPubkey: entry.iykcPubkey, iykcProof: entry.iykcProof }
       : null
-    setCachedValue(iykcProofsByPubkey, iykcCacheTimersByPubkey, iykcCacheAddedAtByPubkey, pubkey, cloneIykcProof(proof), cacheMs)
+    setCachedValue(contentKeysByPubkey, iykcCacheTimersByPubkey, iykcCacheAddedAtByPubkey, pubkey, cloneContentKey(proof), cacheMs)
     if (proof) out[pubkey] = proof
   }
-  pruneCache(iykcProofsByPubkey, iykcCacheTimersByPubkey, iykcCacheAddedAtByPubkey, IYKC_CACHE_MAX_ITEMS)
+  pruneCache(contentKeysByPubkey, iykcCacheTimersByPubkey, iykcCacheAddedAtByPubkey, IYKC_CACHE_MAX_ITEMS)
   return out
 }

@@ -11,8 +11,8 @@ const SUPPORTED_METHODS = new Set([
   'nip04Encrypt',
   'nip04Decrypt',
   'nip44Encrypt',
-  'nip44Decrypt',
-  'withSharedKey'
+  'nip44Decrypt'
+  // 'withSharedKey'
 ])
 
 // NIP-07 wire methods are snake_case (get_public_key, nip44_encrypt, ...)

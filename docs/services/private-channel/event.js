@@ -24,6 +24,14 @@ export function readImkcTag (event) {
   return event.tags?.find(t => t[0] === 'imkc')?.[1] || ''
 }
 
+export function hasImkcTag (event) {
+  return event.tags?.some(t => t[0] === 'imkc') || false
+}
+
+export function readImkcProof (event) {
+  return event.tags?.find(t => t[0] === 'imkc')?.[2] || ''
+}
+
 export function readChunkTag (event) {
   const tag = event.tags?.find(t => t[0] === 'c')
   const index = Number(tag?.[1])
@@ -34,9 +42,12 @@ export function readChunkTag (event) {
   return { index, total }
 }
 
-export function makeRouterEvent ({ pubkey, senderPubkey, imkcPubkey, receiverPubkey, chunkIndex, chunkTotal, content }) {
+export function makeRouterEvent ({ pubkey, senderPubkey, imkcPubkey, imkcProof, receiverPubkey, chunkIndex, chunkTotal, content }) {
   const tags = [['f', senderPubkey]]
-  if (imkcPubkey) tags.push(['imkc', imkcPubkey])
+  if (imkcPubkey) {
+    if (!imkcProof) throw new Error('INVALID_IMKC_PROOF')
+    tags.push(['imkc', imkcPubkey, imkcProof])
+  }
   tags.push(['c', String(chunkIndex), String(chunkTotal)])
   if (receiverPubkey) tags.push(['r', receiverPubkey])
   return { kind: ROUTER_KIND, pubkey, created_at: nowSeconds(), tags, content }

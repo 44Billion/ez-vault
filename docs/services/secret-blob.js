@@ -14,12 +14,14 @@ import { encodeTlv, decodeTlv } from '../helpers/tlv.js'
 const TLV_NSEC = 0x01
 const TLV_BUNKER = 0x02
 const TLV_DEVICE_SIGNER = 0x04
+const TLV_CONTENT_KEY = 0x05
 const TLV_PADDING = 0x00
 
 // `entries` shape:
 //   { type: 'nsec',          pubkey: hex32, seckey:    hex32 }
 //   { type: 'bunker',        pubkey: hex32, clientKey: hex32 }
 //   { type: 'device-signer', seckey: hex32 }
+//   { type: 'content-key',   ownerPubkey: hex32, seckey: hex32, createdAt: seconds }
 //
 // nsec records carry only the seckey (32 bytes); the pubkey is derivable.
 // bunker records carry pubkey || clientKey (64 bytes) since the pubkey is
@@ -27,6 +29,9 @@ const TLV_PADDING = 0x00
 // device-signer records carry just the 32-byte seckey: a single key per
 // device, used to sign the trusted-signer exchange in the pairing flow
 // (and, in future, signer-to-signer messaging).
+// content-key records carry owner pubkey || content seckey || created_at.
+// The content pubkey is derivable from the seckey; owner pubkey keeps the
+// key scoped to the identity account that advertises it.
 //
 // When the entry list is empty we still emit one zero-length padding
 // record. NIP-44 rejects empty plaintext, and we *want* to overwrite the
@@ -44,6 +49,12 @@ export function encodeSecretEntries (entries) {
       records.push([TLV_BUNKER, value])
     } else if (e.type === 'device-signer') {
       records.push([TLV_DEVICE_SIGNER, hexToBytes(e.seckey)])
+    } else if (e.type === 'content-key') {
+      const value = new Uint8Array(68)
+      value.set(hexToBytes(e.ownerPubkey), 0)
+      value.set(hexToBytes(e.seckey), 32)
+      new DataView(value.buffer).setUint32(64, Math.max(0, e.createdAt || 0), false)
+      records.push([TLV_CONTENT_KEY, value])
     }
   }
   if (!records.length) records.push([TLV_PADDING, new Uint8Array(0)])
@@ -74,6 +85,17 @@ export function decodeSecretEntries (bytes) {
     entries.push({
       type: 'device-signer',
       seckey: bytesToHex(v)
+    })
+  }
+  for (const v of tlv[TLV_CONTENT_KEY] || []) {
+    if (v.length !== 64 && v.length !== 68) continue
+    const seckey = bytesToHex(v.slice(32, 64))
+    entries.push({
+      type: 'content-key',
+      ownerPubkey: bytesToHex(v.slice(0, 32)),
+      pubkey: getPublicKey(v.slice(32, 64)),
+      seckey,
+      createdAt: v.length === 68 ? new DataView(v.buffer, v.byteOffset + 64, 4).getUint32(0, false) : 0
     })
   }
   return entries

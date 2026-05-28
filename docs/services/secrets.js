@@ -37,12 +37,14 @@ let vaultConversationKey = null
 const nsecSignersByPubkey = new Map()
 const bunkerHandlesByPubkey = new Map()
 const accountTypeByPubkey = new Map()
+const contentKeySignersByOwnerPubkey = new Map()
 
 // Module-private raw stash used by `sealCurrentEntries` only — not exported.
 // Both the seckey hex (for nsec) and the clientKey hex (for bunker) live
 // here so we can re-emit the TLV blob whenever the secret set changes.
 const rawNsecHexByPubkey = new Map()
 const rawClientKeyHexByPubkey = new Map()
+const rawContentKeyHexByOwnerPubkey = new Map()
 
 // Single device-level signer seckey. Deterministically derived from the
 // passkey PRF via HKDF — see helpers/signer-key.js. We persist the result
@@ -70,13 +72,24 @@ function dropPriorEntry (pubkey) {
     NsecSigner.release(pubkey)
     nsecSignersByPubkey.delete(pubkey)
     rawNsecHexByPubkey.delete(pubkey)
+    dropContentKeysForOwner(pubkey)
   } else if (t === 'bunker') {
     const handle = bunkerHandlesByPubkey.get(pubkey)
     if (handle) handle.close()
     bunkerHandlesByPubkey.delete(pubkey)
     rawClientKeyHexByPubkey.delete(pubkey)
+    dropContentKeysForOwner(pubkey)
   }
   accountTypeByPubkey.delete(pubkey)
+}
+
+function dropContentKeysForOwner (ownerPubkey) {
+  const signers = contentKeySignersByOwnerPubkey.get(ownerPubkey)
+  if (signers) {
+    for (const pubkey of signers.keys()) NsecSigner.release(pubkey)
+  }
+  contentKeySignersByOwnerPubkey.delete(ownerPubkey)
+  rawContentKeyHexByOwnerPubkey.delete(ownerPubkey)
 }
 
 function adoptNsec (pubkey, seckey) {
@@ -113,12 +126,17 @@ function adoptBunkerFromUnlock (pubkey, clientKey) {
 
 function clearAll () {
   for (const pubkey of nsecSignersByPubkey.keys()) NsecSigner.release(pubkey)
+  for (const signers of contentKeySignersByOwnerPubkey.values()) {
+    for (const pubkey of signers.keys()) NsecSigner.release(pubkey)
+  }
   for (const handle of bunkerHandlesByPubkey.values()) handle.close()
   nsecSignersByPubkey.clear()
   bunkerHandlesByPubkey.clear()
   accountTypeByPubkey.clear()
   rawNsecHexByPubkey.clear()
   rawClientKeyHexByPubkey.clear()
+  contentKeySignersByOwnerPubkey.clear()
+  rawContentKeyHexByOwnerPubkey.clear()
   deviceSignerSeckey = null
 }
 
@@ -162,6 +180,7 @@ function loadEntries (ciphertext) {
     if (e.type === 'nsec') adoptNsec(e.pubkey, e.seckey)
     else if (e.type === 'bunker') adoptBunkerFromUnlock(e.pubkey, e.clientKey)
     else if (e.type === 'device-signer') deviceSignerSeckey = e.seckey
+    else if (e.type === 'content-key') adoptContentKey(e.ownerPubkey, e.seckey, e.createdAt)
   }
 }
 
@@ -176,6 +195,47 @@ export function setNsecSecret (pubkey, seckey) {
   if (!isUnlocked()) throw new Error('VAULT_LOCKED')
   adoptNsec(pubkey, seckey)
   notify()
+}
+
+function adoptContentKey (ownerPubkey, seckey, createdAt = Math.floor(Date.now() / 1000)) {
+  const signer = NsecSigner.getOrCreate(seckey)
+  const pubkey = signer.getPublicKey()
+  let signers = contentKeySignersByOwnerPubkey.get(ownerPubkey)
+  if (!signers) {
+    signers = new Map()
+    contentKeySignersByOwnerPubkey.set(ownerPubkey, signers)
+  }
+  let raw = rawContentKeyHexByOwnerPubkey.get(ownerPubkey)
+  if (!raw) {
+    raw = new Map()
+    rawContentKeyHexByOwnerPubkey.set(ownerPubkey, raw)
+  }
+  signers.set(pubkey, signer)
+  raw.set(pubkey, { seckey, createdAt })
+  return signer
+}
+
+export function setContentKeySecret (ownerPubkey, seckey, createdAt = Math.floor(Date.now() / 1000)) {
+  if (!isUnlocked()) throw new Error('VAULT_LOCKED')
+  const signer = adoptContentKey(ownerPubkey, seckey, createdAt)
+  notify()
+  return signer
+}
+
+export function getContentKeySigner (ownerPubkey, contentPubkey) {
+  if (!contentPubkey) return null
+  return contentKeySignersByOwnerPubkey.get(ownerPubkey)?.get(contentPubkey) ?? null
+}
+
+export function getLatestContentKeySigner (ownerPubkey) {
+  const signers = contentKeySignersByOwnerPubkey.get(ownerPubkey)
+  const raw = rawContentKeyHexByOwnerPubkey.get(ownerPubkey)
+  if (!signers?.size || !raw?.size) return null
+  let best = null
+  for (const [pubkey, entry] of raw) {
+    if (!best || (entry.createdAt || 0) >= (best.createdAt || 0)) best = { pubkey, ...entry }
+  }
+  return best ? signers.get(best.pubkey) || null : null
 }
 
 // Adopt a freshly-imported, already-connected BunkerHandle into the pool.
@@ -217,7 +277,11 @@ export async function withDeviceSignerSeckey (fn) {
 }
 
 export function deleteSecret (pubkey) {
-  if (!accountTypeByPubkey.has(pubkey)) return
+  if (!accountTypeByPubkey.has(pubkey)) {
+    dropContentKeysForOwner(pubkey)
+    notify()
+    return
+  }
   dropPriorEntry(pubkey)
   notify()
 }
@@ -285,6 +349,16 @@ function listRawEntriesInternal () {
   }
   if (deviceSignerSeckey) {
     out.push({ type: 'device-signer', seckey: deviceSignerSeckey })
+  }
+  for (const [ownerPubkey, entries] of rawContentKeyHexByOwnerPubkey) {
+    for (const entry of entries.values()) {
+      out.push({
+        type: 'content-key',
+        ownerPubkey,
+        seckey: entry.seckey,
+        createdAt: entry.createdAt || 0
+      })
+    }
   }
   return out
 }

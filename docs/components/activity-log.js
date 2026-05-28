@@ -333,7 +333,7 @@ function appDisplayName (app) {
   return id || 'Unknown app'
 }
 
-function methodLabel (method, eventKind) {
+function methodLabel (method, eventKind, code) {
   switch (method) {
     case 'sign_event':
     case 'signEvent':
@@ -350,6 +350,10 @@ function methodLabel (method, eventKind) {
     case 'nip44_decrypt':
     case 'nip44Decrypt':
       return 'Decrypt (NIP-44)'
+    case 'encrypt':
+      return code === 'NOSTRVAULT' ? 'Encrypt (Vault)' : 'Encrypt'
+    case 'decrypt':
+      return code === 'NOSTRVAULT' ? 'Decrypt (Vault)' : 'Decrypt'
     default:
       return method ?? 'Unknown'
   }
@@ -368,11 +372,15 @@ function previewFor (entry) {
     case 'nip44_encrypt':
     case 'nip44Encrypt':
       return entry.params?.[1] ?? ''
+    case 'encrypt':
+      return entry.params?.[0]?.plaintext ?? ''
     case 'nip04_decrypt':
     case 'nip04Decrypt':
     case 'nip44_decrypt':
     case 'nip44Decrypt':
       return entry.result ?? ''
+    case 'decrypt':
+      return entry.result?.plaintext ?? ''
     default:
       return ''
   }
@@ -463,7 +471,7 @@ export class ActivityLog extends HTMLElement {
     const app = entry.app ?? {}
     const fallback = appFallbackLetters(app)
     const name = appDisplayName(app)
-    const op = methodLabel(entry.method, entry.eventKind)
+    const op = methodLabel(entry.method, entry.eventKind, entry.code)
     const preview = previewFor(entry)
     const fullJson = JSON.stringify(entry, null, 2)
     const status = entry.status ?? 'success'

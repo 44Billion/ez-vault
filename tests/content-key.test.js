@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { generateSecretKey, getEventHash, verifyEvent } from 'nostr-tools'
 import NsecSigner from '../docs/services/nsec-signer.js'
 import { doubleSignEvent, upsertContentKeyEvent } from '../docs/services/content-key/index.js'
-import { makeContentKeyEvent, parseContentKeyEvent, verifyContentKeyProof, CONTENT_KEY_KIND } from '../docs/services/content-key/event.js'
+import { makeContentKeyEvent, parseContentKeyEvent, verifyContentKeyProof, verifyIykcProof, CONTENT_KEY_KIND } from '../docs/services/content-key/event.js'
 import { clearQueryCaches, getIykcProofs, getRelaysByPubkey } from '../docs/helpers/nostr/queries.js'
 import { bytesToHex } from '../docs/helpers/nostr/index.js'
 
@@ -20,7 +20,7 @@ function pubkeyFixture (index) {
   return index.toString(16).padStart(64, '0')
 }
 
-test('makeContentKeyEvent publishes a verifiable cp proof', async () => {
+test('makeContentKeyEvent publishes a signed content pubkey', async () => {
   const user = signer()
   const contentKey = signer()
   const userPubkey = await user.getPublicKey()
@@ -30,46 +30,37 @@ test('makeContentKeyEvent publishes a verifiable cp proof', async () => {
 
   assert.equal(event.kind, CONTENT_KEY_KIND)
   assert.equal(event.pubkey, userPubkey)
-  assert.deepEqual(event.tags[0].slice(0, 2), ['cp', contentPubkey])
-  assert.equal(event.tags[0][3], 'u@ 7')
+  assert.deepEqual(event.tags, [['cp', contentPubkey]])
   assert.equal(parsed.iykcPubkey, contentPubkey)
-  assert.equal(parsed.iykcProof, `${event.created_at}:${event.tags[0][2]}`)
-  assert.equal(verifyContentKeyProof({ ownerPubkey: userPubkey, ...parsed }), true)
-  assert.deepEqual(parsed.staleIykcProofs, [])
+  assert.equal(parsed.iykcProof, `${event.created_at}:${event.sig}`)
+  assert.equal(verifyIykcProof({ receiverPubkey: userPubkey, iykcPubkey: contentPubkey, iykcProof: parsed.iykcProof }), true)
+  assert.equal(verifyContentKeyProof({ ownerPubkey: userPubkey, contentPubkey, proof: parsed.iykcProof }), true)
+  assert.equal(verifyEvent(event), true)
 })
 
-test('makeContentKeyEvent can archive stale content keys', async () => {
-  const user = signer()
-  const currentContentKey = signer()
-  const staleContentKey = signer()
-  const userPubkey = await user.getPublicKey()
-  const stalePubkey = await staleContentKey.getPublicKey()
-  const event = await makeContentKeyEvent({
-    userSigner: user,
-    contentKeySigner: currentContentKey,
-    createdAt: 9,
-    staleContentKeys: [{ iykcPubkey: stalePubkey, removedAt: 8 }]
-  })
-  const parsed = parseContentKeyEvent(event)
-
-  assert.equal(event.tags[1][0], 'zz')
-  assert.equal(event.tags[1][1].startsWith(`cp^${stalePubkey}^`), true)
-  assert.equal(event.tags[1][2], 'u@ 8:0:1:2')
-  assert.equal(parsed.staleIykcProofs.length, 1)
-  assert.equal(parsed.staleIykcProofs[0].iykcPubkey, stalePubkey)
-  assert.equal(verifyContentKeyProof({ ownerPubkey: userPubkey, ...parsed.staleIykcProofs[0] }), true)
-})
-
-test('parseContentKeyEvent rejects events with extra tags or bad proofs', async () => {
+test('parseContentKeyEvent rejects events with extra tags or bad signatures', async () => {
   const user = signer()
   const contentKey = signer()
-  const userPubkey = await user.getPublicKey()
   const event = await makeContentKeyEvent({ userSigner: user, contentKeySigner: contentKey, createdAt: 7 })
 
   assert.equal(parseContentKeyEvent({ ...event, tags: event.tags.concat([['x', 'nope']]) }), null)
-  assert.equal(parseContentKeyEvent({ ...event, tags: [['cp', event.tags[0][1], 'f'.repeat(128)]] }), null)
-  assert.equal(parseContentKeyEvent({ ...event, tags: [['cp', event.tags[0][1], event.tags[0][2], 'u@ 8']] }), null)
-  assert.equal(verifyContentKeyProof({ ownerPubkey: userPubkey, iykcPubkey: event.tags[0][1], iykcProof: `${event.created_at}:${'f'.repeat(128)}` }), false)
+  assert.equal(parseContentKeyEvent({ ...event, tags: [['cp', event.tags[0][1], 'extra']] }), null)
+  assert.equal(parseContentKeyEvent({ ...event, content: 'nope' }), null)
+  assert.equal(parseContentKeyEvent({ ...event, tags: [['cp', 'f'.repeat(64)]] }), null)
+})
+
+test('verifyIykcProof rejects missing or mismatched proofs', async () => {
+  const user = signer()
+  const contentKey = signer()
+  const otherContentKey = signer()
+  const userPubkey = await user.getPublicKey()
+  const contentPubkey = await contentKey.getPublicKey()
+  const event = await makeContentKeyEvent({ userSigner: user, contentKeySigner: contentKey, createdAt: 7 })
+  const { iykcProof } = parseContentKeyEvent(event)
+
+  assert.equal(verifyIykcProof({ receiverPubkey: userPubkey, iykcPubkey: contentPubkey, iykcProof: '' }), false)
+  assert.equal(verifyIykcProof({ receiverPubkey: userPubkey, iykcPubkey: await otherContentKey.getPublicKey(), iykcProof }), false)
+  assert.equal(verifyIykcProof({ receiverPubkey: await signer().getPublicKey(), iykcPubkey: contentPubkey, iykcProof }), false)
 })
 
 test('upsertContentKeyEvent signs and publishes to user write relays', async () => {
@@ -155,8 +146,7 @@ test('getIykcProofs fetches content key events from grouped write relays', async
   assert.deepEqual(result, {
     [bobPubkey]: {
       iykcPubkey: await bobContent.getPublicKey(),
-      iykcProof: `${contentEvent.created_at}:${contentEvent.tags[0][2]}`,
-      staleIykcProofs: []
+      iykcProof: `${contentEvent.created_at}:${contentEvent.sig}`
     }
   })
   assert.equal(calls.filter(call => call.filter.kinds[0] === CONTENT_KEY_KIND).length, 2)
@@ -243,7 +233,7 @@ test('getIykcProofs caches found and missing content key lookups', async () => {
   assert.equal(calls.length, callCountAfterFirstFetch)
 })
 
-test('getIykcProofs evicts oldest proof cache entries above the cap', async () => {
+test('getIykcProofs evicts oldest content key cache entries above the cap', async () => {
   const pubkeys = Array.from({ length: 10001 }, (_value, index) => pubkeyFixture(index))
   let contentKeyFetches = 0
   const _fetchEvents = async (filter) => {

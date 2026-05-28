@@ -1,5 +1,5 @@
 import { bytesToBase64, base64ToBytes } from '../../helpers/base64.js'
-import { verifyContentKeyProof } from '../content-key/event.js'
+import { verifyIykcProof } from '../content-key/event.js'
 import { getTemporaryItem, removeTemporaryItems, setTemporaryItem } from '../temporary-storage.js'
 import { JSONL_CHUNK_BYTES } from './chunk-size.js'
 
@@ -18,27 +18,25 @@ function tempKey (id, index) {
   return `${STORAGE_PREFIX}${id}:${index}`
 }
 
-function verifiedContentKey ({ ownerPubkey = '', iykcPubkey = '', iykcProof = '' } = {}) {
+function normalizeContentKey ({ receiverPubkey, iykcPubkey = '', iykcProof = '' } = {}) {
   if (!iykcPubkey) return { iykcPubkey: '', iykcProof: '' }
-  if (iykcProof && !verifyContentKeyProof({ ownerPubkey, iykcPubkey, iykcProof })) {
-    return { iykcPubkey: '', iykcProof: '' }
-  }
+  if (!verifyIykcProof({ receiverPubkey, iykcPubkey, iykcProof })) throw new Error('INVALID_IYKC_PROOF')
   return { iykcPubkey, iykcProof }
 }
 
 function receiverRecord (receiver, receiverContentKeys) {
   if (typeof receiver === 'string') {
-    const contentKey = verifiedContentKey({ ownerPubkey: receiver, ...receiverContentKeys[receiver] })
+    const fetchedContentKey = normalizeContentKey({ receiverPubkey: receiver, ...receiverContentKeys[receiver] })
     return {
       receiverPubkey: receiver,
-      ...contentKey
+      ...fetchedContentKey
     }
   }
 
   if (Array.isArray(receiver)) {
     const [receiverPubkey, iykcPubkey = '', iykcProof = ''] = receiver
-    const explicitContentKey = verifiedContentKey({ ownerPubkey: receiverPubkey, iykcPubkey, iykcProof })
-    const fetchedContentKey = verifiedContentKey({ ownerPubkey: receiverPubkey, ...receiverContentKeys[receiverPubkey] })
+    const explicitContentKey = normalizeContentKey({ receiverPubkey, iykcPubkey, iykcProof })
+    const fetchedContentKey = normalizeContentKey({ receiverPubkey, ...receiverContentKeys[receiverPubkey] })
     const contentKey = explicitContentKey.iykcPubkey ? explicitContentKey : fetchedContentKey
     return {
       receiverPubkey,
@@ -47,21 +45,18 @@ function receiverRecord (receiver, receiverContentKeys) {
   }
 
   const receiverPubkey = receiver?.receiverPubkey || receiver?.pubkey || ''
-  const explicitContentKey = verifiedContentKey({ ownerPubkey: receiverPubkey, ...receiver })
-  const fetchedContentKey = verifiedContentKey({ ownerPubkey: receiverPubkey, ...receiverContentKeys[receiverPubkey] })
-  const contentKey = explicitContentKey.iykcPubkey ? explicitContentKey : fetchedContentKey
+  const explicitContentKey = normalizeContentKey({ receiverPubkey, ...receiver })
+  const fetchedContentKey = normalizeContentKey({ receiverPubkey, ...receiverContentKeys[receiverPubkey] })
+  const resolvedContentKey = explicitContentKey.iykcPubkey ? explicitContentKey : fetchedContentKey
   return {
     receiverPubkey,
-    ...contentKey
+    ...resolvedContentKey
   }
 }
 
 function buildLine ({ receiverPubkey, iykcPubkey, iykcProof }, ciphertext) {
   const line = [receiverPubkey, ciphertext]
-  if (iykcPubkey) {
-    line.push(iykcPubkey)
-    if (iykcProof) line.push(iykcProof)
-  }
+  if (iykcPubkey) line.push(iykcPubkey, iykcProof)
   return JSON.stringify(line) + '\n'
 }
 
@@ -108,15 +103,23 @@ export function receiverPubkeysWithoutContentKeys (receivers) {
     .map(receiver => receiver.receiverPubkey)
 }
 
-export async function writeChunks ({ rowEncryptionSigner, receivers, receiverContentKeys = {}, event }) {
+export async function writeChunks ({ senderSigner, imkcSigner, receivers, receiverContentKeys = {}, event, multiDhContext }) {
   const id = `${Date.now()}:${Math.random().toString(16).slice(2)}`
   let chunk = new Uint8Array()
   let chunkIndex = 0
+  const useMultiDh = typeof senderSigner?.nip44EncryptMulti === 'function'
 
   for (const receiver of receivers) {
-    const row = receiverRecord(receiver, receiverContentKeys)
-    const peerPubkey = row.iykcPubkey || row.receiverPubkey
-    const ciphertext = await rowEncryptionSigner.nip44Encrypt(peerPubkey, JSON.stringify(event))
+    const row = receiverRecord(receiver, useMultiDh ? receiverContentKeys : {})
+    const ciphertext = useMultiDh
+      ? (await senderSigner.nip44EncryptMulti({
+          peerPubkey: row.receiverPubkey,
+          peerContentPubkey: row.iykcPubkey,
+          ownContentSigner: imkcSigner,
+          context: multiDhContext,
+          plaintext: JSON.stringify(event)
+        })).ciphertext
+      : await senderSigner.nip44Encrypt(row.receiverPubkey, JSON.stringify(event))
     let line = encoder.encode(buildLine(row, ciphertext))
 
     while (line.length) {
