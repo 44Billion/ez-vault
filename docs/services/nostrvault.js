@@ -2,7 +2,6 @@ import { generateSecretKey } from 'nostr-tools'
 import { isOnline } from '../helpers/network.js'
 import { bytesToHex } from '../helpers/nostr/index.js'
 import { getIykcProofs, upsertContentKeyEvent } from './content-key/index.js'
-import * as passkey from './passkey.js'
 import * as secrets from './secrets.js'
 import * as store from './accounts-store.js'
 import { claimSigner } from './signer.js'
@@ -46,19 +45,10 @@ async function publishLocalContentKey ({ userSigner, contentKeySigner, warnings,
   return false
 }
 
-async function createPersistedContentSigner ({ ownerPubkey, warnings, _writeSecretsBlob = passkey.writeSecretsBlob }) {
-  let prior = null
+async function createPersistedContentSigner ({ ownerPubkey, warnings }) {
   try {
-    prior = secrets.sealCurrentEntries()
-    const contentSigner = secrets.setContentKeySecret(ownerPubkey, bytesToHex(generateSecretKey()))
-    await _writeSecretsBlob()
-    return contentSigner
+    return secrets.setContentKeySecret(ownerPubkey, bytesToHex(generateSecretKey()))
   } catch (err) {
-    try {
-      if (prior) secrets.reload(prior)
-    } catch (reloadErr) {
-      console.warn('content key rollback failed', reloadErr?.message ?? reloadErr)
-    }
     warning(warnings, 'CONTENT_KEY_PERSIST_FAILED', err?.message || '')
     return null
   }

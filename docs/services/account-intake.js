@@ -201,8 +201,8 @@ export async function prepareBunker (bunkerUrlInput, token) {
 // secrets mutations + the trusted-signers write. If the trailing
 // writeSecretsBlob throws — or any of the inner mutations does — we roll
 // the store back to its prior records, reload the secrets pool from a
-// snapshot taken just before commit, and restore the trusted-signers
-// ciphertext.
+// snapshot taken just before commit, and restore local encrypted sidecars
+// such as content keys and trusted signers.
 //
 // `options.peerSigner` is `{ pubkey, platform }` — the single device
 // signer pubkey the peer announced in `register_trusted_signer`. We
@@ -220,6 +220,7 @@ export async function commitPrepared (prepared, options = {}) {
   // is the baseline we'd revert to (an empty pool) rather than a not-yet-
   // unlocked state.
   const priorBlob = needsSecretsPersist ? secrets.sealCurrentEntries() : null
+  const priorContentKeysBlob = needsSecretsPersist ? secrets.snapshotContentKeySecrets() : null
   const priorStoreRecords = new Map()
   for (const p of prepared) priorStoreRecords.set(p.pubkey, store.get(p.pubkey))
   const priorTrustedSignersBlob = peerSigner ? trustedSigners.snapshot() : null
@@ -263,6 +264,11 @@ export async function commitPrepared (prepared, options = {}) {
     if (priorBlob !== null) {
       try { secrets.reload(priorBlob) } catch (e) {
         console.warn('secrets rollback failed', e?.message ?? e)
+      }
+    }
+    if (needsSecretsPersist) {
+      try { secrets.restoreContentKeySecrets(priorContentKeysBlob) } catch (e) {
+        console.warn('content-key rollback failed', e?.message ?? e)
       }
     }
     if (trustedSignerWritten) {

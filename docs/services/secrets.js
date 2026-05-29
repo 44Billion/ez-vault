@@ -8,9 +8,9 @@ import { hexToBytes } from '../helpers/nostr/index.js'
 import { deriveSignerSeckey } from '../helpers/signer-key.js'
 
 // In-memory home for every account's secret material plus the deterministic
-// vault key derived from the passkey PRF extension. Nothing here ever
-// touches localStorage — secrets only live in this module while the vault
-// is unlocked.
+// vault key derived from the passkey PRF extension. Account secrets live in
+// this module while the vault is unlocked, and are otherwise sealed into the
+// passkey largeBlob by passkey.js.
 //
 // Encapsulation, mirroring the NsecSigner pattern in nsec-signer.js:
 //
@@ -21,15 +21,19 @@ import { deriveSignerSeckey } from '../helpers/signer-key.js'
 // - For bunker accounts the clientKey is consumed by `BunkerHandle.create`,
 //   which stashes the bytes in *its* private WeakMap. We pool the handle
 //   here and hand callers back the handle — same shape as nsec.
-// - The raw hex strings are also kept in module-private Maps that the
-//   sealing path (TLV encode → encrypt → write to passkey) reads. Those
-//   maps are not exported. There is no `getSeckey` / `getClientKey` /
+// - The raw account hex strings are also kept in module-private Maps that
+//   the sealing path (TLV encode → encrypt → write to passkey) reads.
+//   Those maps are not exported. There is no `getSeckey` / `getClientKey` /
 //   `exportEntries` surface — the export and copy-nsec flows reach the
 //   raw bytes by going through `passkey.openSecrets()`, which prompts the
 //   user for fresh verification and decrypts the largeBlob ad-hoc.
 //
-// The vault key doubles as a NIP-44 self-encryption key; messenger-log uses
-// it to seal sensitive entry payloads while unlocked.
+// The vault key doubles as a NIP-44 self-encryption key; messenger-log and
+// content-key persistence use it to seal sensitive localStorage payloads
+// while unlocked.
+
+const CONTENT_KEYS_KEY = 'ez-vault:content-keys'
+const HEX32 = /^[0-9a-f]{64}$/i
 
 let vaultPrivkey = null
 let vaultConversationKey = null
@@ -67,44 +71,58 @@ function notify () {
 
 function dropPriorEntry (pubkey) {
   const t = accountTypeByPubkey.get(pubkey)
-  if (!t) return
+  if (!t) return false
+  let contentKeysChanged = false
   if (t === 'nsec') {
     NsecSigner.release(pubkey)
     nsecSignersByPubkey.delete(pubkey)
     rawNsecHexByPubkey.delete(pubkey)
-    dropContentKeysForOwner(pubkey)
+    contentKeysChanged = dropContentKeysForOwner(pubkey) || contentKeysChanged
   } else if (t === 'bunker') {
     const handle = bunkerHandlesByPubkey.get(pubkey)
     if (handle) handle.close()
     bunkerHandlesByPubkey.delete(pubkey)
     rawClientKeyHexByPubkey.delete(pubkey)
-    dropContentKeysForOwner(pubkey)
+    contentKeysChanged = dropContentKeysForOwner(pubkey) || contentKeysChanged
   }
   accountTypeByPubkey.delete(pubkey)
+  return contentKeysChanged
 }
 
 function dropContentKeysForOwner (ownerPubkey) {
   const signers = contentKeySignersByOwnerPubkey.get(ownerPubkey)
+  const hadKeys = Boolean(signers?.size || rawContentKeyHexByOwnerPubkey.get(ownerPubkey)?.size)
   if (signers) {
     for (const pubkey of signers.keys()) NsecSigner.release(pubkey)
   }
   contentKeySignersByOwnerPubkey.delete(ownerPubkey)
   rawContentKeyHexByOwnerPubkey.delete(ownerPubkey)
+  return hadKeys
+}
+
+function dropAllContentKeys () {
+  for (const signers of contentKeySignersByOwnerPubkey.values()) {
+    for (const pubkey of signers.keys()) NsecSigner.release(pubkey)
+  }
+  contentKeySignersByOwnerPubkey.clear()
+  rawContentKeyHexByOwnerPubkey.clear()
 }
 
 function adoptNsec (pubkey, seckey) {
-  dropPriorEntry(pubkey)
+  const contentKeysChanged = dropPriorEntry(pubkey)
   rawNsecHexByPubkey.set(pubkey, seckey)
   // NsecSigner.getOrCreate sinks the bytes into its WeakMap-backed slot.
   nsecSignersByPubkey.set(pubkey, NsecSigner.getOrCreate(seckey))
   accountTypeByPubkey.set(pubkey, 'nsec')
+  return contentKeysChanged
 }
 
 function adoptBunkerWithHandle (pubkey, handle, clientKey) {
-  dropPriorEntry(pubkey)
+  const contentKeysChanged = dropPriorEntry(pubkey)
   rawClientKeyHexByPubkey.set(pubkey, clientKey)
   bunkerHandlesByPubkey.set(pubkey, handle)
   accountTypeByPubkey.set(pubkey, 'bunker')
+  return contentKeysChanged
 }
 
 // Used at unlock time, where we have the raw clientKey from the TLV but
@@ -126,17 +144,13 @@ function adoptBunkerFromUnlock (pubkey, clientKey) {
 
 function clearAll () {
   for (const pubkey of nsecSignersByPubkey.keys()) NsecSigner.release(pubkey)
-  for (const signers of contentKeySignersByOwnerPubkey.values()) {
-    for (const pubkey of signers.keys()) NsecSigner.release(pubkey)
-  }
+  dropAllContentKeys()
   for (const handle of bunkerHandlesByPubkey.values()) handle.close()
   nsecSignersByPubkey.clear()
   bunkerHandlesByPubkey.clear()
   accountTypeByPubkey.clear()
   rawNsecHexByPubkey.clear()
   rawClientKeyHexByPubkey.clear()
-  contentKeySignersByOwnerPubkey.clear()
-  rawContentKeyHexByOwnerPubkey.clear()
   deviceSignerSeckey = null
 }
 
@@ -174,14 +188,74 @@ export function reload (ciphertext) {
 
 function loadEntries (ciphertext) {
   clearAll()
-  if (!ciphertext) return
-  const tlvBytes = base64ToBytes(nip44.decrypt(ciphertext, vaultConversationKey))
-  for (const e of decodeSecretEntries(tlvBytes)) {
-    if (e.type === 'nsec') adoptNsec(e.pubkey, e.seckey)
-    else if (e.type === 'bunker') adoptBunkerFromUnlock(e.pubkey, e.clientKey)
-    else if (e.type === 'device-signer') deviceSignerSeckey = e.seckey
-    else if (e.type === 'content-key') adoptContentKey(e.ownerPubkey, e.seckey, e.createdAt)
+  if (ciphertext) {
+    const tlvBytes = base64ToBytes(nip44.decrypt(ciphertext, vaultConversationKey))
+    for (const e of decodeSecretEntries(tlvBytes)) {
+      if (e.type === 'nsec') adoptNsec(e.pubkey, e.seckey)
+      else if (e.type === 'bunker') adoptBunkerFromUnlock(e.pubkey, e.clientKey)
+      else if (e.type === 'device-signer') deviceSignerSeckey = e.seckey
+    }
   }
+  loadPersistedContentKeys()
+}
+
+function normalizeContentKeyEntry (entry) {
+  const ownerPubkey = typeof entry?.ownerPubkey === 'string' ? entry.ownerPubkey.toLowerCase() : ''
+  const seckey = typeof entry?.seckey === 'string' ? entry.seckey.toLowerCase() : ''
+  const createdAt = Math.max(0, Math.floor(Number(entry?.createdAt) || 0))
+  if (!HEX32.test(ownerPubkey) || !HEX32.test(seckey)) return null
+  return { ownerPubkey, seckey, createdAt }
+}
+
+function replaceContentKeyEntries (entries) {
+  dropAllContentKeys()
+  for (const entry of entries) {
+    const normalized = normalizeContentKeyEntry(entry)
+    if (!normalized) continue
+    try {
+      adoptContentKey(normalized.ownerPubkey, normalized.seckey, normalized.createdAt)
+    } catch (err) {
+      console.warn('content key skipped', err?.message ?? err)
+    }
+  }
+}
+
+function readPersistedContentKeyEntries () {
+  const raw = localStorage.getItem(CONTENT_KEYS_KEY)
+  if (!raw) return []
+  if (!vaultConversationKey) return []
+  try {
+    const parsed = JSON.parse(vaultDecrypt(raw))
+    return Array.isArray(parsed) ? parsed.map(normalizeContentKeyEntry).filter(Boolean) : []
+  } catch (err) {
+    console.warn('content keys decrypt failed', err?.message ?? err)
+    return []
+  }
+}
+
+function loadPersistedContentKeys () {
+  replaceContentKeyEntries(readPersistedContentKeyEntries())
+}
+
+function persistContentKeyEntries () {
+  if (!isUnlocked()) throw new Error('VAULT_LOCKED')
+  const entries = listRawContentKeyEntriesInternal()
+  if (!entries.length) {
+    localStorage.removeItem(CONTENT_KEYS_KEY)
+    return
+  }
+  localStorage.setItem(CONTENT_KEYS_KEY, vaultEncrypt(JSON.stringify(entries)))
+}
+
+export function snapshotContentKeySecrets () {
+  return localStorage.getItem(CONTENT_KEYS_KEY)
+}
+
+export function restoreContentKeySecrets (priorCiphertext) {
+  if (priorCiphertext === null) localStorage.removeItem(CONTENT_KEYS_KEY)
+  else localStorage.setItem(CONTENT_KEYS_KEY, priorCiphertext)
+  if (isUnlocked()) loadPersistedContentKeys()
+  notify()
 }
 
 export function lock () {
@@ -193,7 +267,14 @@ export function lock () {
 
 export function setNsecSecret (pubkey, seckey) {
   if (!isUnlocked()) throw new Error('VAULT_LOCKED')
-  adoptNsec(pubkey, seckey)
+  const priorContentKeys = snapshotContentKeySecrets()
+  const contentKeysChanged = adoptNsec(pubkey, seckey)
+  try {
+    if (contentKeysChanged) persistContentKeyEntries()
+  } catch (err) {
+    restoreContentKeySecrets(priorContentKeys)
+    throw err
+  }
   notify()
 }
 
@@ -217,9 +298,34 @@ function adoptContentKey (ownerPubkey, seckey, createdAt = Math.floor(Date.now()
 
 export function setContentKeySecret (ownerPubkey, seckey, createdAt = Math.floor(Date.now() / 1000)) {
   if (!isUnlocked()) throw new Error('VAULT_LOCKED')
-  const signer = adoptContentKey(ownerPubkey, seckey, createdAt)
-  notify()
-  return signer
+  const prior = listRawContentKeyEntriesInternal()
+  try {
+    const signer = adoptContentKey(ownerPubkey, seckey, createdAt)
+    // Content keys can rotate during quiet background sync. Keep them in
+    // vault-key-encrypted localStorage so rotation never needs a largeBlob
+    // WebAuthn prompt.
+    persistContentKeyEntries()
+    notify()
+    return signer
+  } catch (err) {
+    replaceContentKeyEntries(prior)
+    throw err
+  }
+}
+
+export function replaceContentKeySecret (ownerPubkey, seckey, createdAt = Math.floor(Date.now() / 1000)) {
+  if (!isUnlocked()) throw new Error('VAULT_LOCKED')
+  const prior = listRawContentKeyEntriesInternal()
+  try {
+    dropContentKeysForOwner(ownerPubkey)
+    const signer = adoptContentKey(ownerPubkey, seckey, createdAt)
+    persistContentKeyEntries()
+    notify()
+    return signer
+  } catch (err) {
+    replaceContentKeyEntries(prior)
+    throw err
+  }
 }
 
 export function getContentKeySigner (ownerPubkey, contentPubkey) {
@@ -243,7 +349,14 @@ export function getLatestContentKeySigner (ownerPubkey) {
 // the clientKey from its module-private WeakMap and threads it in here.
 export function adoptBunkerHandle (pubkey, handle, clientKey) {
   if (!isUnlocked()) throw new Error('VAULT_LOCKED')
-  adoptBunkerWithHandle(pubkey, handle, clientKey)
+  const priorContentKeys = snapshotContentKeySecrets()
+  const contentKeysChanged = adoptBunkerWithHandle(pubkey, handle, clientKey)
+  try {
+    if (contentKeysChanged) persistContentKeyEntries()
+  } catch (err) {
+    restoreContentKeySecrets(priorContentKeys)
+    throw err
+  }
   notify()
 }
 
@@ -277,12 +390,26 @@ export async function withDeviceSignerSeckey (fn) {
 }
 
 export function deleteSecret (pubkey) {
+  const priorContentKeys = snapshotContentKeySecrets()
+  let contentKeysChanged = false
   if (!accountTypeByPubkey.has(pubkey)) {
-    dropContentKeysForOwner(pubkey)
+    contentKeysChanged = dropContentKeysForOwner(pubkey)
+    try {
+      if (contentKeysChanged) persistContentKeyEntries()
+    } catch (err) {
+      restoreContentKeySecrets(priorContentKeys)
+      throw err
+    }
     notify()
     return
   }
-  dropPriorEntry(pubkey)
+  contentKeysChanged = dropPriorEntry(pubkey)
+  try {
+    if (contentKeysChanged) persistContentKeyEntries()
+  } catch (err) {
+    restoreContentKeySecrets(priorContentKeys)
+    throw err
+  }
   notify()
 }
 
@@ -350,10 +477,14 @@ function listRawEntriesInternal () {
   if (deviceSignerSeckey) {
     out.push({ type: 'device-signer', seckey: deviceSignerSeckey })
   }
+  return out
+}
+
+function listRawContentKeyEntriesInternal () {
+  const out = []
   for (const [ownerPubkey, entries] of rawContentKeyHexByOwnerPubkey) {
     for (const entry of entries.values()) {
       out.push({
-        type: 'content-key',
         ownerPubkey,
         seckey: entry.seckey,
         createdAt: entry.createdAt || 0

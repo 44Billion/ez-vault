@@ -7,6 +7,8 @@ import * as secrets from '../docs/services/secrets.js'
 import NsecSigner from '../docs/services/nsec-signer.js'
 import { bytesToHex, hexToBytes } from '../docs/helpers/nostr/index.js'
 
+const CONTENT_KEYS_STORAGE_KEY = 'ez-vault:content-keys'
+
 if (!globalThis.localStorage) {
   const data = new Map()
   globalThis.localStorage = {
@@ -133,4 +135,84 @@ test('nostrvault can opt out of content-key lookup', async () => {
   assert.equal(encrypted.senderContentPubkey, '')
   assert.equal(encrypted.receiverContentPubkey, '')
   assert.equal(decrypted.plaintext, 'identity only')
+})
+
+test('nostrvault creates own content keys in encrypted localStorage', async () => {
+  const vaultKey = generateSecretKey()
+  secrets.unlock(vaultKey, null)
+  const alice = addNsecAccount()
+  const bob = addNsecAccount()
+  let publishedContentPubkey = ''
+
+  const encrypted = await run({
+    pubkey: alice.pubkey,
+    method: 'encrypt',
+    params: [{ peerPubkey: bob.pubkey, plaintext: 'hello bob' }],
+    internals: {
+      _getIykcProofs: async () => ({}),
+      _upsertContentKeyEvent: async ({ contentKeySigner }) => {
+        publishedContentPubkey = contentKeySigner.getPublicKey()
+        return { result: { success: true } }
+      }
+    }
+  })
+  const accountBlob = secrets.sealCurrentEntries()
+
+  assert.equal(encrypted.senderContentPubkey, publishedContentPubkey)
+  assert.ok(globalThis.localStorage.getItem(CONTENT_KEYS_STORAGE_KEY))
+
+  secrets.lock()
+  secrets.unlock(vaultKey, accountBlob)
+  assert.ok(secrets.getContentKeySigner(alice.pubkey, publishedContentPubkey))
+})
+
+test('content keys persist in vault-key encrypted localStorage, not the largeBlob blob', async () => {
+  const vaultKey = generateSecretKey()
+  secrets.unlock(vaultKey, null)
+  const alice = addNsecAccount()
+  const aliceContent = addContentKey(alice.pubkey)
+  const accountBlob = secrets.sealCurrentEntries()
+  const sealedContentKeys = globalThis.localStorage.getItem(CONTENT_KEYS_STORAGE_KEY)
+
+  assert.ok(sealedContentKeys)
+  assert.equal(sealedContentKeys.includes(aliceContent.secret), false)
+
+  secrets.lock()
+  secrets.unlock(vaultKey, accountBlob)
+  assert.ok(secrets.getContentKeySigner(alice.pubkey, aliceContent.pubkey))
+
+  globalThis.localStorage.removeItem(CONTENT_KEYS_STORAGE_KEY)
+  secrets.lock()
+  secrets.unlock(vaultKey, accountBlob)
+  assert.equal(secrets.getContentKeySigner(alice.pubkey, aliceContent.pubkey), null)
+})
+
+test('deleting an account purges its persisted content keys', () => {
+  secrets.unlock(generateSecretKey(), null)
+  const alice = addNsecAccount()
+  addContentKey(alice.pubkey)
+
+  assert.ok(globalThis.localStorage.getItem(CONTENT_KEYS_STORAGE_KEY))
+  secrets.deleteSecret(alice.pubkey)
+  assert.equal(globalThis.localStorage.getItem(CONTENT_KEYS_STORAGE_KEY), null)
+})
+
+test('content key replacement rotates the owner to the new persisted key', () => {
+  const vaultKey = generateSecretKey()
+  secrets.unlock(vaultKey, null)
+  const alice = addNsecAccount()
+  const oldContent = addContentKey(alice.pubkey)
+  const newSecret = seckey()
+  const newPubkey = getPublicKey(hexToBytes(newSecret))
+
+  secrets.replaceContentKeySecret(alice.pubkey, newSecret, 8)
+  const accountBlob = secrets.sealCurrentEntries()
+
+  assert.equal(secrets.getContentKeySigner(alice.pubkey, oldContent.pubkey), null)
+  assert.equal(secrets.getLatestContentKeySigner(alice.pubkey)?.getPublicKey(), newPubkey)
+
+  secrets.lock()
+  secrets.unlock(vaultKey, accountBlob)
+  assert.equal(secrets.getContentKeySigner(alice.pubkey, oldContent.pubkey), null)
+  assert.equal(secrets.getLatestContentKeySigner(alice.pubkey)?.getPublicKey(), newPubkey)
 })
