@@ -90,13 +90,13 @@ test('multi-DH signer round-trips every content-key mode', async () => {
   ]
 
   for (const c of cases) {
-    const encrypted = await alice.nip44EncryptMulti({
+    const encrypted = await alice.nip44EncryptMultiDH({
       peerPubkey: bobPubkey,
       peerContentPubkey: c.bobContent ? bobContentPubkey : '',
       ownContentSigner: c.aliceContent || null,
       plaintext: c.mode
     })
-    const decrypted = await bob.nip44DecryptMulti({
+    const decrypted = await bob.nip44DecryptMultiDH({
       peerPubkey: alicePubkey,
       peerContentPubkey: c.aliceContent ? aliceContentPubkey : '',
       ownContentSigner: c.bobContent || null,
@@ -190,7 +190,7 @@ test('multi-DH self-encryption with a content key still requires the identity ke
   const alicePubkey = await alice.getPublicKey()
   const aliceContentPubkey = await aliceContent.getPublicKey()
 
-  const encrypted = await alice.nip44EncryptMulti({
+  const encrypted = await alice.nip44EncryptMultiDH({
     peerPubkey: alicePubkey,
     peerContentPubkey: aliceContentPubkey,
     ownContentSigner: aliceContent,
@@ -198,7 +198,7 @@ test('multi-DH self-encryption with a content key still requires the identity ke
   })
 
   assert.equal(encrypted.mode, 'both-content')
-  assert.equal((await alice.nip44DecryptMulti({
+  assert.equal((await alice.nip44DecryptMultiDH({
     peerPubkey: alicePubkey,
     peerContentPubkey: aliceContentPubkey,
     ownContentSigner: aliceContent,
@@ -206,7 +206,7 @@ test('multi-DH self-encryption with a content key still requires the identity ke
   })).plaintext, 'note to self')
 
   await assert.rejects(
-    () => wrongIdentity.nip44DecryptMulti({
+    () => wrongIdentity.nip44DecryptMultiDH({
       peerPubkey: alicePubkey,
       peerContentPubkey: aliceContentPubkey,
       ownContentSigner: aliceContent,

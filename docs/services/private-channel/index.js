@@ -40,7 +40,7 @@ export async function * wrapEvents ({ senderSigner, imkcSigner, privateChannelSi
   if (!Array.isArray(receivers) || !receivers.length) throw new Error('NO_RECEIVERS')
 
   const senderPubkey = await senderSigner.getPublicKey()
-  const useMultiDh = typeof senderSigner.nip44EncryptMulti === 'function'
+  const useMultiDh = typeof senderSigner.nip44EncryptMultiDH === 'function'
   const imkcPubkey = useMultiDh && imkcSigner ? await imkcSigner.getPublicKey() : ''
   const imkcProof = imkcPubkey ? await makeImkcProof({ senderSigner, imkcSigner, senderPubkey, imkcPubkey }) : ''
   const channelPubkey = await privateChannelSigner.getPublicKey()
@@ -130,13 +130,13 @@ async function unwrapRecipientEnvelope ({ envelope, receiverSigner, iykcSigner, 
   if (receiverPubkey && envelope.receiverPubkey !== receiverPubkey) return null
   let plaintext
   if (envelope.iykcPubkey || imkcPubkey) {
-    if (!receiverSigner?.nip44DecryptMulti) throw new Error('RECEIVER_MULTI_DH_UNSUPPORTED')
+    if (!receiverSigner?.nip44DecryptMultiDH) throw new Error('RECEIVER_MULTI_DH_UNSUPPORTED')
     if (envelope.iykcPubkey) {
       assertValidEnvelopeIykcProof(envelope)
       if (!iykcSigner?.getPublicKey) throw new Error('RECEIVER_CONTENT_KEY_REQUIRED')
       if (await iykcSigner.getPublicKey() !== envelope.iykcPubkey) return null
     }
-    plaintext = (await receiverSigner.nip44DecryptMulti({
+    plaintext = (await receiverSigner.nip44DecryptMultiDH({
       peerPubkey: senderPubkey,
       peerContentPubkey: imkcPubkey,
       ownContentSigner: envelope.iykcPubkey ? iykcSigner : null,

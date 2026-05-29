@@ -2,7 +2,6 @@ import { ask, reply } from '../helpers/window-message.js'
 import { serializeError } from '../helpers/error.js'
 import * as store from './accounts-store.js'
 import * as signer from './signer.js'
-import * as nostrvault from './nostrvault.js'
 import * as log from './messenger-log/index.js'
 
 // Read-only disclosures — the result is publicly derivable, so logging them
@@ -107,7 +106,6 @@ function onPortMessage (e) {
   if (code === 'REPLY') return
   if (!handshakeComplete) return
   if (code === 'NIP07') return handleNip07(e)
-  if (code === 'NOSTRVAULT') return handleNostrVault(e)
 }
 
 async function handleSignerRequest (e, { code, run }) {
@@ -149,8 +147,4 @@ async function handleSignerRequest (e, { code, run }) {
 
 async function handleNip07 (e) {
   return handleSignerRequest(e, { code: 'NIP07', run: signer.run })
-}
-
-async function handleNostrVault (e) {
-  return handleSignerRequest(e, { code: 'NOSTRVAULT', run: nostrvault.run })
 }

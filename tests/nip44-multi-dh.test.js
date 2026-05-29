@@ -1,7 +1,7 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { generateSecretKey, getPublicKey } from 'nostr-tools'
-import { run } from '../docs/services/nostrvault.js'
+import { run } from '../docs/services/signer.js'
 import * as store from '../docs/services/accounts-store.js'
 import * as secrets from '../docs/services/secrets.js'
 import NsecSigner from '../docs/services/nsec-signer.js'
@@ -48,7 +48,7 @@ function addContentKey (ownerPubkey) {
   return { pubkey, secret }
 }
 
-test('nostrvault encrypt/decrypt uses advertised content keys', async () => {
+test('nip44-multi-dh encrypt/decrypt uses advertised content keys', async () => {
   secrets.unlock(generateSecretKey(), null)
   const alice = addNsecAccount()
   const bob = addNsecAccount()
@@ -61,13 +61,13 @@ test('nostrvault encrypt/decrypt uses advertised content keys', async () => {
 
   const encrypted = await run({
     pubkey: alice.pubkey,
-    method: 'encrypt',
+    method: 'nip44EncryptMultiDH',
     params: [{ peerPubkey: bob.pubkey, plaintext: 'hello bob' }],
     internals: { _getIykcProofs }
   })
   const decrypted = await run({
     pubkey: bob.pubkey,
-    method: 'decrypt',
+    method: 'nip44DecryptMultiDH',
     params: [{
       peerPubkey: alice.pubkey,
       ciphertext: encrypted.ciphertext,
@@ -83,7 +83,7 @@ test('nostrvault encrypt/decrypt uses advertised content keys', async () => {
   assert.equal(decrypted.mode, 'both-content')
 })
 
-test('nostrvault self-encryption with content keys round-trips', async () => {
+test('nip44-multi-dh self-encryption with content keys round-trips', async () => {
   secrets.unlock(generateSecretKey(), null)
   const alice = addNsecAccount()
   const aliceContent = addContentKey(alice.pubkey)
@@ -91,13 +91,13 @@ test('nostrvault self-encryption with content keys round-trips', async () => {
 
   const encrypted = await run({
     pubkey: alice.pubkey,
-    method: 'encrypt',
+    method: 'nip44EncryptMultiDH',
     params: [{ peerPubkey: alice.pubkey, plaintext: 'note to self' }],
     internals: { _getIykcProofs }
   })
   const decrypted = await run({
     pubkey: alice.pubkey,
-    method: 'decrypt',
+    method: 'nip44DecryptMultiDH',
     params: [{
       peerPubkey: alice.pubkey,
       ciphertext: encrypted.ciphertext,
@@ -110,14 +110,14 @@ test('nostrvault self-encryption with content keys round-trips', async () => {
   assert.equal(decrypted.plaintext, 'note to self')
 })
 
-test('nostrvault can opt out of content-key lookup', async () => {
+test('nip44-multi-dh can opt out of content-key lookup', async () => {
   secrets.unlock(generateSecretKey(), null)
   const alice = addNsecAccount()
   const bob = addNsecAccount()
 
   const encrypted = await run({
     pubkey: alice.pubkey,
-    method: 'encrypt',
+    method: 'nip44EncryptMultiDH',
     params: [{
       peerPubkey: bob.pubkey,
       plaintext: 'identity only',
@@ -127,7 +127,7 @@ test('nostrvault can opt out of content-key lookup', async () => {
   })
   const decrypted = await run({
     pubkey: bob.pubkey,
-    method: 'decrypt',
+    method: 'nip44DecryptMultiDH',
     params: [{ peerPubkey: alice.pubkey, ciphertext: encrypted.ciphertext }]
   })
 
@@ -137,7 +137,31 @@ test('nostrvault can opt out of content-key lookup', async () => {
   assert.equal(decrypted.plaintext, 'identity only')
 })
 
-test('nostrvault creates own content keys in encrypted localStorage', async () => {
+test('signer.run normalizes snake_case multi-DH wire methods', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const alice = addNsecAccount()
+  const bob = addNsecAccount()
+
+  const encrypted = await run({
+    pubkey: alice.pubkey,
+    method: 'nip44_encrypt_multi_dh',
+    params: [{
+      peerPubkey: bob.pubkey,
+      plaintext: 'snake case',
+      useOwnContentKey: false,
+      usePeerContentKey: false
+    }]
+  })
+  const decrypted = await run({
+    pubkey: bob.pubkey,
+    method: 'nip44_decrypt_multi_dh',
+    params: [{ peerPubkey: alice.pubkey, ciphertext: encrypted.ciphertext }]
+  })
+
+  assert.equal(decrypted.plaintext, 'snake case')
+})
+
+test('nip44-multi-dh creates own content keys in encrypted localStorage', async () => {
   const vaultKey = generateSecretKey()
   secrets.unlock(vaultKey, null)
   const alice = addNsecAccount()
@@ -146,7 +170,7 @@ test('nostrvault creates own content keys in encrypted localStorage', async () =
 
   const encrypted = await run({
     pubkey: alice.pubkey,
-    method: 'encrypt',
+    method: 'nip44EncryptMultiDH',
     params: [{ peerPubkey: bob.pubkey, plaintext: 'hello bob' }],
     internals: {
       _getIykcProofs: async () => ({}),

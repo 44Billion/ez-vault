@@ -47,8 +47,8 @@ class SharedKeySigner {
   async nip04Decrypt (peerPubkey, ciphertext) { return (await this.#sharedSigner()).nip04Decrypt(peerPubkey, ciphertext) }
   async nip44Encrypt (peerPubkey, plaintext) { return (await this.#sharedSigner()).nip44Encrypt(peerPubkey, plaintext) }
   async nip44Decrypt (peerPubkey, ciphertext) { return (await this.#sharedSigner()).nip44Decrypt(peerPubkey, ciphertext) }
-  async nip44EncryptMulti (options) { return (await this.#sharedSigner()).nip44EncryptMulti(options) }
-  async nip44DecryptMulti (options) { return (await this.#sharedSigner()).nip44DecryptMulti(options) }
+  async nip44EncryptMultiDH (options) { return (await this.#sharedSigner()).nip44EncryptMultiDH(options) }
+  async nip44DecryptMultiDH (options) { return (await this.#sharedSigner()).nip44DecryptMultiDH(options) }
   withSharedKey (peerPubkey) { return new SharedKeySigner(this.#signer, peerPubkey) }
 }
 
@@ -157,7 +157,7 @@ export default class NsecSigner {
     }
   }
 
-  async nip44EncryptMulti ({ peerPubkey, peerContentPubkey = '', ownContentSigner, plaintext, context }) {
+  async nip44EncryptMultiDH ({ peerPubkey, peerContentPubkey = '', ownContentSigner, plaintext, context }) {
     const { contentPubkey, contentSecretKey } = await this.#contentKeyMaterial(ownContentSigner)
     const { mode, conversationKey } = deriveMultiDhConversationKey({
       role: 'sender',
@@ -179,7 +179,7 @@ export default class NsecSigner {
     }
   }
 
-  async nip44DecryptMulti ({ peerPubkey, peerContentPubkey = '', ownContentSigner, ciphertext, context }) {
+  async nip44DecryptMultiDH ({ peerPubkey, peerContentPubkey = '', ownContentSigner, ciphertext, context }) {
     const { contentPubkey, contentSecretKey } = await this.#contentKeyMaterial(ownContentSigner)
     const { mode, conversationKey } = deriveMultiDhConversationKey({
       role: 'receiver',

@@ -107,12 +107,12 @@ export async function writeChunks ({ senderSigner, imkcSigner, receivers, receiv
   const id = `${Date.now()}:${Math.random().toString(16).slice(2)}`
   let chunk = new Uint8Array()
   let chunkIndex = 0
-  const useMultiDh = typeof senderSigner?.nip44EncryptMulti === 'function'
+  const useMultiDh = typeof senderSigner?.nip44EncryptMultiDH === 'function'
 
   for (const receiver of receivers) {
     const row = receiverRecord(receiver, useMultiDh ? receiverContentKeys : {})
     const ciphertext = useMultiDh
-      ? (await senderSigner.nip44EncryptMulti({
+      ? (await senderSigner.nip44EncryptMultiDH({
           peerPubkey: row.receiverPubkey,
           peerContentPubkey: row.iykcPubkey,
           ownContentSigner: imkcSigner,

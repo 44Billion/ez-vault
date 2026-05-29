@@ -3,10 +3,6 @@ import { isOnline } from '../helpers/network.js'
 import { bytesToHex } from '../helpers/nostr/index.js'
 import { getIykcProofs, upsertContentKeyEvent } from './content-key/index.js'
 import * as secrets from './secrets.js'
-import * as store from './accounts-store.js'
-import { claimSigner } from './signer.js'
-
-const SUPPORTED_METHODS = new Set(['encrypt', 'decrypt'])
 
 function firstParamObject (params) {
   if (params && !Array.isArray(params) && typeof params === 'object') return params
@@ -90,7 +86,7 @@ async function encrypt ({ account, signer, options, internals }) {
   if (typeof plaintext !== 'string') throw new Error('PLAINTEXT_REQUIRED')
 
   const warnings = []
-  if (!signer.nip44EncryptMulti || account.type !== 'nsec') {
+  if (!signer.nip44EncryptMultiDH || account.type !== 'nsec') {
     warning(warnings, 'MULTI_DH_UNSUPPORTED')
     return {
       ciphertext: await signer.nip44Encrypt(peerPubkey, plaintext),
@@ -108,7 +104,7 @@ async function encrypt ({ account, signer, options, internals }) {
     ? (await lookupContentPubkey(peerPubkey, warnings, internals)).pubkey
     : '')
 
-  const result = await signer.nip44EncryptMulti({
+  const result = await signer.nip44EncryptMultiDH({
     peerPubkey,
     peerContentPubkey,
     ownContentSigner,
@@ -140,7 +136,7 @@ async function decrypt ({ account, signer, options }) {
     : null
   if (ownContentPubkey && !ownContentSigner) throw new Error('CONTENT_KEY_NOT_FOUND')
 
-  if (!signer.nip44DecryptMulti || account.type !== 'nsec') {
+  if (!signer.nip44DecryptMultiDH || account.type !== 'nsec') {
     return {
       plaintext: await signer.nip44Decrypt(peerPubkey, ciphertext),
       senderPubkey: peerPubkey,
@@ -151,7 +147,7 @@ async function decrypt ({ account, signer, options }) {
     }
   }
 
-  const result = await signer.nip44DecryptMulti({
+  const result = await signer.nip44DecryptMultiDH({
     peerPubkey,
     peerContentPubkey,
     ownContentSigner,
@@ -167,13 +163,12 @@ async function decrypt ({ account, signer, options }) {
   }
 }
 
-export async function run ({ pubkey, method, params = [], options, internals = {} }) {
-  const account = store.get(pubkey)
-  if (!account) throw new Error('UNKNOWN_ACCOUNT')
-  if (!SUPPORTED_METHODS.has(method)) throw new Error('UNSUPPORTED_METHOD')
-  const signer = claimSigner(account)
+export async function nip44EncryptMultiDH ({ account, signer, params = [], options, internals = {} }) {
   const request = options || firstParamObject(params)
+  return encrypt({ account, signer, options: request, internals })
+}
 
-  if (method === 'encrypt') return encrypt({ account, signer, options: request, internals })
-  if (method === 'decrypt') return decrypt({ account, signer, options: request })
+export async function nip44DecryptMultiDH ({ account, signer, params = [], options }) {
+  const request = options || firstParamObject(params)
+  return decrypt({ account, signer, options: request })
 }

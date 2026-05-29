@@ -1,5 +1,6 @@
 import * as store from './accounts-store.js'
 import * as secrets from './secrets.js'
+import * as nip44MultiDh from './nip44-multi-dh.js'
 
 // NIP-07 / NIP-46 method whitelist. Anything outside this set is rejected
 // before we hit the per-type signer, so typos and unknown methods fail fast
@@ -11,16 +12,25 @@ const SUPPORTED_METHODS = new Set([
   'nip04Encrypt',
   'nip04Decrypt',
   'nip44Encrypt',
-  'nip44Decrypt'
+  'nip44Decrypt',
+  'nip44EncryptMultiDH',
+  'nip44DecryptMultiDH'
   // 'withSharedKey'
 ])
+
+const METHOD_ALIASES = {
+  nip44EncryptMultiDh: 'nip44EncryptMultiDH',
+  nip44DecryptMultiDh: 'nip44DecryptMultiDH'
+}
 
 // NIP-07 wire methods are snake_case (get_public_key, nip44_encrypt, ...)
 // while our JS impls are camelCase. Normalize here so callers can forward
 // the wire form untouched.
 function normalizeMethod (method) {
-  if (!method.includes('_')) return method
-  return method.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase())
+  const normalized = method.includes('_')
+    ? method.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase())
+    : method
+  return METHOD_ALIASES[normalized] || normalized
 }
 
 export function claimSigner (account) {
@@ -46,11 +56,17 @@ export function claimSigner (account) {
 // unknown account, read-only account, or unsupported method; the messenger
 // layer is responsible for translating thrown errors into the postMessage
 // error shape.
-export async function run ({ pubkey, method, params = [] }) {
+export async function run ({ pubkey, method, params = [], internals = {} }) {
   const account = store.get(pubkey)
   if (!account) throw new Error('UNKNOWN_ACCOUNT')
   const normalized = normalizeMethod(method)
   if (!SUPPORTED_METHODS.has(normalized)) throw new Error('UNSUPPORTED_METHOD')
   const signer = claimSigner(account)
+  if (normalized === 'nip44EncryptMultiDH') {
+    return nip44MultiDh.nip44EncryptMultiDH({ account, signer, params, internals })
+  }
+  if (normalized === 'nip44DecryptMultiDH') {
+    return nip44MultiDh.nip44DecryptMultiDH({ account, signer, params })
+  }
   return signer[normalized](...params)
 }

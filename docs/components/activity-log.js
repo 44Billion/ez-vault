@@ -333,7 +333,7 @@ function appDisplayName (app) {
   return id || 'Unknown app'
 }
 
-function methodLabel (method, eventKind, code) {
+function methodLabel (method, eventKind, _code) {
   switch (method) {
     case 'sign_event':
     case 'signEvent':
@@ -350,10 +350,12 @@ function methodLabel (method, eventKind, code) {
     case 'nip44_decrypt':
     case 'nip44Decrypt':
       return 'Decrypt (NIP-44)'
-    case 'encrypt':
-      return code === 'NOSTRVAULT' ? 'Encrypt (Vault)' : 'Encrypt'
-    case 'decrypt':
-      return code === 'NOSTRVAULT' ? 'Decrypt (Vault)' : 'Decrypt'
+    case 'nip44_encrypt_multi_dh':
+    case 'nip44EncryptMultiDH':
+      return 'Encrypt (NIP-44 Multi-DH)'
+    case 'nip44_decrypt_multi_dh':
+    case 'nip44DecryptMultiDH':
+      return 'Decrypt (NIP-44 Multi-DH)'
     default:
       return method ?? 'Unknown'
   }
@@ -372,15 +374,17 @@ function previewFor (entry) {
     case 'nip44_encrypt':
     case 'nip44Encrypt':
       return entry.params?.[1] ?? ''
-    case 'encrypt':
+    case 'nip44_encrypt_multi_dh':
+    case 'nip44EncryptMultiDH':
       return entry.params?.[0]?.plaintext ?? ''
     case 'nip04_decrypt':
     case 'nip04Decrypt':
     case 'nip44_decrypt':
     case 'nip44Decrypt':
       return entry.result ?? ''
-    case 'decrypt':
-      return entry.result?.plaintext ?? ''
+    case 'nip44_decrypt_multi_dh':
+    case 'nip44DecryptMultiDH':
+      return entry.params?.[0]?.ciphertext ?? ''
     default:
       return ''
   }
