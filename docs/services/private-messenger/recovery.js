@@ -1,9 +1,9 @@
 import { bytesToBase64, base64ToBytes } from '../../helpers/base64.js'
 import { ASK_KIND, parseRumorContent } from '../../helpers/nostr/private-message.js'
 
-export const SEEDER_PRESENCE_CODE = 'seederPresence_9xfz'
-export const MISSING_MESSAGES_ASK_CODE = 'missingMessages_8mj8'
-export const MISSING_MESSAGES_REPLY_CODE = 'missingMessages_roau'
+export const SEEDER_PRESENCE_CODE = 'seederPresence_8mj8'
+export const MISSING_MESSAGES_ASK_CODE = 'missingMessages_ask_8mj8'
+export const MISSING_MESSAGES_REPLY_CODE = 'missingMessages_reply_8mj8'
 
 const DEFAULT_EVENTS_PER_CHUNK = 100
 const encoder = new TextEncoder()

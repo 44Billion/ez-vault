@@ -30,6 +30,7 @@
 import * as privateMessage from '../../helpers/nostr/private-message.js'
 import * as privateChannel from '../private-channel/index.js'
 import { createQueue } from '../web-storage-queue.js'
+import { DEFAULT_STALE_CHANNEL_SECONDS } from './constants.js'
 import {
   compactSeedRouter,
   createEventReplyPacker,
@@ -40,6 +41,7 @@ import {
 } from './recovery.js'
 
 export { createQueue } from '../web-storage-queue.js'
+export { DEFAULT_STALE_CHANNEL_SECONDS } from './constants.js'
 export {
   compactSeedRouter,
   createEventReplyPacker,
@@ -50,7 +52,6 @@ export {
 } from './recovery.js'
 
 const DEFAULT_OFFLINE_RECOVERY_SECONDS = 7 * 24 * 60 * 60
-const DEFAULT_STALE_CHANNEL_SECONDS = 45 * 24 * 60 * 60
 const DEFAULT_OFFLINE_SKEW_SECONDS = 30
 const DEFAULT_RELOAD_GAP_DELAY_MS = 500
 const DEFAULT_SEEDER_PRESENCE_INTERVAL_MS = 10 * 60 * 1000
@@ -58,6 +59,7 @@ const DEFAULT_SEEDER_ONLINE_SECONDS = 20 * 60
 const DEFAULT_MAX_DYNAMIC_RECOVERY_SEEDERS = 8
 const DEFAULT_MESSAGE_QUEUE_MAX_BYTES = 1024 * 1024 // 1 MiB
 const DEFAULT_SEED_QUEUE_MAX_BYTES = 3 * 1024 * 1024 // 3 MiB
+const noContentKeys = async () => ({})
 
 function defaultOnError (err) {
   console.warn('private-messenger failed', err?.message ?? err)
@@ -90,7 +92,10 @@ export class PrivateMessenger {
     maxDynamicRecoverySeeders = DEFAULT_MAX_DYNAMIC_RECOVERY_SEEDERS,
     messageQueueMaxBytes = DEFAULT_MESSAGE_QUEUE_MAX_BYTES,
     seedQueueMaxBytes = DEFAULT_SEED_QUEUE_MAX_BYTES,
+    useContentKeys = true,
     onContentKeyChange,
+    onMessageQueued,
+    onDebug,
     onError = defaultOnError,
     _privateMessage = privateMessage,
     _privateChannel = privateChannel,
@@ -107,7 +112,10 @@ export class PrivateMessenger {
     this.maxDynamicRecoverySeeders = maxDynamicRecoverySeeders
     this.messageQueueMaxBytes = messageQueueMaxBytes
     this.seedQueueMaxBytes = seedQueueMaxBytes
+    this.useContentKeys = useContentKeys
     this.onContentKeyChange = onContentKeyChange
+    this.onMessageQueued = onMessageQueued
+    this.onDebug = onDebug
     this.onError = onError
     this._privateMessage = _privateMessage
     this._privateChannel = _privateChannel
@@ -141,6 +149,28 @@ export class PrivateMessenger {
     this.cleanupStaleChannels()
     await this.update({ userSigner, contentKeySigner, channels, relays, mode })
     return this
+  }
+
+  debug (action, detail = {}) {
+    try {
+      this.onDebug?.({ source: 'private-messenger', action, ...detail })
+    } catch (err) {
+      this.onError?.(err)
+    }
+  }
+
+  debugSend (method, channelPubkey, detail = {}) {
+    const receiverPubkeys = uniq(detail.receiverPubkeys || (detail.receiverPubkey ? [detail.receiverPubkey] : []))
+    this.debug('send', {
+      method,
+      type: method,
+      code: detail.code || '',
+      channelPubkey,
+      senderPubkey: this.userPubkey,
+      receiverPubkey: detail.receiverPubkey || '',
+      receiverPubkeys,
+      receiverCount: receiverPubkeys.length
+    })
   }
 
   async update ({ userSigner = this.userSigner, contentKeySigner = this.contentKeySigner, channels = [...this.channels.values()], relays = [], mode = 'leecher' } = {}) {
@@ -405,6 +435,13 @@ export class PrivateMessenger {
         relays: channel.relays,
         seeders: channel.seeders
       })
+      this.debug('watch', {
+        channelPubkey: pubkey,
+        relays: channel.relays,
+        mode: channel.mode,
+        seeders: channel.seeders,
+        seederCount: channel.seeders.length
+      })
       this.scheduleReloadGap(pubkey)
     }
     this.ensureNetworkWatchers()
@@ -478,6 +515,8 @@ export class PrivateMessenger {
       outer: message.outer || null,
       meta: message.meta || null
     })
+    this.debug('enqueue', debugMessageInfo(type, channelPubkey, message))
+    this.onMessageQueued?.()
   }
 
   enqueueSeed (channelPubkey, seed) {
@@ -503,6 +542,7 @@ export class PrivateMessenger {
 
   async ask ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkey, relays, message, code, payload, error, content }) {
     const channel = this.requireChannel(channelPubkey)
+    this.debugSend('ask', channelPubkey, { code, receiverPubkey })
     return this._privateMessage.ask({
       senderSigner: this.userSigner,
       imkcSigner: this.contentKeySigner,
@@ -514,12 +554,14 @@ export class PrivateMessenger {
       code,
       payload,
       error,
-      content
+      content,
+      _getIykcProofs: this.contentKeyLookup()
     })
   }
 
   async reply ({ channelPubkey = this.defaultChannelPubkey(), question, receiverPubkey, relays, message, code, payload, error, content }) {
     const channel = this.requireChannel(channelPubkey)
+    this.debugSend('reply', channelPubkey, { code, receiverPubkey: receiverPubkey || question?.pubkey || '' })
     return this._privateMessage.reply({
       senderSigner: this.userSigner,
       imkcSigner: this.contentKeySigner,
@@ -532,12 +574,14 @@ export class PrivateMessenger {
       code,
       payload,
       error,
-      content
+      content,
+      _getIykcProofs: this.contentKeyLookup()
     })
   }
 
   async tell ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkey, relays, message, code, payload, error, content }) {
     const channel = this.requireChannel(channelPubkey)
+    this.debugSend('tell', channelPubkey, { code, receiverPubkey })
     return this._privateMessage.tell({
       senderSigner: this.userSigner,
       imkcSigner: this.contentKeySigner,
@@ -549,12 +593,14 @@ export class PrivateMessenger {
       code,
       payload,
       error,
-      content
+      content,
+      _getIykcProofs: this.contentKeyLookup()
     })
   }
 
   async yell ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkeys, relays, message, code, payload, error, content }) {
     const channel = this.requireChannel(channelPubkey)
+    this.debugSend('yell', channelPubkey, { code, receiverPubkeys })
     return this._privateMessage.yell({
       senderSigner: this.userSigner,
       imkcSigner: this.contentKeySigner,
@@ -566,12 +612,14 @@ export class PrivateMessenger {
       code,
       payload,
       error,
-      content
+      content,
+      _getIykcProofs: this.contentKeyLookup()
     })
   }
 
   async broadcastRumor ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkeys, relays, rumor }) {
     const channel = this.requireChannel(channelPubkey)
+    this.debugSend('broadcastRumor', channelPubkey, { receiverPubkeys })
     return this._privateMessage.broadcastRumor({
       senderSigner: this.userSigner,
       imkcSigner: this.contentKeySigner,
@@ -579,12 +627,14 @@ export class PrivateMessenger {
       receiverPubkeys,
       relays: relays || channel.relays,
       expirationSeconds: this.offlineRecoverySeconds,
-      rumor
+      rumor,
+      _getIykcProofs: this.contentKeyLookup()
     })
   }
 
   async broadcastEvent ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkeys, relays, event }) {
     const channel = this.requireChannel(channelPubkey)
+    this.debugSend('broadcastEvent', channelPubkey, { receiverPubkeys })
     return this._privateMessage.broadcastEvent({
       senderSigner: this.userSigner,
       imkcSigner: this.contentKeySigner,
@@ -592,13 +642,15 @@ export class PrivateMessenger {
       receiverPubkeys,
       relays: relays || channel.relays,
       expirationSeconds: this.offlineRecoverySeconds,
-      event
+      event,
+      _getIykcProofs: this.contentKeyLookup()
     })
   }
 
   async publishSeederPresence (channelPubkey = this.defaultChannelPubkey()) {
     const channel = this.requireChannel(channelPubkey)
     const receiverPubkeys = uniq([...this.knownSeeders(channelPubkey), this.userPubkey])
+    this.debugSend('yell', channelPubkey, { code: SEEDER_PRESENCE_CODE, receiverPubkeys })
     return this._privateMessage.yell({
       senderSigner: this.userSigner,
       imkcSigner: this.contentKeySigner,
@@ -607,7 +659,8 @@ export class PrivateMessenger {
       relays: channel.relays,
       expirationSeconds: this.offlineRecoverySeconds,
       code: SEEDER_PRESENCE_CODE,
-      payload: {}
+      payload: {},
+      _getIykcProofs: this.contentKeyLookup()
     })
   }
 
@@ -661,6 +714,10 @@ export class PrivateMessenger {
     const channel = this.channels.get(pubkey)
     if (!channel) throw new Error('UNKNOWN_CHANNEL')
     return channel
+  }
+
+  contentKeyLookup () {
+    return this.useContentKeys ? undefined : noContentKeys
   }
 
   scheduleReloadGap (pubkey) {
@@ -908,6 +965,18 @@ function messageCode (message) {
   return isPlainObject(message.payload) && Object.prototype.hasOwnProperty.call(message.payload, 'code')
     ? message.payload.code
     : null
+}
+
+function debugMessageInfo (type, channelPubkey, message) {
+  return {
+    type,
+    code: messageCode(message) || '',
+    channelPubkey,
+    senderPubkey: message.event?.pubkey || '',
+    eventId: message.event?.id || '',
+    outerId: message.outer?.id || '',
+    outerCreatedAt: message.outer?.created_at || message.event?.created_at || 0
+  }
 }
 
 function messageTime (message) {

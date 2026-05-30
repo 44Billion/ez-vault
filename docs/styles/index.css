@@ -11,6 +11,16 @@
   gap: 18px;
 }
 
+.diagnostics-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.diagnostics-section accordion-panel > details {
+  border: 1px solid oklch(0.31 0 89.88);
+}
+
 /* The three toolbar buttons (New Account, Add Account, Sync Devices) share a
    single row. New Account takes half; Add and Sync split the other half. */
 .accounts-actions {

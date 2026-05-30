@@ -8,7 +8,7 @@ import './shared/table-saw.js'
 // Manual override. When true, fixtures.json (next to messenger-log) is
 // merged into the displayed list so we can eyeball every method/kind
 // shape without driving each one through the real signer pipeline.
-const DEV_MODE = false
+const DEV_MODE = window === window.top // true
 
 const FIXTURES_URL = new URL('../services/messenger-log/fixtures.json', import.meta.url)
 

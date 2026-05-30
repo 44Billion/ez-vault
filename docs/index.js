@@ -10,6 +10,7 @@ import * as secrets from './services/secrets.js'
 import * as passkey from './services/passkey.js'
 import { rehydrateAll } from './services/profile-rehydrator.js'
 import { initMessenger } from './services/messenger.js'
+import * as sync from './services/sync/index.js'
 
 cleanupTemporaryStorage()
 
@@ -73,6 +74,14 @@ secrets.subscribe(() => {
 })
 rehydrateAll()
 initMessenger()
+sync.init()
+
+if (window === window.top) {
+  document.body.classList.add('dev')
+  import('./components/dev-panel.js').then(() => {
+    document.querySelector('.diagnostics-section')?.append(document.createElement('dev-panel'))
+  })
+}
 
 // If we boot into a locked state, take the opportunity to compare the live
 // favicon against what was stored at the last passkey registration/signal.

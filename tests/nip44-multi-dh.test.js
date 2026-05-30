@@ -5,6 +5,7 @@ import { run } from '../docs/services/signer.js'
 import * as store from '../docs/services/accounts-store.js'
 import * as secrets from '../docs/services/secrets.js'
 import NsecSigner from '../docs/services/nsec-signer.js'
+import { DEFAULT_STALE_CHANNEL_SECONDS } from '../docs/services/private-messenger/index.js'
 import { bytesToHex, hexToBytes } from '../docs/helpers/nostr/index.js'
 
 const CONTENT_KEYS_STORAGE_KEY = 'ez-vault:content-keys'
@@ -33,6 +34,14 @@ function seckey () {
   return bytesToHex(generateSecretKey())
 }
 
+function nowSeconds () {
+  return Math.floor(Date.now() / 1000)
+}
+
+function staleCreatedAt (offset = 0) {
+  return nowSeconds() - DEFAULT_STALE_CHANNEL_SECONDS - offset
+}
+
 function addNsecAccount () {
   const secret = seckey()
   const pubkey = getPublicKey(hexToBytes(secret))
@@ -44,7 +53,7 @@ function addNsecAccount () {
 function addContentKey (ownerPubkey) {
   const secret = seckey()
   const pubkey = getPublicKey(hexToBytes(secret))
-  secrets.setContentKeySecret(ownerPubkey, secret, 7)
+  secrets.setContentKeySecret(ownerPubkey, secret, nowSeconds())
   return { pubkey, secret }
 }
 
@@ -219,6 +228,24 @@ test('deleting an account purges its persisted content keys', () => {
   assert.ok(globalThis.localStorage.getItem(CONTENT_KEYS_STORAGE_KEY))
   secrets.deleteSecret(alice.pubkey)
   assert.equal(globalThis.localStorage.getItem(CONTENT_KEYS_STORAGE_KEY), null)
+})
+
+test('stale content keys are pruned once a newer key is stored', () => {
+  secrets.unlock(generateSecretKey(), null)
+  const alice = addNsecAccount()
+  const staleSecret = seckey()
+  const stalePubkey = getPublicKey(hexToBytes(staleSecret))
+  const freshSecret = seckey()
+  const freshPubkey = getPublicKey(hexToBytes(freshSecret))
+
+  assert.ok(secrets.setContentKeySecret(alice.pubkey, staleSecret, staleCreatedAt(5)))
+  assert.ok(secrets.getContentKeySigner(alice.pubkey, stalePubkey))
+
+  assert.ok(secrets.setContentKeySecret(alice.pubkey, freshSecret, nowSeconds()))
+
+  assert.equal(secrets.getContentKeySigner(alice.pubkey, stalePubkey), null)
+  assert.ok(secrets.getContentKeySigner(alice.pubkey, freshPubkey))
+  assert.deepEqual(secrets.listContentKeys(alice.pubkey).map(key => key.pubkey), [freshPubkey])
 })
 
 test('content key replacement rotates the owner to the new persisted key', () => {

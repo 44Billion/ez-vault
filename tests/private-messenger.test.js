@@ -249,6 +249,57 @@ test('private messenger delegates send helpers with scoped signers and relays', 
   assert.equal(pm.sent[5].options.event.id, 'signed-id')
 })
 
+test('private messenger debug reports send and enqueue events without payload secrets', async () => {
+  const pm = fakePrivateMessage()
+  const debugEvents = []
+  const messenger = await new PrivateMessenger({
+    _privateMessage: pm,
+    onDebug: event => debugEvents.push(event)
+  }).init({
+    userSigner: signer('user'),
+    channels: [{ pubkey: 'channel', signer: signer('channel'), relays: ['wss://relay.example'] }]
+  })
+
+  await messenger.yell({
+    receiverPubkeys: ['alice', 'bob'],
+    code: 'contentKeys_reply_v1',
+    payload: { keys: [{ pubkey: 'pubkey', seckey: 'sent-secret' }] }
+  })
+  await pm.watchCalls[0].onReply({
+    event: { id: 'reply-id', kind: REPLY_KIND, pubkey: 'alice', created_at: 12, tags: [['q', 'question-id']], content: 'pong' },
+    outer: { id: 'outer-reply-id', created_at: 13 },
+    meta: { channelPubkey: 'channel' },
+    payload: { code: 'contentKeys_reply_v1', payload: { keys: [{ pubkey: 'pubkey', seckey: 'received-secret' }] } },
+    questionId: 'question-id',
+    reply: { id: 'reply-id' }
+  })
+
+  const send = debugEvents.find(event => event.action === 'send' && event.method === 'yell')
+  const enqueue = debugEvents.find(event => event.action === 'enqueue' && event.type === 'reply')
+  assert.ok(debugEvents.some(event => event.action === 'watch'))
+  assert.equal(send.code, 'contentKeys_reply_v1')
+  assert.deepEqual(send.receiverPubkeys, ['alice', 'bob'])
+  assert.equal(send.receiverCount, 2)
+  assert.equal(enqueue.code, 'contentKeys_reply_v1')
+  assert.equal(enqueue.channelPubkey, 'channel')
+  assert.equal(enqueue.senderPubkey, 'alice')
+  assert.equal(JSON.stringify(debugEvents).includes('sent-secret'), false)
+  assert.equal(JSON.stringify(debugEvents).includes('received-secret'), false)
+})
+
+test('private messenger can disable receiver content-key lookup for identity-only traffic', async () => {
+  const pm = fakePrivateMessage()
+  const messenger = await new PrivateMessenger({ _privateMessage: pm, useContentKeys: false }).init({
+    userSigner: signer('user'),
+    channels: [{ pubkey: 'channel', signer: signer('channel'), relays: ['wss://relay.example'] }]
+  })
+
+  await messenger.tell({ receiverPubkey: 'alice', payload: 'identity only' })
+
+  assert.equal(typeof pm.sent[0].options._getIykcProofs, 'function')
+  assert.deepEqual(await pm.sent[0].options._getIykcProofs(['alice']), {})
+})
+
 test('clearChannel removes queued items and channel state without clearing other channels', async () => {
   const pm = fakePrivateMessage()
   const messenger = await new PrivateMessenger({ _privateMessage: pm }).init({
