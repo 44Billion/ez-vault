@@ -23,7 +23,7 @@
 // - Ranges older than 7 days are ignored; channel state not watched for 45 days is pruned.
 // - Seeders announce presence every 10min and are used for the relay-uncovered left edge of a missed range.
 // - Configured seeders are all asked; auto-discovered seeders are capped to the 8 most recently active.
-// - Seeder channels store reconstructed router events in a separate web-storage queue and auto-reply to recovery asks.
+// - Seeder/watchtower channels store reconstructed router events in a separate web-storage queue and auto-reply to recovery asks.
 // - Seeder replies stream compact routers with createMissingMessageReplyPacker({ messenger, question }).update(seed), then finalize(optionalLastSeed).
 // - For other event-list replies, use createEventReplyPacker({ messenger, question, code }).update(event).
 
@@ -75,6 +75,10 @@ function uniq (values) {
 
 function isPlainObject (value) {
   return value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function storesRecoverySeeds (mode) {
+  return mode === 'seeder' || mode === 'watchtower'
 }
 
 function parseJson (raw, fallback) {
@@ -460,7 +464,7 @@ export class PrivateMessenger {
   async handleAsk (channelPubkey, message) {
     try {
       this.trackSeederActivity(channelPubkey, message)
-      if (this.channels.get(channelPubkey)?.mode === 'seeder' && messageCode(message) === MISSING_MESSAGES_ASK_CODE) {
+      if (storesRecoverySeeds(this.channels.get(channelPubkey)?.mode) && messageCode(message) === MISSING_MESSAGES_ASK_CODE) {
         await this.replyWithStoredSeeds(channelPubkey, message)
         return
       }
@@ -502,7 +506,7 @@ export class PrivateMessenger {
 
   enqueueRumor (type, channelPubkey, message) {
     const channel = this.channels.get(channelPubkey)
-    if (channel?.mode === 'seeder' && type !== 'ask') return
+    if (channel?.mode === 'watchtower' && type !== 'ask') return
     this.markSeen(channelPubkey, message.outer?.created_at || message.event?.created_at || nowSeconds())
     this.queue.enqueue({
       type,
@@ -533,10 +537,12 @@ export class PrivateMessenger {
   }
 
   messages () {
+    // seedQueue is retained replay material for recovery replies, not an app-message stream.
     return this.queue.items()
   }
 
   nextMessage () {
+    // seedQueue is retained replay material for recovery replies, not an app-message stream.
     return this.queue.shift()
   }
 
@@ -689,10 +695,10 @@ export class PrivateMessenger {
   async reconcilePresencePublishers () {
     const starts = []
     for (const pubkey of [...this.presenceTimers.keys()]) {
-      if (this.channels.get(pubkey)?.mode !== 'seeder') this.stopPresencePublisher(pubkey)
+      if (!storesRecoverySeeds(this.channels.get(pubkey)?.mode)) this.stopPresencePublisher(pubkey)
     }
     for (const [pubkey, channel] of this.channels) {
-      if (channel.mode === 'seeder') starts.push(this.startPresencePublisher(pubkey))
+      if (storesRecoverySeeds(channel.mode)) starts.push(this.startPresencePublisher(pubkey))
       else this.stopPresencePublisher(pubkey)
     }
     await Promise.all(starts)

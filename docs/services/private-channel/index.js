@@ -21,6 +21,10 @@ function multiDhContext (channelPubkey) {
   return { protocol: 'private-channel', channelPubkey }
 }
 
+function storesRecoverySeeds (mode) {
+  return mode === 'seeder' || mode === 'watchtower'
+}
+
 async function makeImkcProof ({ senderSigner, imkcSigner, senderPubkey, imkcPubkey }) {
   const event = await makeContentKeyEvent({ userSigner: senderSigner, contentKeySigner: imkcSigner })
   const parsed = parseContentKeyEvent(event)
@@ -348,10 +352,10 @@ function createProcessor ({
         missing: status.missing
       })
 
-      const shouldSeed = channelMode === 'seeder'
+      const shouldSeed = storesRecoverySeeds(channelMode)
       const sentByReceiver = receiverPubkey && senderPubkey === receiverPubkey
-      // Seeders and own-sent messages need the full recipient list; regular
-      // leechers can stop as soon as their recipient envelope is decrypted.
+      // Recovery seeders and own-sent messages need the full recipient list;
+      // regular leechers can stop as soon as their envelope is decrypted.
       const mustScanWholeBundle = shouldSeed || sentByReceiver
       let event = null
 

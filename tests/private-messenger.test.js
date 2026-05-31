@@ -396,7 +396,7 @@ test('seeder channels publish presence immediately and on interval', async () =>
   assert.deepEqual(cleared, intervals)
 })
 
-test('seeder channels store router seeds separately and answer missing-message asks', async () => {
+test('seeder channels store router seeds separately, consume messages, and answer missing-message asks', async () => {
   const pm = fakePrivateMessage()
   const now = Math.floor(Date.now() / 1000)
   const messenger = await new PrivateMessenger({ _privateMessage: pm }).init({
@@ -418,6 +418,17 @@ test('seeder channels store router seeds separately and answer missing-message a
     }
   })
 
+  pm.watchCalls[0].onTell({
+    event: { id: 'tell-id', kind: TELL_KIND, pubkey: 'alice', created_at: now, tags: [['r', 'seeder']], content: 'hi' },
+    outer: { id: 'tell-outer-id', created_at: now },
+    meta: { channelPubkey: 'channel' },
+    payload: { payload: 'hi' },
+    tell: { id: 'tell-id' }
+  })
+
+  const item = messenger.nextMessage()
+  assert.equal(item.type, 'tell')
+  assert.equal(item.event.id, 'tell-id')
   assert.equal(messenger.nextMessage(), null)
 
   await pm.watchCalls[0].onAsk({
@@ -443,6 +454,63 @@ test('seeder channels store router seeds separately and answer missing-message a
   assert.equal(records[0].kind, 263)
   assert.equal(Buffer.from(records[0].content, 'base64').toString(), `${userRow}\n`)
   assert.deepEqual(records[0].tags, [['f', 'alice'], ['c', '0', '1']])
+  assert.equal(messenger.nextMessage(), null)
+})
+
+test('watchtower channels store router seeds without consuming normal messages', async () => {
+  const pm = fakePrivateMessage()
+  const now = Math.floor(Date.now() / 1000)
+  const messenger = await new PrivateMessenger({ _privateMessage: pm }).init({
+    userSigner: signer('watchtower'),
+    channels: [{ pubkey: 'channel', signer: signer('channel'), relays: ['wss://relay.example'], mode: 'watchtower' }]
+  })
+  const userRow = JSON.stringify(['user', 'ciphertext'])
+
+  assert.equal(pm.watchCalls[0].mode, 'watchtower')
+
+  pm.watchCalls[0].onSeed({
+    channelPubkey: 'channel',
+    outer: { id: 'outer-id', kind: 3560, pubkey: 'channel', created_at: now },
+    router: {
+      kind: 263,
+      pubkey: 'router',
+      created_at: now,
+      tags: [['f', 'alice'], ['c', '0', '1']],
+      content: jsonlContent(userRow)
+    }
+  })
+
+  pm.watchCalls[0].onTell({
+    event: { id: 'tell-id', kind: TELL_KIND, pubkey: 'alice', created_at: now, tags: [['r', 'watchtower']], content: 'hi' },
+    outer: { id: 'tell-outer-id', created_at: now },
+    meta: { channelPubkey: 'channel' },
+    payload: { payload: 'hi' },
+    tell: { id: 'tell-id' }
+  })
+
+  assert.equal(messenger.nextMessage(), null)
+
+  await pm.watchCalls[0].onAsk({
+    event: {
+      id: 'question-id',
+      kind: ASK_KIND,
+      pubkey: 'user',
+      created_at: now,
+      tags: [['r', 'watchtower'], ['h', MISSING_MESSAGES_ASK_CODE]],
+      content: JSON.stringify({ since: now - 5, until: now + 5 })
+    },
+    outer: { id: 'ask-outer-id', created_at: now },
+    meta: { channelPubkey: 'channel' },
+    payload: { code: MISSING_MESSAGES_ASK_CODE, payload: { since: now - 5, until: now + 5 } },
+    question: { id: 'question-id' }
+  })
+
+  const reply = pm.sent.find(sent => sent.method === 'reply' && sent.options.code === MISSING_MESSAGES_REPLY_CODE)
+  assert.equal(reply.options.receiverPubkey, 'user')
+  assert.equal(reply.options.payload.isLast, true)
+  const records = reply.options.payload.jsonl.trim().split('\n').map(line => JSON.parse(line))
+  assert.equal(records.length, 1)
+  assert.equal(Buffer.from(records[0].content, 'base64').toString(), `${userRow}\n`)
   assert.equal(messenger.nextMessage(), null)
 })
 

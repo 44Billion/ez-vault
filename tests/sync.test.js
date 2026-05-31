@@ -135,6 +135,7 @@ test('sync orchestration watches nsec and bunker channels with identity-only syn
     list: () => [{ pubkey: 'trusted1', platform: 'Laptop' }]
   })
   const instances = []
+  const debugEvents = []
   class FakeMessenger {
     constructor (options) {
       this.options = options
@@ -144,6 +145,11 @@ test('sync orchestration watches nsec and bunker channels with identity-only syn
 
     async init (options) {
       this.initOptions = options
+      this.options.onDebug?.({
+        source: 'private-messenger',
+        action: 'watch',
+        mode: options.channels[0]?.mode || ''
+      })
       return this
     }
 
@@ -166,7 +172,8 @@ test('sync orchestration watches nsec and bunker channels with identity-only syn
     _setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers[timers.length - 1] },
     _clearTimeout: () => {},
     _setInterval: (fn, ms) => ({ fn, ms }),
-    _clearInterval: () => {}
+    _clearInterval: () => {},
+    _debug: event => debugEvents.push(event)
   })
 
   await controller.init()
@@ -175,11 +182,14 @@ test('sync orchestration watches nsec and bunker channels with identity-only syn
   assert.equal(instances[0].options.useContentKeys, false)
   assert.equal(instances[0].initOptions.userSigner, deviceSigner)
   assert.equal(instances[0].initOptions.contentKeySigner, null)
+  assert.equal(instances[0].initOptions.mode, 'seeder')
   assert.deepEqual(instances[0].initOptions.relays, ['wss://one.example', 'wss://two.example'])
   assert.deepEqual(instances[0].initOptions.channels.map(channel => channel.pubkey), ['nsec1', 'bunker1'])
   assert.deepEqual(instances[0].initOptions.channels.map(channel => channel.signer), [accountSigners.nsec1, accountSigners.bunker1])
+  assert.deepEqual(instances[0].initOptions.channels.map(channel => channel.mode), ['seeder', 'seeder'])
   assert.deepEqual(instances[0].initOptions.channels[0].relays, ['wss://one.example', 'wss://two.example'])
   assert.deepEqual(instances[0].initOptions.channels[0].seeders, ['trusted1'])
+  assert.ok(debugEvents.some(event => event.action === 'watch' && event.mode === 'seeder'))
   assert.equal(timers[0].ms, 1000)
 
   await storeStub.emit()

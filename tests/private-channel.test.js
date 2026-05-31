@@ -450,6 +450,48 @@ test('subscribe emits content key usage for own sent direct messages', async () 
   }
 })
 
+test('subscribe treats watchtower mode as recovery seed storage', async () => {
+  const originalSubscribeMany = pool.subscribeMany
+  let handlers = null
+  pool.subscribeMany = (_relays, _filter, nextHandlers) => {
+    handlers = nextHandlers
+    return { close: () => {} }
+  }
+
+  try {
+    const alice = signer()
+    const bob = signer()
+    const bobPubkey = await bob.getPublicKey()
+    const original = eventFixture('watchtower payload')
+    const [wrapped] = await wrapEvent({
+      senderSigner: alice,
+      receivers: [bobPubkey],
+      event: original,
+      _getIykcProofs: noContentKeys
+    })
+    const events = []
+    const seeds = []
+
+    subscribe({
+      receiverSigner: bob,
+      privateChannelSigner: alice,
+      receiverPubkey: bobPubkey,
+      relays: ['wss://relay.example'],
+      mode: 'watchtower',
+      onEvent: event => events.push(event),
+      onSeedEvent: seed => seeds.push(seed)
+    })
+    await handlers.onevent(wrapped)
+
+    assert.deepEqual(events, [unwrappedFixture(original, await alice.getPublicKey())])
+    assert.equal(seeds.length, 1)
+    assert.equal(seeds[0].channelPubkey, await alice.getPublicKey())
+    assert.ok(seeds[0].router.content)
+  } finally {
+    pool.subscribeMany = originalSubscribeMany
+  }
+})
+
 test('wrapEvent uses receiver content key rows when iykc is advertised', async () => {
   const alice = signer()
   const bob = signer()

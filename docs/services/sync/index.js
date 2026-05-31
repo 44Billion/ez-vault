@@ -133,7 +133,7 @@ export function createSyncController ({
           pubkey: account.pubkey,
           signer: _claimSigner(account),
           relays: relayList(),
-          mode: 'leecher',
+          mode: 'seeder',
           seeders
         })
       } catch (err) {
@@ -285,7 +285,7 @@ export function createSyncController ({
       contentKeySigner: null,
       channels,
       relays: relayList(),
-      mode: 'seeder' // 'leecher' seems less suitable for trusted signers
+      mode: 'seeder'
     }
 
     if (!messenger) {
