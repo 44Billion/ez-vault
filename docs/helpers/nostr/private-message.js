@@ -189,6 +189,15 @@ function signersForChannels (channels) {
   return out
 }
 
+function readerSignersForChannels (channels) {
+  const out = {}
+  for (const channel of channels) {
+    const signer = watchesByChannel.get(channel)?.privateChannelReaderSigner
+    if (signer) out[channel] = signer
+  }
+  return out
+}
+
 function modesForChannels (channels) {
   const out = {}
   for (const channel of channels) out[channel] = watchesByChannel.get(channel)?.mode || 'leecher'
@@ -233,6 +242,8 @@ function rebuildSubscriptions ({ _subscribe = privateChannel.subscribe } = {}) {
       iykcSigner: firstWatch.iykcSigner,
       privateChannelSigner: firstWatch.privateChannelSigner,
       privateChannelSignersByPubkey: signersForChannels(channelList),
+      privateChannelReaderSigner: firstWatch.privateChannelReaderSigner,
+      privateChannelReaderSignersByPubkey: readerSignersForChannels(channelList),
       privateChannelPubkeys: channelList,
       receiverPubkey: firstWatch.receiverPubkey,
       relays: [relay],
@@ -271,6 +282,8 @@ async function recoverWatchedChannels ({ _fetch = privateChannel.fetch } = {}) {
       iykcSigner: watch.iykcSigner,
       privateChannelSigner: watch.privateChannelSigner,
       privateChannelSignersByPubkey: { [channelPubkey]: watch.privateChannelSigner },
+      privateChannelReaderSigner: watch.privateChannelReaderSigner,
+      privateChannelReaderSignersByPubkey: { [channelPubkey]: watch.privateChannelReaderSigner },
       privateChannelPubkeys: [channelPubkey],
       receiverPubkey: watch.receiverPubkey,
       relays: watch.relays,
@@ -308,6 +321,7 @@ export async function watch ({
   receiverSigner,
   iykcSigner,
   privateChannelSigner = receiverSigner,
+  privateChannelReaderSigner = privateChannelSigner,
   receiverPubkey,
   mode = 'leecher',
   onAsk,
@@ -339,6 +353,7 @@ export async function watch ({
       receiverSigner,
       iykcSigner,
       privateChannelSigner,
+      privateChannelReaderSigner: privateChannelReaderSigner || privateChannelSigner,
       receiverPubkey: ownPubkey,
       mode,
       receivedChunkTtlMs,
@@ -354,6 +369,8 @@ export async function watch ({
     if (
       current &&
       setEquals(new Set(current.relays), new Set(next.relays)) &&
+      current.privateChannelSigner === next.privateChannelSigner &&
+      current.privateChannelReaderSigner === next.privateChannelReaderSigner &&
       current.mode === next.mode &&
       current.receivedChunkTtlMs === next.receivedChunkTtlMs &&
       current.receivedChunkMaxBytes === next.receivedChunkMaxBytes &&
@@ -391,6 +408,7 @@ async function sendPrivateMessage ({
   senderSigner,
   imkcSigner,
   privateChannelSigner = senderSigner,
+  privateChannelReaderPubkey,
   receivers,
   receiverTag,
   event,
@@ -399,13 +417,15 @@ async function sendPrivateMessage ({
   _getIykcProofs,
   _publish = privateChannel.publish
 }) {
-  return _publish({ senderSigner, imkcSigner, privateChannelSigner, receivers, receiverTag, event, relays, expirationSeconds, _getIykcProofs })
+  if (!privateChannelSigner?.getPublicKey) throw new Error('PRIVATE_CHANNEL_WRITER_REQUIRED')
+  return _publish({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag, event, relays, expirationSeconds, _getIykcProofs })
 }
 
 export async function ask ({
   senderSigner,
   imkcSigner,
   privateChannelSigner = senderSigner,
+  privateChannelReaderPubkey,
   receiverPubkey,
   relays,
   message,
@@ -418,6 +438,7 @@ export async function ask ({
   _publish = privateChannel.publish
 }) {
   if (!receiverPubkey) throw new Error('RECEIVER_PUBKEY_REQUIRED')
+  if (!privateChannelSigner?.getPublicKey) throw new Error('PRIVATE_CHANNEL_WRITER_REQUIRED')
   const privateChannelPubkey = await ownPrivateChannelPubkey(privateChannelSigner)
   assertWatching(privateChannelPubkey)
 
@@ -429,7 +450,7 @@ export async function ask ({
       message: message || { code, payload, error, content }
     })
   })
-  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers: [receiverPubkey], receiverTag: receiverPubkey, event: wireEvent, relays, expirationSeconds, _getIykcProofs, _publish })
+  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers: [receiverPubkey], receiverTag: receiverPubkey, event: wireEvent, relays, expirationSeconds, _getIykcProofs, _publish })
 
   return { question, results }
 }
@@ -438,6 +459,7 @@ export async function reply ({
   senderSigner,
   imkcSigner,
   privateChannelSigner = senderSigner,
+  privateChannelReaderPubkey,
   question,
   receiverPubkey = question?.pubkey,
   relays,
@@ -460,7 +482,7 @@ export async function reply ({
       message: message || { code, payload, error, content }
     })
   })
-  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers: [receiverPubkey], receiverTag: receiverPubkey, event: wireEvent, relays, expirationSeconds, _getIykcProofs, _publish })
+  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers: [receiverPubkey], receiverTag: receiverPubkey, event: wireEvent, relays, expirationSeconds, _getIykcProofs, _publish })
   return { reply: event, results }
 }
 
@@ -468,6 +490,7 @@ export async function tell ({
   senderSigner,
   imkcSigner,
   privateChannelSigner = senderSigner,
+  privateChannelReaderPubkey,
   receiverPubkey,
   relays,
   message,
@@ -488,7 +511,7 @@ export async function tell ({
       message: message || { code, payload, error, content }
     })
   })
-  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers: [receiverPubkey], receiverTag: receiverPubkey, event: wireEvent, relays, expirationSeconds, _getIykcProofs, _publish })
+  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers: [receiverPubkey], receiverTag: receiverPubkey, event: wireEvent, relays, expirationSeconds, _getIykcProofs, _publish })
   return { tell: event, results }
 }
 
@@ -496,6 +519,7 @@ export async function yell ({
   senderSigner,
   imkcSigner,
   privateChannelSigner = senderSigner,
+  privateChannelReaderPubkey,
   receiverPubkeys,
   relays,
   message,
@@ -517,7 +541,7 @@ export async function yell ({
       message: message || { code, payload, error, content }
     })
   })
-  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers, receiverTag: '', event: wireEvent, relays, expirationSeconds, _getIykcProofs, _publish })
+  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag: '', event: wireEvent, relays, expirationSeconds, _getIykcProofs, _publish })
   return { yell: event, results }
 }
 
@@ -525,6 +549,7 @@ export async function broadcastRumor ({
   senderSigner,
   imkcSigner,
   privateChannelSigner = senderSigner,
+  privateChannelReaderPubkey,
   receiverPubkeys,
   relays,
   rumor,
@@ -535,7 +560,7 @@ export async function broadcastRumor ({
   const receivers = uniq(receiverPubkeys)
   if (!receivers.length) throw new Error('NO_RECEIVERS')
   const { event, wireEvent } = await makeOutgoingRumor({ senderSigner, rumor })
-  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers, receiverTag: '', event: wireEvent, relays, expirationSeconds, _getIykcProofs, _publish })
+  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag: '', event: wireEvent, relays, expirationSeconds, _getIykcProofs, _publish })
   return { rumor: event, results }
 }
 
@@ -543,6 +568,7 @@ export async function broadcastEvent ({
   senderSigner,
   imkcSigner,
   privateChannelSigner = senderSigner,
+  privateChannelReaderPubkey,
   receiverPubkeys,
   relays,
   event,
@@ -553,6 +579,6 @@ export async function broadcastEvent ({
   const receivers = uniq(receiverPubkeys)
   if (!receivers.length) throw new Error('NO_RECEIVERS')
   const wireEvent = assertValidSignedEvent({ ...event, tags: cloneTags(event?.tags) })
-  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, receivers, receiverTag: '', event: wireEvent, relays, expirationSeconds, _getIykcProofs, _publish })
+  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag: '', event: wireEvent, relays, expirationSeconds, _getIykcProofs, _publish })
   return { event: wireEvent, results }
 }

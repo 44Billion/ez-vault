@@ -202,14 +202,21 @@ export class PrivateMessenger {
     const out = []
     for (const entry of channels || []) {
       const channel = typeof entry === 'string' ? { pubkey: entry } : entry
-      const signer = channel.signer || channel.privateChannelSigner
+      const signer = channel.signer || channel.privateChannelSigner || null
+      const readerSigner = channel.readerSigner || channel.privateChannelReaderSigner || signer || null
       const pubkey = channel.pubkey || await signer?.getPublicKey?.()
-      if (!pubkey || !signer) throw new Error('CHANNEL_SIGNER_REQUIRED')
+      if (!pubkey) throw new Error('CHANNEL_PUBKEY_REQUIRED')
+      if (!signer && !readerSigner) throw new Error('CHANNEL_SIGNER_REQUIRED')
+      const mode = channel.mode || defaults.mode || 'leecher'
+      if (!signer && storesRecoverySeeds(mode)) throw new Error('PRIVATE_CHANNEL_WRITER_REQUIRED')
+      const readerPubkey = channel.readerPubkey || channel.privateChannelReaderPubkey || await readerSigner?.getPublicKey?.() || pubkey
       out.push({
         pubkey,
         signer,
+        readerSigner,
+        readerPubkey,
         relays: uniq(channel.relays?.length ? channel.relays : defaults.relays),
-        mode: channel.mode || defaults.mode || 'leecher',
+        mode,
         seeders: uniq(channel.seeders)
       })
     }
@@ -421,6 +428,7 @@ export class PrivateMessenger {
         receiverSigner: this.userSigner,
         iykcSigner: this.contentKeySigner,
         privateChannelSigner: channel.signer,
+        privateChannelReaderSigner: channel.readerSigner,
         mode: channel.mode,
         onAsk: message => this.handleAsk(pubkey, message),
         onReply: message => this.handleReply(pubkey, message),
@@ -547,12 +555,13 @@ export class PrivateMessenger {
   }
 
   async ask ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkey, relays, message, code, payload, error, content }) {
-    const channel = this.requireChannel(channelPubkey)
+    const channel = this.requireWritableChannel(channelPubkey)
     this.debugSend('ask', channelPubkey, { code, receiverPubkey })
     return this._privateMessage.ask({
       senderSigner: this.userSigner,
       imkcSigner: this.contentKeySigner,
       privateChannelSigner: channel.signer,
+      privateChannelReaderPubkey: channel.readerPubkey,
       receiverPubkey,
       relays: relays || channel.relays,
       expirationSeconds: this.offlineRecoverySeconds,
@@ -566,12 +575,13 @@ export class PrivateMessenger {
   }
 
   async reply ({ channelPubkey = this.defaultChannelPubkey(), question, receiverPubkey, relays, message, code, payload, error, content }) {
-    const channel = this.requireChannel(channelPubkey)
+    const channel = this.requireWritableChannel(channelPubkey)
     this.debugSend('reply', channelPubkey, { code, receiverPubkey: receiverPubkey || question?.pubkey || '' })
     return this._privateMessage.reply({
       senderSigner: this.userSigner,
       imkcSigner: this.contentKeySigner,
       privateChannelSigner: channel.signer,
+      privateChannelReaderPubkey: channel.readerPubkey,
       question,
       receiverPubkey,
       relays: relays || channel.relays,
@@ -586,12 +596,13 @@ export class PrivateMessenger {
   }
 
   async tell ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkey, relays, message, code, payload, error, content }) {
-    const channel = this.requireChannel(channelPubkey)
+    const channel = this.requireWritableChannel(channelPubkey)
     this.debugSend('tell', channelPubkey, { code, receiverPubkey })
     return this._privateMessage.tell({
       senderSigner: this.userSigner,
       imkcSigner: this.contentKeySigner,
       privateChannelSigner: channel.signer,
+      privateChannelReaderPubkey: channel.readerPubkey,
       receiverPubkey,
       relays: relays || channel.relays,
       expirationSeconds: this.offlineRecoverySeconds,
@@ -605,12 +616,13 @@ export class PrivateMessenger {
   }
 
   async yell ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkeys, relays, message, code, payload, error, content }) {
-    const channel = this.requireChannel(channelPubkey)
+    const channel = this.requireWritableChannel(channelPubkey)
     this.debugSend('yell', channelPubkey, { code, receiverPubkeys })
     return this._privateMessage.yell({
       senderSigner: this.userSigner,
       imkcSigner: this.contentKeySigner,
       privateChannelSigner: channel.signer,
+      privateChannelReaderPubkey: channel.readerPubkey,
       receiverPubkeys,
       relays: relays || channel.relays,
       expirationSeconds: this.offlineRecoverySeconds,
@@ -624,12 +636,13 @@ export class PrivateMessenger {
   }
 
   async broadcastRumor ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkeys, relays, rumor }) {
-    const channel = this.requireChannel(channelPubkey)
+    const channel = this.requireWritableChannel(channelPubkey)
     this.debugSend('broadcastRumor', channelPubkey, { receiverPubkeys })
     return this._privateMessage.broadcastRumor({
       senderSigner: this.userSigner,
       imkcSigner: this.contentKeySigner,
       privateChannelSigner: channel.signer,
+      privateChannelReaderPubkey: channel.readerPubkey,
       receiverPubkeys,
       relays: relays || channel.relays,
       expirationSeconds: this.offlineRecoverySeconds,
@@ -639,12 +652,13 @@ export class PrivateMessenger {
   }
 
   async broadcastEvent ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkeys, relays, event }) {
-    const channel = this.requireChannel(channelPubkey)
+    const channel = this.requireWritableChannel(channelPubkey)
     this.debugSend('broadcastEvent', channelPubkey, { receiverPubkeys })
     return this._privateMessage.broadcastEvent({
       senderSigner: this.userSigner,
       imkcSigner: this.contentKeySigner,
       privateChannelSigner: channel.signer,
+      privateChannelReaderPubkey: channel.readerPubkey,
       receiverPubkeys,
       relays: relays || channel.relays,
       expirationSeconds: this.offlineRecoverySeconds,
@@ -654,13 +668,14 @@ export class PrivateMessenger {
   }
 
   async publishSeederPresence (channelPubkey = this.defaultChannelPubkey()) {
-    const channel = this.requireChannel(channelPubkey)
+    const channel = this.requireWritableChannel(channelPubkey)
     const receiverPubkeys = uniq([...this.knownSeeders(channelPubkey), this.userPubkey])
     this.debugSend('yell', channelPubkey, { code: SEEDER_PRESENCE_CODE, receiverPubkeys })
     return this._privateMessage.yell({
       senderSigner: this.userSigner,
       imkcSigner: this.contentKeySigner,
       privateChannelSigner: channel.signer,
+      privateChannelReaderPubkey: channel.readerPubkey,
       receiverPubkeys,
       relays: channel.relays,
       expirationSeconds: this.offlineRecoverySeconds,
@@ -722,6 +737,12 @@ export class PrivateMessenger {
     return channel
   }
 
+  requireWritableChannel (pubkey) {
+    const channel = this.requireChannel(pubkey)
+    if (!channel.signer) throw new Error('PRIVATE_CHANNEL_WRITER_REQUIRED')
+    return channel
+  }
+
   contentKeyLookup () {
     return this.useContentKeys ? undefined : noContentKeys
   }
@@ -764,6 +785,7 @@ export class PrivateMessenger {
   }
 
   async askSeedersForMissingRange (channelPubkey, since, until) {
+    if (!this.channels.get(channelPubkey)?.signer) return []
     const seeders = this.recoverySeeders(channelPubkey)
     if (!seeders.length || until < since) return []
 
@@ -840,17 +862,19 @@ export class PrivateMessenger {
       tags: (record.tags || []).filter(tag => tag[0] !== 'c').concat([['c', '0', '1']]),
       content: record.content
     }
+    const encryptSigner = channel.readerSigner || channel.signer
     const outer = {
       kind: privateChannel.PRIVATE_BROADCAST_KIND,
       pubkey: channelPubkey,
       created_at: router.created_at,
       tags: [],
-      content: await channel.signer.nip44Encrypt(channelPubkey, JSON.stringify(router))
+      content: await encryptSigner.nip44Encrypt(channelPubkey, JSON.stringify(router))
     }
     return this._privateChannel.unwrapEvent({
       receiverSigner: this.userSigner,
       iykcSigner: this.contentKeySigner,
       privateChannelSigner: channel.signer,
+      privateChannelReaderSigner: channel.readerSigner,
       event: outer,
       receiverPubkey: this.userPubkey
     })
@@ -874,6 +898,7 @@ export class PrivateMessenger {
             receiverSigner: this.userSigner,
             iykcSigner: this.contentKeySigner,
             privateChannelSigner: channel.signer,
+            privateChannelReaderSigner: channel.readerSigner,
             privateChannelPubkeys: [pubkey],
             receiverPubkey: this.userPubkey,
             relays: channel.relays,

@@ -54,18 +54,22 @@ function fakeSubscribeFactory () {
 
 test('watch merges overlapping relay subscriptions by channel author', async () => {
   const { calls, closed, fakeSubscribe } = fakeSubscribeFactory()
+  const channel1 = signer('channel1')
+  const reader1 = signer('reader1')
   await watch({
     channels: ['channel1'],
     relays: ['wss://a.example'],
     receiverSigner: signer('receiver'),
-    privateChannelSigner: signer('channel1'),
+    privateChannelSigner: channel1,
+    privateChannelReaderSigner: reader1,
     _subscribe: fakeSubscribe
   })
   await watch({
     channels: ['channel1'],
     relays: ['wss://a.example'],
     receiverSigner: signer('receiver'),
-    privateChannelSigner: signer('channel1'),
+    privateChannelSigner: channel1,
+    privateChannelReaderSigner: reader1,
     _subscribe: fakeSubscribe
   })
   await watch({
@@ -73,6 +77,7 @@ test('watch merges overlapping relay subscriptions by channel author', async () 
     relays: ['wss://a.example', 'wss://b.example'],
     receiverSigner: signer('receiver'),
     privateChannelSigner: signer('channel2'),
+    privateChannelReaderSigner: signer('reader2'),
     mode: 'seeder',
     _subscribe: fakeSubscribe
   })
@@ -85,6 +90,10 @@ test('watch merges overlapping relay subscriptions by channel author', async () 
   assert.deepEqual(calls[1].privateChannelPubkeys.sort(), ['channel1', 'channel2'])
   assert.deepEqual(calls[1].relays, ['wss://a.example'])
   assert.deepEqual(calls[1].modeByPubkey, { channel1: 'leecher', channel2: 'seeder' })
+  assert.deepEqual(Object.fromEntries(Object.entries(calls[1].privateChannelReaderSignersByPubkey).map(([channel, nextSigner]) => [channel, nextSigner.getPublicKey()])), {
+    channel1: 'reader1',
+    channel2: 'reader2'
+  })
   assert.deepEqual(calls[2].privateChannelPubkeys, ['channel2'])
   assert.deepEqual(calls[2].relays, ['wss://b.example'])
 
@@ -104,6 +113,30 @@ test('ask requires watching the sender private channel first', async () => {
       _publish: async () => ({ results: [] })
     }),
     /PRIVATE_MESSAGE_NOT_WATCHING/
+  )
+})
+
+test('ask from a reader-only channel requires a writer signer', async () => {
+  const { fakeSubscribe } = fakeSubscribeFactory()
+  await watch({
+    channels: ['writer-channel'],
+    relays: ['wss://relay.example'],
+    receiverSigner: signer('sender'),
+    privateChannelSigner: null,
+    privateChannelReaderSigner: signer('reader'),
+    _subscribe: fakeSubscribe
+  })
+
+  await assert.rejects(
+    () => ask({
+      senderSigner: signer('sender'),
+      privateChannelSigner: null,
+      receiverPubkey: 'receiver',
+      relays: ['wss://relay.example'],
+      message: { code: 'PING' },
+      _publish: async () => ({ results: [] })
+    }),
+    /PRIVATE_CHANNEL_WRITER_REQUIRED/
   )
 })
 
@@ -144,6 +177,7 @@ test('ask publishes an ask rumor and watch dispatches the reply with its questio
   const result = await ask({
     senderSigner: signer(senderPubkey),
     privateChannelSigner: signer('sender-channel'),
+    privateChannelReaderPubkey: 'reader-channel',
     receiverPubkey: 'receiver',
     relays: ['wss://relay.example'],
     message: { code: 'PING', payload: { ok: true } },
@@ -159,6 +193,7 @@ test('ask publishes an ask rumor and watch dispatches the reply with its questio
   assert.equal(published.event.pubkey, undefined)
   assert.equal(published.receiverTag, 'receiver')
   assert.deepEqual(published.receivers, ['receiver'])
+  assert.equal(published.privateChannelReaderPubkey, 'reader-channel')
   assert.deepEqual(JSON.parse(published.event.content), { ok: true })
   assert.deepEqual(published.event.tags, [['r', 'receiver'], ['h', 'PING']])
   assert.equal(result.question.pubkey, senderPubkey)

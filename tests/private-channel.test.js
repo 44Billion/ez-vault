@@ -266,6 +266,79 @@ test('unwrapEvent returns the addressed receiver event or null', async () => {
   assert.equal(await unwrapEvent({ receiverSigner: bob, privateChannelSigner: alice, event: wrapped, receiverPubkey: await signer().getPublicKey() }), null)
 })
 
+test('wrapEvent can encrypt the outer router to a separate reader key', async () => {
+  const sender = signer()
+  const channel = signer()
+  const reader = signer()
+  const bob = signer()
+  const bobPubkey = await bob.getPublicKey()
+  const readerPubkey = await reader.getPublicKey()
+  const channelPubkey = await channel.getPublicKey()
+  const original = eventFixture('reader decrypts channel')
+  const [wrapped] = await wrapEvent({
+    senderSigner: sender,
+    privateChannelSigner: channel,
+    privateChannelReaderPubkey: readerPubkey,
+    receivers: [bobPubkey],
+    event: original,
+    _getIykcProofs: noContentKeys
+  })
+
+  assert.equal(wrapped.pubkey, channelPubkey)
+  const router = JSON.parse(await reader.nip44Decrypt(channelPubkey, wrapped.content))
+  assert.equal(router.kind, ROUTER_KIND)
+  assert.deepEqual(await unwrapEvent({
+    receiverSigner: bob,
+    privateChannelSigner: channel,
+    privateChannelReaderSigner: reader,
+    event: wrapped,
+    receiverPubkey: bobPubkey
+  }), unwrappedFixture(original, await sender.getPublicKey()))
+})
+
+test('subscribe can read channel events with only a reader signer', async () => {
+  const originalSubscribeMany = pool.subscribeMany
+  let handlers = null
+  pool.subscribeMany = (_relays, _filter, nextHandlers) => {
+    handlers = nextHandlers
+    return { close: () => {} }
+  }
+
+  try {
+    const sender = signer()
+    const channel = signer()
+    const reader = signer()
+    const bob = signer()
+    const bobPubkey = await bob.getPublicKey()
+    const channelPubkey = await channel.getPublicKey()
+    const original = eventFixture('reader-only subscribe')
+    const [wrapped] = await wrapEvent({
+      senderSigner: sender,
+      privateChannelSigner: channel,
+      privateChannelReaderPubkey: await reader.getPublicKey(),
+      receivers: [bobPubkey],
+      event: original,
+      _getIykcProofs: noContentKeys
+    })
+    const events = []
+
+    subscribe({
+      receiverSigner: bob,
+      privateChannelSigner: null,
+      privateChannelReaderSigner: reader,
+      privateChannelPubkey: channelPubkey,
+      receiverPubkey: bobPubkey,
+      relays: ['wss://relay.example'],
+      onEvent: event => events.push(event)
+    })
+    await handlers.onevent(wrapped)
+
+    assert.deepEqual(events, [unwrappedFixture(original, await sender.getPublicKey())])
+  } finally {
+    pool.subscribeMany = originalSubscribeMany
+  }
+})
+
 test('unwrapEvent preserves valid signed inner events', async () => {
   const alice = signer()
   const bob = signer()

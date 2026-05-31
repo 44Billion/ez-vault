@@ -249,6 +249,69 @@ test('private messenger delegates send helpers with scoped signers and relays', 
   assert.equal(pm.sent[5].options.event.id, 'signed-id')
 })
 
+test('private messenger reader-only channels watch and drain but reject sends', async () => {
+  const pm = fakePrivateMessage()
+  const messenger = await new PrivateMessenger({ _privateMessage: pm }).init({
+    userSigner: signer('user'),
+    channels: [{ pubkey: 'channel', readerSigner: signer('reader'), relays: ['wss://relay.example'] }]
+  })
+
+  assert.equal(pm.watchCalls[0].privateChannelSigner, null)
+  assert.equal(pm.watchCalls[0].privateChannelReaderSigner.getPublicKey(), 'reader')
+
+  pm.watchCalls[0].onTell({
+    event: { id: 'tell-id', kind: TELL_KIND, pubkey: 'alice', created_at: 10, tags: [['r', 'user']], content: 'hi' },
+    outer: { id: 'outer-id', created_at: 11 },
+    meta: { channelPubkey: 'channel' },
+    payload: { payload: 'hi' },
+    tell: { id: 'tell-id' }
+  })
+
+  assert.equal(messenger.nextMessage().event.id, 'tell-id')
+  await assert.rejects(
+    () => messenger.tell({ channelPubkey: 'channel', receiverPubkey: 'alice', payload: 'note' }),
+    /PRIVATE_CHANNEL_WRITER_REQUIRED/
+  )
+})
+
+test('private messenger writer channels can encrypt to a reader key', async () => {
+  const pm = fakePrivateMessage()
+  const messenger = await new PrivateMessenger({ _privateMessage: pm }).init({
+    userSigner: signer('user'),
+    channels: [{
+      pubkey: 'channel',
+      signer: signer('channel'),
+      readerSigner: signer('reader'),
+      relays: ['wss://relay.example']
+    }]
+  })
+
+  await messenger.tell({ channelPubkey: 'channel', receiverPubkey: 'alice', payload: 'note' })
+
+  assert.equal(pm.watchCalls[0].privateChannelSigner.getPublicKey(), 'channel')
+  assert.equal(pm.watchCalls[0].privateChannelReaderSigner.getPublicKey(), 'reader')
+  assert.equal(pm.sent[0].options.privateChannelSigner.getPublicKey(), 'channel')
+  assert.equal(pm.sent[0].options.privateChannelReaderPubkey, 'reader')
+})
+
+test('reader-only channels cannot use recovery seed modes', async () => {
+  const pm = fakePrivateMessage()
+  await assert.rejects(
+    () => new PrivateMessenger({ _privateMessage: pm }).init({
+      userSigner: signer('user'),
+      channels: [{ pubkey: 'channel', readerSigner: signer('reader'), relays: ['wss://relay.example'], mode: 'seeder' }]
+    }),
+    /PRIVATE_CHANNEL_WRITER_REQUIRED/
+  )
+  await assert.rejects(
+    () => new PrivateMessenger({ _privateMessage: pm }).init({
+      userSigner: signer('user'),
+      channels: [{ pubkey: 'channel', readerSigner: signer('reader'), relays: ['wss://relay.example'], mode: 'watchtower' }]
+    }),
+    /PRIVATE_CHANNEL_WRITER_REQUIRED/
+  )
+})
+
 test('private messenger debug reports send and enqueue events without payload secrets', async () => {
   const pm = fakePrivateMessage()
   const debugEvents = []
@@ -363,6 +426,45 @@ test('watch schedules reload-gap recovery and fetches missing channel window', a
   assert.equal(fetches[0].receivedChunkTtlMs, 7 * 24 * 60 * 60 * 1000)
   assert.equal(messenger.nextMessage().event.id, 'ask-id')
   assert.deepEqual(messenger.readState().channels.channel.offlineRanges, [])
+})
+
+test('reader-only channels fetch reload gaps with the reader signer', async () => {
+  const pm = fakePrivateMessage()
+  const fetches = []
+  let scheduled = null
+  const now = Math.floor(Date.now() / 1000)
+  globalThis.localStorage.setItem('ez-vault:private-messenger:user:state', JSON.stringify({
+    channels: {
+      channel: { lastSeenAt: now - 10, lastWatchedAt: now - 10 }
+    }
+  }))
+  const messenger = await new PrivateMessenger({
+    _privateMessage: pm,
+    _privateChannel: {
+      fetch: async options => {
+        fetches.push(options)
+        options.onEvent({
+          id: 'missed-id',
+          kind: TELL_KIND,
+          pubkey: 'alice',
+          created_at: now - 5,
+          tags: [['r', 'user']],
+          content: 'missed'
+        }, { id: 'outer-id', created_at: now - 5 }, { channelPubkey: 'channel' })
+      }
+    },
+    _setTimeout: fn => { scheduled = fn }
+  }).init({
+    userSigner: signer('user'),
+    channels: [{ pubkey: 'channel', readerSigner: signer('reader'), relays: ['wss://relay.example'] }]
+  })
+
+  await scheduled()
+
+  assert.equal(fetches.length, 1)
+  assert.equal(fetches[0].privateChannelSigner, null)
+  assert.equal(fetches[0].privateChannelReaderSigner.getPublicKey(), 'reader')
+  assert.equal(messenger.nextMessage().event.id, 'missed-id')
 })
 
 test('seeder channels publish presence immediately and on interval', async () => {

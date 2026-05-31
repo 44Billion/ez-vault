@@ -37,7 +37,7 @@ async function makeImkcProof ({ senderSigner, imkcSigner, senderPubkey, imkcPubk
 }
 
 // Streaming version of wrapEvent
-export async function * wrapEvents ({ senderSigner, imkcSigner, privateChannelSigner = senderSigner, receivers, receiverTag, event, expirationSeconds = EXPIRATION_SECONDS, _getIykcProofs = getIykcProofs }) {
+export async function * wrapEvents ({ senderSigner, imkcSigner, privateChannelSigner = senderSigner, privateChannelReaderPubkey, receivers, receiverTag, event, expirationSeconds = EXPIRATION_SECONDS, _getIykcProofs = getIykcProofs }) {
   if (!senderSigner?.getPublicKey) throw new Error('SENDER_SIGNER_REQUIRED')
   if (!senderSigner?.nip44Encrypt) throw new Error('SIGNER_NIP44_ENCRYPT_UNSUPPORTED')
   if (!privateChannelSigner?.getPublicKey || !privateChannelSigner?.nip44Encrypt || !privateChannelSigner?.signEvent) throw new Error('PRIVATE_CHANNEL_SIGNER_REQUIRED')
@@ -48,6 +48,7 @@ export async function * wrapEvents ({ senderSigner, imkcSigner, privateChannelSi
   const imkcPubkey = useMultiDh && imkcSigner ? await imkcSigner.getPublicKey() : ''
   const imkcProof = imkcPubkey ? await makeImkcProof({ senderSigner, imkcSigner, senderPubkey, imkcPubkey }) : ''
   const channelPubkey = await privateChannelSigner.getPublicKey()
+  const channelReaderPubkey = privateChannelReaderPubkey || channelPubkey
   const routerSeckey = generateSecretKey()
   const routerPubkey = getPublicKey(routerSeckey)
   const receiverPubkeyList = receiverPubkeys(receivers)
@@ -72,7 +73,7 @@ export async function * wrapEvents ({ senderSigner, imkcSigner, privateChannelSi
         kind: PRIVATE_BROADCAST_KIND,
         created_at: nowSeconds(),
         tags: [['expiration', String(nowSeconds() + expirationSeconds)]],
-        content: await privateChannelSigner.nip44Encrypt(channelPubkey, JSON.stringify(router))
+        content: await privateChannelSigner.nip44Encrypt(channelReaderPubkey, JSON.stringify(router))
       })
       if (eventByteLength(outer) > MAX_EVENT_BYTES) throw new Error('EVENT_TOO_LARGE')
       yield outer
@@ -157,13 +158,14 @@ async function unwrapRecipientEnvelope ({ envelope, receiverSigner, iykcSigner, 
   return { ...normalized, id: getEventHash(normalized) }
 }
 
-export async function unwrapEvent ({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, event, receiverPubkey }) {
+export async function unwrapEvent ({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelReaderSigner = privateChannelSigner, event, receiverPubkey }) {
   if (!event || event.kind !== PRIVATE_BROADCAST_KIND) return null
   if (!receiverSigner?.nip44Decrypt) throw new Error('RECEIVER_SIGNER_NIP44_DECRYPT_UNSUPPORTED')
-  if (!privateChannelSigner?.getPublicKey || !privateChannelSigner?.nip44Decrypt) throw new Error('PRIVATE_CHANNEL_SIGNER_REQUIRED')
+  if (!privateChannelReaderSigner?.nip44Decrypt) throw new Error('PRIVATE_CHANNEL_READER_REQUIRED')
 
-  const channelPubkey = await privateChannelSigner.getPublicKey()
-  const router = JSON.parse(await privateChannelSigner.nip44Decrypt(channelPubkey, event.content))
+  const channelPubkey = event.pubkey || await privateChannelSigner?.getPublicKey?.()
+  if (!channelPubkey) throw new Error('PRIVATE_CHANNEL_PUBKEY_REQUIRED')
+  const router = JSON.parse(await privateChannelReaderSigner.nip44Decrypt(channelPubkey, event.content))
   if (router.kind !== ROUTER_KIND) throw new Error('INVALID_ROUTER_KIND')
   if (receiverPubkey && readReceiverTag(router) && readReceiverTag(router) !== receiverPubkey) return null
 
@@ -186,9 +188,9 @@ export async function unwrapEvent ({ receiverSigner, iykcSigner, privateChannelS
   return null
 }
 
-export async function publish ({ senderSigner, imkcSigner, privateChannelSigner = senderSigner, receivers, receiverTag, event, relays, expirationSeconds, _getIykcProofs = getIykcProofs }) {
+export async function publish ({ senderSigner, imkcSigner, privateChannelSigner = senderSigner, privateChannelReaderPubkey, receivers, receiverTag, event, relays, expirationSeconds, _getIykcProofs = getIykcProofs }) {
   const results = []
-  for await (const wrappedEvent of wrapEvents({ senderSigner, imkcSigner, privateChannelSigner, receivers, receiverTag, event, expirationSeconds, _getIykcProofs })) {
+  for await (const wrappedEvent of wrapEvents({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag, event, expirationSeconds, _getIykcProofs })) {
     results.push(await publishToRelays(wrappedEvent, relays))
   }
   return { results }
@@ -292,6 +294,8 @@ function createProcessor ({
   iykcSigner,
   privateChannelSigner,
   privateChannelSignersByPubkey,
+  privateChannelReaderSigner = privateChannelSigner,
+  privateChannelReaderSignersByPubkey,
   receiverPubkey,
   mode = 'leecher',
   modeByPubkey,
@@ -321,10 +325,12 @@ function createProcessor ({
     try {
       const channelPubkey = outer.pubkey || await privateChannelSigner?.getPublicKey?.()
       const channelSigner = readSignerFromMap(privateChannelSignersByPubkey, channelPubkey) || privateChannelSigner
+      const channelReaderSigner = readSignerFromMap(privateChannelReaderSignersByPubkey, channelPubkey) || privateChannelReaderSigner || channelSigner
       const channelMode = readValueFromMap(modeByPubkey, channelPubkey) || mode
-      if (!channelSigner?.getPublicKey || !channelSigner?.nip44Decrypt) throw new Error('PRIVATE_CHANNEL_SIGNER_REQUIRED')
+      if (!channelPubkey) throw new Error('PRIVATE_CHANNEL_PUBKEY_REQUIRED')
+      if (!channelReaderSigner?.nip44Decrypt) throw new Error('PRIVATE_CHANNEL_READER_REQUIRED')
 
-      const router = JSON.parse(await channelSigner.nip44Decrypt(channelPubkey, outer.content))
+      const router = JSON.parse(await channelReaderSigner.nip44Decrypt(channelPubkey, outer.content))
       if (router.kind !== ROUTER_KIND) return
       const senderPubkey = readSenderTag(router)
       if (receiverPubkey && readReceiverTag(router) && readReceiverTag(router) !== receiverPubkey && senderPubkey !== receiverPubkey) return
@@ -427,7 +433,7 @@ function createProcessor ({
   }
 }
 
-export async function fetch ({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelSignersByPubkey, privateChannelPubkey, privateChannelPubkeys, receiverPubkey, relays, onChunk, onEvent, onSeedEvent, onContentKeyUsage, onError, since, until, limit, mode = 'leecher', modeByPubkey, receivedChunkTtlMs = DEFAULT_RECEIVED_CHUNK_TTL_MS, receivedChunkMaxBytes = DEFAULT_RECEIVED_CHUNK_MAX_BYTES, receivedChunkStorageArea, ignoredGroupTtlMs = DEFAULT_IGNORED_GROUP_TTL_MS, ignoredGroupMaxEntries = DEFAULT_IGNORED_GROUP_MAX_ENTRIES }) {
+export async function fetch ({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelSignersByPubkey, privateChannelReaderSigner = privateChannelSigner, privateChannelReaderSignersByPubkey, privateChannelPubkey, privateChannelPubkeys, receiverPubkey, relays, onChunk, onEvent, onSeedEvent, onContentKeyUsage, onError, since, until, limit, mode = 'leecher', modeByPubkey, receivedChunkTtlMs = DEFAULT_RECEIVED_CHUNK_TTL_MS, receivedChunkMaxBytes = DEFAULT_RECEIVED_CHUNK_MAX_BYTES, receivedChunkStorageArea, ignoredGroupTtlMs = DEFAULT_IGNORED_GROUP_TTL_MS, ignoredGroupMaxEntries = DEFAULT_IGNORED_GROUP_MAX_ENTRIES }) {
   if (!relays?.length) throw new Error('NO_RELAYS')
   const authors = privateChannelPubkeyList({ privateChannelPubkey, privateChannelPubkeys })
   const filter = { kinds: [PRIVATE_BROADCAST_KIND] }
@@ -438,21 +444,21 @@ export async function fetch ({ receiverSigner, iykcSigner, privateChannelSigner 
 
   const events = await fetchEvents(filter, relays)
   events.sort((a, b) => a.created_at - b.created_at)
-  const processOuterEvent = createProcessor({ receiverSigner, iykcSigner, privateChannelSigner, privateChannelSignersByPubkey, receiverPubkey, mode, modeByPubkey, onChunk, onEvent, onSeedEvent, onContentKeyUsage, onError, receivedChunkTtlMs, receivedChunkMaxBytes, receivedChunkStorageArea, ignoredGroupTtlMs, ignoredGroupMaxEntries })
+  const processOuterEvent = createProcessor({ receiverSigner, iykcSigner, privateChannelSigner, privateChannelSignersByPubkey, privateChannelReaderSigner, privateChannelReaderSignersByPubkey, receiverPubkey, mode, modeByPubkey, onChunk, onEvent, onSeedEvent, onContentKeyUsage, onError, receivedChunkTtlMs, receivedChunkMaxBytes, receivedChunkStorageArea, ignoredGroupTtlMs, ignoredGroupMaxEntries })
   for (const event of events) await processOuterEvent(event)
   return events
 }
 
-export function subscribe ({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelSignersByPubkey, privateChannelPubkey, privateChannelPubkeys, receiverPubkey, relays, onChunk, onEvent, onSeedEvent, onContentKeyUsage, onError, onEose, since = nowSeconds() - 5, limit, liveOnly = false, mode = 'leecher', modeByPubkey, receivedChunkTtlMs = DEFAULT_RECEIVED_CHUNK_TTL_MS, receivedChunkMaxBytes = DEFAULT_RECEIVED_CHUNK_MAX_BYTES, receivedChunkStorageArea, ignoredGroupTtlMs = DEFAULT_IGNORED_GROUP_TTL_MS, ignoredGroupMaxEntries = DEFAULT_IGNORED_GROUP_MAX_ENTRIES }) {
+export function subscribe ({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelSignersByPubkey, privateChannelReaderSigner = privateChannelSigner, privateChannelReaderSignersByPubkey, privateChannelPubkey, privateChannelPubkeys, receiverPubkey, relays, onChunk, onEvent, onSeedEvent, onContentKeyUsage, onError, onEose, since = nowSeconds() - 5, limit, liveOnly = false, mode = 'leecher', modeByPubkey, receivedChunkTtlMs = DEFAULT_RECEIVED_CHUNK_TTL_MS, receivedChunkMaxBytes = DEFAULT_RECEIVED_CHUNK_MAX_BYTES, receivedChunkStorageArea, ignoredGroupTtlMs = DEFAULT_IGNORED_GROUP_TTL_MS, ignoredGroupMaxEntries = DEFAULT_IGNORED_GROUP_MAX_ENTRIES }) {
   if (!relays?.length) throw new Error('NO_RELAYS')
   if (receiverSigner && !receiverSigner?.nip44Decrypt) throw new Error('RECEIVER_SIGNER_NIP44_DECRYPT_UNSUPPORTED')
-  if (!privateChannelSigner && !privateChannelSignersByPubkey) throw new Error('PRIVATE_CHANNEL_SIGNER_REQUIRED')
+  if (!privateChannelReaderSigner && !privateChannelReaderSignersByPubkey && !privateChannelSigner && !privateChannelSignersByPubkey) throw new Error('PRIVATE_CHANNEL_READER_REQUIRED')
 
   const authors = privateChannelPubkeyList({ privateChannelPubkey, privateChannelPubkeys })
   const filter = { kinds: [PRIVATE_BROADCAST_KIND], since }
   if (authors.length) filter.authors = authors
   if (limit != null) filter.limit = limit
-  const processOuterEvent = createProcessor({ receiverSigner, iykcSigner, privateChannelSigner, privateChannelSignersByPubkey, receiverPubkey, mode, modeByPubkey, onChunk, onEvent, onSeedEvent, onContentKeyUsage, onError, receivedChunkTtlMs, receivedChunkMaxBytes, receivedChunkStorageArea, ignoredGroupTtlMs, ignoredGroupMaxEntries })
+  const processOuterEvent = createProcessor({ receiverSigner, iykcSigner, privateChannelSigner, privateChannelSignersByPubkey, privateChannelReaderSigner, privateChannelReaderSignersByPubkey, receiverPubkey, mode, modeByPubkey, onChunk, onEvent, onSeedEvent, onContentKeyUsage, onError, receivedChunkTtlMs, receivedChunkMaxBytes, receivedChunkStorageArea, ignoredGroupTtlMs, ignoredGroupMaxEntries })
   let eosed = false
 
   return pool.subscribeMany(relays, filter, {
