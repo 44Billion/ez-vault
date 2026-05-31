@@ -364,8 +364,14 @@ test('setContentKeySecret causes one immediate announce through the sync subscri
   const trusted = '8'.repeat(64)
   const yells = []
   const timers = []
+  const instances = []
 
   class FakeMessenger {
+    constructor () {
+      this.updates = []
+      instances.push(this)
+    }
+
     async init (options) {
       this.options = options
       return this
@@ -373,6 +379,7 @@ test('setContentKeySecret causes one immediate announce through the sync subscri
 
     async update (options) {
       this.options = options
+      this.updates.push(options)
       return this
     }
 
@@ -414,10 +421,12 @@ test('setContentKeySecret causes one immediate announce through the sync subscri
   })
 
   await controller.init()
+  assert.equal(instances[0].updates.length, 0)
   const contentSecret = seckey()
   const contentPubkey = pubkeyFromSecret(contentSecret)
   secrets.setContentKeySecret(owner.pubkey, contentSecret, 60)
   await flushMicrotasks()
+  assert.equal(instances[0].updates.length, 0)
 
   const immediateTimers = timers.filter(timer => timer.ms === 0)
   assert.equal(immediateTimers.length, 1)

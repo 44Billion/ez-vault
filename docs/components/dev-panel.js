@@ -199,6 +199,7 @@ function accountRow (row, errors, unlocked) {
 export class DevPanel extends HTMLElement {
   #unsubscribeSync = null
   #unsubscribeSecrets = null
+  #unsubscribeContentKeys = null
   #unsubscribeStore = null
   #errors = new Map()
 
@@ -206,6 +207,7 @@ export class DevPanel extends HTMLElement {
     injectComponentStyles('dev-panel', STYLES)
     this.#unsubscribeSync = sync.subscribeDebug(() => this.render())
     this.#unsubscribeSecrets = secrets.subscribe(() => this.render())
+    this.#unsubscribeContentKeys = secrets.subscribeContentKeys?.(() => this.render()) || null
     this.#unsubscribeStore = store.subscribe(() => this.render())
     this.addEventListener('click', this.#onClick)
     this.render()
@@ -215,6 +217,7 @@ export class DevPanel extends HTMLElement {
     this.removeEventListener('click', this.#onClick)
     this.#unsubscribeSync?.()
     this.#unsubscribeSecrets?.()
+    this.#unsubscribeContentKeys?.()
     this.#unsubscribeStore?.()
   }
 

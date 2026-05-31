@@ -391,7 +391,6 @@ export function setContentKeySecret (ownerPubkey, seckey, createdAt = Math.floor
     // WebAuthn prompt.
     persistContentKeyEntries()
     notifyContentKeys(ownerPubkey)
-    notify()
     return signer
   } catch (err) {
     replaceContentKeyEntries(prior, { pruneStale: false })
@@ -407,7 +406,6 @@ export function replaceContentKeySecret (ownerPubkey, seckey, createdAt = Math.f
     const signer = adoptContentKey(ownerPubkey, seckey, Math.max(0, Math.floor(Number(createdAt) || 0)))
     persistContentKeyEntries({ pruneStale: false })
     notifyContentKeys(ownerPubkey)
-    notify()
     return signer
   } catch (err) {
     replaceContentKeyEntries(prior, { pruneStale: false })
