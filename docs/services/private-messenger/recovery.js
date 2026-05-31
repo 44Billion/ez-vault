@@ -105,7 +105,8 @@ export function createEventReplyPacker ({
   code,
   payload = {},
   eventsPerChunk = DEFAULT_EVENTS_PER_CHUNK,
-  recordsFromInput = eventRecordFromInput
+  recordsFromInput = eventRecordFromInput,
+  sendEmptyReply = false
 }) {
   if (!messenger?.reply) throw new Error('MESSENGER_REQUIRED')
   if (!question?.id) throw new Error('QUESTION_REQUIRED')
@@ -116,11 +117,13 @@ export function createEventReplyPacker ({
   let chunkEvents = 0
   let index = 0
   let finalized = false
+  let published = false
 
   async function publish (isLast) {
     const jsonl = chunk
     chunk = ''
     chunkEvents = 0
+    published = true
     await messenger.reply({
       channelPubkey,
       question,
@@ -157,6 +160,7 @@ export function createEventReplyPacker ({
     if (finalized) return
     if (input != null) await appendRecords(await recordsFromInput(input), { final: true })
     finalized = true
+    if (!chunk && !sendEmptyReply && !published) return
     await publish(true)
   }
 

@@ -514,6 +514,32 @@ test('watchtower channels store router seeds without consuming normal messages',
   assert.equal(messenger.nextMessage(), null)
 })
 
+test('missing-message asks without stored seeds do not send empty replies', async () => {
+  const pm = fakePrivateMessage()
+  const now = Math.floor(Date.now() / 1000)
+  await new PrivateMessenger({ _privateMessage: pm }).init({
+    userSigner: signer('seeder'),
+    channels: [{ pubkey: 'channel', signer: signer('channel'), relays: ['wss://relay.example'], mode: 'seeder' }]
+  })
+
+  await pm.watchCalls[0].onAsk({
+    event: {
+      id: 'question-id',
+      kind: ASK_KIND,
+      pubkey: 'user',
+      created_at: now,
+      tags: [['r', 'seeder'], ['h', MISSING_MESSAGES_ASK_CODE]],
+      content: JSON.stringify({ since: now - 5, until: now + 5 })
+    },
+    outer: { id: 'ask-outer-id', created_at: now },
+    meta: { channelPubkey: 'channel' },
+    payload: { code: MISSING_MESSAGES_ASK_CODE, payload: { since: now - 5, until: now + 5 } },
+    question: { id: 'question-id' }
+  })
+
+  assert.equal(pm.sent.some(sent => sent.method === 'reply' && sent.options.code === MISSING_MESSAGES_REPLY_CODE), false)
+})
+
 test('recovery asks online seeders for the relay-uncovered left edge', async () => {
   const pm = fakePrivateMessage()
   const fetches = []
@@ -717,6 +743,25 @@ test('missing-message reply packer streams compact seed routers only', async () 
   assert.deepEqual(record.tags, [['f', 'sender'], ['c', '0', '1']])
 })
 
+test('missing-message reply packer skips empty replies by default', async () => {
+  const replies = []
+  const question = {
+    id: 'question-id',
+    pubkey: 'user',
+    tags: [['h', MISSING_MESSAGES_ASK_CODE]],
+    content: JSON.stringify({ since: 5, until: 20 })
+  }
+  const packer = createMissingMessageReplyPacker({
+    messenger: { reply: async options => replies.push(options) },
+    channelPubkey: 'channel',
+    question
+  })
+
+  await packer.finalize()
+
+  assert.deepEqual(replies, [])
+})
+
 test('event reply packer streams regular event lists', async () => {
   const replies = []
   const question = { id: 'question-id', pubkey: 'peer', content: '' }
@@ -744,4 +789,45 @@ test('event reply packer streams regular event lists', async () => {
   assert.equal(replies[1].payload.index, 1)
   assert.equal(replies[1].payload.isLast, true)
   assert.deepEqual(replies[1].payload.jsonl.trim().split('\n').map(line => JSON.parse(line).id), ['event-3'])
+})
+
+test('event reply packer can send configured empty replies', async () => {
+  const replies = []
+  const question = { id: 'question-id', pubkey: 'peer', content: '' }
+  const packer = createEventReplyPacker({
+    messenger: { reply: async options => replies.push(options) },
+    channelPubkey: 'channel',
+    question,
+    code: 'eventSync_empty',
+    sendEmptyReply: true
+  })
+
+  await packer.finalize()
+
+  assert.equal(replies.length, 1)
+  assert.equal(replies[0].payload.index, 0)
+  assert.equal(replies[0].payload.isLast, true)
+  assert.equal(replies[0].payload.jsonl, '')
+})
+
+test('event reply packer still sends an empty final marker after prior chunks', async () => {
+  const replies = []
+  const question = { id: 'question-id', pubkey: 'peer', content: '' }
+  const packer = createEventReplyPacker({
+    messenger: { reply: async options => replies.push(options) },
+    channelPubkey: 'channel',
+    question,
+    code: 'eventSync_marker',
+    eventsPerChunk: 1
+  })
+
+  await packer.update({ id: 'event-1', kind: 1, pubkey: 'alice', created_at: 1, tags: [], content: 'one' })
+  await packer.finalize()
+
+  assert.equal(replies.length, 2)
+  assert.equal(replies[0].payload.isLast, false)
+  assert.equal(JSON.parse(replies[0].payload.jsonl).id, 'event-1')
+  assert.equal(replies[1].payload.index, 1)
+  assert.equal(replies[1].payload.isLast, true)
+  assert.equal(replies[1].payload.jsonl, '')
 })
