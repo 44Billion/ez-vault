@@ -294,6 +294,13 @@ test('wrapEvent can encrypt the outer router to a separate reader key', async ()
     event: wrapped,
     receiverPubkey: bobPubkey
   }), unwrappedFixture(original, await sender.getPublicKey()))
+  assert.deepEqual(await unwrapEvent({
+    receiverSigner: bob,
+    privateChannelSigner: channel,
+    privateChannelReaderPubkey: readerPubkey,
+    event: wrapped,
+    receiverPubkey: bobPubkey
+  }), unwrappedFixture(original, await sender.getPublicKey()))
 })
 
 test('subscribe can read channel events with only a reader signer', async () => {
@@ -326,6 +333,50 @@ test('subscribe can read channel events with only a reader signer', async () => 
       receiverSigner: bob,
       privateChannelSigner: null,
       privateChannelReaderSigner: reader,
+      privateChannelPubkey: channelPubkey,
+      receiverPubkey: bobPubkey,
+      relays: ['wss://relay.example'],
+      onEvent: event => events.push(event)
+    })
+    await handlers.onevent(wrapped)
+
+    assert.deepEqual(events, [unwrappedFixture(original, await sender.getPublicKey())])
+  } finally {
+    pool.subscribeMany = originalSubscribeMany
+  }
+})
+
+test('subscribe can read reader-targeted channel events with the writer signer', async () => {
+  const originalSubscribeMany = pool.subscribeMany
+  let handlers = null
+  pool.subscribeMany = (_relays, _filter, nextHandlers) => {
+    handlers = nextHandlers
+    return { close: () => {} }
+  }
+
+  try {
+    const sender = signer()
+    const channel = signer()
+    const reader = signer()
+    const bob = signer()
+    const bobPubkey = await bob.getPublicKey()
+    const readerPubkey = await reader.getPublicKey()
+    const channelPubkey = await channel.getPublicKey()
+    const original = eventFixture('writer reads reader-targeted router')
+    const [wrapped] = await wrapEvent({
+      senderSigner: sender,
+      privateChannelSigner: channel,
+      privateChannelReaderPubkey: readerPubkey,
+      receivers: [bobPubkey],
+      event: original,
+      _getIykcProofs: noContentKeys
+    })
+    const events = []
+
+    subscribe({
+      receiverSigner: bob,
+      privateChannelSigner: channel,
+      privateChannelReaderPubkey: readerPubkey,
       privateChannelPubkey: channelPubkey,
       receiverPubkey: bobPubkey,
       relays: ['wss://relay.example'],

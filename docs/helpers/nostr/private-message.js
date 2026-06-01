@@ -198,6 +198,15 @@ function readerSignersForChannels (channels) {
   return out
 }
 
+function readerPubkeysForChannels (channels) {
+  const out = {}
+  for (const channel of channels) {
+    const pubkey = watchesByChannel.get(channel)?.privateChannelReaderPubkey
+    if (pubkey) out[channel] = pubkey
+  }
+  return out
+}
+
 function modesForChannels (channels) {
   const out = {}
   for (const channel of channels) out[channel] = watchesByChannel.get(channel)?.mode || 'leecher'
@@ -244,6 +253,8 @@ function rebuildSubscriptions ({ _subscribe = privateChannel.subscribe } = {}) {
       privateChannelSignersByPubkey: signersForChannels(channelList),
       privateChannelReaderSigner: firstWatch.privateChannelReaderSigner,
       privateChannelReaderSignersByPubkey: readerSignersForChannels(channelList),
+      privateChannelReaderPubkey: firstWatch.privateChannelReaderPubkey,
+      privateChannelReaderPubkeysByPubkey: readerPubkeysForChannels(channelList),
       privateChannelPubkeys: channelList,
       receiverPubkey: firstWatch.receiverPubkey,
       relays: [relay],
@@ -284,6 +295,8 @@ async function recoverWatchedChannels ({ _fetch = privateChannel.fetch } = {}) {
       privateChannelSignersByPubkey: { [channelPubkey]: watch.privateChannelSigner },
       privateChannelReaderSigner: watch.privateChannelReaderSigner,
       privateChannelReaderSignersByPubkey: { [channelPubkey]: watch.privateChannelReaderSigner },
+      privateChannelReaderPubkey: watch.privateChannelReaderPubkey,
+      privateChannelReaderPubkeysByPubkey: { [channelPubkey]: watch.privateChannelReaderPubkey },
       privateChannelPubkeys: [channelPubkey],
       receiverPubkey: watch.receiverPubkey,
       relays: watch.relays,
@@ -322,6 +335,7 @@ export async function watch ({
   iykcSigner,
   privateChannelSigner = receiverSigner,
   privateChannelReaderSigner = privateChannelSigner,
+  privateChannelReaderPubkey,
   receiverPubkey,
   mode = 'leecher',
   onAsk,
@@ -354,6 +368,7 @@ export async function watch ({
       iykcSigner,
       privateChannelSigner,
       privateChannelReaderSigner: privateChannelReaderSigner || privateChannelSigner,
+      privateChannelReaderPubkey,
       receiverPubkey: ownPubkey,
       mode,
       receivedChunkTtlMs,
@@ -371,6 +386,7 @@ export async function watch ({
       setEquals(new Set(current.relays), new Set(next.relays)) &&
       current.privateChannelSigner === next.privateChannelSigner &&
       current.privateChannelReaderSigner === next.privateChannelReaderSigner &&
+      current.privateChannelReaderPubkey === next.privateChannelReaderPubkey &&
       current.mode === next.mode &&
       current.receivedChunkTtlMs === next.receivedChunkTtlMs &&
       current.receivedChunkMaxBytes === next.receivedChunkMaxBytes &&

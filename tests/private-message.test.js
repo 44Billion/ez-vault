@@ -62,6 +62,7 @@ test('watch merges overlapping relay subscriptions by channel author', async () 
     receiverSigner: signer('receiver'),
     privateChannelSigner: channel1,
     privateChannelReaderSigner: reader1,
+    privateChannelReaderPubkey: 'reader1',
     _subscribe: fakeSubscribe
   })
   await watch({
@@ -70,6 +71,7 @@ test('watch merges overlapping relay subscriptions by channel author', async () 
     receiverSigner: signer('receiver'),
     privateChannelSigner: channel1,
     privateChannelReaderSigner: reader1,
+    privateChannelReaderPubkey: 'reader1',
     _subscribe: fakeSubscribe
   })
   await watch({
@@ -78,6 +80,7 @@ test('watch merges overlapping relay subscriptions by channel author', async () 
     receiverSigner: signer('receiver'),
     privateChannelSigner: signer('channel2'),
     privateChannelReaderSigner: signer('reader2'),
+    privateChannelReaderPubkey: 'reader2',
     mode: 'seeder',
     _subscribe: fakeSubscribe
   })
@@ -91,6 +94,10 @@ test('watch merges overlapping relay subscriptions by channel author', async () 
   assert.deepEqual(calls[1].relays, ['wss://a.example'])
   assert.deepEqual(calls[1].modeByPubkey, { channel1: 'leecher', channel2: 'seeder' })
   assert.deepEqual(Object.fromEntries(Object.entries(calls[1].privateChannelReaderSignersByPubkey).map(([channel, nextSigner]) => [channel, nextSigner.getPublicKey()])), {
+    channel1: 'reader1',
+    channel2: 'reader2'
+  })
+  assert.deepEqual(calls[1].privateChannelReaderPubkeysByPubkey, {
     channel1: 'reader1',
     channel2: 'reader2'
   })

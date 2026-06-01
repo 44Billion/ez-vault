@@ -29,13 +29,6 @@ function signer (pubkey) {
   }
 }
 
-function channelSigner (pubkey) {
-  return {
-    ...signer(pubkey),
-    nip44Encrypt: async (_pubkey, content) => content
-  }
-}
-
 function jsonlContent (...rows) {
   return Buffer.from(`${rows.join('\n')}\n`).toString('base64')
 }
@@ -290,7 +283,28 @@ test('private messenger writer channels can encrypt to a reader key', async () =
 
   assert.equal(pm.watchCalls[0].privateChannelSigner.getPublicKey(), 'channel')
   assert.equal(pm.watchCalls[0].privateChannelReaderSigner.getPublicKey(), 'reader')
+  assert.equal(pm.watchCalls[0].privateChannelReaderPubkey, 'reader')
   assert.equal(pm.sent[0].options.privateChannelSigner.getPublicKey(), 'channel')
+  assert.equal(pm.sent[0].options.privateChannelReaderPubkey, 'reader')
+})
+
+test('private messenger writer channels can read with only a reader pubkey', async () => {
+  const pm = fakePrivateMessage()
+  const messenger = await new PrivateMessenger({ _privateMessage: pm }).init({
+    userSigner: signer('user'),
+    channels: [{
+      pubkey: 'channel',
+      signer: signer('channel'),
+      readerPubkey: 'reader',
+      relays: ['wss://relay.example']
+    }]
+  })
+
+  await messenger.tell({ channelPubkey: 'channel', receiverPubkey: 'alice', payload: 'note' })
+
+  assert.equal(pm.watchCalls[0].privateChannelSigner.getPublicKey(), 'channel')
+  assert.equal(pm.watchCalls[0].privateChannelReaderSigner.getPublicKey(), 'channel')
+  assert.equal(pm.watchCalls[0].privateChannelReaderPubkey, 'reader')
   assert.equal(pm.sent[0].options.privateChannelReaderPubkey, 'reader')
 })
 
@@ -750,6 +764,14 @@ test('missing-message replies ignore raw event rows', async () => {
 test('missing-message replies can recover router-only seed records', async () => {
   const pm = fakePrivateMessage()
   let unwrapCall = null
+  let encryptedTo = null
+  const channel = {
+    ...signer('channel'),
+    nip44Encrypt: async (pubkey, content) => {
+      encryptedTo = pubkey
+      return content
+    }
+  }
   const messenger = await new PrivateMessenger({
     _privateMessage: pm,
     _privateChannel: {
@@ -767,7 +789,7 @@ test('missing-message replies can recover router-only seed records', async () =>
     }
   }).init({
     userSigner: signer('user'),
-    channels: [{ pubkey: 'channel', signer: channelSigner('channel'), relays: ['wss://relay.example'], seeders: ['seeder'] }]
+    channels: [{ pubkey: 'channel', signer: channel, readerPubkey: 'reader', relays: ['wss://relay.example'], seeders: ['seeder'] }]
   })
   const userRow = JSON.stringify(['user', 'ciphertext'])
   const jsonl = `${JSON.stringify({
@@ -787,6 +809,8 @@ test('missing-message replies can recover router-only seed records', async () =>
   })
 
   const syntheticRouter = JSON.parse(unwrapCall.event.content)
+  assert.equal(encryptedTo, 'reader')
+  assert.equal(unwrapCall.privateChannelReaderPubkey, 'reader')
   assert.equal(syntheticRouter.content, jsonlContent(userRow))
   assert.deepEqual(syntheticRouter.tags, [['f', 'alice'], ['c', '0', '1']])
   assert.equal(messenger.nextMessage().event.id, 'missed-id')

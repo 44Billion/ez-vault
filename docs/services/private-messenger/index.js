@@ -6,6 +6,12 @@
 //   onContentKeyChange: event => reviewContentKeyUse(event),
 //   onError: err => reportPrivateMessengerError(err)
 // })
+//
+// Channel roles:
+// - Default channel: { signer } signs, publishes, and decrypts the outer router with the same channel key.
+// - Split reader channel: { signer, readerPubkey } signs as the channel key but encrypts/decrypts the outer router with the reader pubkey.
+// - Reader-secret channel: { signer, readerSigner } is also valid; the reader signer decrypts the router.
+// - Reader-only channel: { pubkey, readerSigner } can watch/fetch/drain messages but cannot send or seed recovery replies.
 // for await (const msg of messenger.messages()) handlePrivateMessage(msg)
 // await messenger.ask({ receiverPubkey, payload: { ping: true } })
 // await messenger.reply({ question: msg.question, payload: { ok: true } })
@@ -429,6 +435,7 @@ export class PrivateMessenger {
         iykcSigner: this.contentKeySigner,
         privateChannelSigner: channel.signer,
         privateChannelReaderSigner: channel.readerSigner,
+        privateChannelReaderPubkey: channel.readerPubkey,
         mode: channel.mode,
         onAsk: message => this.handleAsk(pubkey, message),
         onReply: message => this.handleReply(pubkey, message),
@@ -862,19 +869,21 @@ export class PrivateMessenger {
       tags: (record.tags || []).filter(tag => tag[0] !== 'c').concat([['c', '0', '1']]),
       content: record.content
     }
-    const encryptSigner = channel.readerSigner || channel.signer
+    const encryptSigner = channel.readerSigner && channel.readerSigner !== channel.signer ? channel.readerSigner : channel.signer
+    const encryptPeerPubkey = encryptSigner === channel.signer ? channel.readerPubkey : channelPubkey
     const outer = {
       kind: privateChannel.PRIVATE_BROADCAST_KIND,
       pubkey: channelPubkey,
       created_at: router.created_at,
       tags: [],
-      content: await encryptSigner.nip44Encrypt(channelPubkey, JSON.stringify(router))
+      content: await encryptSigner.nip44Encrypt(encryptPeerPubkey, JSON.stringify(router))
     }
     return this._privateChannel.unwrapEvent({
       receiverSigner: this.userSigner,
       iykcSigner: this.contentKeySigner,
       privateChannelSigner: channel.signer,
       privateChannelReaderSigner: channel.readerSigner,
+      privateChannelReaderPubkey: channel.readerPubkey,
       event: outer,
       receiverPubkey: this.userPubkey
     })
@@ -899,6 +908,7 @@ export class PrivateMessenger {
             iykcSigner: this.contentKeySigner,
             privateChannelSigner: channel.signer,
             privateChannelReaderSigner: channel.readerSigner,
+            privateChannelReaderPubkey: channel.readerPubkey,
             privateChannelPubkeys: [pubkey],
             receiverPubkey: this.userPubkey,
             relays: channel.relays,
