@@ -364,6 +364,18 @@ export function createReceivedChunkStore ({
     return decoder.decode(base64ToBytes(content))
   }
 
+  function readChunkContents (groupKey) {
+    const meta = readMeta(groupKey)
+    if (!meta) return []
+    const parts = []
+    for (let index = 0; index < meta.total; index++) {
+      const chunk = storage().getItem(chunkKey(groupKey, index))
+      if (chunk == null) throw new Error('RECEIVED_CHUNK_MISSING')
+      parts.push(chunk)
+    }
+    return parts
+  }
+
   cleanupStale()
 
   return {
@@ -371,6 +383,7 @@ export function createReceivedChunkStore ({
     drainAvailable,
     groupKeyFor,
     put,
+    readChunkContents,
     readEnvelopeBundleContent,
     readEnvelopeBundleText,
     removeGroup,

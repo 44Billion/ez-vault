@@ -68,3 +68,7 @@ function maxJsonlChunkByteSize () {
 // NIP-44 padding has large size jumps, so derive this from the actual signed
 // event shapes instead of estimating a flat overhead.
 export const JSONL_CHUNK_BYTES = maxJsonlChunkByteSize()
+// Nym carrier content is a base64 slice of the inner event JSON. The router
+// budget is more conservative because routers carry extra tags, so it is safe
+// to reuse it as the maximum carrier content length.
+export const NYM_CARRIER_CHUNK_CHARS = JSONL_CHUNK_BYTES

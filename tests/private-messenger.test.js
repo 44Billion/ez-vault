@@ -6,7 +6,9 @@ import {
   createMissingMessageReplyPacker,
   MISSING_MESSAGES_ASK_CODE,
   MISSING_MESSAGES_REPLY_CODE,
+  NYM_CARRIER_SEED_RECORD_TYPE,
   PrivateMessenger,
+  ROUTER_SEED_RECORD_TYPE,
   SEEDER_PRESENCE_CODE
 } from '../docs/services/private-messenger/index.js'
 
@@ -72,6 +74,14 @@ function fakePrivateMessage () {
     },
     broadcastEvent: async options => {
       sent.push({ method: 'broadcastEvent', options })
+      return { event: options.event, results: [] }
+    },
+    broadcastNymRumor: async options => {
+      sent.push({ method: 'broadcastNymRumor', options })
+      return { rumor: { id: 'nym-raw-id', kind: 9003, pubkey: options.nymSigner.getPublicKey() }, results: [] }
+    },
+    broadcastNymEvent: async options => {
+      sent.push({ method: 'broadcastNymEvent', options })
       return { event: options.event, results: [] }
     },
     unwatch: channels => stopped.push(channels),
@@ -149,6 +159,28 @@ test('private messenger forwards watch errors to the configured error handler', 
   assert.equal(errors[0].message, 'RECEIVER_MULTI_DH_UNSUPPORTED')
 })
 
+test('private messenger queues nym messages without dispatching helper kinds', async () => {
+  const pm = fakePrivateMessage()
+  const messenger = await new PrivateMessenger({ _privateMessage: pm }).init({
+    userSigner: signer('user'),
+    channels: [{ signer: signer('channel'), relays: ['wss://relay.example'] }]
+  })
+
+  pm.watchCalls[0].onNym({
+    event: { id: 'nym-ask-id', kind: ASK_KIND, pubkey: 'nym', created_at: 10, tags: [['r', 'user']], content: 'hi' },
+    outer: { id: 'outer-id', created_at: 11 },
+    meta: { channelPubkey: 'channel' },
+    payload: { payload: 'hi' },
+    nym: { id: 'nym-ask-id' }
+  })
+
+  const item = messenger.nextMessage()
+  assert.equal(item.type, 'nym')
+  assert.equal(item.event.kind, ASK_KIND)
+  assert.equal(item.event.pubkey, 'nym')
+  assert.equal(messenger.nextMessage(), null)
+})
+
 test('private messenger reports content key usage changes for sent and received messages', async () => {
   const pm = fakePrivateMessage()
   const changes = []
@@ -221,6 +253,7 @@ test('private messenger delegates send helpers with scoped signers and relays', 
   const messenger = await new PrivateMessenger({ _privateMessage: pm }).init({
     userSigner: signer('user'),
     contentKeySigner: signer('content'),
+    nymSigner: signer('global-nym'),
     channels: [{ pubkey: 'channel', signer: signer('channel'), relays: ['wss://relay.example'] }]
   })
 
@@ -230,9 +263,11 @@ test('private messenger delegates send helpers with scoped signers and relays', 
   await messenger.yell({ receiverPubkeys: ['alice', 'bob'], payload: 'news' })
   await messenger.broadcastRumor({ receiverPubkeys: ['alice', 'bob'], rumor: { kind: 9001, created_at: 1, tags: [], content: 'raw' } })
   await messenger.broadcastEvent({ receiverPubkeys: ['alice', 'bob'], event: { id: 'signed-id', kind: 9002, pubkey: 'author', created_at: 2, tags: [], content: 'signed', sig: 'sig' } })
+  await messenger.broadcastNymRumor({ rumor: { kind: 9003, created_at: 3, tags: [], content: 'nym raw' } })
+  await messenger.broadcastNymEvent({ event: { id: 'nym-signed-id', kind: 9004, pubkey: 'author', created_at: 4, tags: [], content: 'nym signed', sig: 'sig' } })
 
-  assert.deepEqual(pm.sent.map(s => s.method), ['ask', 'reply', 'tell', 'yell', 'broadcastRumor', 'broadcastEvent'])
-  for (const sent of pm.sent) {
+  assert.deepEqual(pm.sent.map(s => s.method), ['ask', 'reply', 'tell', 'yell', 'broadcastRumor', 'broadcastEvent', 'broadcastNymRumor', 'broadcastNymEvent'])
+  for (const sent of pm.sent.slice(0, 6)) {
     assert.equal(sent.options.senderSigner.getPublicKey(), 'user')
     assert.equal(sent.options.imkcSigner.getPublicKey(), 'content')
     assert.equal(sent.options.privateChannelSigner.getPublicKey(), 'channel')
@@ -240,6 +275,12 @@ test('private messenger delegates send helpers with scoped signers and relays', 
     assert.equal(sent.options.expirationSeconds, 7 * 24 * 60 * 60)
   }
   assert.equal(pm.sent[5].options.event.id, 'signed-id')
+  assert.equal(pm.sent[6].options.nymSigner.getPublicKey(), 'global-nym')
+  assert.equal(pm.sent[6].options.privateChannelSigner.getPublicKey(), 'channel')
+  assert.deepEqual(pm.sent[6].options.relays, ['wss://relay.example'])
+  assert.equal(pm.sent[6].options.expirationSeconds, 7 * 24 * 60 * 60)
+  assert.equal(pm.sent[7].options.nymSigner.getPublicKey(), 'global-nym')
+  assert.equal(pm.sent[7].options.event.pubkey, 'author')
 })
 
 test('private messenger reader-only channels watch and drain but reject sends', async () => {
@@ -264,6 +305,31 @@ test('private messenger reader-only channels watch and drain but reject sends', 
   await assert.rejects(
     () => messenger.tell({ channelPubkey: 'channel', receiverPubkey: 'alice', payload: 'note' }),
     /PRIVATE_CHANNEL_WRITER_REQUIRED/
+  )
+  await assert.rejects(
+    () => messenger.broadcastNymRumor({ channelPubkey: 'channel', nymSigner: signer('nym'), rumor: { kind: 1, tags: [], content: 'note' } }),
+    /PRIVATE_CHANNEL_WRITER_REQUIRED/
+  )
+})
+
+test('private messenger resolves nym signers by method channel then global order', async () => {
+  const pm = fakePrivateMessage()
+  const messenger = await new PrivateMessenger({ _privateMessage: pm }).init({
+    userSigner: signer('user'),
+    nymSigner: signer('global-nym'),
+    channels: [
+      { pubkey: 'global-channel', signer: signer('global-channel'), relays: ['wss://relay.example'] },
+      { pubkey: 'channel-nym', signer: signer('channel-nym'), nymSigner: signer('channel-nym-signer'), relays: ['wss://relay.example'] }
+    ]
+  })
+
+  await messenger.broadcastNymRumor({ channelPubkey: 'global-channel', rumor: { kind: 1, tags: [], content: 'global' } })
+  await messenger.broadcastNymRumor({ channelPubkey: 'channel-nym', rumor: { kind: 1, tags: [], content: 'channel' } })
+  await messenger.broadcastNymRumor({ channelPubkey: 'channel-nym', nymSigner: signer('method-nym'), rumor: { kind: 1, tags: [], content: 'method' } })
+
+  assert.deepEqual(
+    pm.sent.filter(sent => sent.method === 'broadcastNymRumor').map(sent => sent.options.nymSigner.getPublicKey()),
+    ['global-nym', 'channel-nym-signer', 'method-nym']
   )
 })
 
@@ -567,9 +633,10 @@ test('seeder channels store router seeds separately, consume messages, and answe
   assert.equal(reply.options.payload.isLast, true)
   const records = reply.options.payload.jsonl.trim().split('\n').map(line => JSON.parse(line))
   assert.equal(records.length, 1)
-  assert.equal(records[0].kind, 263)
-  assert.equal(Buffer.from(records[0].content, 'base64').toString(), `${userRow}\n`)
-  assert.deepEqual(records[0].tags, [['f', 'alice'], ['c', '0', '1']])
+  assert.equal(records[0].recordType, ROUTER_SEED_RECORD_TYPE)
+  assert.equal(records[0].router.kind, 263)
+  assert.equal(Buffer.from(records[0].router.content, 'base64').toString(), `${userRow}\n`)
+  assert.deepEqual(records[0].router.tags, [['f', 'alice'], ['c', '0', '1']])
   assert.equal(messenger.nextMessage(), null)
 })
 
@@ -626,7 +693,8 @@ test('watchtower channels store router seeds without consuming normal messages',
   assert.equal(reply.options.payload.isLast, true)
   const records = reply.options.payload.jsonl.trim().split('\n').map(line => JSON.parse(line))
   assert.equal(records.length, 1)
-  assert.equal(Buffer.from(records[0].content, 'base64').toString(), `${userRow}\n`)
+  assert.equal(records[0].recordType, ROUTER_SEED_RECORD_TYPE)
+  assert.equal(Buffer.from(records[0].router.content, 'base64').toString(), `${userRow}\n`)
   assert.equal(messenger.nextMessage(), null)
 })
 
@@ -793,11 +861,14 @@ test('missing-message replies can recover router-only seed records', async () =>
   })
   const userRow = JSON.stringify(['user', 'ciphertext'])
   const jsonl = `${JSON.stringify({
-    kind: 263,
-    pubkey: 'router',
-    created_at: 1,
-    tags: [['f', 'alice'], ['c', '0', '1']],
-    content: jsonlContent(userRow)
+    recordType: ROUTER_SEED_RECORD_TYPE,
+    router: {
+      kind: 263,
+      pubkey: 'router',
+      created_at: 1,
+      tags: [['f', 'alice'], ['c', '0', '1']],
+      content: jsonlContent(userRow)
+    }
   })}\n`
   await pm.watchCalls[0].onReply({
     event: { id: 'reply-id', kind: REPLY_KIND, pubkey: 'seeder', created_at: 2, tags: [['q', 'question-id']], content: '' },
@@ -814,6 +885,77 @@ test('missing-message replies can recover router-only seed records', async () =>
   assert.equal(syntheticRouter.content, jsonlContent(userRow))
   assert.deepEqual(syntheticRouter.tags, [['f', 'alice'], ['c', '0', '1']])
   assert.equal(messenger.nextMessage().event.id, 'missed-id')
+  assert.equal(messenger.nextMessage(), null)
+})
+
+test('nym carrier seeds are replied to and recovered as nym queue items', async () => {
+  const pm = fakePrivateMessage()
+  const now = Math.floor(Date.now() / 1000)
+  const carriers = [
+    {
+      id: 'carrier-id',
+      kind: 264,
+      pubkey: 'nym',
+      created_at: now,
+      tags: [['id', 'inner-id'], ['c', '0', '1']],
+      content: 'payload',
+      sig: 'sig'
+    }
+  ]
+  const messenger = await new PrivateMessenger({
+    _privateMessage: pm,
+    _privateChannel: {
+      eventFromNymCarriers: input => {
+        assert.deepEqual(input, carriers)
+        return { id: 'inner-id', kind: ASK_KIND, pubkey: 'inner-author', created_at: now, tags: [['r', 'user']], content: 'nym ask' }
+      }
+    }
+  }).init({
+    userSigner: signer('seeder'),
+    channels: [{ pubkey: 'channel', signer: signer('channel'), relays: ['wss://relay.example'], mode: 'seeder' }]
+  })
+
+  pm.watchCalls[0].onSeed({
+    recordType: NYM_CARRIER_SEED_RECORD_TYPE,
+    channelPubkey: 'channel',
+    outer: { id: 'outer-id', kind: 3560, pubkey: 'channel', created_at: now },
+    carriers
+  })
+
+  await pm.watchCalls[0].onAsk({
+    event: {
+      id: 'question-id',
+      kind: ASK_KIND,
+      pubkey: 'user',
+      created_at: now,
+      tags: [['r', 'seeder'], ['h', MISSING_MESSAGES_ASK_CODE]],
+      content: JSON.stringify({ since: now - 5, until: now + 5 })
+    },
+    outer: { id: 'ask-outer-id', created_at: now },
+    meta: { channelPubkey: 'channel' },
+    payload: { code: MISSING_MESSAGES_ASK_CODE, payload: { since: now - 5, until: now + 5 } },
+    question: { id: 'question-id' }
+  })
+
+  const reply = pm.sent.find(sent => sent.method === 'reply' && sent.options.code === MISSING_MESSAGES_REPLY_CODE)
+  const records = reply.options.payload.jsonl.trim().split('\n').map(line => JSON.parse(line))
+  assert.equal(records.length, 1)
+  assert.equal(records[0].recordType, NYM_CARRIER_SEED_RECORD_TYPE)
+  assert.deepEqual(records[0].carriers, carriers)
+
+  await pm.watchCalls[0].onReply({
+    event: { id: 'reply-id', kind: REPLY_KIND, pubkey: 'seeder', created_at: now, tags: [['q', 'question-id']], content: '' },
+    outer: { id: 'reply-outer-id', created_at: now },
+    meta: { channelPubkey: 'channel' },
+    payload: { code: MISSING_MESSAGES_REPLY_CODE, payload: { index: 0, isLast: true, jsonl: reply.options.payload.jsonl } },
+    questionId: 'question-id',
+    reply: { id: 'reply-id' }
+  })
+
+  const item = messenger.nextMessage()
+  assert.equal(item.type, 'nym')
+  assert.equal(item.event.kind, ASK_KIND)
+  assert.equal(item.meta.recoveredFromSeeder, 'seeder')
   assert.equal(messenger.nextMessage(), null)
 })
 
@@ -844,6 +986,7 @@ test('missing-message reply packer streams compact seed routers only', async () 
   })
   await packer.finalize({
     type: 'seed',
+    recordType: ROUTER_SEED_RECORD_TYPE,
     channelPubkey: 'channel',
     outer: { id: 'outer-id', kind: 3560, pubkey: 'channel', created_at: 10, tags: [['expiration', '99']] },
     router: {
@@ -864,9 +1007,10 @@ test('missing-message reply packer streams compact seed routers only', async () 
   const lines = replies[0].payload.jsonl.trim().split('\n')
   assert.equal(lines.length, 1)
   const record = JSON.parse(lines[0])
-  assert.equal(record.kind, 263)
-  assert.equal(Buffer.from(record.content, 'base64').toString(), `${userRow}\n`)
-  assert.deepEqual(record.tags, [['f', 'sender'], ['c', '0', '1']])
+  assert.equal(record.recordType, ROUTER_SEED_RECORD_TYPE)
+  assert.equal(record.router.kind, 263)
+  assert.equal(Buffer.from(record.router.content, 'base64').toString(), `${userRow}\n`)
+  assert.deepEqual(record.router.tags, [['f', 'sender'], ['c', '0', '1']])
 })
 
 test('missing-message reply packer skips empty replies by default', async () => {

@@ -2,6 +2,7 @@
 // const messenger = await createPrivateMessenger({
 //   userSigner,
 //   contentKeySigner,
+//   nymSigner: optionalDefaultNymSigner,
 //   channels: [{ signer: privateChannelSigner, relays, mode: 'leecher', seeders: optionalSeederPubkeys }],
 //   onContentKeyChange: event => reviewContentKeyUse(event),
 //   onError: err => reportPrivateMessengerError(err)
@@ -19,6 +20,8 @@
 // await messenger.yell({ receiverPubkeys, payload: { notice: 'hello all' } })
 // await messenger.broadcastRumor({ receiverPubkeys, rumor: { kind, tags: [], content } })
 // await messenger.broadcastEvent({ receiverPubkeys, event: signedNostrEvent })
+// await messenger.broadcastNymRumor({ rumor: { kind, tags: [], content } })
+// await messenger.broadcastNymEvent({ event: signedNostrEvent })
 // await messenger.update({ channels: [{ signer: privateChannelSigner, relays, seeders: nextOptionalSeederPubkeys }] })
 // messenger.clearChannel(channelPubkey)
 //
@@ -38,22 +41,28 @@ import * as privateChannel from '../private-channel/index.js'
 import { createQueue } from '../web-storage-queue.js'
 import { DEFAULT_STALE_CHANNEL_SECONDS } from './constants.js'
 import {
+  compactSeedNymCarriers,
   compactSeedRouter,
   createEventReplyPacker,
   createMissingMessageReplyPacker,
   MISSING_MESSAGES_ASK_CODE,
   MISSING_MESSAGES_REPLY_CODE,
+  NYM_CARRIER_SEED_RECORD_TYPE,
+  ROUTER_SEED_RECORD_TYPE,
   SEEDER_PRESENCE_CODE
 } from './recovery.js'
 
 export { createQueue } from '../web-storage-queue.js'
 export { DEFAULT_STALE_CHANNEL_SECONDS } from './constants.js'
 export {
+  compactSeedNymCarriers,
   compactSeedRouter,
   createEventReplyPacker,
   createMissingMessageReplyPacker,
   MISSING_MESSAGES_ASK_CODE,
   MISSING_MESSAGES_REPLY_CODE,
+  NYM_CARRIER_SEED_RECORD_TYPE,
+  ROUTER_SEED_RECORD_TYPE,
   SEEDER_PRESENCE_CODE
 } from './recovery.js'
 
@@ -135,6 +144,7 @@ export class PrivateMessenger {
 
     this.userSigner = null
     this.contentKeySigner = null
+    this.nymSigner = null
     this.userPubkey = ''
     this.contentKeyPubkey = ''
     this.prefix = ''
@@ -147,17 +157,18 @@ export class PrivateMessenger {
     this.stopOffline = null
   }
 
-  async init ({ userSigner, contentKeySigner, channels = [], relays = [], mode = 'leecher' }) {
+  async init ({ userSigner, contentKeySigner, nymSigner, channels = [], relays = [], mode = 'leecher' }) {
     if (!userSigner?.getPublicKey) throw new Error('USER_SIGNER_REQUIRED')
     this.userSigner = userSigner
     this.contentKeySigner = contentKeySigner || null
+    this.nymSigner = nymSigner || null
     this.userPubkey = await userSigner.getPublicKey()
     this.contentKeyPubkey = await this.contentKeySigner?.getPublicKey?.() || ''
     this.prefix = `ez-vault:private-messenger:${this.userPubkey}`
     this.queue = createQueue({ prefix: this.prefix, maxBytes: this.messageQueueMaxBytes, evictionPolicy: 'fifo' })
     this.seedQueue = createQueue({ prefix: `${this.prefix}:seeds`, maxBytes: this.seedQueueMaxBytes, evictionPolicy: 'fifo' })
     this.cleanupStaleChannels()
-    await this.update({ userSigner, contentKeySigner, channels, relays, mode })
+    await this.update({ userSigner, contentKeySigner, nymSigner: this.nymSigner, channels, relays, mode })
     return this
   }
 
@@ -183,9 +194,10 @@ export class PrivateMessenger {
     })
   }
 
-  async update ({ userSigner = this.userSigner, contentKeySigner = this.contentKeySigner, channels = [...this.channels.values()], relays = [], mode = 'leecher' } = {}) {
+  async update ({ userSigner = this.userSigner, contentKeySigner = this.contentKeySigner, nymSigner = this.nymSigner, channels = [...this.channels.values()], relays = [], mode = 'leecher' } = {}) {
     if (userSigner) this.userSigner = userSigner
     this.contentKeySigner = contentKeySigner || null
+    this.nymSigner = nymSigner || null
     this.contentKeyPubkey = await this.contentKeySigner?.getPublicKey?.() || ''
     const nextChannels = await this.normalizeChannels(channels, { relays, mode })
     const nextPubkeys = new Set(nextChannels.map(channel => channel.pubkey))
@@ -210,6 +222,7 @@ export class PrivateMessenger {
       const channel = typeof entry === 'string' ? { pubkey: entry } : entry
       const signer = channel.signer || channel.privateChannelSigner || null
       const readerSigner = channel.readerSigner || channel.privateChannelReaderSigner || signer || null
+      const nymSigner = channel.nymSigner || null
       const pubkey = channel.pubkey || await signer?.getPublicKey?.()
       if (!pubkey) throw new Error('CHANNEL_PUBKEY_REQUIRED')
       if (!signer && !readerSigner) throw new Error('CHANNEL_SIGNER_REQUIRED')
@@ -221,6 +234,7 @@ export class PrivateMessenger {
         signer,
         readerSigner,
         readerPubkey,
+        nymSigner,
         relays: uniq(channel.relays?.length ? channel.relays : defaults.relays),
         mode,
         seeders: uniq(channel.seeders)
@@ -441,6 +455,7 @@ export class PrivateMessenger {
         onReply: message => this.handleReply(pubkey, message),
         onTell: message => this.handleTell(pubkey, message),
         onYell: message => this.handleYell(pubkey, message),
+        onNym: message => this.handleNym(pubkey, message),
         onMessage: message => this.handleMessage(pubkey, message),
         onSeed: seed => this.enqueueSeed(pubkey, seed),
         onContentKeyUsage: usage => this.handleContentKeyUsage(pubkey, usage),
@@ -513,6 +528,10 @@ export class PrivateMessenger {
     this.enqueueRumor('yell', channelPubkey, message)
   }
 
+  handleNym (channelPubkey, message) {
+    this.enqueueRumor('nym', channelPubkey, message)
+  }
+
   handleMessage (channelPubkey, message) {
     if (eventType(message.event) !== 'message') return
     this.trackSeederActivity(channelPubkey, message)
@@ -539,12 +558,29 @@ export class PrivateMessenger {
   }
 
   enqueueSeed (channelPubkey, seed) {
+    const receivedAt = nowSeconds()
+    if (seed.recordType === NYM_CARRIER_SEED_RECORD_TYPE || seed.carriers?.length) {
+      const carriers = compactSeedNymCarriers(seed.carriers)
+      this.markSeen(channelPubkey, nymCarrierRecordTime({ carriers }) || seed.outer?.created_at || receivedAt)
+      this.seedQueue.enqueue({
+        type: 'seed',
+        recordType: NYM_CARRIER_SEED_RECORD_TYPE,
+        channelPubkey,
+        receivedAt,
+        carriers,
+        meta: { channelPubkey: seed.channelPubkey }
+      })
+      this.pruneStoredSeeds(channelPubkey)
+      return
+    }
+
     const router = compactSeedRouter(seed.router)
-    this.markSeen(channelPubkey, router.created_at || seed.outer?.created_at || nowSeconds())
+    this.markSeen(channelPubkey, router.created_at || seed.outer?.created_at || receivedAt)
     this.seedQueue.enqueue({
       type: 'seed',
+      recordType: ROUTER_SEED_RECORD_TYPE,
       channelPubkey,
-      receivedAt: nowSeconds(),
+      receivedAt,
       router,
       meta: { channelPubkey: seed.channelPubkey }
     })
@@ -674,6 +710,34 @@ export class PrivateMessenger {
     })
   }
 
+  async broadcastNymRumor ({ channelPubkey = this.defaultChannelPubkey(), relays, rumor, nymSigner }) {
+    const channel = this.requireWritableChannel(channelPubkey)
+    const resolvedNymSigner = this.requireNymSigner(channel, nymSigner)
+    this.debugSend('broadcastNymRumor', channelPubkey)
+    return this._privateMessage.broadcastNymRumor({
+      nymSigner: resolvedNymSigner,
+      privateChannelSigner: channel.signer,
+      privateChannelReaderPubkey: channel.readerPubkey,
+      relays: relays || channel.relays,
+      expirationSeconds: this.offlineRecoverySeconds,
+      rumor
+    })
+  }
+
+  async broadcastNymEvent ({ channelPubkey = this.defaultChannelPubkey(), relays, event, nymSigner }) {
+    const channel = this.requireWritableChannel(channelPubkey)
+    const resolvedNymSigner = this.requireNymSigner(channel, nymSigner)
+    this.debugSend('broadcastNymEvent', channelPubkey)
+    return this._privateMessage.broadcastNymEvent({
+      nymSigner: resolvedNymSigner,
+      privateChannelSigner: channel.signer,
+      privateChannelReaderPubkey: channel.readerPubkey,
+      relays: relays || channel.relays,
+      expirationSeconds: this.offlineRecoverySeconds,
+      event
+    })
+  }
+
   async publishSeederPresence (channelPubkey = this.defaultChannelPubkey()) {
     const channel = this.requireWritableChannel(channelPubkey)
     const receiverPubkeys = uniq([...this.knownSeeders(channelPubkey), this.userPubkey])
@@ -748,6 +812,12 @@ export class PrivateMessenger {
     const channel = this.requireChannel(pubkey)
     if (!channel.signer) throw new Error('PRIVATE_CHANNEL_WRITER_REQUIRED')
     return channel
+  }
+
+  requireNymSigner (channel, override) {
+    const signer = override || channel?.nymSigner || this.nymSigner
+    if (!signer?.getPublicKey) throw new Error('NYM_SIGNER_REQUIRED')
+    return signer
   }
 
   contentKeyLookup () {
@@ -846,28 +916,40 @@ export class PrivateMessenger {
     for (const line of splitJsonl(jsonl)) {
       const record = parseJson(line, null)
       if (!record) continue
-      const event = await this.eventFromBackfillRecord(channelPubkey, record)
-      if (!event) continue
-      this.enqueueRumor(eventType(event), channelPubkey, {
-        event,
-        outer: message.outer,
-        meta: { ...(message.meta || {}), channelPubkey, recoveredFromSeeder: message.event?.pubkey || '' },
-        payload: parseEventContent(event)
+      const recovered = await this.messageFromBackfillRecord(channelPubkey, record)
+      if (!recovered) continue
+      this.enqueueRumor(recovered.type, channelPubkey, {
+        event: recovered.event,
+        outer: recovered.outer,
+        meta: { ...(recovered.meta || {}), channelPubkey, recoveredFromSeeder: message.event?.pubkey || '' },
+        payload: recovered.payload
       })
     }
   }
 
-  async eventFromBackfillRecord (channelPubkey, record) {
-    if (!isPrivateChannelRouter(record)) return null
+  async messageFromBackfillRecord (channelPubkey, record) {
+    if (record?.recordType === NYM_CARRIER_SEED_RECORD_TYPE) {
+      const event = this._privateChannel.eventFromNymCarriers(record.carriers)
+      return {
+        type: 'nym',
+        event,
+        outer: { id: '', created_at: nymCarrierRecordTime(record) },
+        meta: { channelPubkey, carriers: record.carriers },
+        payload: parseEventContent(event)
+      }
+    }
+
+    const routerRecord = record?.recordType === ROUTER_SEED_RECORD_TYPE ? record.router : null
+    if (!isPrivateChannelRouter(routerRecord)) return null
     if (!this._privateChannel.unwrapEvent) throw new Error('PRIVATE_CHANNEL_UNWRAP_UNSUPPORTED')
 
     const channel = this.requireChannel(channelPubkey)
     const router = {
       kind: privateChannel.ROUTER_KIND,
-      pubkey: record.pubkey,
-      created_at: record.created_at || nowSeconds(),
-      tags: (record.tags || []).filter(tag => tag[0] !== 'c').concat([['c', '0', '1']]),
-      content: record.content
+      pubkey: routerRecord.pubkey,
+      created_at: routerRecord.created_at || nowSeconds(),
+      tags: (routerRecord.tags || []).filter(tag => tag[0] !== 'c').concat([['c', '0', '1']]),
+      content: routerRecord.content
     }
     const encryptSigner = channel.readerSigner && channel.readerSigner !== channel.signer ? channel.readerSigner : channel.signer
     const encryptPeerPubkey = encryptSigner === channel.signer ? channel.readerPubkey : channelPubkey
@@ -878,7 +960,7 @@ export class PrivateMessenger {
       tags: [],
       content: await encryptSigner.nip44Encrypt(encryptPeerPubkey, JSON.stringify(router))
     }
-    return this._privateChannel.unwrapEvent({
+    const event = await this._privateChannel.unwrapEvent({
       receiverSigner: this.userSigner,
       iykcSigner: this.contentKeySigner,
       privateChannelSigner: channel.signer,
@@ -887,6 +969,14 @@ export class PrivateMessenger {
       event: outer,
       receiverPubkey: this.userPubkey
     })
+    if (!event) return null
+    return {
+      type: eventType(event),
+      event,
+      outer,
+      meta: { channelPubkey },
+      payload: parseEventContent(event)
+    }
   }
 
   async recoverOfflineRanges (channels = [...this.stopByChannel.keys()]) {
@@ -918,6 +1008,7 @@ export class PrivateMessenger {
             modeByPubkey: { [pubkey]: channel.mode },
             receivedChunkTtlMs: this.offlineRecoverySeconds * 1000,
             onEvent: (event, outer, meta) => this.enqueueRumor(eventType(event), pubkey, { event, outer, meta, payload: parseEventContent(event) }),
+            onNymEvent: (event, outer, meta) => this.enqueueRumor('nym', pubkey, { event, outer, meta, payload: parseEventContent(event) }),
             onSeedEvent: seed => this.enqueueSeed(pubkey, seed),
             onContentKeyUsage: usage => this.handleContentKeyUsage(pubkey, usage),
             onError: err => { throw err }
@@ -967,7 +1058,7 @@ export class PrivateMessenger {
     const cutoff = nowSeconds() - this.offlineRecoverySeconds
     this.seedQueue?.removeWhere(item => {
       if (channelPubkey && item.channelPubkey !== channelPubkey) return false
-      return (item.router?.created_at || item.receivedAt || 0) < cutoff
+      return (seedRecordTime(item) || item.receivedAt || 0) < cutoff
     })
   }
 
@@ -1037,6 +1128,15 @@ function isPrivateChannelRouter (event) {
   return event?.kind === privateChannel.ROUTER_KIND &&
     typeof event.content === 'string' &&
     event.tags?.some(tag => tag[0] === 'c')
+}
+
+function nymCarrierRecordTime (record) {
+  return record?.carriers?.reduce((max, carrier) => Math.max(max, carrier.created_at || 0), 0) || 0
+}
+
+function seedRecordTime (record) {
+  if (record?.recordType === NYM_CARRIER_SEED_RECORD_TYPE || record?.carriers?.length) return nymCarrierRecordTime(record)
+  return record?.router?.created_at || 0
 }
 
 function splitJsonl (jsonl) {

@@ -4,6 +4,8 @@ import { ASK_KIND, parseRumorContent } from '../../helpers/nostr/private-message
 export const SEEDER_PRESENCE_CODE = 'seederPresence_8mj8'
 export const MISSING_MESSAGES_ASK_CODE = 'missingMessages_ask_8mj8'
 export const MISSING_MESSAGES_REPLY_CODE = 'missingMessages_reply_8mj8'
+export const ROUTER_SEED_RECORD_TYPE = 'router_v1'
+export const NYM_CARRIER_SEED_RECORD_TYPE = 'nymCarrier_v1'
 
 const DEFAULT_EVENTS_PER_CHUNK = 100
 const encoder = new TextEncoder()
@@ -49,11 +51,27 @@ function compactRouter (router = {}) {
   }
 }
 
+function cloneTags (tags) {
+  return (tags || []).map(tag => Array.isArray(tag) ? [...tag] : tag)
+}
+
 export function compactSeedRouter (router = {}) {
   return {
     ...compactRouter(router),
     content: router.content || ''
   }
+}
+
+export function compactSeedNymCarriers (carriers = []) {
+  return carriers.map(carrier => ({
+    id: carrier.id,
+    kind: carrier.kind,
+    pubkey: carrier.pubkey,
+    created_at: carrier.created_at,
+    tags: cloneTags(carrier.tags),
+    content: carrier.content || '',
+    sig: carrier.sig
+  }))
 }
 
 function routerWithSingleRow (router, row) {
@@ -79,9 +97,37 @@ function compactRoutersFromSeed (seed, { receiverPubkey, since, until }) {
   const records = []
   for (const row of splitJsonl(decodeJsonl(seed.router.content))) {
     if (receiverPubkey && recordReceiverPubkey(row) !== receiverPubkey) continue
-    records.push(routerWithSingleRow(seed.router, row))
+    records.push({
+      recordType: ROUTER_SEED_RECORD_TYPE,
+      router: routerWithSingleRow(seed.router, row)
+    })
   }
   return records
+}
+
+function nymCarrierRecordTime (seed) {
+  return seed?.carriers?.reduce((max, carrier) => Math.max(max, carrier.created_at || 0), 0) || 0
+}
+
+function compactNymCarriersFromSeed (seed, { since, until }) {
+  // eslint-disable-next-line camelcase
+  const created_at = nymCarrierRecordTime(seed)
+  // eslint-disable-next-line camelcase
+  if (!seed?.carriers?.length || !eventInRange({ created_at }, since, until)) return []
+  return [{
+    recordType: NYM_CARRIER_SEED_RECORD_TYPE,
+    carriers: compactSeedNymCarriers(seed.carriers)
+  }]
+}
+
+function compactRecordsFromSeed (seed, { receiverPubkey, since, until }) {
+  if (seed?.recordType === NYM_CARRIER_SEED_RECORD_TYPE) {
+    return compactNymCarriersFromSeed(seed, { since, until })
+  }
+  if (seed?.recordType === ROUTER_SEED_RECORD_TYPE) {
+    return compactRoutersFromSeed(seed, { receiverPubkey, since, until })
+  }
+  return []
 }
 
 function backfillRequestRange (question, since, until) {
@@ -193,6 +239,6 @@ export function createMissingMessageReplyPacker ({
     code: MISSING_MESSAGES_REPLY_CODE,
     payload: { since: range.since, until: range.until },
     eventsPerChunk,
-    recordsFromInput: seed => compactRoutersFromSeed(seed, { receiverPubkey, since: range.since, until: range.until })
+    recordsFromInput: seed => compactRecordsFromSeed(seed, { receiverPubkey, since: range.since, until: range.until })
   })
 }

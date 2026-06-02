@@ -151,6 +151,17 @@ function dispatchWatchedEvent (event, outer, meta) {
   callbacks.onMessage?.(message)
 }
 
+function dispatchWatchedNymEvent (event, outer, meta) {
+  const callbacks = watchCallbacks(meta.channelPubkey)
+  callbacks.onNym?.({
+    event,
+    outer,
+    meta,
+    payload: parseRumorContent(event),
+    nym: event
+  })
+}
+
 function dispatchSeedEvent (seed) {
   watchCallbacks(seed.channelPubkey).onSeed?.(seed)
 }
@@ -273,6 +284,10 @@ function rebuildSubscriptions ({ _subscribe = privateChannel.subscribe } = {}) {
         recordSeen(meta.channelPubkey, outer.created_at)
         dispatchWatchedEvent(event, outer, meta)
       },
+      onNymEvent: (event, outer, meta) => {
+        recordSeen(meta.channelPubkey, outer.created_at)
+        dispatchWatchedNymEvent(event, outer, meta)
+      },
       onSeedEvent: (seed) => {
         recordSeen(seed.channelPubkey, seed.outer.created_at)
         dispatchSeedEvent(seed)
@@ -313,6 +328,10 @@ async function recoverWatchedChannels ({ _fetch = privateChannel.fetch } = {}) {
         watch.lastSeenAt = Math.max(watch.lastSeenAt || 0, outer.created_at || 0)
         dispatchWatchedEvent(event, outer, meta)
       },
+      onNymEvent: (event, outer, meta) => {
+        watch.lastSeenAt = Math.max(watch.lastSeenAt || 0, outer.created_at || 0)
+        dispatchWatchedNymEvent(event, outer, meta)
+      },
       onSeedEvent: dispatchSeedEvent,
       onContentKeyUsage: dispatchContentKeyUsage,
       onError: err => watch.callbacks.onError?.(err)
@@ -342,6 +361,7 @@ export async function watch ({
   onReply,
   onTell,
   onYell,
+  onNym,
   onMessage,
   onSeed,
   onChunk,
@@ -358,7 +378,7 @@ export async function watch ({
   if (!relays?.length) throw new Error('NO_RELAYS')
   const channelList = uniq(channels?.length ? channels : [await ownPrivateChannelPubkey(privateChannelSigner)])
   const ownPubkey = receiverPubkey || await receiverSigner?.getPublicKey?.()
-  const callbacks = { onAsk, onReply, onTell, onYell, onMessage, onSeed, onChunk, onContentKeyUsage, onError }
+  const callbacks = { onAsk, onReply, onTell, onYell, onNym, onMessage, onSeed, onChunk, onContentKeyUsage, onError }
 
   let changed = false
   for (const channel of channelList) {
@@ -435,6 +455,20 @@ async function sendPrivateMessage ({
 }) {
   if (!privateChannelSigner?.getPublicKey) throw new Error('PRIVATE_CHANNEL_WRITER_REQUIRED')
   return _publish({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag, event, relays, expirationSeconds, _getIykcProofs })
+}
+
+async function sendNymMessage ({
+  nymSigner,
+  privateChannelSigner,
+  privateChannelReaderPubkey,
+  event,
+  relays,
+  expirationSeconds,
+  _publish = privateChannel.publishNymEvent
+}) {
+  if (!nymSigner?.getPublicKey) throw new Error('NYM_SIGNER_REQUIRED')
+  if (!privateChannelSigner?.getPublicKey) throw new Error('PRIVATE_CHANNEL_WRITER_REQUIRED')
+  return _publish({ nymSigner, privateChannelSigner, privateChannelReaderPubkey, event, relays, expirationSeconds })
 }
 
 export async function ask ({
@@ -596,5 +630,35 @@ export async function broadcastEvent ({
   if (!receivers.length) throw new Error('NO_RECEIVERS')
   const wireEvent = assertValidSignedEvent({ ...event, tags: cloneTags(event?.tags) })
   const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag: '', event: wireEvent, relays, expirationSeconds, _getIykcProofs, _publish })
+  return { event: wireEvent, results }
+}
+
+export async function broadcastNymRumor ({
+  nymSigner,
+  privateChannelSigner,
+  privateChannelReaderPubkey,
+  relays,
+  rumor,
+  expirationSeconds,
+  _publish = privateChannel.publishNymEvent
+}) {
+  if (!nymSigner?.getPublicKey) throw new Error('NYM_SIGNER_REQUIRED')
+  const { event, wireEvent } = await makeOutgoingRumor({ senderSigner: nymSigner, rumor })
+  const results = await sendNymMessage({ nymSigner, privateChannelSigner, privateChannelReaderPubkey, event: wireEvent, relays, expirationSeconds, _publish })
+  return { rumor: event, results }
+}
+
+export async function broadcastNymEvent ({
+  nymSigner,
+  privateChannelSigner,
+  privateChannelReaderPubkey,
+  relays,
+  event,
+  expirationSeconds,
+  _publish = privateChannel.publishNymEvent
+}) {
+  if (!nymSigner?.getPublicKey) throw new Error('NYM_SIGNER_REQUIRED')
+  const wireEvent = assertValidSignedEvent({ ...event, tags: cloneTags(event?.tags) })
+  const results = await sendNymMessage({ nymSigner, privateChannelSigner, privateChannelReaderPubkey, event: wireEvent, relays, expirationSeconds, _publish })
   return { event: wireEvent, results }
 }

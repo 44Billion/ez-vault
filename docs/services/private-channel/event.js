@@ -1,4 +1,4 @@
-import { ROUTER_KIND } from './constants.js'
+import { NYM_CARRIER_KIND, ROUTER_KIND } from './constants.js'
 
 const encoder = new TextEncoder()
 
@@ -32,6 +32,10 @@ export function readImkcProof (event) {
   return event.tags?.find(t => t[0] === 'imkc')?.[2] || ''
 }
 
+export function readIdTag (event) {
+  return event.tags?.find(t => t[0] === 'id')?.[1] || ''
+}
+
 export function readChunkTag (event) {
   const tag = event.tags?.find(t => t[0] === 'c')
   const index = Number(tag?.[1])
@@ -51,4 +55,14 @@ export function makeRouterEvent ({ pubkey, senderPubkey, imkcPubkey, imkcProof, 
   tags.push(['c', String(chunkIndex), String(chunkTotal)])
   if (receiverPubkey) tags.push(['r', receiverPubkey])
   return { kind: ROUTER_KIND, pubkey, created_at: nowSeconds(), tags, content }
+}
+
+export function makeNymCarrierEvent ({ innerId, chunkIndex, chunkTotal, content, createdAt = nowSeconds() }) {
+  if (!innerId) throw new Error('INNER_EVENT_ID_REQUIRED')
+  return {
+    kind: NYM_CARRIER_KIND,
+    created_at: createdAt,
+    tags: [['id', innerId], ['c', String(chunkIndex), String(chunkTotal)]],
+    content
+  }
 }

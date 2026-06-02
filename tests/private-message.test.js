@@ -6,6 +6,8 @@ import {
   REPLY_KIND,
   TELL_KIND,
   broadcastEvent,
+  broadcastNymEvent,
+  broadcastNymRumor,
   ask,
   broadcastRumor,
   parseRumorContent,
@@ -333,6 +335,43 @@ test('broadcastEvent refuses unsigned or invalid signed events', async () => {
   )
 
   assert.equal(published, false)
+})
+
+test('nym broadcasts publish through the nym channel path without receivers', async () => {
+  const published = []
+  const nymPubkey = pubkeyFixture(6)
+  const channelPubkey = pubkeyFixture(7)
+  const authorEvent = finalizeEvent({ kind: 9002, created_at: 30, tags: [], content: 'signed by another key' }, generateSecretKey())
+  const _publish = async options => {
+    published.push(options)
+    return { results: [] }
+  }
+
+  const rumorResult = await broadcastNymRumor({
+    nymSigner: signer(nymPubkey),
+    privateChannelSigner: signer(channelPubkey),
+    relays: ['wss://relay.example'],
+    rumor: { kind: 9001, created_at: 29, tags: [['x', 'nym']], content: 'rumor' },
+    _publish
+  })
+  const eventResult = await broadcastNymEvent({
+    nymSigner: signer(nymPubkey),
+    privateChannelSigner: signer(channelPubkey),
+    relays: ['wss://relay.example'],
+    event: authorEvent,
+    _publish
+  })
+
+  assert.equal(published.length, 2)
+  assert.equal(published[0].nymSigner.getPublicKey(), nymPubkey)
+  assert.equal(published[0].privateChannelSigner.getPublicKey(), channelPubkey)
+  assert.equal(published[0].event.pubkey, undefined)
+  assert.equal(published[0].event.id, undefined)
+  assert.equal(rumorResult.rumor.pubkey, nymPubkey)
+  assert.equal(rumorResult.rumor.id, getEventHash({ ...published[0].event, pubkey: nymPubkey }))
+  assert.deepEqual(published[1].event, authorEvent)
+  assert.notEqual(published[1].event.pubkey, nymPubkey)
+  assert.deepEqual(eventResult.event, authorEvent)
 })
 
 test('parseRumorContent only reads h tags for private message kinds', () => {

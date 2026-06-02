@@ -5,14 +5,18 @@ import NsecSigner from '../docs/services/nsec-signer.js'
 import { deriveMultiDhConversationKey } from '../docs/helpers/nostr/multi-dh.js'
 import {
   EXPIRATION_SECONDS,
+  eventFromNymCarriers,
   getJsonlChunkByteSize,
+  getNymCarrierChunkSize,
   MAX_EVENT_BYTES,
+  NYM_CARRIER_KIND,
   PRIVATE_BROADCAST_KIND,
   ROUTER_KIND,
   subscribe,
   unwrapEvent,
   wrapEvent,
-  wrapEvents
+  wrapEvents,
+  wrapNymEvent
 } from '../docs/services/private-channel/index.js'
 import { createReceivedChunkStore, DEFAULT_RECEIVED_CHUNK_MAX_BYTES } from '../docs/services/private-channel/received-chunks.js'
 import { makeContentKeyEvent, parseContentKeyEvent, verifyContentKeyProof } from '../docs/services/content-key/event.js'
@@ -434,6 +438,156 @@ test('unwrapEvent rejects malformed signed inner events', async () => {
     () => unwrapEvent({ receiverSigner: bob, privateChannelSigner: alice, event: wrapped, receiverPubkey: bobPubkey }),
     /INVALID_SIGNED_INNER_EVENT/
   )
+})
+
+test('wrapNymEvent signs nym carriers and reconstructs nym rumors', async () => {
+  const channel = signer()
+  const reader = signer()
+  const nym = signer()
+  const channelPubkey = await channel.getPublicKey()
+  const readerPubkey = await reader.getPublicKey()
+  const nymPubkey = await nym.getPublicKey()
+  const original = eventFixture('nym rumor')
+  const [wrapped] = await wrapNymEvent({
+    nymSigner: nym,
+    privateChannelSigner: channel,
+    privateChannelReaderPubkey: readerPubkey,
+    event: original
+  })
+
+  assert.equal(wrapped.kind, PRIVATE_BROADCAST_KIND)
+  assert.equal(wrapped.pubkey, channelPubkey)
+  assert.ok(new TextEncoder().encode(JSON.stringify(wrapped)).length <= MAX_EVENT_BYTES)
+  const carrier = JSON.parse(await reader.nip44Decrypt(channelPubkey, wrapped.content))
+  const expected = unwrappedFixture(original, nymPubkey)
+
+  assert.equal(carrier.kind, NYM_CARRIER_KIND)
+  assert.equal(carrier.pubkey, nymPubkey)
+  assert.equal(carrier.tags.find(tag => tag[0] === 'id')?.[1], expected.id)
+  assert.deepEqual(carrier.tags.find(tag => tag[0] === 'c'), ['c', '0', '1'])
+  assert.deepEqual(eventFromNymCarriers([carrier]), expected)
+})
+
+test('wrapNymEvent preserves signed inner event authors distinct from carrier nym', async () => {
+  const channel = signer()
+  const nym = signer()
+  const signed = finalizeEvent({ kind: 9002, created_at: 23, tags: [['x', 'signed']], content: 'signed by someone else' }, generateSecretKey())
+  const [wrapped] = await wrapNymEvent({
+    nymSigner: nym,
+    privateChannelSigner: channel,
+    event: signed
+  })
+  const carrier = JSON.parse(await channel.nip44Decrypt(await channel.getPublicKey(), wrapped.content))
+
+  assert.notEqual(carrier.pubkey, signed.pubkey)
+  assert.equal(carrier.tags.find(tag => tag[0] === 'id')?.[1], signed.id)
+  assert.deepEqual(eventFromNymCarriers([carrier]), signed)
+})
+
+test('subscribe buffers out-of-order nym carrier chunks by nym pubkey and inner id', async () => {
+  const originalSubscribeMany = pool.subscribeMany
+  let handlers = null
+  pool.subscribeMany = (_relays, _filter, nextHandlers) => {
+    handlers = nextHandlers
+    return { close: () => {} }
+  }
+
+  try {
+    const channel = signer()
+    const nym = signer()
+    const nymPubkey = await nym.getPublicKey()
+    const original = eventFixture('x'.repeat(getNymCarrierChunkSize()))
+    const wrapped = await wrapNymEvent({
+      nymSigner: nym,
+      privateChannelSigner: channel,
+      event: original
+    })
+    const routedEvents = []
+    const nymEvents = []
+    const seeds = []
+
+    assert.ok(wrapped.length > 1)
+    for (const event of wrapped) assert.ok(new TextEncoder().encode(JSON.stringify(event)).length <= MAX_EVENT_BYTES)
+
+    subscribe({
+      privateChannelSigner: channel,
+      privateChannelPubkey: await channel.getPublicKey(),
+      relays: ['wss://relay.example'],
+      mode: 'seeder',
+      onEvent: event => routedEvents.push(event),
+      onNymEvent: event => nymEvents.push(event),
+      onSeedEvent: seed => seeds.push(seed)
+    })
+    for (const event of [...wrapped].reverse()) await handlers.onevent(event)
+
+    assert.deepEqual(routedEvents, [])
+    assert.deepEqual(nymEvents, [unwrappedFixture(original, nymPubkey)])
+    assert.equal(seeds.length, 1)
+    assert.equal(seeds[0].recordType, 'nymCarrier_v1')
+    assert.equal(seeds[0].carriers.length, wrapped.length)
+  } finally {
+    pool.subscribeMany = originalSubscribeMany
+  }
+})
+
+test('subscribe separates nym carrier groups that use different chunk totals', async () => {
+  const originalSubscribeMany = pool.subscribeMany
+  let handlers = null
+  pool.subscribeMany = (_relays, _filter, nextHandlers) => {
+    handlers = nextHandlers
+    return { close: () => {} }
+  }
+
+  try {
+    const channel = signer()
+    const nym = signer()
+    const channelPubkey = await channel.getPublicKey()
+    const nymPubkey = await nym.getPublicKey()
+    const original = eventFixture('same inner event, different chunking')
+    const expected = unwrappedFixture(original, nymPubkey)
+    const encoded = Buffer.from(JSON.stringify(original)).toString('base64')
+    const midpoint = Math.ceil(encoded.length / 2)
+    const nymEvents = []
+    const errors = []
+
+    async function carrier (index, total, content) {
+      return nym.signEvent({
+        kind: NYM_CARRIER_KIND,
+        created_at: 9,
+        tags: [['id', expected.id], ['c', String(index), String(total)]],
+        content
+      })
+    }
+
+    async function outer (carrier) {
+      return channel.signEvent({
+        kind: PRIVATE_BROADCAST_KIND,
+        created_at: 10,
+        tags: [],
+        content: await channel.nip44Encrypt(channelPubkey, JSON.stringify(carrier))
+      })
+    }
+
+    const twoChunkFirst = await outer(await carrier(0, 2, encoded.slice(0, midpoint)))
+    const oneChunk = await outer(await carrier(0, 1, encoded))
+    const twoChunkLast = await outer(await carrier(1, 2, encoded.slice(midpoint)))
+
+    subscribe({
+      privateChannelSigner: channel,
+      privateChannelPubkey: channelPubkey,
+      relays: ['wss://relay.example'],
+      onNymEvent: event => nymEvents.push(event),
+      onError: err => errors.push(err)
+    })
+    await handlers.onevent(twoChunkFirst)
+    await handlers.onevent(oneChunk)
+    await handlers.onevent(twoChunkLast)
+
+    assert.deepEqual(errors, [])
+    assert.deepEqual(nymEvents, [expected, expected])
+  } finally {
+    pool.subscribeMany = originalSubscribeMany
+  }
 })
 
 test('unwrapEvent uses imkc tag as the row encryption pubkey', async () => {

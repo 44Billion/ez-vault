@@ -1,20 +1,27 @@
 import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash, validateEvent, verifyEvent } from 'nostr-tools'
+import { bytesToBase64, base64ToBytes } from '../../helpers/base64.js'
 import { makeContentKeyEvent, parseContentKeyEvent, verifyContentKeyProof, verifyIykcProof } from '../content-key/event.js'
 import { getIykcProofs } from '../content-key/index.js'
 import { fetchEvents, pool, publish as publishToRelays } from '../relays.js'
-import { JSONL_CHUNK_BYTES } from './chunk-size.js'
+import { JSONL_CHUNK_BYTES, NYM_CARRIER_CHUNK_CHARS } from './chunk-size.js'
 import { cleanupChunks, decodeChunkLines, readChunkContent, receiverPubkeys, receiverPubkeysWithoutContentKeys, writeChunks } from './chunks.js'
-import { EXPIRATION_SECONDS, MAX_EVENT_BYTES, PRIVATE_BROADCAST_KIND, ROUTER_KIND } from './constants.js'
-import { eventByteLength, hasImkcTag, makeRouterEvent, nowSeconds, readChunkTag, readImkcProof, readImkcTag, readReceiverTag, readSenderTag } from './event.js'
+import { EXPIRATION_SECONDS, MAX_EVENT_BYTES, NYM_CARRIER_KIND, PRIVATE_BROADCAST_KIND, ROUTER_KIND } from './constants.js'
+import { eventByteLength, hasImkcTag, makeNymCarrierEvent, makeRouterEvent, nowSeconds, readChunkTag, readIdTag, readImkcProof, readImkcTag, readReceiverTag, readSenderTag } from './event.js'
 import { createReceivedChunkStore, DEFAULT_RECEIVED_CHUNK_MAX_BYTES, DEFAULT_RECEIVED_CHUNK_TTL_MS } from './received-chunks.js'
 
-export { EXPIRATION_SECONDS, MAX_EVENT_BYTES, PRIVATE_BROADCAST_KIND, ROUTER_KIND } from './constants.js'
+export { EXPIRATION_SECONDS, MAX_EVENT_BYTES, NYM_CARRIER_KIND, PRIVATE_BROADCAST_KIND, ROUTER_KIND } from './constants.js'
 
 const DEFAULT_IGNORED_GROUP_TTL_MS = 30 * 60 * 1000
 const DEFAULT_IGNORED_GROUP_MAX_ENTRIES = 5000
+const encoder = new TextEncoder()
+const decoder = new TextDecoder()
 
 export function getJsonlChunkByteSize () {
   return JSONL_CHUNK_BYTES
+}
+
+export function getNymCarrierChunkSize () {
+  return NYM_CARRIER_CHUNK_CHARS
 }
 
 function multiDhContext (channelPubkey) {
@@ -89,6 +96,46 @@ export async function wrapEvent (options) {
   return events
 }
 
+export async function * wrapNymEvents ({ nymSigner, privateChannelSigner, privateChannelReaderPubkey, event, expirationSeconds = EXPIRATION_SECONDS }) {
+  if (!nymSigner?.getPublicKey || !nymSigner?.signEvent) throw new Error('NYM_SIGNER_REQUIRED')
+  if (!privateChannelSigner?.getPublicKey || !privateChannelSigner?.nip44Encrypt || !privateChannelSigner?.signEvent) throw new Error('PRIVATE_CHANNEL_SIGNER_REQUIRED')
+
+  const nymPubkey = await nymSigner.getPublicKey()
+  const channelPubkey = await privateChannelSigner.getPublicKey()
+  const channelReaderPubkey = privateChannelReaderPubkey || channelPubkey
+  const wireEvent = isSignedEvent(event)
+    ? assertValidSignedInnerEvent(event)
+    : wireNymRumor({ ...event, created_at: event?.created_at !== undefined ? event.created_at : nowSeconds() })
+  const innerEvent = isSignedEvent(wireEvent) ? wireEvent : normalizeNymRumor(wireEvent, nymPubkey)
+  const encoded = bytesToBase64(encoder.encode(JSON.stringify(wireEvent)))
+  const total = Math.max(1, Math.ceil(encoded.length / NYM_CARRIER_CHUNK_CHARS))
+  const carrierCreatedAt = nowSeconds()
+
+  for (let index = 0; index < total; index++) {
+    const carrier = assertValidNymCarrierEvent(await nymSigner.signEvent(makeNymCarrierEvent({
+      innerId: innerEvent.id,
+      chunkIndex: index,
+      chunkTotal: total,
+      content: encoded.slice(index * NYM_CARRIER_CHUNK_CHARS, (index + 1) * NYM_CARRIER_CHUNK_CHARS),
+      createdAt: carrierCreatedAt
+    })))
+    const outer = await privateChannelSigner.signEvent({
+      kind: PRIVATE_BROADCAST_KIND,
+      created_at: nowSeconds(),
+      tags: [['expiration', String(nowSeconds() + expirationSeconds)]],
+      content: await privateChannelSigner.nip44Encrypt(channelReaderPubkey, JSON.stringify(carrier))
+    })
+    if (eventByteLength(outer) > MAX_EVENT_BYTES) throw new Error('EVENT_TOO_LARGE')
+    yield outer
+  }
+}
+
+export async function wrapNymEvent (options) {
+  const events = []
+  for await (const event of wrapNymEvents(options)) events.push(event)
+  return events
+}
+
 function joinedRouter (router, content = '') {
   return {
     ...router,
@@ -110,6 +157,85 @@ function assertValidSignedInnerEvent (event) {
   if (!validateEvent(event) || event.id !== getEventHash(event) || !verifyEvent(event)) {
     throw new Error('INVALID_SIGNED_INNER_EVENT')
   }
+  return event
+}
+
+function normalizeNymRumor (event, pubkey) {
+  const normalized = { ...event, pubkey }
+  if (!validateEvent(normalized)) throw new Error('INVALID_NYM_RUMOR')
+  return { ...normalized, id: getEventHash(normalized) }
+}
+
+function wireNymRumor (event = {}) {
+  return {
+    kind: event.kind,
+    tags: event.tags,
+    content: event.content,
+    created_at: event.created_at
+  }
+}
+
+function assertValidNymCarrierEvent (carrier) {
+  if (!validateEvent(carrier) || carrier.id !== getEventHash(carrier) || !verifyEvent(carrier)) {
+    throw new Error('INVALID_NYM_CARRIER')
+  }
+  if (carrier.kind !== NYM_CARRIER_KIND) throw new Error('INVALID_NYM_CARRIER_KIND')
+  if (!readIdTag(carrier)) throw new Error('MISSING_NYM_CARRIER_ID')
+  readChunkTag(carrier)
+  return carrier
+}
+
+function nymCarrierGroupId (carrier) {
+  return `nym:${carrier.pubkey}:${readIdTag(carrier)}:${readChunkTag(carrier).total}`
+}
+
+function validateNymCarriers (carriers) {
+  if (!Array.isArray(carriers) || !carriers.length) throw new Error('NYM_CARRIERS_REQUIRED')
+  const chunks = []
+  let nymPubkey = ''
+  let innerId = ''
+  let total = 0
+
+  for (const carrier of carriers) {
+    assertValidNymCarrierEvent(carrier)
+    const nextInnerId = readIdTag(carrier)
+    const { index, total: nextTotal } = readChunkTag(carrier)
+    if (!nymPubkey) {
+      nymPubkey = carrier.pubkey
+      innerId = nextInnerId
+      total = nextTotal
+    }
+    if (carrier.pubkey !== nymPubkey || nextInnerId !== innerId || nextTotal !== total) {
+      throw new Error('MISMATCHED_NYM_CARRIER_CHUNKS')
+    }
+    if (chunks[index] !== undefined) throw new Error('DUPLICATE_NYM_CARRIER_CHUNK')
+    chunks[index] = carrier.content
+  }
+
+  if (chunks.length !== total) throw new Error('MISSING_NYM_CARRIER_CHUNK')
+  for (let index = 0; index < total; index++) {
+    if (chunks[index] == null) throw new Error('MISSING_NYM_CARRIER_CHUNK')
+  }
+  return { nymPubkey, innerId, content: chunks.join('') }
+}
+
+export function eventFromNymCarriers (carriers) {
+  const { nymPubkey, innerId, content } = validateNymCarriers(carriers)
+  let parsed
+  try {
+    parsed = JSON.parse(decoder.decode(base64ToBytes(content)))
+  } catch {
+    throw new Error('INVALID_NYM_CARRIER_PAYLOAD')
+  }
+
+  if (isSignedEvent(parsed)) {
+    const event = assertValidSignedInnerEvent(parsed)
+    if (event.id !== innerId) throw new Error('INVALID_NYM_CARRIER_INNER_ID')
+    return event
+  }
+
+  const event = normalizeNymRumor(parsed, nymPubkey)
+  if (event.id !== innerId) throw new Error('INVALID_NYM_CARRIER_INNER_ID')
   return event
 }
 
@@ -198,6 +324,14 @@ export async function unwrapEvent ({ receiverSigner, iykcSigner, privateChannelS
 export async function publish ({ senderSigner, imkcSigner, privateChannelSigner = senderSigner, privateChannelReaderPubkey, receivers, receiverTag, event, relays, expirationSeconds, _getIykcProofs = getIykcProofs }) {
   const results = []
   for await (const wrappedEvent of wrapEvents({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag, event, expirationSeconds, _getIykcProofs })) {
+    results.push(await publishToRelays(wrappedEvent, relays))
+  }
+  return { results }
+}
+
+export async function publishNymEvent ({ nymSigner, privateChannelSigner, privateChannelReaderPubkey, event, relays, expirationSeconds }) {
+  const results = []
+  for await (const wrappedEvent of wrapNymEvents({ nymSigner, privateChannelSigner, privateChannelReaderPubkey, event, expirationSeconds })) {
     results.push(await publishToRelays(wrappedEvent, relays))
   }
   return { results }
@@ -322,6 +456,7 @@ function createProcessor ({
   modeByPubkey,
   onChunk,
   onEvent,
+  onNymEvent,
   onSeedEvent,
   onContentKeyUsage,
   onError,
@@ -351,13 +486,60 @@ function createProcessor ({
       const channelMode = readValueFromMap(modeByPubkey, channelPubkey) || mode
       if (!channelPubkey) throw new Error('PRIVATE_CHANNEL_PUBKEY_REQUIRED')
 
-      const router = await decryptRouter({
+      const decrypted = await decryptRouter({
         content: outer.content,
         channelPubkey,
         channelSigner,
         channelReaderSigner,
         channelReaderPubkey
       })
+      if (decrypted.kind === NYM_CARRIER_KIND) {
+        const carrier = assertValidNymCarrierEvent(decrypted)
+        const { index, total } = readChunkTag(carrier)
+        groupKey = receivedChunks.groupKeyFor(channelPubkey, nymCarrierGroupId(carrier))
+        if (ignoredGroups.has(groupKey)) return
+
+        const meta = receivedChunks.put({
+          channelPubkey,
+          routerPubkey: nymCarrierGroupId(carrier),
+          index,
+          total,
+          content: JSON.stringify(carrier)
+        })
+        const status = receivedChunks.status(meta)
+        onChunk?.({
+          outer,
+          nymCarrier: carrier,
+          channelPubkey,
+          index,
+          total,
+          received: status.received,
+          missing: status.missing
+        })
+        if (status.received < total) return
+
+        const carriers = receivedChunks.readChunkContents(groupKey).map(raw => JSON.parse(raw))
+        const event = eventFromNymCarriers(carriers)
+        const shouldSeed = storesRecoverySeeds(channelMode)
+        if (shouldSeed) {
+          await onSeedEvent?.({
+            recordType: 'nymCarrier_v1',
+            outer,
+            carriers,
+            carrier: carriers[0],
+            channelPubkey,
+            event
+          })
+        }
+        await onNymEvent?.(event, outer, {
+          carrier: carriers[0],
+          carriers,
+          channelPubkey
+        })
+        receivedChunks.removeGroup(groupKey)
+        return
+      }
+      const router = decrypted
       if (router.kind !== ROUTER_KIND) return
       const senderPubkey = readSenderTag(router)
       if (receiverPubkey && readReceiverTag(router) && readReceiverTag(router) !== receiverPubkey && senderPubkey !== receiverPubkey) return
@@ -446,12 +628,12 @@ function createProcessor ({
         receiverPubkeys,
         onContentKeyUsage
       })
-      if (shouldSeed) await onSeedEvent?.({ outer, router: completeRouter, channelPubkey, jsonl })
+      if (shouldSeed) await onSeedEvent?.({ recordType: 'router_v1', outer, router: completeRouter, channelPubkey, jsonl })
       if (event) await onEvent?.(event, outer, { router: completeRouter, channelPubkey, jsonl })
 
       receivedChunks.removeGroup(groupKey)
     } catch (err) {
-      if ((err?.message === 'INVALID_SIGNED_INNER_EVENT' || err?.message === 'INVALID_IYKC_PROOF' || err?.message === 'INVALID_IMKC_PROOF') && groupKey) {
+      if (shouldIgnoreGroupError(err) && groupKey) {
         ignoredGroups.add(groupKey)
         receivedChunks.removeGroup(groupKey)
       }
@@ -460,7 +642,25 @@ function createProcessor ({
   }
 }
 
-export async function fetch ({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelSignersByPubkey, privateChannelReaderSigner = privateChannelSigner, privateChannelReaderSignersByPubkey, privateChannelReaderPubkey, privateChannelReaderPubkeysByPubkey, privateChannelPubkey, privateChannelPubkeys, receiverPubkey, relays, onChunk, onEvent, onSeedEvent, onContentKeyUsage, onError, since, until, limit, mode = 'leecher', modeByPubkey, receivedChunkTtlMs = DEFAULT_RECEIVED_CHUNK_TTL_MS, receivedChunkMaxBytes = DEFAULT_RECEIVED_CHUNK_MAX_BYTES, receivedChunkStorageArea, ignoredGroupTtlMs = DEFAULT_IGNORED_GROUP_TTL_MS, ignoredGroupMaxEntries = DEFAULT_IGNORED_GROUP_MAX_ENTRIES }) {
+function shouldIgnoreGroupError (err) {
+  return [
+    'DUPLICATE_NYM_CARRIER_CHUNK',
+    'INVALID_IYKC_PROOF',
+    'INVALID_IMKC_PROOF',
+    'INVALID_NYM_CARRIER',
+    'INVALID_NYM_CARRIER_ID',
+    'INVALID_NYM_CARRIER_INNER_ID',
+    'INVALID_NYM_CARRIER_KIND',
+    'INVALID_NYM_CARRIER_PAYLOAD',
+    'INVALID_NYM_RUMOR',
+    'INVALID_SIGNED_INNER_EVENT',
+    'MISMATCHED_NYM_CARRIER_CHUNKS',
+    'MISSING_NYM_CARRIER_CHUNK',
+    'MISSING_NYM_CARRIER_ID'
+  ].includes(err?.message)
+}
+
+export async function fetch ({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelSignersByPubkey, privateChannelReaderSigner = privateChannelSigner, privateChannelReaderSignersByPubkey, privateChannelReaderPubkey, privateChannelReaderPubkeysByPubkey, privateChannelPubkey, privateChannelPubkeys, receiverPubkey, relays, onChunk, onEvent, onNymEvent, onSeedEvent, onContentKeyUsage, onError, since, until, limit, mode = 'leecher', modeByPubkey, receivedChunkTtlMs = DEFAULT_RECEIVED_CHUNK_TTL_MS, receivedChunkMaxBytes = DEFAULT_RECEIVED_CHUNK_MAX_BYTES, receivedChunkStorageArea, ignoredGroupTtlMs = DEFAULT_IGNORED_GROUP_TTL_MS, ignoredGroupMaxEntries = DEFAULT_IGNORED_GROUP_MAX_ENTRIES }) {
   if (!relays?.length) throw new Error('NO_RELAYS')
   const authors = privateChannelPubkeyList({ privateChannelPubkey, privateChannelPubkeys })
   const filter = { kinds: [PRIVATE_BROADCAST_KIND] }
@@ -471,12 +671,12 @@ export async function fetch ({ receiverSigner, iykcSigner, privateChannelSigner 
 
   const events = await fetchEvents(filter, relays)
   events.sort((a, b) => a.created_at - b.created_at)
-  const processOuterEvent = createProcessor({ receiverSigner, iykcSigner, privateChannelSigner, privateChannelSignersByPubkey, privateChannelReaderSigner, privateChannelReaderSignersByPubkey, privateChannelReaderPubkey, privateChannelReaderPubkeysByPubkey, receiverPubkey, mode, modeByPubkey, onChunk, onEvent, onSeedEvent, onContentKeyUsage, onError, receivedChunkTtlMs, receivedChunkMaxBytes, receivedChunkStorageArea, ignoredGroupTtlMs, ignoredGroupMaxEntries })
+  const processOuterEvent = createProcessor({ receiverSigner, iykcSigner, privateChannelSigner, privateChannelSignersByPubkey, privateChannelReaderSigner, privateChannelReaderSignersByPubkey, privateChannelReaderPubkey, privateChannelReaderPubkeysByPubkey, receiverPubkey, mode, modeByPubkey, onChunk, onEvent, onNymEvent, onSeedEvent, onContentKeyUsage, onError, receivedChunkTtlMs, receivedChunkMaxBytes, receivedChunkStorageArea, ignoredGroupTtlMs, ignoredGroupMaxEntries })
   for (const event of events) await processOuterEvent(event)
   return events
 }
 
-export function subscribe ({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelSignersByPubkey, privateChannelReaderSigner = privateChannelSigner, privateChannelReaderSignersByPubkey, privateChannelReaderPubkey, privateChannelReaderPubkeysByPubkey, privateChannelPubkey, privateChannelPubkeys, receiverPubkey, relays, onChunk, onEvent, onSeedEvent, onContentKeyUsage, onError, onEose, since = nowSeconds() - 5, limit, liveOnly = false, mode = 'leecher', modeByPubkey, receivedChunkTtlMs = DEFAULT_RECEIVED_CHUNK_TTL_MS, receivedChunkMaxBytes = DEFAULT_RECEIVED_CHUNK_MAX_BYTES, receivedChunkStorageArea, ignoredGroupTtlMs = DEFAULT_IGNORED_GROUP_TTL_MS, ignoredGroupMaxEntries = DEFAULT_IGNORED_GROUP_MAX_ENTRIES }) {
+export function subscribe ({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelSignersByPubkey, privateChannelReaderSigner = privateChannelSigner, privateChannelReaderSignersByPubkey, privateChannelReaderPubkey, privateChannelReaderPubkeysByPubkey, privateChannelPubkey, privateChannelPubkeys, receiverPubkey, relays, onChunk, onEvent, onNymEvent, onSeedEvent, onContentKeyUsage, onError, onEose, since = nowSeconds() - 5, limit, liveOnly = false, mode = 'leecher', modeByPubkey, receivedChunkTtlMs = DEFAULT_RECEIVED_CHUNK_TTL_MS, receivedChunkMaxBytes = DEFAULT_RECEIVED_CHUNK_MAX_BYTES, receivedChunkStorageArea, ignoredGroupTtlMs = DEFAULT_IGNORED_GROUP_TTL_MS, ignoredGroupMaxEntries = DEFAULT_IGNORED_GROUP_MAX_ENTRIES }) {
   if (!relays?.length) throw new Error('NO_RELAYS')
   if (receiverSigner && !receiverSigner?.nip44Decrypt) throw new Error('RECEIVER_SIGNER_NIP44_DECRYPT_UNSUPPORTED')
   if (!privateChannelReaderSigner && !privateChannelReaderSignersByPubkey && !privateChannelSigner && !privateChannelSignersByPubkey) throw new Error('PRIVATE_CHANNEL_READER_REQUIRED')
@@ -485,7 +685,7 @@ export function subscribe ({ receiverSigner, iykcSigner, privateChannelSigner = 
   const filter = { kinds: [PRIVATE_BROADCAST_KIND], since }
   if (authors.length) filter.authors = authors
   if (limit != null) filter.limit = limit
-  const processOuterEvent = createProcessor({ receiverSigner, iykcSigner, privateChannelSigner, privateChannelSignersByPubkey, privateChannelReaderSigner, privateChannelReaderSignersByPubkey, privateChannelReaderPubkey, privateChannelReaderPubkeysByPubkey, receiverPubkey, mode, modeByPubkey, onChunk, onEvent, onSeedEvent, onContentKeyUsage, onError, receivedChunkTtlMs, receivedChunkMaxBytes, receivedChunkStorageArea, ignoredGroupTtlMs, ignoredGroupMaxEntries })
+  const processOuterEvent = createProcessor({ receiverSigner, iykcSigner, privateChannelSigner, privateChannelSignersByPubkey, privateChannelReaderSigner, privateChannelReaderSignersByPubkey, privateChannelReaderPubkey, privateChannelReaderPubkeysByPubkey, receiverPubkey, mode, modeByPubkey, onChunk, onEvent, onNymEvent, onSeedEvent, onContentKeyUsage, onError, receivedChunkTtlMs, receivedChunkMaxBytes, receivedChunkStorageArea, ignoredGroupTtlMs, ignoredGroupMaxEntries })
   let eosed = false
 
   return pool.subscribeMany(relays, filter, {
