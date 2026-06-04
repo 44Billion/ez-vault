@@ -54,6 +54,7 @@ class SharedKeySigner {
 
 export default class NsecSigner {
   static #signersByPubkey = {}
+  static #contentSignersByOwnerSigner = new WeakMap()
   #pubkey
   #conversationKeyGcTimeout
   #conversationKeys = {}
@@ -90,6 +91,17 @@ export default class NsecSigner {
 
   static releaseAll () {
     for (const pubkey of Object.keys(this.#signersByPubkey)) this.release(pubkey)
+  }
+
+  static setContentSigners (ownerSigner, contentSigners = []) {
+    if (!secretKeys.has(ownerSigner)) throw new Error('OWNER_SIGNER_UNSUPPORTED')
+    const signers = new Map()
+    for (const signer of contentSigners || []) {
+      if (!secretKeys.has(signer)) throw new Error('CONTENT_SIGNER_UNSUPPORTED')
+      signers.set(signer.getPublicKey(), signer)
+    }
+    if (signers.size) this.#contentSignersByOwnerSigner.set(ownerSigner, signers)
+    else this.#contentSignersByOwnerSigner.delete(ownerSigner)
   }
 
   #cleanup () {
@@ -148,17 +160,22 @@ export default class NsecSigner {
     return nip44Decrypt(ciphertext, ck)
   }
 
-  async #contentKeyMaterial (contentSigner) {
-    if (!contentSigner) return { contentPubkey: '', contentSecretKey: null }
+  async #contentKeyMaterial (contentSigner, requestedContentPubkey = '') {
+    if (!contentSigner && requestedContentPubkey) {
+      contentSigner = NsecSigner.#contentSignersByOwnerSigner.get(this)?.get(requestedContentPubkey) || null
+    }
+    if (!contentSigner) return { contentPubkey: requestedContentPubkey || '', contentSecretKey: null }
     if (!secretKeys.has(contentSigner)) throw new Error('CONTENT_SIGNER_UNSUPPORTED')
+    const contentPubkey = await contentSigner.getPublicKey()
+    if (requestedContentPubkey && requestedContentPubkey !== contentPubkey) throw new Error('CONTENT_SIGNER_MISMATCH')
     return {
-      contentPubkey: await contentSigner.getPublicKey(),
+      contentPubkey,
       contentSecretKey: secretKeys.get(contentSigner)
     }
   }
 
-  async nip44EncryptMultiDH ({ peerPubkey, peerContentPubkey = '', ownContentSigner, plaintext, context }) {
-    const { contentPubkey, contentSecretKey } = await this.#contentKeyMaterial(ownContentSigner)
+  async nip44EncryptMultiDH ({ peerPubkey, peerContentPubkey = '', ownContentSigner, ownContentPubkey = '', plaintext, context }) {
+    const { contentPubkey, contentSecretKey } = await this.#contentKeyMaterial(ownContentSigner, ownContentPubkey)
     const { mode, conversationKey } = deriveMultiDhConversationKey({
       role: 'sender',
       identitySecretKey: this.#secretKey,
@@ -179,8 +196,8 @@ export default class NsecSigner {
     }
   }
 
-  async nip44DecryptMultiDH ({ peerPubkey, peerContentPubkey = '', ownContentSigner, ciphertext, context }) {
-    const { contentPubkey, contentSecretKey } = await this.#contentKeyMaterial(ownContentSigner)
+  async nip44DecryptMultiDH ({ peerPubkey, peerContentPubkey = '', ownContentSigner, ownContentPubkey = '', ciphertext, context }) {
+    const { contentPubkey, contentSecretKey } = await this.#contentKeyMaterial(ownContentSigner, ownContentPubkey)
     const { mode, conversationKey } = deriveMultiDhConversationKey({
       role: 'receiver',
       identitySecretKey: this.#secretKey,

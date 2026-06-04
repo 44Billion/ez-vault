@@ -1,7 +1,7 @@
 // Expected use:
 // const messenger = await createPrivateMessenger({
 //   userSigner,
-//   contentKeySigner,
+//   contentKeySigner, // optional when userSigner handles content keys internally
 //   nymSigner: optionalDefaultNymSigner,
 //   channels: [{ signer: privateChannelSigner, relays, mode: 'leecher', seeders: optionalSeederPubkeys }],
 //   onContentKeyChange: event => reviewContentKeyUse(event),

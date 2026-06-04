@@ -103,23 +103,36 @@ export function receiverPubkeysWithoutContentKeys (receivers) {
     .map(receiver => receiver.receiverPubkey)
 }
 
-export async function writeChunks ({ senderSigner, imkcSigner, receivers, receiverContentKeys = {}, event, multiDhContext }) {
+async function writeChunksOnce ({ senderSigner, imkcSigner, receivers, receiverContentKeys = {}, event, multiDhContext }) {
   const id = `${Date.now()}:${Math.random().toString(16).slice(2)}`
   let chunk = new Uint8Array()
   let chunkIndex = 0
   const useMultiDh = typeof senderSigner?.nip44EncryptMultiDH === 'function'
+  let foundOwnContentPubkey = false
+  let usedOwnContentPubkey = ''
 
   for (const receiver of receivers) {
     const row = receiverRecord(receiver, useMultiDh ? receiverContentKeys : {})
-    const ciphertext = useMultiDh
-      ? (await senderSigner.nip44EncryptMultiDH({
-          peerPubkey: row.receiverPubkey,
-          peerContentPubkey: row.iykcPubkey,
-          ownContentSigner: imkcSigner,
-          context: multiDhContext,
-          plaintext: JSON.stringify(event)
-        })).ciphertext
-      : await senderSigner.nip44Encrypt(row.receiverPubkey, JSON.stringify(event))
+    let ciphertext
+    if (useMultiDh) {
+      const encrypted = await senderSigner.nip44EncryptMultiDH({
+        peerPubkey: row.receiverPubkey,
+        peerContentPubkey: row.iykcPubkey,
+        ownContentSigner: imkcSigner,
+        context: multiDhContext,
+        plaintext: JSON.stringify(event)
+      })
+      ciphertext = encrypted.ciphertext
+      const nextContentPubkey = encrypted.ownContentPubkey || ''
+      if (foundOwnContentPubkey && nextContentPubkey !== usedOwnContentPubkey) {
+        cleanupChunks(id, chunkIndex)
+        throw new Error('INCONSISTENT_IMKC_PUBKEY')
+      }
+      foundOwnContentPubkey = true
+      if (nextContentPubkey) usedOwnContentPubkey = nextContentPubkey
+    } else {
+      ciphertext = await senderSigner.nip44Encrypt(row.receiverPubkey, JSON.stringify(event))
+    }
     let line = encoder.encode(buildLine(row, ciphertext))
 
     while (line.length) {
@@ -134,7 +147,16 @@ export async function writeChunks ({ senderSigner, imkcSigner, receivers, receiv
   }
 
   if (chunk.length || chunkIndex === 0) setTemporaryItem(tempKey(id, chunkIndex++), bytesToBase64(chunk))
-  return { id, total: chunkIndex }
+  return { id, total: chunkIndex, ownContentPubkey: usedOwnContentPubkey }
+}
+
+export async function writeChunks (options) {
+  try {
+    return await writeChunksOnce(options)
+  } catch (err) {
+    if (err?.message !== 'INCONSISTENT_IMKC_PUBKEY') throw err
+  }
+  return writeChunksOnce(options)
 }
 
 export function cleanupChunks (id, total) {

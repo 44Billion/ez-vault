@@ -101,6 +101,16 @@ function dropPriorEntry (pubkey) {
   return contentKeysChanged
 }
 
+function refreshContentSignerBindings (ownerPubkey) {
+  const ownerSigner = nsecSignersByPubkey.get(ownerPubkey)
+  if (!ownerSigner) return
+  NsecSigner.setContentSigners(ownerSigner, [...(contentKeySignersByOwnerPubkey.get(ownerPubkey)?.values() || [])])
+}
+
+function clearContentSignerBindings () {
+  for (const signer of nsecSignersByPubkey.values()) NsecSigner.setContentSigners(signer, [])
+}
+
 function dropContentKeysForOwner (ownerPubkey) {
   const signers = contentKeySignersByOwnerPubkey.get(ownerPubkey)
   const hadKeys = Boolean(signers?.size || rawContentKeyHexByOwnerPubkey.get(ownerPubkey)?.size)
@@ -109,6 +119,7 @@ function dropContentKeysForOwner (ownerPubkey) {
   }
   contentKeySignersByOwnerPubkey.delete(ownerPubkey)
   rawContentKeyHexByOwnerPubkey.delete(ownerPubkey)
+  refreshContentSignerBindings(ownerPubkey)
   return hadKeys
 }
 
@@ -122,6 +133,7 @@ function dropContentKey (ownerPubkey, contentPubkey) {
   raw?.delete(contentPubkey)
   if (!signers?.size) contentKeySignersByOwnerPubkey.delete(ownerPubkey)
   if (!raw?.size) rawContentKeyHexByOwnerPubkey.delete(ownerPubkey)
+  refreshContentSignerBindings(ownerPubkey)
   return true
 }
 
@@ -131,6 +143,7 @@ function dropAllContentKeys () {
   }
   contentKeySignersByOwnerPubkey.clear()
   rawContentKeyHexByOwnerPubkey.clear()
+  clearContentSignerBindings()
 }
 
 function adoptNsec (pubkey, seckey) {
@@ -139,6 +152,7 @@ function adoptNsec (pubkey, seckey) {
   // NsecSigner.getOrCreate sinks the bytes into its WeakMap-backed slot.
   nsecSignersByPubkey.set(pubkey, NsecSigner.getOrCreate(seckey))
   accountTypeByPubkey.set(pubkey, 'nsec')
+  refreshContentSignerBindings(pubkey)
   return contentKeysChanged
 }
 
@@ -376,6 +390,7 @@ function adoptContentKey (ownerPubkey, seckey, createdAt = Math.floor(Date.now()
   }
   signers.set(pubkey, signer)
   raw.set(pubkey, { seckey, createdAt })
+  refreshContentSignerBindings(ownerPubkey)
   return signer
 }
 

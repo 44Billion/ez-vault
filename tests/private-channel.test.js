@@ -50,6 +50,26 @@ function signer () {
   return NsecSigner.getOrCreate(bytesToHex(generateSecretKey()))
 }
 
+async function signerWithInternalContentKey (identitySigner, contentSigner) {
+  const identityPubkey = await identitySigner.getPublicKey()
+  const contentPubkey = await contentSigner.getPublicKey()
+  return {
+    getPublicKey: () => identityPubkey,
+    signEvent: event => identitySigner.signEvent(event),
+    nip44Encrypt: (peerPubkey, plaintext) => identitySigner.nip44Encrypt(peerPubkey, plaintext),
+    nip44Decrypt: (peerPubkey, ciphertext) => identitySigner.nip44Decrypt(peerPubkey, ciphertext),
+    nip44EncryptMultiDH: options => identitySigner.nip44EncryptMultiDH({
+      ...options,
+      ownContentSigner: contentSigner,
+      ownContentPubkey: options.ownContentPubkey || contentPubkey
+    }),
+    nip44DecryptMultiDH: options => identitySigner.nip44DecryptMultiDH({
+      ...options,
+      ownContentSigner: options.ownContentPubkey ? contentSigner : null
+    })
+  }
+}
+
 function eventFixture (content = 'hello') {
   return { kind: 1, created_at: 1, tags: [], content }
 }
@@ -665,6 +685,118 @@ test('unwrapEvent uses imkc tag as the row encryption pubkey', async () => {
   )
 })
 
+test('wrapEvent can add imkc from senderSigner Multi-DH without direct content signer access', async () => {
+  const alice = signer()
+  const aliceContent = signer()
+  const bob = signer()
+  const aliceProxy = await signerWithInternalContentKey(alice, aliceContent)
+  const alicePubkey = await alice.getPublicKey()
+  const bobPubkey = await bob.getPublicKey()
+  const contentPubkey = await aliceContent.getPublicKey()
+  const original = eventFixture('private')
+  const [wrapped] = await wrapEvent({
+    senderSigner: aliceProxy,
+    privateChannelSigner: alice,
+    receivers: [bobPubkey],
+    event: original,
+    _getIykcProofs: noContentKeys
+  })
+  const router = JSON.parse(await alice.nip44Decrypt(alicePubkey, wrapped.content))
+  const imkcTag = router.tags.find(t => t[0] === 'imkc')
+
+  assert.equal(imkcTag?.[1], contentPubkey)
+  assert.equal(verifyContentKeyProof({ ownerPubkey: alicePubkey, contentPubkey, proof: imkcTag?.[2] }), true)
+  assert.deepEqual(
+    await unwrapEvent({
+      receiverSigner: bob,
+      privateChannelSigner: alice,
+      event: wrapped,
+      receiverPubkey: bobPubkey
+    }),
+    unwrappedFixture(original, alicePubkey)
+  )
+})
+
+test('wrapEvent uses Multi-DH returned own content pubkey for imkc tag', async () => {
+  const alice = signer()
+  const oldContent = signer()
+  const actualContent = signer()
+  const bob = signer()
+  const alicePubkey = await alice.getPublicKey()
+  const bobPubkey = await bob.getPublicKey()
+  const actualContentPubkey = await actualContent.getPublicKey()
+  const senderSigner = {
+    getPublicKey: () => alice.getPublicKey(),
+    signEvent: event => alice.signEvent(event),
+    nip44Encrypt: (peerPubkey, plaintext) => alice.nip44Encrypt(peerPubkey, plaintext),
+    nip44EncryptMultiDH: options => alice.nip44EncryptMultiDH({
+      ...options,
+      ownContentSigner: actualContent
+    })
+  }
+  const [wrapped] = await wrapEvent({
+    senderSigner,
+    imkcSigner: oldContent,
+    privateChannelSigner: alice,
+    receivers: [bobPubkey],
+    event: eventFixture('private'),
+    _getIykcProofs: noContentKeys
+  })
+  const router = JSON.parse(await alice.nip44Decrypt(alicePubkey, wrapped.content))
+  const imkcTag = router.tags.find(t => t[0] === 'imkc')
+
+  assert.equal(imkcTag?.[1], actualContentPubkey)
+  assert.equal(verifyContentKeyProof({ ownerPubkey: alicePubkey, contentPubkey: actualContentPubkey, proof: imkcTag?.[2] }), true)
+})
+
+test('wrapEvent retries once when sender content key rotates while writing chunks', async () => {
+  const alice = signer()
+  const oldContent = signer()
+  const actualContent = signer()
+  const bob = signer()
+  const carol = signer()
+  const alicePubkey = await alice.getPublicKey()
+  const bobPubkey = await bob.getPublicKey()
+  const carolPubkey = await carol.getPublicKey()
+  const actualContentPubkey = await actualContent.getPublicKey()
+  let encryptCalls = 0
+  const senderSigner = {
+    getPublicKey: () => alice.getPublicKey(),
+    signEvent: event => alice.signEvent(event),
+    nip44Encrypt: (peerPubkey, plaintext) => alice.nip44Encrypt(peerPubkey, plaintext),
+    nip44EncryptMultiDH: options => {
+      encryptCalls++
+      return alice.nip44EncryptMultiDH({
+        ...options,
+        ownContentSigner: encryptCalls === 1 ? oldContent : actualContent
+      })
+    }
+  }
+  const original = eventFixture('private after rotation')
+  const [wrapped] = await wrapEvent({
+    senderSigner,
+    imkcSigner: oldContent,
+    privateChannelSigner: alice,
+    receivers: [bobPubkey, carolPubkey],
+    event: original,
+    _getIykcProofs: noContentKeys
+  })
+  const router = JSON.parse(await alice.nip44Decrypt(alicePubkey, wrapped.content))
+  const imkcTag = router.tags.find(t => t[0] === 'imkc')
+
+  assert.equal(encryptCalls, 4)
+  assert.equal(imkcTag?.[1], actualContentPubkey)
+  assert.deepEqual(
+    await unwrapEvent({
+      receiverSigner: bob,
+      privateChannelSigner: alice,
+      event: wrapped,
+      receiverPubkey: bobPubkey
+    }),
+    unwrappedFixture(original, alicePubkey)
+  )
+})
+
 test('unwrapEvent rejects sender imkc keys that do not match the ciphertext', async () => {
   const alice = signer()
   const oldImkc = signer()
@@ -844,6 +976,65 @@ test('wrapEvent uses receiver content key rows when iykc is advertised', async (
   await assert.rejects(
     () => unwrapEvent({ receiverSigner: bob, privateChannelSigner: alice, event: wrapped, receiverPubkey: bobPubkey }),
     /RECEIVER_CONTENT_KEY_REQUIRED/
+  )
+})
+
+test('unwrapEvent can decrypt iykc rows through receiverSigner without direct content signer access', async () => {
+  const alice = signer()
+  const bob = signer()
+  const bobContent = signer()
+  const bobProxy = await signerWithInternalContentKey(bob, bobContent)
+  const bobPubkey = await bob.getPublicKey()
+  const contentKeyEvent = await makeContentKeyEvent({ userSigner: bob, contentKeySigner: bobContent, createdAt: 7 })
+  const contentKey = parseContentKeyEvent(contentKeyEvent)
+  const original = eventFixture('private')
+  const [wrapped] = await wrapEvent({
+    senderSigner: alice,
+    receivers: [bobPubkey],
+    event: original,
+    _getIykcProofs: async () => ({
+      [bobPubkey]: contentKey
+    })
+  })
+
+  assert.deepEqual(
+    await unwrapEvent({
+      receiverSigner: bobProxy,
+      privateChannelSigner: alice,
+      event: wrapped,
+      receiverPubkey: bobPubkey
+    }),
+    unwrappedFixture(original, await alice.getPublicKey())
+  )
+})
+
+test('unwrapEvent lets receiverSigner resolve older iykc when current content signer differs', async () => {
+  const alice = signer()
+  const bob = signer()
+  const bobOldContent = signer()
+  const bobLatestContent = signer()
+  const bobProxy = await signerWithInternalContentKey(bob, bobOldContent)
+  const bobPubkey = await bob.getPublicKey()
+  const oldContentKey = parseContentKeyEvent(await makeContentKeyEvent({ userSigner: bob, contentKeySigner: bobOldContent, createdAt: 7 }))
+  const original = eventFixture('older key private')
+  const [wrapped] = await wrapEvent({
+    senderSigner: alice,
+    receivers: [bobPubkey],
+    event: original,
+    _getIykcProofs: async () => ({
+      [bobPubkey]: oldContentKey
+    })
+  })
+
+  assert.deepEqual(
+    await unwrapEvent({
+      receiverSigner: bobProxy,
+      iykcSigner: bobLatestContent,
+      privateChannelSigner: alice,
+      event: wrapped,
+      receiverPubkey: bobPubkey
+    }),
+    unwrappedFixture(original, await alice.getPublicKey())
   )
 })
 

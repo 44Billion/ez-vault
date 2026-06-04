@@ -1,6 +1,6 @@
 import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash, validateEvent, verifyEvent } from 'nostr-tools'
 import { bytesToBase64, base64ToBytes } from '../../helpers/base64.js'
-import { makeContentKeyEvent, parseContentKeyEvent, verifyContentKeyProof, verifyIykcProof } from '../content-key/event.js'
+import { makeContentKeyEventForPubkey, parseContentKeyEvent, verifyContentKeyProof, verifyIykcProof } from '../content-key/event.js'
 import { getIykcProofs } from '../content-key/index.js'
 import { fetchEvents, pool, publish as publishToRelays } from '../relays.js'
 import { JSONL_CHUNK_BYTES, NYM_CARRIER_CHUNK_CHARS } from './chunk-size.js'
@@ -36,8 +36,8 @@ function storesRecoverySeeds (mode) {
   return mode === 'seeder' || mode === 'watchtower'
 }
 
-async function makeImkcProof ({ senderSigner, imkcSigner, senderPubkey, imkcPubkey }) {
-  const event = await makeContentKeyEvent({ userSigner: senderSigner, contentKeySigner: imkcSigner })
+async function makeImkcProof ({ senderSigner, senderPubkey, imkcPubkey }) {
+  const event = await makeContentKeyEventForPubkey({ userSigner: senderSigner, contentPubkey: imkcPubkey })
   const parsed = parseContentKeyEvent(event)
   if (
     event.pubkey !== senderPubkey ||
@@ -56,8 +56,6 @@ export async function * wrapEvents ({ senderSigner, imkcSigner, privateChannelSi
 
   const senderPubkey = await senderSigner.getPublicKey()
   const useMultiDh = typeof senderSigner.nip44EncryptMultiDH === 'function'
-  const imkcPubkey = useMultiDh && imkcSigner ? await imkcSigner.getPublicKey() : ''
-  const imkcProof = imkcPubkey ? await makeImkcProof({ senderSigner, imkcSigner, senderPubkey, imkcPubkey }) : ''
   const channelPubkey = await privateChannelSigner.getPublicKey()
   const channelReaderPubkey = privateChannelReaderPubkey || channelPubkey
   const routerSeckey = generateSecretKey()
@@ -65,7 +63,19 @@ export async function * wrapEvents ({ senderSigner, imkcSigner, privateChannelSi
   const receiverPubkeyList = receiverPubkeys(receivers)
   const routerReceiverTag = receiverTag ?? (receiverPubkeyList.length === 1 ? receiverPubkeyList[0] : '')
   const receiverContentKeys = useMultiDh ? await _getIykcProofs(receiverPubkeysWithoutContentKeys(receivers)) : {}
-  const { id, total } = await writeChunks({ senderSigner, imkcSigner: useMultiDh ? imkcSigner : null, receivers, receiverContentKeys, event, multiDhContext: multiDhContext(channelPubkey) })
+  const {
+    id,
+    total,
+    ownContentPubkey: imkcPubkey
+  } = await writeChunks({
+    senderSigner,
+    imkcSigner: useMultiDh ? imkcSigner : null,
+    receivers,
+    receiverContentKeys,
+    event,
+    multiDhContext: multiDhContext(channelPubkey)
+  })
+  const imkcProof = imkcPubkey ? await makeImkcProof({ senderSigner, senderPubkey, imkcPubkey }) : ''
 
   try {
     for (let index = 0; index < total; index++) {
@@ -266,15 +276,18 @@ async function unwrapRecipientEnvelope ({ envelope, receiverSigner, iykcSigner, 
   let plaintext
   if (envelope.iykcPubkey || imkcPubkey) {
     if (!receiverSigner?.nip44DecryptMultiDH) throw new Error('RECEIVER_MULTI_DH_UNSUPPORTED')
+    let ownContentSigner = null
     if (envelope.iykcPubkey) {
       assertValidEnvelopeIykcProof(envelope)
-      if (!iykcSigner?.getPublicKey) throw new Error('RECEIVER_CONTENT_KEY_REQUIRED')
-      if (await iykcSigner.getPublicKey() !== envelope.iykcPubkey) return null
+      ownContentSigner = iykcSigner?.getPublicKey && await iykcSigner.getPublicKey() === envelope.iykcPubkey
+        ? iykcSigner
+        : null
     }
     plaintext = (await receiverSigner.nip44DecryptMultiDH({
       peerPubkey: senderPubkey,
       peerContentPubkey: imkcPubkey,
-      ownContentSigner: envelope.iykcPubkey ? iykcSigner : null,
+      ownContentSigner,
+      ownContentPubkey: envelope.iykcPubkey || '',
       context: multiDhContext,
       ciphertext: envelope.ciphertext
     })).plaintext

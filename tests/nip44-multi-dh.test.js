@@ -1,6 +1,6 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { generateSecretKey, getPublicKey } from 'nostr-tools'
+import { generateSecretKey, getEventHash, getPublicKey, verifyEvent } from 'nostr-tools'
 import { run } from '../docs/services/signer.js'
 import * as store from '../docs/services/accounts-store.js'
 import * as secrets from '../docs/services/secrets.js'
@@ -119,6 +119,36 @@ test('nip44-multi-dh self-encryption with content keys round-trips', async () =>
   assert.equal(decrypted.plaintext, 'note to self')
 })
 
+test('nip44-multi-dh decrypt resolves older stored own content keys by pubkey', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const alice = addNsecAccount()
+  const bob = addNsecAccount()
+  const olderSecret = seckey()
+  const newerSecret = seckey()
+  const olderPubkey = getPublicKey(hexToBytes(olderSecret))
+  const newerPubkey = getPublicKey(hexToBytes(newerSecret))
+  const now = nowSeconds()
+  secrets.setContentKeySecret(bob.pubkey, olderSecret, now - 10)
+  secrets.setContentKeySecret(bob.pubkey, newerSecret, now)
+
+  const aliceSigner = secrets.getNsecSigner(alice.pubkey)
+  const bobSigner = secrets.getNsecSigner(bob.pubkey)
+  const encrypted = await aliceSigner.nip44EncryptMultiDH({
+    peerPubkey: bob.pubkey,
+    peerContentPubkey: olderPubkey,
+    plaintext: 'old key message'
+  })
+  const decrypted = await bobSigner.nip44DecryptMultiDH({
+    peerPubkey: alice.pubkey,
+    ownContentPubkey: olderPubkey,
+    ciphertext: encrypted.ciphertext
+  })
+
+  assert.equal(secrets.getLatestContentKeySigner(bob.pubkey).getPublicKey(), newerPubkey)
+  assert.equal(decrypted.ownContentPubkey, olderPubkey)
+  assert.equal(decrypted.plaintext, 'old key message')
+})
+
 test('nip44-multi-dh can opt out of content-key lookup', async () => {
   secrets.unlock(generateSecretKey(), null)
   const alice = addNsecAccount()
@@ -168,6 +198,43 @@ test('signer.run normalizes snake_case multi-DH wire methods', async () => {
   })
 
   assert.equal(decrypted.plaintext, 'snake case')
+})
+
+test('signer.run doubleSignEvent signs with identity and local content key', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const alice = addNsecAccount()
+  const aliceContent = addContentKey(alice.pubkey)
+  const event = {
+    kind: 1,
+    pubkey: 'f'.repeat(64),
+    id: 'e'.repeat(64),
+    sig: 'd'.repeat(128),
+    created_at: 9,
+    tags: [['p', 'peer'], ['imkc', 'old'], ['x', 'kept']],
+    content: 'clear text'
+  }
+
+  const signed = await run({
+    pubkey: alice.pubkey,
+    method: 'doubleSignEvent',
+    params: [event]
+  })
+  const imkcTag = signed.tags.find(tag => tag[0] === 'imkc')
+  const proofEvent = {
+    kind: signed.kind,
+    pubkey: aliceContent.pubkey,
+    created_at: signed.created_at,
+    tags: signed.tags.map(tag => tag[0] === 'imkc' ? ['imkc', aliceContent.pubkey] : [...tag]),
+    content: signed.content,
+    sig: imkcTag[2]
+  }
+  proofEvent.id = getEventHash(proofEvent)
+
+  assert.equal(signed.pubkey, alice.pubkey)
+  assert.deepEqual(imkcTag.slice(0, 2), ['imkc', aliceContent.pubkey])
+  assert.equal(event.tags[1][1], 'old')
+  assert.equal(verifyEvent(proofEvent), true)
+  assert.equal(verifyEvent(signed), true)
 })
 
 test('nip44-multi-dh creates own content keys in encrypted localStorage', async () => {

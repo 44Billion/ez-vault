@@ -9,16 +9,24 @@ function nowSeconds () {
   return Math.floor(Date.now() / 1000)
 }
 
-export async function makeContentKeyEvent ({ userSigner, contentKeySigner, createdAt = nowSeconds() }) {
+export async function makeContentKeyEventForPubkey ({ userSigner, contentPubkey, createdAt = nowSeconds() }) {
   if (!userSigner?.getPublicKey || !userSigner?.signEvent) throw new Error('USER_SIGNER_REQUIRED')
-  if (!contentKeySigner?.getPublicKey) throw new Error('CONTENT_KEY_SIGNER_REQUIRED')
+  if (!HEX_PUBKEY.test(contentPubkey || '')) throw new Error('CONTENT_PUBKEY_REQUIRED')
 
-  const contentPubkey = await contentKeySigner.getPublicKey()
   return userSigner.signEvent({
     kind: CONTENT_KEY_KIND,
     created_at: createdAt,
     tags: [['cp', contentPubkey]],
     content: ''
+  })
+}
+
+export async function makeContentKeyEvent ({ userSigner, contentKeySigner, createdAt = nowSeconds() }) {
+  if (!contentKeySigner?.getPublicKey) throw new Error('CONTENT_KEY_SIGNER_REQUIRED')
+  return makeContentKeyEventForPubkey({
+    userSigner,
+    contentPubkey: await contentKeySigner.getPublicKey(),
+    createdAt
   })
 }
 

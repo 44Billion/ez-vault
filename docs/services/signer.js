@@ -1,6 +1,9 @@
+import { generateSecretKey } from 'nostr-tools'
+import { bytesToHex } from '../helpers/nostr/index.js'
 import * as store from './accounts-store.js'
 import * as secrets from './secrets.js'
 import * as nip44MultiDh from './nip44-multi-dh.js'
+import { doubleSignEvent } from './content-key/index.js'
 
 // NIP-07 / NIP-46 method whitelist. Anything outside this set is rejected
 // before we hit the per-type signer, so typos and unknown methods fail fast
@@ -14,19 +17,22 @@ const SUPPORTED_METHODS = new Set([
   'nip44Encrypt',
   'nip44Decrypt',
   'nip44EncryptMultiDH',
-  'nip44DecryptMultiDH'
+  'nip44DecryptMultiDH',
+  'doubleSignEvent'
   // 'withSharedKey'
 ])
 
 const METHOD_ALIASES = {
-  nip44EncryptMultiDh: 'nip44EncryptMultiDH',
-  nip44DecryptMultiDh: 'nip44DecryptMultiDH'
+  nip44_encrypt_multi_dh: 'nip44EncryptMultiDH',
+  nip44_decrypt_multi_dh: 'nip44DecryptMultiDH',
+  double_sign_event: 'doubleSignEvent'
 }
 
 // NIP-07 wire methods are snake_case (get_public_key, nip44_encrypt, ...)
 // while our JS impls are camelCase. Normalize here so callers can forward
 // the wire form untouched.
 function normalizeMethod (method) {
+  if (METHOD_ALIASES[method]) return METHOD_ALIASES[method]
   const normalized = method.includes('_')
     ? method.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase())
     : method
@@ -51,6 +57,27 @@ export function claimSigner (account) {
   }
 }
 
+function doubleSignRequest (params) {
+  if (params && !Array.isArray(params) && typeof params === 'object') return params
+  const [first, second] = params || []
+  if (first?.event) return first
+  return {
+    ...(second && typeof second === 'object' && !Array.isArray(second) ? second : {}),
+    event: first
+  }
+}
+
+function contentSignerForDoubleSign (account, contentPubkey = '') {
+  if (account.type !== 'nsec') throw new Error('OWN_CONTENT_KEY_UNSUPPORTED')
+  if (contentPubkey) {
+    const signer = secrets.getContentKeySigner(account.pubkey, contentPubkey)
+    if (!signer) throw new Error('CONTENT_KEY_NOT_FOUND')
+    return signer
+  }
+  return secrets.getLatestContentKeySigner(account.pubkey) ||
+    secrets.setContentKeySecret(account.pubkey, bytesToHex(generateSecretKey()))
+}
+
 // Single entry point for the (future) messenger's NIP-07/46 dispatch. Looks
 // up the account, picks the right signer, and invokes the method. Throws on
 // unknown account, read-only account, or unsupported method; the messenger
@@ -67,6 +94,14 @@ export async function run ({ pubkey, method, params = [], internals = {} }) {
   }
   if (normalized === 'nip44DecryptMultiDH') {
     return nip44MultiDh.nip44DecryptMultiDH({ account, signer, params })
+  }
+  if (normalized === 'doubleSignEvent') {
+    const { event, contentPubkey = '' } = doubleSignRequest(params)
+    return doubleSignEvent({
+      userSigner: signer,
+      contentKeySigner: contentSignerForDoubleSign(account, contentPubkey),
+      event
+    })
   }
   return signer[normalized](...params)
 }

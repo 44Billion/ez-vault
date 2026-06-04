@@ -108,6 +108,7 @@ async function encrypt ({ account, signer, options, internals }) {
     peerPubkey,
     peerContentPubkey,
     ownContentSigner,
+    ownContentPubkey: await ownContentSigner?.getPublicKey?.() || '',
     plaintext
   })
   return {
@@ -151,6 +152,7 @@ async function decrypt ({ account, signer, options }) {
     peerPubkey,
     peerContentPubkey,
     ownContentSigner,
+    ownContentPubkey,
     ciphertext
   })
   return {
