@@ -11,6 +11,7 @@ import {
   MAX_EVENT_BYTES,
   NYM_CARRIER_KIND,
   PRIVATE_BROADCAST_KIND,
+  publish,
   ROUTER_KIND,
   subscribe,
   unwrapEvent,
@@ -235,6 +236,54 @@ test('wrapEvent creates private broadcast events under relay event size limit', 
   assert.equal(globalThis.localStorage.getItem(TEMPORARY_STORAGE_KEYS_KEY), null)
 })
 
+test('publish splits relay-targeted routers by receiver subset with separate router pubkeys', async () => {
+  const alice = signer()
+  const bob = signer()
+  const carol = signer()
+  const dave = signer()
+  const alicePubkey = await alice.getPublicKey()
+  const bobPubkey = await bob.getPublicKey()
+  const carolPubkey = await carol.getPublicKey()
+  const davePubkey = await dave.getPublicKey()
+  const event = eventFixture('split publish')
+  const published = []
+
+  await publish({
+    senderSigner: alice,
+    receivers: [bobPubkey, carolPubkey, davePubkey],
+    relayToReceivers: new Map([
+      ['wss://one.example', [bobPubkey, carolPubkey]],
+      ['wss://two.example', [carolPubkey, bobPubkey]],
+      ['wss://three.example', [davePubkey]]
+    ]),
+    event,
+    _getIykcProofs: noContentKeys,
+    _publish: async (outer, relays) => {
+      published.push({ outer, relays })
+      return { success: true }
+    }
+  })
+
+  assert.equal(published.length, 2)
+  assert.deepEqual(published[0].relays, ['wss://one.example', 'wss://two.example'])
+  assert.deepEqual(published[1].relays, ['wss://three.example'])
+
+  const routers = []
+  for (const { outer } of published) {
+    routers.push(JSON.parse(await alice.nip44Decrypt(alicePubkey, outer.content)))
+  }
+  assert.deepEqual(routers.map(router => router.tags.some(tag => tag[0] === 'id')), [false, false])
+  assert.notEqual(routers[0].pubkey, routers[1].pubkey)
+  assert.deepEqual(
+    Buffer.from(routers[0].content, 'base64').toString().trim().split('\n').map(line => JSON.parse(line)[0]).sort(),
+    [bobPubkey, carolPubkey].sort()
+  )
+  assert.deepEqual(
+    Buffer.from(routers[1].content, 'base64').toString().trim().split('\n').map(line => JSON.parse(line)[0]),
+    [davePubkey]
+  )
+})
+
 test('received chunk default cap is proportional to private-channel chunk size', () => {
   assert.equal(DEFAULT_RECEIVED_CHUNK_MAX_BYTES, Math.min(getJsonlChunkByteSize() * 64, 3 * 1024 * 1024))
 })
@@ -430,7 +479,7 @@ test('unwrapEvent rejects malformed signed inner events', async () => {
   const [wrapped] = await wrapEvent({
     senderSigner: alice,
     receivers: [bobPubkey],
-    event: { kind: 9002, created_at: 2, tags: [], content: 'signed', sig: 42 },
+    event: { id: 'e'.repeat(64), pubkey: 'a'.repeat(64), kind: 9002, created_at: 2, tags: [], content: 'signed', sig: 42 },
     _getIykcProofs: noContentKeys
   })
 

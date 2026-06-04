@@ -16,6 +16,10 @@ const DEFAULT_IGNORED_GROUP_MAX_ENTRIES = 5000
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 
+function uniq (values) {
+  return [...new Set((values || []).filter(Boolean))]
+}
+
 export function getJsonlChunkByteSize () {
   return JSONL_CHUNK_BYTES
 }
@@ -321,18 +325,93 @@ export async function unwrapEvent ({ receiverSigner, iykcSigner, privateChannelS
   return null
 }
 
-export async function publish ({ senderSigner, imkcSigner, privateChannelSigner = senderSigner, privateChannelReaderPubkey, receivers, receiverTag, event, relays, expirationSeconds, _getIykcProofs = getIykcProofs }) {
+function receiverPubkeyFor (receiver) {
+  return receiverPubkeys([receiver])[0] || ''
+}
+
+function relayReceiverEntries (relayToReceivers) {
+  if (!relayToReceivers) return []
+  if (relayToReceivers instanceof Map) return [...relayToReceivers.entries()]
+  if (typeof relayToReceivers === 'object') return Object.entries(relayToReceivers)
+  throw new Error('INVALID_RELAY_RECEIVERS')
+}
+
+function groupedRelayReceivers ({ relayToReceivers, receivers }) {
+  const entries = relayReceiverEntries(relayToReceivers)
+  if (!entries.length) return null
+
+  const receiverByPubkey = new Map()
+  const orderedPubkeys = []
+  for (const receiver of receivers || []) {
+    const pubkey = receiverPubkeyFor(receiver)
+    if (!pubkey || receiverByPubkey.has(pubkey)) continue
+    receiverByPubkey.set(pubkey, receiver)
+    orderedPubkeys.push(pubkey)
+  }
+
+  const wanted = new Set(orderedPubkeys)
+  const covered = new Set()
+  const groupsByKey = new Map()
+  for (const [relay, value] of entries) {
+    if (!relay) continue
+    const pubkeys = uniq(Array.isArray(value) ? value : [value])
+    if (!pubkeys.length) continue
+    for (const pubkey of pubkeys) {
+      if (!wanted.has(pubkey)) throw new Error('RELAY_RECEIVER_NOT_REQUESTED')
+      covered.add(pubkey)
+    }
+    const key = [...pubkeys].sort().join(',')
+    if (!groupsByKey.has(key)) {
+      const set = new Set(pubkeys)
+      groupsByKey.set(key, {
+        pubkeys: set,
+        relays: []
+      })
+    }
+    groupsByKey.get(key).relays.push(relay)
+  }
+
+  if (!groupsByKey.size) throw new Error('NO_RELAYS')
+  for (const pubkey of orderedPubkeys) {
+    if (!covered.has(pubkey)) throw new Error('RELAY_RECEIVER_MISSING')
+  }
+
+  return [...groupsByKey.values()].map(group => ({
+    relays: uniq(group.relays),
+    receivers: orderedPubkeys
+      .filter(pubkey => group.pubkeys.has(pubkey))
+      .map(pubkey => receiverByPubkey.get(pubkey))
+  }))
+}
+
+function relaysFromRelayReceivers (relayToReceivers) {
+  return uniq(relayReceiverEntries(relayToReceivers).map(([relay]) => relay))
+}
+
+export async function publish ({ senderSigner, imkcSigner, privateChannelSigner = senderSigner, privateChannelReaderPubkey, receivers, receiverTag, event, relays, relayToReceivers, expirationSeconds, _getIykcProofs = getIykcProofs, _publish = publishToRelays }) {
   const results = []
+  // Relays are grouped only when they have the exact same recipient pubkey set
+  const groups = groupedRelayReceivers({ relayToReceivers, receivers })
+  if (groups) {
+    for (const group of groups) {
+      for await (const wrappedEvent of wrapEvents({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers: group.receivers, receiverTag, event, expirationSeconds, _getIykcProofs })) {
+        results.push(await _publish(wrappedEvent, group.relays))
+      }
+    }
+    return { results }
+  }
+
   for await (const wrappedEvent of wrapEvents({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag, event, expirationSeconds, _getIykcProofs })) {
-    results.push(await publishToRelays(wrappedEvent, relays))
+    results.push(await _publish(wrappedEvent, relays))
   }
   return { results }
 }
 
-export async function publishNymEvent ({ nymSigner, privateChannelSigner, privateChannelReaderPubkey, event, relays, expirationSeconds }) {
+export async function publishNymEvent ({ nymSigner, privateChannelSigner, privateChannelReaderPubkey, event, relays, relayToReceivers, expirationSeconds, _publish = publishToRelays }) {
   const results = []
+  const publishRelays = relayToReceivers ? relaysFromRelayReceivers(relayToReceivers) : relays
   for await (const wrappedEvent of wrapNymEvents({ nymSigner, privateChannelSigner, privateChannelReaderPubkey, event, expirationSeconds })) {
-    results.push(await publishToRelays(wrappedEvent, relays))
+    results.push(await _publish(wrappedEvent, publishRelays))
   }
   return { results }
 }
@@ -573,6 +652,7 @@ function createProcessor ({
       // regular leechers can stop as soon as their envelope is decrypted.
       const mustScanWholeBundle = shouldSeed || sentByReceiver
       let event = null
+      const innerEventIdsByRowIndex = {}
 
       const drained = await receivedChunks.drainAvailable(groupKey, {
         onLine: async (line, rowIndex, groupMeta, helpers) => {
@@ -600,7 +680,10 @@ function createProcessor ({
                 imkcPubkey,
                 multiDhContext: multiDhContext(channelPubkey)
               })
-              if (event && !mustScanWholeBundle) return { stop: true }
+              if (event) {
+                innerEventIdsByRowIndex[rowIndex] = event.id
+                if (!mustScanWholeBundle) return { stop: true }
+              }
             }
           }
         }
@@ -628,7 +711,7 @@ function createProcessor ({
         receiverPubkeys,
         onContentKeyUsage
       })
-      if (shouldSeed) await onSeedEvent?.({ recordType: 'router_v1', outer, router: completeRouter, channelPubkey, jsonl })
+      if (shouldSeed) await onSeedEvent?.({ recordType: 'routerRow_v1', outer, router: completeRouter, channelPubkey, jsonl, innerEventIdsByRowIndex })
       if (event) await onEvent?.(event, outer, { router: completeRouter, channelPubkey, jsonl })
 
       receivedChunks.removeGroup(groupKey)

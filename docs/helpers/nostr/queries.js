@@ -82,11 +82,12 @@ export function clearQueryCaches () {
 // Given pubkeys and their relay mappings, picks the minimum set of relays
 // that covers all pubkeys (up to maxPerPubkey relays each), preferring
 // relays shared by more pubkeys. Returns Map<relayUrl, pubkey[]>.
-export function pickRelaysForPubkeys (pubkeys, relaysByPubkey, { maxPerPubkey = DEFAULT_RELAYS_PER_PUBKEY } = {}) {
+export function pickRelaysForPubkeys (pubkeys, relaysByPubkey, { maxPerPubkey = DEFAULT_RELAYS_PER_PUBKEY, relayType = 'write' } = {}) {
+  const type = relayType === 'read' ? 'read' : 'write'
   const pkToPossibleRelays = new Map()
   for (const pk of pubkeys) {
-    const writeRelays = relaysByPubkey[pk]?.write || []
-    pkToPossibleRelays.set(pk, new Set(writeRelays.length ? writeRelays : freeRelays.slice(0, DEFAULT_RELAYS_PER_PUBKEY)))
+    const relays = relaysByPubkey[pk]?.[type] || []
+    pkToPossibleRelays.set(pk, new Set(relays.length ? relays : freeRelays.slice(0, DEFAULT_RELAYS_PER_PUBKEY)))
   }
 
   const relayCounts = new Map()

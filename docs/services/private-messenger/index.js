@@ -37,18 +37,20 @@
 // - For other event-list replies, use createEventReplyPacker({ messenger, question, code }).update(event).
 
 import * as privateMessage from '../../helpers/nostr/private-message.js'
+import { getRelaysByPubkey, pickRelaysForPubkeys } from '../../helpers/nostr/queries.js'
 import * as privateChannel from '../private-channel/index.js'
 import { createQueue } from '../web-storage-queue.js'
 import { DEFAULT_STALE_CHANNEL_SECONDS } from './constants.js'
 import {
   compactSeedNymCarriers,
-  compactSeedRouter,
+  compactSeedRouterRows,
   createEventReplyPacker,
   createMissingMessageReplyPacker,
   MISSING_MESSAGES_ASK_CODE,
   MISSING_MESSAGES_REPLY_CODE,
   NYM_CARRIER_SEED_RECORD_TYPE,
   ROUTER_SEED_RECORD_TYPE,
+  routerSeedRowKey,
   SEEDER_PRESENCE_CODE
 } from './recovery.js'
 
@@ -56,13 +58,14 @@ export { createQueue } from '../web-storage-queue.js'
 export { DEFAULT_STALE_CHANNEL_SECONDS } from './constants.js'
 export {
   compactSeedNymCarriers,
-  compactSeedRouter,
+  compactSeedRouterRows,
   createEventReplyPacker,
   createMissingMessageReplyPacker,
   MISSING_MESSAGES_ASK_CODE,
   MISSING_MESSAGES_REPLY_CODE,
   NYM_CARRIER_SEED_RECORD_TYPE,
   ROUTER_SEED_RECORD_TYPE,
+  routerSeedRowKey,
   SEEDER_PRESENCE_CODE
 } from './recovery.js'
 
@@ -118,6 +121,8 @@ export class PrivateMessenger {
     onError = defaultOnError,
     _privateMessage = privateMessage,
     _privateChannel = privateChannel,
+    _getRelaysByPubkey = getRelaysByPubkey,
+    _pickRelaysForPubkeys = pickRelaysForPubkeys,
     _setTimeout = globalThis.setTimeout.bind(globalThis),
     _setInterval = globalThis.setInterval.bind(globalThis),
     _clearInterval = globalThis.clearInterval.bind(globalThis)
@@ -138,6 +143,8 @@ export class PrivateMessenger {
     this.onError = onError
     this._privateMessage = _privateMessage
     this._privateChannel = _privateChannel
+    this._getRelaysByPubkey = _getRelaysByPubkey
+    this._pickRelaysForPubkeys = _pickRelaysForPubkeys
     this._setTimeout = _setTimeout
     this._setInterval = _setInterval
     this._clearInterval = _clearInterval
@@ -241,6 +248,27 @@ export class PrivateMessenger {
       })
     }
     return out
+  }
+
+  async readRelayToReceivers (receiverPubkeys) {
+    const pubkeys = uniq(receiverPubkeys)
+    if (!pubkeys.length) return new Map()
+    const relaysByPubkey = await this._getRelaysByPubkey(pubkeys)
+    return this._pickRelaysForPubkeys(pubkeys, relaysByPubkey, { relayType: 'read' })
+  }
+
+  async resolveWatchRelays (channel) {
+    if (channel.relays.length) return channel.relays
+    return relayMapRelays(await this.readRelayToReceivers([this.userPubkey]))
+  }
+
+  async resolveSendRouting ({ channel, receiverPubkeys, relays, relayToReceivers }) {
+    if (relayToReceivers) return { relayToReceivers }
+    if (relays?.length) return { relays: uniq(relays) }
+    if (channel.relays.length) return { relays: channel.relays }
+    const derived = await this.readRelayToReceivers(receiverPubkeys)
+    if (!relayMapRelays(derived).length) throw new Error('NO_RELAYS')
+    return { relayToReceivers: derived }
   }
 
   stateKey () {
@@ -442,9 +470,10 @@ export class PrivateMessenger {
       const channel = this.channels.get(pubkey)
       if (!channel) throw new Error('UNKNOWN_CHANNEL')
       this.stopByChannel.get(pubkey)?.()
+      const watchRelays = await this.resolveWatchRelays(channel)
       const stop = await this._privateMessage.watch({
         channels: [pubkey],
-        relays: channel.relays,
+        relays: watchRelays,
         receiverSigner: this.userSigner,
         iykcSigner: this.contentKeySigner,
         privateChannelSigner: channel.signer,
@@ -466,12 +495,12 @@ export class PrivateMessenger {
       this.updateChannelState(pubkey, {
         lastWatchedAt: nowSeconds(),
         mode: channel.mode,
-        relays: channel.relays,
+        relays: watchRelays,
         seeders: channel.seeders
       })
       this.debug('watch', {
         channelPubkey: pubkey,
-        relays: channel.relays,
+        relays: watchRelays,
         mode: channel.mode,
         seeders: channel.seeders,
         seederCount: channel.seeders.length
@@ -542,6 +571,11 @@ export class PrivateMessenger {
     const channel = this.channels.get(channelPubkey)
     if (channel?.mode === 'watchtower' && type !== 'ask') return
     this.markSeen(channelPubkey, message.outer?.created_at || message.event?.created_at || nowSeconds())
+    const eventId = message.event?.id || ''
+    if (eventId && this.queue.some(item => item.channelPubkey === channelPubkey && item.type === type && item.event?.id === eventId)) {
+      this.debug('dedupe', debugMessageInfo(type, channelPubkey, message))
+      return
+    }
     this.queue.enqueue({
       type,
       channelPubkey,
@@ -562,6 +596,8 @@ export class PrivateMessenger {
     if (seed.recordType === NYM_CARRIER_SEED_RECORD_TYPE || seed.carriers?.length) {
       const carriers = compactSeedNymCarriers(seed.carriers)
       this.markSeen(channelPubkey, nymCarrierRecordTime({ carriers }) || seed.outer?.created_at || receivedAt)
+      const seedKey = nymCarrierSeedKey({ channelPubkey, carriers })
+      if (seedKey && this.seedQueue.some(item => item.recordType === NYM_CARRIER_SEED_RECORD_TYPE && nymCarrierSeedKey(item) === seedKey)) return
       this.seedQueue.enqueue({
         type: 'seed',
         recordType: NYM_CARRIER_SEED_RECORD_TYPE,
@@ -574,16 +610,33 @@ export class PrivateMessenger {
       return
     }
 
-    const router = compactSeedRouter(seed.router)
-    this.markSeen(channelPubkey, router.created_at || seed.outer?.created_at || receivedAt)
-    this.seedQueue.enqueue({
-      type: 'seed',
-      recordType: ROUTER_SEED_RECORD_TYPE,
-      channelPubkey,
-      receivedAt,
-      router,
-      meta: { channelPubkey: seed.channelPubkey }
-    })
+    const rows = compactSeedRouterRows(seed)
+    let newest = seed.outer?.created_at || receivedAt
+    for (const row of rows) {
+      const rowTime = row.lastSeenAt || row.router?.created_at || receivedAt
+      newest = Math.max(newest, rowTime)
+      const rowKey = routerSeedRowKey({ ...row, channelPubkey })
+      let previous = null
+      this.seedQueue.removeWhere(item => {
+        if (item.recordType !== ROUTER_SEED_RECORD_TYPE) return false
+        if (routerSeedRowKey(item) !== rowKey) return false
+        previous = item
+        return true
+      })
+      const firstSeenAt = Math.min(previous?.firstSeenAt ?? rowTime, row.firstSeenAt ?? rowTime)
+      const lastSeenAt = Math.max(previous?.lastSeenAt ?? rowTime, row.lastSeenAt ?? rowTime)
+      this.seedQueue.enqueue({
+        ...row,
+        type: 'seed',
+        recordType: ROUTER_SEED_RECORD_TYPE,
+        channelPubkey,
+        receivedAt,
+        firstSeenAt,
+        lastSeenAt,
+        meta: { channelPubkey: seed.channelPubkey }
+      })
+    }
+    this.markSeen(channelPubkey, newest)
     this.pruneStoredSeeds(channelPubkey)
   }
 
@@ -597,8 +650,9 @@ export class PrivateMessenger {
     return this.queue.shift()
   }
 
-  async ask ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkey, relays, message, code, payload, error, content }) {
+  async ask ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkey, relays, relayToReceivers, message, code, payload, error, content }) {
     const channel = this.requireWritableChannel(channelPubkey)
+    const routing = await this.resolveSendRouting({ channel, receiverPubkeys: [receiverPubkey], relays, relayToReceivers })
     this.debugSend('ask', channelPubkey, { code, receiverPubkey })
     return this._privateMessage.ask({
       senderSigner: this.userSigner,
@@ -606,7 +660,7 @@ export class PrivateMessenger {
       privateChannelSigner: channel.signer,
       privateChannelReaderPubkey: channel.readerPubkey,
       receiverPubkey,
-      relays: relays || channel.relays,
+      ...routing,
       expirationSeconds: this.offlineRecoverySeconds,
       message,
       code,
@@ -617,8 +671,10 @@ export class PrivateMessenger {
     })
   }
 
-  async reply ({ channelPubkey = this.defaultChannelPubkey(), question, receiverPubkey, relays, message, code, payload, error, content }) {
+  async reply ({ channelPubkey = this.defaultChannelPubkey(), question, receiverPubkey, relays, relayToReceivers, message, code, payload, error, content }) {
     const channel = this.requireWritableChannel(channelPubkey)
+    const resolvedReceiverPubkey = receiverPubkey || question?.pubkey || ''
+    const routing = await this.resolveSendRouting({ channel, receiverPubkeys: [resolvedReceiverPubkey], relays, relayToReceivers })
     this.debugSend('reply', channelPubkey, { code, receiverPubkey: receiverPubkey || question?.pubkey || '' })
     return this._privateMessage.reply({
       senderSigner: this.userSigner,
@@ -627,7 +683,7 @@ export class PrivateMessenger {
       privateChannelReaderPubkey: channel.readerPubkey,
       question,
       receiverPubkey,
-      relays: relays || channel.relays,
+      ...routing,
       expirationSeconds: this.offlineRecoverySeconds,
       message,
       code,
@@ -638,8 +694,9 @@ export class PrivateMessenger {
     })
   }
 
-  async tell ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkey, relays, message, code, payload, error, content }) {
+  async tell ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkey, relays, relayToReceivers, message, code, payload, error, content }) {
     const channel = this.requireWritableChannel(channelPubkey)
+    const routing = await this.resolveSendRouting({ channel, receiverPubkeys: [receiverPubkey], relays, relayToReceivers })
     this.debugSend('tell', channelPubkey, { code, receiverPubkey })
     return this._privateMessage.tell({
       senderSigner: this.userSigner,
@@ -647,7 +704,7 @@ export class PrivateMessenger {
       privateChannelSigner: channel.signer,
       privateChannelReaderPubkey: channel.readerPubkey,
       receiverPubkey,
-      relays: relays || channel.relays,
+      ...routing,
       expirationSeconds: this.offlineRecoverySeconds,
       message,
       code,
@@ -658,8 +715,9 @@ export class PrivateMessenger {
     })
   }
 
-  async yell ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkeys, relays, message, code, payload, error, content }) {
+  async yell ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkeys, relays, relayToReceivers, message, code, payload, error, content }) {
     const channel = this.requireWritableChannel(channelPubkey)
+    const routing = await this.resolveSendRouting({ channel, receiverPubkeys, relays, relayToReceivers })
     this.debugSend('yell', channelPubkey, { code, receiverPubkeys })
     return this._privateMessage.yell({
       senderSigner: this.userSigner,
@@ -667,7 +725,7 @@ export class PrivateMessenger {
       privateChannelSigner: channel.signer,
       privateChannelReaderPubkey: channel.readerPubkey,
       receiverPubkeys,
-      relays: relays || channel.relays,
+      ...routing,
       expirationSeconds: this.offlineRecoverySeconds,
       message,
       code,
@@ -678,8 +736,9 @@ export class PrivateMessenger {
     })
   }
 
-  async broadcastRumor ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkeys, relays, rumor }) {
+  async broadcastRumor ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkeys, relays, relayToReceivers, rumor }) {
     const channel = this.requireWritableChannel(channelPubkey)
+    const routing = await this.resolveSendRouting({ channel, receiverPubkeys, relays, relayToReceivers })
     this.debugSend('broadcastRumor', channelPubkey, { receiverPubkeys })
     return this._privateMessage.broadcastRumor({
       senderSigner: this.userSigner,
@@ -687,15 +746,16 @@ export class PrivateMessenger {
       privateChannelSigner: channel.signer,
       privateChannelReaderPubkey: channel.readerPubkey,
       receiverPubkeys,
-      relays: relays || channel.relays,
+      ...routing,
       expirationSeconds: this.offlineRecoverySeconds,
       rumor,
       _getIykcProofs: this.contentKeyLookup()
     })
   }
 
-  async broadcastEvent ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkeys, relays, event }) {
+  async broadcastEvent ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkeys, relays, relayToReceivers, event }) {
     const channel = this.requireWritableChannel(channelPubkey)
+    const routing = await this.resolveSendRouting({ channel, receiverPubkeys, relays, relayToReceivers })
     this.debugSend('broadcastEvent', channelPubkey, { receiverPubkeys })
     return this._privateMessage.broadcastEvent({
       senderSigner: this.userSigner,
@@ -703,36 +763,38 @@ export class PrivateMessenger {
       privateChannelSigner: channel.signer,
       privateChannelReaderPubkey: channel.readerPubkey,
       receiverPubkeys,
-      relays: relays || channel.relays,
+      ...routing,
       expirationSeconds: this.offlineRecoverySeconds,
       event,
       _getIykcProofs: this.contentKeyLookup()
     })
   }
 
-  async broadcastNymRumor ({ channelPubkey = this.defaultChannelPubkey(), relays, rumor, nymSigner }) {
+  async broadcastNymRumor ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkeys, relays, relayToReceivers, rumor, nymSigner }) {
     const channel = this.requireWritableChannel(channelPubkey)
     const resolvedNymSigner = this.requireNymSigner(channel, nymSigner)
-    this.debugSend('broadcastNymRumor', channelPubkey)
+    const routing = await this.resolveSendRouting({ channel, receiverPubkeys, relays, relayToReceivers })
+    this.debugSend('broadcastNymRumor', channelPubkey, { receiverPubkeys })
     return this._privateMessage.broadcastNymRumor({
       nymSigner: resolvedNymSigner,
       privateChannelSigner: channel.signer,
       privateChannelReaderPubkey: channel.readerPubkey,
-      relays: relays || channel.relays,
+      ...routing,
       expirationSeconds: this.offlineRecoverySeconds,
       rumor
     })
   }
 
-  async broadcastNymEvent ({ channelPubkey = this.defaultChannelPubkey(), relays, event, nymSigner }) {
+  async broadcastNymEvent ({ channelPubkey = this.defaultChannelPubkey(), receiverPubkeys, relays, relayToReceivers, event, nymSigner }) {
     const channel = this.requireWritableChannel(channelPubkey)
     const resolvedNymSigner = this.requireNymSigner(channel, nymSigner)
-    this.debugSend('broadcastNymEvent', channelPubkey)
+    const routing = await this.resolveSendRouting({ channel, receiverPubkeys, relays, relayToReceivers })
+    this.debugSend('broadcastNymEvent', channelPubkey, { receiverPubkeys })
     return this._privateMessage.broadcastNymEvent({
       nymSigner: resolvedNymSigner,
       privateChannelSigner: channel.signer,
       privateChannelReaderPubkey: channel.readerPubkey,
-      relays: relays || channel.relays,
+      ...routing,
       expirationSeconds: this.offlineRecoverySeconds,
       event
     })
@@ -741,6 +803,7 @@ export class PrivateMessenger {
   async publishSeederPresence (channelPubkey = this.defaultChannelPubkey()) {
     const channel = this.requireWritableChannel(channelPubkey)
     const receiverPubkeys = uniq([...this.knownSeeders(channelPubkey), this.userPubkey])
+    const routing = await this.resolveSendRouting({ channel, receiverPubkeys })
     this.debugSend('yell', channelPubkey, { code: SEEDER_PRESENCE_CODE, receiverPubkeys })
     return this._privateMessage.yell({
       senderSigner: this.userSigner,
@@ -748,7 +811,7 @@ export class PrivateMessenger {
       privateChannelSigner: channel.signer,
       privateChannelReaderPubkey: channel.readerPubkey,
       receiverPubkeys,
-      relays: channel.relays,
+      ...routing,
       expirationSeconds: this.offlineRecoverySeconds,
       code: SEEDER_PRESENCE_CODE,
       payload: {},
@@ -993,6 +1056,7 @@ export class PrivateMessenger {
       for (const range of current.offlineRanges) {
         if (range.end < minStart) continue
         try {
+          const fetchRelays = await this.resolveWatchRelays(channel)
           const fetchedEvents = await this._privateChannel.fetch({
             receiverSigner: this.userSigner,
             iykcSigner: this.contentKeySigner,
@@ -1001,7 +1065,7 @@ export class PrivateMessenger {
             privateChannelReaderPubkey: channel.readerPubkey,
             privateChannelPubkeys: [pubkey],
             receiverPubkey: this.userPubkey,
-            relays: channel.relays,
+            relays: fetchRelays,
             since: Math.max(0, range.start),
             until: range.end,
             mode: channel.mode,
@@ -1124,6 +1188,12 @@ function oldestCreatedAt (events) {
   return oldest
 }
 
+function relayMapRelays (relayToReceivers) {
+  if (!relayToReceivers) return []
+  const entries = relayToReceivers instanceof Map ? relayToReceivers.entries() : Object.entries(relayToReceivers)
+  return uniq([...entries].map(([relay]) => relay))
+}
+
 function isPrivateChannelRouter (event) {
   return event?.kind === privateChannel.ROUTER_KIND &&
     typeof event.content === 'string' &&
@@ -1134,8 +1204,16 @@ function nymCarrierRecordTime (record) {
   return record?.carriers?.reduce((max, carrier) => Math.max(max, carrier.created_at || 0), 0) || 0
 }
 
+function nymCarrierSeedKey (record) {
+  const carriers = record?.carriers || []
+  if (!carriers.length) return ''
+  const ids = carriers.map(carrier => carrier.id || '').join(',')
+  return `${record.channelPubkey || ''}:${carriers[0]?.pubkey || ''}:${ids}`
+}
+
 function seedRecordTime (record) {
   if (record?.recordType === NYM_CARRIER_SEED_RECORD_TYPE || record?.carriers?.length) return nymCarrierRecordTime(record)
+  if (record?.recordType === ROUTER_SEED_RECORD_TYPE) return record.lastSeenAt || record.router?.created_at || 0
   return record?.router?.created_at || 0
 }
 

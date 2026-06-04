@@ -181,6 +181,28 @@ test('private messenger queues nym messages without dispatching helper kinds', a
   assert.equal(messenger.nextMessage(), null)
 })
 
+test('private messenger skips duplicate pending app messages by channel type and event id', async () => {
+  const pm = fakePrivateMessage()
+  const messenger = await new PrivateMessenger({ _privateMessage: pm }).init({
+    userSigner: signer('user'),
+    channels: [{ signer: signer('channel'), relays: ['wss://relay.example'] }]
+  })
+  const message = {
+    event: { id: 'tell-id', kind: TELL_KIND, pubkey: 'alice', created_at: 10, tags: [['r', 'user']], content: 'hi' },
+    outer: { id: 'outer-id', created_at: 11 },
+    meta: { channelPubkey: 'channel' },
+    payload: { payload: 'hi' },
+    tell: { id: 'tell-id' }
+  }
+
+  pm.watchCalls[0].onTell(message)
+  pm.watchCalls[0].onTell({ ...message, outer: { id: 'outer-duplicate-id', created_at: 12 } })
+
+  assert.equal(messenger.nextMessage().event.id, 'tell-id')
+  assert.equal(messenger.nextMessage(), null)
+  assert.equal(messenger.readState().channels.channel.lastSeenAt, 12)
+})
+
 test('private messenger reports content key usage changes for sent and received messages', async () => {
   const pm = fakePrivateMessage()
   const changes = []
@@ -281,6 +303,69 @@ test('private messenger delegates send helpers with scoped signers and relays', 
   assert.equal(pm.sent[6].options.expirationSeconds, 7 * 24 * 60 * 60)
   assert.equal(pm.sent[7].options.nymSigner.getPublicKey(), 'global-nym')
   assert.equal(pm.sent[7].options.event.pubkey, 'author')
+})
+
+test('private messenger falls back to recipient read relays when no relay set is configured', async () => {
+  const pm = fakePrivateMessage()
+  const relayLookups = []
+  const messenger = await new PrivateMessenger({
+    _privateMessage: pm,
+    _getRelaysByPubkey: async pubkeys => {
+      relayLookups.push(pubkeys)
+      return Object.fromEntries(pubkeys.map(pubkey => [pubkey, {
+        read: [`wss://${pubkey}.read.example`],
+        write: [`wss://${pubkey}.write.example`]
+      }]))
+    }
+  }).init({
+    userSigner: signer('user'),
+    channels: [{ pubkey: 'channel', signer: signer('channel') }]
+  })
+
+  assert.deepEqual(pm.watchCalls[0].relays, ['wss://user.read.example'])
+
+  await messenger.tell({ receiverPubkey: 'alice', payload: 'note' })
+  await messenger.broadcastNymRumor({
+    receiverPubkeys: ['bob'],
+    nymSigner: signer('nym'),
+    rumor: { kind: 9001, created_at: 1, tags: [], content: 'nym rumor' }
+  })
+  await messenger.broadcastNymEvent({
+    receiverPubkeys: ['carol'],
+    nymSigner: signer('nym'),
+    event: { id: 'nym-signed-id', kind: 9002, pubkey: 'author', created_at: 2, tags: [], content: 'nym event', sig: 'sig' }
+  })
+
+  assert.deepEqual(relayLookups, [['user'], ['alice'], ['bob'], ['carol']])
+  assert.equal(pm.sent[0].options.relays, undefined)
+  assert.deepEqual([...pm.sent[0].options.relayToReceivers.entries()], [['wss://alice.read.example', ['alice']]])
+  assert.equal(pm.sent[1].options.relays, undefined)
+  assert.deepEqual([...pm.sent[1].options.relayToReceivers.entries()], [['wss://bob.read.example', ['bob']]])
+  assert.equal(Object.prototype.hasOwnProperty.call(pm.sent[1].options, 'receiverPubkeys'), false)
+  assert.equal(pm.sent[2].options.relays, undefined)
+  assert.deepEqual([...pm.sent[2].options.relayToReceivers.entries()], [['wss://carol.read.example', ['carol']]])
+  assert.equal(Object.prototype.hasOwnProperty.call(pm.sent[2].options, 'receiverPubkeys'), false)
+})
+
+test('private messenger prefers explicit relay receiver maps over channel relays', async () => {
+  const pm = fakePrivateMessage()
+  const messenger = await new PrivateMessenger({ _privateMessage: pm }).init({
+    userSigner: signer('user'),
+    channels: [{ pubkey: 'channel', signer: signer('channel'), relays: ['wss://channel.example'] }]
+  })
+  const relayToReceivers = new Map([
+    ['wss://alice.example', ['alice']],
+    ['wss://bob.example', ['bob']]
+  ])
+
+  await messenger.broadcastRumor({
+    receiverPubkeys: ['alice', 'bob'],
+    relayToReceivers,
+    rumor: { kind: 9001, created_at: 1, tags: [], content: 'raw' }
+  })
+
+  assert.equal(pm.sent[0].options.relays, undefined)
+  assert.equal(pm.sent[0].options.relayToReceivers, relayToReceivers)
 })
 
 test('private messenger reader-only channels watch and drain but reject sends', async () => {
@@ -599,6 +684,24 @@ test('seeder channels store router seeds separately, consume messages, and answe
       content: jsonlContent(userRow, otherRow)
     }
   })
+  pm.watchCalls[0].onSeed({
+    channelPubkey: 'channel',
+    outer: { id: 'outer-duplicate-id', kind: 3560, pubkey: 'channel', created_at: now + 100 },
+    router: {
+      kind: 263,
+      pubkey: 'router-duplicate',
+      created_at: now + 100,
+      tags: [['f', 'alice'], ['c', '0', '1']],
+      content: jsonlContent(userRow, otherRow)
+    }
+  })
+
+  const storedSeeds = []
+  for await (const seed of messenger.seedQueue.storedItems()) storedSeeds.push(seed)
+  const routerRows = storedSeeds.filter(seed => seed.recordType === ROUTER_SEED_RECORD_TYPE)
+  assert.equal(routerRows.length, 2)
+  assert.equal(routerRows.find(seed => seed.receiverPubkey === 'user').firstSeenAt, now)
+  assert.equal(routerRows.find(seed => seed.receiverPubkey === 'user').lastSeenAt, now + 100)
 
   pm.watchCalls[0].onTell({
     event: { id: 'tell-id', kind: TELL_KIND, pubkey: 'alice', created_at: now, tags: [['r', 'seeder']], content: 'hi' },
@@ -620,11 +723,11 @@ test('seeder channels store router seeds separately, consume messages, and answe
       pubkey: 'user',
       created_at: now,
       tags: [['r', 'seeder'], ['h', MISSING_MESSAGES_ASK_CODE]],
-      content: JSON.stringify({ since: now - 5, until: now + 5 })
+      content: JSON.stringify({ since: now + 50, until: now + 60 })
     },
     outer: { id: 'ask-outer-id', created_at: now },
     meta: { channelPubkey: 'channel' },
-    payload: { code: MISSING_MESSAGES_ASK_CODE, payload: { since: now - 5, until: now + 5 } },
+    payload: { code: MISSING_MESSAGES_ASK_CODE, payload: { since: now + 50, until: now + 60 } },
     question: { id: 'question-id' }
   })
 
@@ -638,6 +741,39 @@ test('seeder channels store router seeds separately, consume messages, and answe
   assert.equal(Buffer.from(records[0].router.content, 'base64').toString(), `${userRow}\n`)
   assert.deepEqual(records[0].router.tags, [['f', 'alice'], ['c', '0', '1']])
   assert.equal(messenger.nextMessage(), null)
+})
+
+test('router seed rows dedupe by proven inner id without content-key pubkey', async () => {
+  const pm = fakePrivateMessage()
+  const now = Math.floor(Date.now() / 1000)
+  const messenger = await new PrivateMessenger({ _privateMessage: pm }).init({
+    userSigner: signer('user'),
+    channels: [{ pubkey: 'channel', signer: signer('channel'), relays: ['wss://relay.example'], mode: 'seeder' }]
+  })
+  const oldContentRow = JSON.stringify(['user', 'old-ciphertext', 'old-content-key', 'old-proof'])
+  const newContentRow = JSON.stringify(['user', 'new-ciphertext', 'new-content-key', 'new-proof'])
+
+  pm.watchCalls[0].onSeed({
+    channelPubkey: 'channel',
+    outer: { id: 'outer-id', kind: 3560, pubkey: 'channel', created_at: now },
+    router: {
+      kind: 263,
+      pubkey: 'router',
+      created_at: now,
+      tags: [['f', 'alice'], ['c', '0', '1']],
+      content: jsonlContent(oldContentRow, newContentRow)
+    },
+    innerEventIdsByRowIndex: { 0: 'same-inner-id', 1: 'same-inner-id' }
+  })
+
+  const storedSeeds = []
+  for await (const seed of messenger.seedQueue.storedItems()) storedSeeds.push(seed)
+
+  assert.equal(storedSeeds.filter(seed => seed.recordType === ROUTER_SEED_RECORD_TYPE).length, 1)
+  assert.equal(storedSeeds[0].receiverPubkey, 'user')
+  assert.equal(storedSeeds[0].innerEventId, 'same-inner-id')
+  assert.equal(storedSeeds[0].iykcPubkey, 'new-content-key')
+  assert.equal(storedSeeds[0].row, newContentRow)
 })
 
 test('watchtower channels store router seeds without consuming normal messages', async () => {
@@ -921,6 +1057,12 @@ test('nym carrier seeds are replied to and recovered as nym queue items', async 
     outer: { id: 'outer-id', kind: 3560, pubkey: 'channel', created_at: now },
     carriers
   })
+  pm.watchCalls[0].onSeed({
+    recordType: NYM_CARRIER_SEED_RECORD_TYPE,
+    channelPubkey: 'channel',
+    outer: { id: 'outer-duplicate-id', kind: 3560, pubkey: 'channel', created_at: now },
+    carriers
+  })
 
   await pm.watchCalls[0].onAsk({
     event: {
@@ -988,14 +1130,19 @@ test('missing-message reply packer streams compact seed routers only', async () 
     type: 'seed',
     recordType: ROUTER_SEED_RECORD_TYPE,
     channelPubkey: 'channel',
-    outer: { id: 'outer-id', kind: 3560, pubkey: 'channel', created_at: 10, tags: [['expiration', '99']] },
     router: {
       kind: 263,
       pubkey: 'router',
       created_at: 10,
       tags: [['f', 'sender'], ['c', '0', '1']],
-      content: jsonlContent(userRow, otherRow)
-    }
+      content: ''
+    },
+    receiverPubkey: 'user',
+    iykcPubkey: '',
+    innerEventId: 'seeded-id',
+    row: userRow,
+    firstSeenAt: 10,
+    lastSeenAt: 10
   })
 
   assert.equal(replies.length, 1)

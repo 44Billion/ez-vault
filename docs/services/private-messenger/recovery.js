@@ -1,15 +1,17 @@
+import { getEventHash } from 'nostr-tools'
 import { bytesToBase64, base64ToBytes } from '../../helpers/base64.js'
 import { ASK_KIND, parseRumorContent } from '../../helpers/nostr/private-message.js'
 
 export const SEEDER_PRESENCE_CODE = 'seederPresence_8mj8'
 export const MISSING_MESSAGES_ASK_CODE = 'missingMessages_ask_8mj8'
 export const MISSING_MESSAGES_REPLY_CODE = 'missingMessages_reply_8mj8'
-export const ROUTER_SEED_RECORD_TYPE = 'router_v1'
+export const ROUTER_SEED_RECORD_TYPE = 'routerRow_v1'
 export const NYM_CARRIER_SEED_RECORD_TYPE = 'nymCarrier_v1'
 
 const DEFAULT_EVENTS_PER_CHUNK = 100
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
+const HASH_PUBKEY = '0'.repeat(64)
 
 function nowSeconds () {
   return Math.floor(Date.now() / 1000)
@@ -62,6 +64,67 @@ export function compactSeedRouter (router = {}) {
   }
 }
 
+function parseRouterRow (line) {
+  try {
+    const record = JSON.parse(line)
+    if (!Array.isArray(record)) return null
+    return {
+      receiverPubkey: record[0] || '',
+      iykcPubkey: record[2] || ''
+    }
+  } catch {
+    return null
+  }
+}
+
+function rowHash (row) {
+  return getEventHash({
+    kind: 0,
+    pubkey: HASH_PUBKEY,
+    created_at: 0,
+    tags: [],
+    content: row
+  })
+}
+
+export function compactSeedRouterRows (seed = {}) {
+  const router = compactRouter(seed.router)
+  const createdAt = router.created_at || seed.outer?.created_at || nowSeconds()
+  const rows = []
+  const innerEventIdsByRowIndex = seed.innerEventIdsByRowIndex || {}
+  const lines = splitJsonl(seed.jsonl || decodeJsonl(seed.router?.content))
+  for (let index = 0; index < lines.length; index++) {
+    const row = lines[index]
+    const parsed = parseRouterRow(row)
+    if (!parsed?.receiverPubkey) continue
+    const innerEventId = innerEventIdsByRowIndex[index] || innerEventIdsByRowIndex[String(index)] || ''
+    rows.push({
+      type: 'seed',
+      recordType: ROUTER_SEED_RECORD_TYPE,
+      router,
+      receiverPubkey: parsed.receiverPubkey,
+      iykcPubkey: parsed.iykcPubkey,
+      innerEventId,
+      rowHash: innerEventId ? '' : rowHash(row),
+      row,
+      firstSeenAt: createdAt,
+      lastSeenAt: createdAt
+    })
+  }
+  return rows
+}
+
+export function routerSeedRowKey (seed = {}) {
+  const row = seed.row ? parseRouterRow(seed.row) : null
+  const innerEventId = seed.innerEventId || ''
+  const fallbackRowHash = seed.rowHash || (seed.row ? rowHash(seed.row) : '')
+  return [
+    seed.channelPubkey || '',
+    seed.receiverPubkey || row?.receiverPubkey || '',
+    innerEventId ? `event:${innerEventId}` : `row:${fallbackRowHash}`
+  ].join(':')
+}
+
 export function compactSeedNymCarriers (carriers = []) {
   return carriers.map(carrier => ({
     id: carrier.id,
@@ -83,26 +146,22 @@ function routerWithSingleRow (router, row) {
   }
 }
 
-function recordReceiverPubkey (line) {
-  try {
-    const record = JSON.parse(line)
-    return Array.isArray(record) ? record[0] : ''
-  } catch {
-    return ''
-  }
+function seedRowInRange (seed, since, until) {
+  const firstSeenAt = seed.firstSeenAt ?? seed.router?.created_at
+  const lastSeenAt = seed.lastSeenAt ?? seed.router?.created_at
+  if (!Number.isFinite(firstSeenAt) || !Number.isFinite(lastSeenAt)) return eventInRange(seed.router, since, until)
+  if (since != null && lastSeenAt < since) return false
+  if (until != null && firstSeenAt > until) return false
+  return true
 }
 
 function compactRoutersFromSeed (seed, { receiverPubkey, since, until }) {
-  if (!seed?.router?.content || !eventInRange(seed.router, since, until)) return []
-  const records = []
-  for (const row of splitJsonl(decodeJsonl(seed.router.content))) {
-    if (receiverPubkey && recordReceiverPubkey(row) !== receiverPubkey) continue
-    records.push({
-      recordType: ROUTER_SEED_RECORD_TYPE,
-      router: routerWithSingleRow(seed.router, row)
-    })
-  }
-  return records
+  if (!seed?.row || !seed?.router || !seedRowInRange(seed, since, until)) return []
+  if (receiverPubkey && seed.receiverPubkey !== receiverPubkey) return []
+  return [{
+    recordType: ROUTER_SEED_RECORD_TYPE,
+    router: routerWithSingleRow(seed.router, seed.row)
+  }]
 }
 
 function nymCarrierRecordTime (seed) {

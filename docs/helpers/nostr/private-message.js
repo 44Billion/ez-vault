@@ -449,12 +449,13 @@ async function sendPrivateMessage ({
   receiverTag,
   event,
   relays,
+  relayToReceivers,
   expirationSeconds,
   _getIykcProofs,
   _publish = privateChannel.publish
 }) {
   if (!privateChannelSigner?.getPublicKey) throw new Error('PRIVATE_CHANNEL_WRITER_REQUIRED')
-  return _publish({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag, event, relays, expirationSeconds, _getIykcProofs })
+  return _publish({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag, event, relays, relayToReceivers, expirationSeconds, _getIykcProofs })
 }
 
 async function sendNymMessage ({
@@ -463,12 +464,13 @@ async function sendNymMessage ({
   privateChannelReaderPubkey,
   event,
   relays,
+  relayToReceivers,
   expirationSeconds,
   _publish = privateChannel.publishNymEvent
 }) {
   if (!nymSigner?.getPublicKey) throw new Error('NYM_SIGNER_REQUIRED')
   if (!privateChannelSigner?.getPublicKey) throw new Error('PRIVATE_CHANNEL_WRITER_REQUIRED')
-  return _publish({ nymSigner, privateChannelSigner, privateChannelReaderPubkey, event, relays, expirationSeconds })
+  return _publish({ nymSigner, privateChannelSigner, privateChannelReaderPubkey, event, relays, relayToReceivers, expirationSeconds })
 }
 
 export async function ask ({
@@ -478,6 +480,7 @@ export async function ask ({
   privateChannelReaderPubkey,
   receiverPubkey,
   relays,
+  relayToReceivers,
   message,
   code,
   payload,
@@ -500,7 +503,7 @@ export async function ask ({
       message: message || { code, payload, error, content }
     })
   })
-  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers: [receiverPubkey], receiverTag: receiverPubkey, event: wireEvent, relays, expirationSeconds, _getIykcProofs, _publish })
+  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers: [receiverPubkey], receiverTag: receiverPubkey, event: wireEvent, relays, relayToReceivers, expirationSeconds, _getIykcProofs, _publish })
 
   return { question, results }
 }
@@ -513,6 +516,7 @@ export async function reply ({
   question,
   receiverPubkey = question?.pubkey,
   relays,
+  relayToReceivers,
   message,
   code,
   payload,
@@ -532,7 +536,7 @@ export async function reply ({
       message: message || { code, payload, error, content }
     })
   })
-  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers: [receiverPubkey], receiverTag: receiverPubkey, event: wireEvent, relays, expirationSeconds, _getIykcProofs, _publish })
+  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers: [receiverPubkey], receiverTag: receiverPubkey, event: wireEvent, relays, relayToReceivers, expirationSeconds, _getIykcProofs, _publish })
   return { reply: event, results }
 }
 
@@ -543,6 +547,7 @@ export async function tell ({
   privateChannelReaderPubkey,
   receiverPubkey,
   relays,
+  relayToReceivers,
   message,
   code,
   payload,
@@ -561,7 +566,7 @@ export async function tell ({
       message: message || { code, payload, error, content }
     })
   })
-  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers: [receiverPubkey], receiverTag: receiverPubkey, event: wireEvent, relays, expirationSeconds, _getIykcProofs, _publish })
+  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers: [receiverPubkey], receiverTag: receiverPubkey, event: wireEvent, relays, relayToReceivers, expirationSeconds, _getIykcProofs, _publish })
   return { tell: event, results }
 }
 
@@ -572,6 +577,7 @@ export async function yell ({
   privateChannelReaderPubkey,
   receiverPubkeys,
   relays,
+  relayToReceivers,
   message,
   code,
   payload,
@@ -591,7 +597,7 @@ export async function yell ({
       message: message || { code, payload, error, content }
     })
   })
-  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag: '', event: wireEvent, relays, expirationSeconds, _getIykcProofs, _publish })
+  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag: '', event: wireEvent, relays, relayToReceivers, expirationSeconds, _getIykcProofs, _publish })
   return { yell: event, results }
 }
 
@@ -602,6 +608,7 @@ export async function broadcastRumor ({
   privateChannelReaderPubkey,
   receiverPubkeys,
   relays,
+  relayToReceivers,
   rumor,
   expirationSeconds,
   _getIykcProofs,
@@ -610,7 +617,7 @@ export async function broadcastRumor ({
   const receivers = uniq(receiverPubkeys)
   if (!receivers.length) throw new Error('NO_RECEIVERS')
   const { event, wireEvent } = await makeOutgoingRumor({ senderSigner, rumor })
-  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag: '', event: wireEvent, relays, expirationSeconds, _getIykcProofs, _publish })
+  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag: '', event: wireEvent, relays, relayToReceivers, expirationSeconds, _getIykcProofs, _publish })
   return { rumor: event, results }
 }
 
@@ -621,6 +628,7 @@ export async function broadcastEvent ({
   privateChannelReaderPubkey,
   receiverPubkeys,
   relays,
+  relayToReceivers,
   event,
   expirationSeconds,
   _getIykcProofs,
@@ -629,7 +637,7 @@ export async function broadcastEvent ({
   const receivers = uniq(receiverPubkeys)
   if (!receivers.length) throw new Error('NO_RECEIVERS')
   const wireEvent = assertValidSignedEvent({ ...event, tags: cloneTags(event?.tags) })
-  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag: '', event: wireEvent, relays, expirationSeconds, _getIykcProofs, _publish })
+  const results = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag: '', event: wireEvent, relays, relayToReceivers, expirationSeconds, _getIykcProofs, _publish })
   return { event: wireEvent, results }
 }
 
@@ -638,13 +646,14 @@ export async function broadcastNymRumor ({
   privateChannelSigner,
   privateChannelReaderPubkey,
   relays,
+  relayToReceivers,
   rumor,
   expirationSeconds,
   _publish = privateChannel.publishNymEvent
 }) {
   if (!nymSigner?.getPublicKey) throw new Error('NYM_SIGNER_REQUIRED')
   const { event, wireEvent } = await makeOutgoingRumor({ senderSigner: nymSigner, rumor })
-  const results = await sendNymMessage({ nymSigner, privateChannelSigner, privateChannelReaderPubkey, event: wireEvent, relays, expirationSeconds, _publish })
+  const results = await sendNymMessage({ nymSigner, privateChannelSigner, privateChannelReaderPubkey, event: wireEvent, relays, relayToReceivers, expirationSeconds, _publish })
   return { rumor: event, results }
 }
 
@@ -653,12 +662,13 @@ export async function broadcastNymEvent ({
   privateChannelSigner,
   privateChannelReaderPubkey,
   relays,
+  relayToReceivers,
   event,
   expirationSeconds,
   _publish = privateChannel.publishNymEvent
 }) {
   if (!nymSigner?.getPublicKey) throw new Error('NYM_SIGNER_REQUIRED')
   const wireEvent = assertValidSignedEvent({ ...event, tags: cloneTags(event?.tags) })
-  const results = await sendNymMessage({ nymSigner, privateChannelSigner, privateChannelReaderPubkey, event: wireEvent, relays, expirationSeconds, _publish })
+  const results = await sendNymMessage({ nymSigner, privateChannelSigner, privateChannelReaderPubkey, event: wireEvent, relays, relayToReceivers, expirationSeconds, _publish })
   return { event: wireEvent, results }
 }

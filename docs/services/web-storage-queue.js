@@ -593,6 +593,16 @@ export function createQueue ({
     writeState(state)
   }
 
+  function some (predicate) {
+    if (typeof predicate !== 'function') throw new Error('QUEUE_PREDICATE_REQUIRED')
+    const state = readState()
+    for (let id = state.head; id < state.tail; id++) {
+      const item = readItem(id)
+      if (item && predicate(item)) return true
+    }
+    return false
+  }
+
   function clear () {
     const state = readState()
     for (let id = state.head; id < state.tail; id++) storage().removeItem(itemKey(id))
@@ -617,6 +627,7 @@ export function createQueue ({
     insertWhere,
     removeAt,
     removeWhere,
+    some,
     clear
   }
 }

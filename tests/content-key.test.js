@@ -4,7 +4,7 @@ import { generateSecretKey, getEventHash, verifyEvent } from 'nostr-tools'
 import NsecSigner from '../docs/services/nsec-signer.js'
 import { doubleSignEvent, upsertContentKeyEvent } from '../docs/services/content-key/index.js'
 import { makeContentKeyEvent, parseContentKeyEvent, verifyContentKeyProof, verifyIykcProof, CONTENT_KEY_KIND } from '../docs/services/content-key/event.js'
-import { clearQueryCaches, getIykcProofs, getRelaysByPubkey } from '../docs/helpers/nostr/queries.js'
+import { clearQueryCaches, getIykcProofs, getRelaysByPubkey, pickRelaysForPubkeys } from '../docs/helpers/nostr/queries.js'
 import { bytesToHex } from '../docs/helpers/nostr/index.js'
 
 afterEach(() => {
@@ -151,6 +151,22 @@ test('getIykcProofs fetches content key events from grouped write relays', async
   })
   assert.equal(calls.filter(call => call.filter.kinds[0] === CONTENT_KEY_KIND).length, 2)
   assert.deepEqual(calls.filter(call => call.filter.kinds[0] === CONTENT_KEY_KIND).map(call => call.relays[0]).sort(), ['wss://a.example', 'wss://b.example'])
+})
+
+test('pickRelaysForPubkeys defaults to write relays and can pick read relays', () => {
+  const relaysByPubkey = {
+    alice: { read: ['wss://alice-read.example'], write: ['wss://alice-write.example'] },
+    bob: { read: ['wss://shared-read.example'], write: ['wss://bob-write.example'] }
+  }
+
+  assert.deepEqual(
+    [...pickRelaysForPubkeys(['alice', 'bob'], relaysByPubkey).keys()].sort(),
+    ['wss://alice-write.example', 'wss://bob-write.example']
+  )
+  assert.deepEqual(
+    [...pickRelaysForPubkeys(['alice', 'bob'], relaysByPubkey, { relayType: 'read' }).keys()].sort(),
+    ['wss://alice-read.example', 'wss://shared-read.example']
+  )
 })
 
 test('getRelaysByPubkey caches relay lookups per pubkey', async () => {
