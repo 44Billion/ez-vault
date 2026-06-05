@@ -1,5 +1,4 @@
 import { PrivateMessenger } from '../private-messenger/index.js'
-import { freeRelays } from '../relays.js'
 import { claimSigner } from '../signer.js'
 import * as store from '../accounts-store.js'
 import * as secrets from '../secrets.js'
@@ -9,6 +8,7 @@ import * as contentKeys from './content-keys.js'
 const ANNOUNCE_INTERVAL_MS = 4 * 60 * 60 * 1000
 const ANNOUNCE_DEBOUNCE_MS = 1000
 const ANNOUNCE_ALL = '*'
+const TRUSTED_SIGNER_SYNC_INFO = 'trusted-signer-sync-v1'
 
 function defaultOnError (err) {
   console.warn('sync failed', err?.message ?? err)
@@ -49,7 +49,7 @@ function defaultDebugSink () {
 }
 
 function syncRelays (relays) {
-  return relays.slice(0, 2)
+  return [...new Set((Array.isArray(relays) ? relays : []).filter(Boolean))].slice(0, 2)
 }
 
 function trustedMap (trusted) {
@@ -85,7 +85,6 @@ export function createSyncController ({
   _trustedSigners = trustedSigners,
   _contentKeys = contentKeys,
   _claimSigner = claimSigner,
-  _freeRelays = freeRelays,
   _setTimeout = globalThis.setTimeout.bind(globalThis),
   _clearTimeout = globalThis.clearTimeout.bind(globalThis),
   _setInterval = globalThis.setInterval.bind(globalThis),
@@ -105,6 +104,8 @@ export function createSyncController ({
   let pendingResetInterval = false
   const pendingAnnounceOwners = new Set()
   const unsubscribers = []
+  const channelPubkeyByOwnerPubkey = new Map()
+  const ownerPubkeyByChannelPubkey = new Map()
   const debug = _debug === undefined ? defaultDebugSink() : _debug
 
   function emitDebug (action, detail = {}) {
@@ -115,30 +116,57 @@ export function createSyncController ({
     }
   }
 
-  function relayList () {
-    return syncRelays(_freeRelays)
+  async function accountReadRelays (signer) {
+    const relays = await signer.getRelays?.()
+    const readRelays = syncRelays(relays?.read)
+    if (!readRelays.length) throw new Error('SYNC_READ_RELAYS_REQUIRED')
+    return readRelays
   }
 
   function trustedPubkeys () {
     return [...trustedByPubkey.keys()]
   }
 
-  function buildChannels () {
+  function channelPubkeyForOwner (ownerPubkey) {
+    return channelPubkeyByOwnerPubkey.get(ownerPubkey) || ownerPubkey
+  }
+
+  function ownerPubkeyForChannel (channelPubkey) {
+    return ownerPubkeyByChannelPubkey.get(channelPubkey) || ''
+  }
+
+  async function buildChannels () {
     const seeders = trustedPubkeys()
     const channels = []
+    const nextChannelPubkeyByOwnerPubkey = new Map()
+    const nextOwnerPubkeyByChannelPubkey = new Map()
     for (const account of _store.list()) {
       if (account.type !== 'nsec' && account.type !== 'bunker') continue
       try {
+        const accountSigner = _claimSigner(account)
+        const channelSigner = accountSigner.withSharedKey(account.pubkey, TRUSTED_SIGNER_SYNC_INFO)
+        const channelPubkey = await channelSigner.getPublicKey()
+        const relays = await accountReadRelays(accountSigner)
+        nextChannelPubkeyByOwnerPubkey.set(account.pubkey, channelPubkey)
+        nextOwnerPubkeyByChannelPubkey.set(channelPubkey, account.pubkey)
         channels.push({
-          pubkey: account.pubkey,
-          signer: _claimSigner(account),
-          relays: relayList(),
+          pubkey: channelPubkey,
+          signer: channelSigner,
+          relays,
           mode: 'seeder',
           seeders
         })
       } catch (err) {
         onError(err)
       }
+    }
+    channelPubkeyByOwnerPubkey.clear()
+    ownerPubkeyByChannelPubkey.clear()
+    for (const [ownerPubkey, channelPubkey] of nextChannelPubkeyByOwnerPubkey) {
+      channelPubkeyByOwnerPubkey.set(ownerPubkey, channelPubkey)
+    }
+    for (const [channelPubkey, ownerPubkey] of nextOwnerPubkeyByChannelPubkey) {
+      ownerPubkeyByChannelPubkey.set(channelPubkey, ownerPubkey)
     }
     return channels
   }
@@ -173,6 +201,7 @@ export function createSyncController ({
             await _contentKeys.handleMessage(message, {
               messenger,
               trustedByPubkey,
+              ownerPubkeyForChannel,
               debug
             })
           } catch (err) {
@@ -231,7 +260,13 @@ export function createSyncController ({
 
     for (const ownerPubkey of owners) {
       try {
-        await _contentKeys.announceContentKeys({ messenger, ownerPubkey, receiverPubkeys: receivers, debug })
+        await _contentKeys.announceContentKeys({
+          messenger,
+          channelPubkey: channelPubkeyForOwner(ownerPubkey),
+          ownerPubkey,
+          receiverPubkeys: receivers,
+          debug
+        })
       } catch (err) {
         onError(err)
       }
@@ -262,6 +297,8 @@ export function createSyncController ({
   function stop () {
     messenger?.close?.()
     messenger = null
+    channelPubkeyByOwnerPubkey.clear()
+    ownerPubkeyByChannelPubkey.clear()
     clearAnnouncementTimers()
     _contentKeys.resetDebugSources?.()
   }
@@ -273,7 +310,7 @@ export function createSyncController ({
     }
 
     trustedByPubkey = trustedMap(_trustedSigners.list())
-    const channels = buildChannels()
+    const channels = await buildChannels()
     if (!channels.length) {
       stop()
       return null
@@ -284,7 +321,7 @@ export function createSyncController ({
       userSigner,
       contentKeySigner: null,
       channels,
-      relays: relayList(),
+      relays: [],
       mode: 'seeder'
     }
 

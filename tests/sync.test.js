@@ -19,6 +19,7 @@ import * as secrets from '../docs/services/secrets.js'
 import { bytesToHex, hexToBytes } from '../docs/helpers/nostr/index.js'
 
 const data = new Map()
+const SYNC_INFO = 'trusted-signer-sync-v1'
 globalThis.localStorage = {
   clear: () => data.clear(),
   getItem: key => data.has(String(key)) ? data.get(String(key)) : null,
@@ -57,8 +58,19 @@ function staleCreatedAt (offset = 0) {
   return nowSeconds() - DEFAULT_STALE_CHANNEL_SECONDS - offset
 }
 
-function signer (pubkey) {
-  return { getPublicKey: () => pubkey }
+function signer (pubkey, options = {}) {
+  const sharedCalls = options.sharedCalls || []
+  const readRelays = options.readRelays || [`wss://${pubkey}.read-one.example`, `wss://${pubkey}.read-two.example`]
+  const writeRelays = options.writeRelays || []
+  return {
+    sharedCalls,
+    getPublicKey: () => pubkey,
+    getRelays: async () => ({ read: readRelays, write: writeRelays }),
+    withSharedKey: (peerPubkey, info = '') => {
+      sharedCalls.push({ peerPubkey, info })
+      return signer(`${pubkey}:shared:${peerPubkey}:${info}`, { sharedCalls, readRelays, writeRelays })
+    }
+  }
 }
 
 function createSubscribable (state) {
@@ -116,8 +128,8 @@ async function flushMicrotasks (turns = 6) {
 test('sync orchestration watches nsec and bunker channels with identity-only sync options', async () => {
   const deviceSigner = signer('device')
   const accountSigners = {
-    nsec1: signer('nsec1'),
-    bunker1: signer('bunker1')
+    nsec1: signer('nsec1', { readRelays: ['wss://nsec-one.example', 'wss://nsec-two.example', 'wss://nsec-three.example'] }),
+    bunker1: signer('bunker1', { readRelays: ['wss://bunker-one.example', 'wss://bunker-two.example'] })
   }
   const storeStub = createSubscribable({
     list: () => [
@@ -168,7 +180,6 @@ test('sync orchestration watches nsec and bunker channels with identity-only syn
     _secrets: secretsStub,
     _trustedSigners: trustedStub,
     _claimSigner: account => accountSigners[account.pubkey],
-    _freeRelays: ['wss://one.example', 'wss://two.example', 'wss://three.example'],
     _setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers[timers.length - 1] },
     _clearTimeout: () => {},
     _setInterval: (fn, ms) => ({ fn, ms }),
@@ -183,11 +194,15 @@ test('sync orchestration watches nsec and bunker channels with identity-only syn
   assert.equal(instances[0].initOptions.userSigner, deviceSigner)
   assert.equal(instances[0].initOptions.contentKeySigner, null)
   assert.equal(instances[0].initOptions.mode, 'seeder')
-  assert.deepEqual(instances[0].initOptions.relays, ['wss://one.example', 'wss://two.example'])
-  assert.deepEqual(instances[0].initOptions.channels.map(channel => channel.pubkey), ['nsec1', 'bunker1'])
-  assert.deepEqual(instances[0].initOptions.channels.map(channel => channel.signer), [accountSigners.nsec1, accountSigners.bunker1])
+  assert.deepEqual(instances[0].initOptions.relays, [])
+  assert.deepEqual(instances[0].initOptions.channels.map(channel => channel.pubkey), [
+    `nsec1:shared:nsec1:${SYNC_INFO}`,
+    `bunker1:shared:bunker1:${SYNC_INFO}`
+  ])
+  assert.deepEqual(accountSigners.nsec1.sharedCalls, [{ peerPubkey: 'nsec1', info: SYNC_INFO }])
+  assert.deepEqual(accountSigners.bunker1.sharedCalls, [{ peerPubkey: 'bunker1', info: SYNC_INFO }])
   assert.deepEqual(instances[0].initOptions.channels.map(channel => channel.mode), ['seeder', 'seeder'])
-  assert.deepEqual(instances[0].initOptions.channels[0].relays, ['wss://one.example', 'wss://two.example'])
+  assert.deepEqual(instances[0].initOptions.channels[0].relays, ['wss://nsec-one.example', 'wss://nsec-two.example'])
   assert.deepEqual(instances[0].initOptions.channels[0].seeders, ['trusted1'])
   assert.ok(debugEvents.some(event => event.action === 'watch' && event.mode === 'seeder'))
   assert.equal(timers[0].ms, 1000)
@@ -261,7 +276,6 @@ test('sync drains messages enqueued while another message is being handled', asy
       }
     },
     _claimSigner: () => signer('nsec1'),
-    _freeRelays: ['wss://one.example', 'wss://two.example'],
     _setTimeout: () => ({}),
     _clearTimeout: () => {},
     _setInterval: () => ({}),
@@ -326,7 +340,6 @@ test('sync announces content-key changes immediately and restarts the four-hour 
       announceContentKeys: async options => announced.push(options)
     },
     _claimSigner: () => signer('nsec1'),
-    _freeRelays: ['wss://one.example', 'wss://two.example'],
     _setTimeout: (fn, ms) => {
       const timer = { fn, ms }
       timers.push(timer)
@@ -350,6 +363,7 @@ test('sync announces content-key changes immediately and restarts the four-hour 
 
   assert.equal(announced.length, 1)
   assert.equal(announced[0].ownerPubkey, 'nsec1')
+  assert.equal(announced[0].channelPubkey, `nsec1:shared:nsec1:${SYNC_INFO}`)
   assert.deepEqual(announced[0].receiverPubkeys, ['trusted1'])
   assert.equal(intervals[0].ms, 4 * 60 * 60 * 1000)
   assert.deepEqual(clearedIntervals, [intervals[0]])
@@ -409,7 +423,6 @@ test('setContentKeySecret causes one immediate announce through the sync subscri
       subscribe: () => () => {}
     },
     _claimSigner: () => signer(owner.pubkey),
-    _freeRelays: ['wss://one.example', 'wss://two.example'],
     _setTimeout: (fn, ms) => {
       const timer = { fn, ms }
       timers.push(timer)
@@ -433,6 +446,7 @@ test('setContentKeySecret causes one immediate announce through the sync subscri
   await immediateTimers[0].fn()
 
   assert.equal(yells.length, 1)
+  assert.equal(yells[0].channelPubkey, `${owner.pubkey}:shared:${owner.pubkey}:${SYNC_INFO}`)
   assert.equal(yells[0].code, CONTENT_KEYS_ANNOUNCE_CODE)
   assert.deepEqual(yells[0].receiverPubkeys, [trusted])
   assert.deepEqual(yells[0].payload.keys, [{ pubkey: contentPubkey, createdAt: 60 }])
@@ -525,6 +539,35 @@ test('content-key announce does not request keys already restored from localStor
   assert.ok(secrets.getContentKeySigner(owner.pubkey, content.pubkey))
   assert.equal(messenger.sent.length, 0)
   assert.equal(debugEvents.some(event => event.action === 'request'), false)
+})
+
+test('content-key announce routes asks over derived sync channels', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const owner = addNsecAccount()
+  const absentSecret = seckey()
+  const absentPubkey = pubkeyFromSecret(absentSecret)
+  const channelPubkey = 'derived-sync-channel'
+  const trusted = '4'.repeat(64)
+  const messenger = fakeMessenger()
+
+  await handleMessage(syncMessage({
+    channelPubkey,
+    senderPubkey: trusted,
+    code: CONTENT_KEYS_ANNOUNCE_CODE,
+    payload: { ownerPubkey: owner.pubkey, keys: [{ pubkey: absentPubkey, createdAt: 20 }] }
+  }), {
+    messenger,
+    trustedByPubkey: new Map([[trusted, { pubkey: trusted, platform: 'Phone' }]]),
+    ownerPubkeyForChannel: pubkey => pubkey === channelPubkey ? owner.pubkey : ''
+  })
+
+  assert.equal(messenger.sent.length, 1)
+  assert.equal(messenger.sent[0].method, 'ask')
+  assert.equal(messenger.sent[0].options.channelPubkey, channelPubkey)
+  assert.deepEqual(messenger.sent[0].options.payload, {
+    ownerPubkey: owner.pubkey,
+    pubkeys: [absentPubkey]
+  })
 })
 
 test('content-key announce contains only public key metadata', async () => {

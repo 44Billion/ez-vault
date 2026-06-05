@@ -18,8 +18,8 @@ const SUPPORTED_METHODS = new Set([
   'nip44Decrypt',
   'nip44EncryptMultiDH',
   'nip44DecryptMultiDH',
-  'doubleSignEvent'
-  // 'withSharedKey'
+  'doubleSignEvent',
+  'withSharedKey'
 ])
 
 const METHOD_ALIASES = {

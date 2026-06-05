@@ -118,13 +118,14 @@ function isTrustedSender (message, trustedByPubkey) {
   return trustedByPubkey?.has?.(message?.event?.pubkey) || false
 }
 
-function isLocalNsecChannel (channelPubkey) {
-  return store.get(channelPubkey)?.type === 'nsec'
+function localOwnerForChannel (channelPubkey, context = {}) {
+  const ownerPubkey = normalizePubkey(context.ownerPubkeyForChannel?.(channelPubkey) || channelPubkey)
+  return store.get(ownerPubkey)?.type === 'nsec' ? ownerPubkey : ''
 }
 
-function channelOwnerPayload (message) {
+function channelOwnerPayload (message, context = {}) {
   const ownerPubkey = normalizePubkey(messageBody(message).ownerPubkey)
-  return ownerPubkey && ownerPubkey === message.channelPubkey ? ownerPubkey : ''
+  return ownerPubkey && ownerPubkey === localOwnerForChannel(message.channelPubkey, context) ? ownerPubkey : ''
 }
 
 function contentKeyDiff (ownerPubkey, announcedKeys) {
@@ -171,14 +172,14 @@ export function getDebugSnapshot () {
   return { unlocked: secrets.isUnlocked(), accounts }
 }
 
-export async function announceContentKeys ({ messenger, ownerPubkey, receiverPubkeys, debug }) {
+export async function announceContentKeys ({ messenger, ownerPubkey, channelPubkey = ownerPubkey, receiverPubkeys, debug }) {
   const keys = contentKeysForOwner(ownerPubkey)
   const receivers = normalizePubkeyList(receiverPubkeys)
   if (!keys.length || !receivers.length) return null
   emitDebug(debug, 'announce', {
     type: 'yell',
     code: CONTENT_KEYS_ANNOUNCE_CODE,
-    channelPubkey: ownerPubkey,
+    channelPubkey,
     ownerPubkey,
     receiverPubkeys: receivers,
     receiverCount: receivers.length,
@@ -186,7 +187,7 @@ export async function announceContentKeys ({ messenger, ownerPubkey, receiverPub
     count: keys.length
   })
   return messenger.yell({
-    channelPubkey: ownerPubkey,
+    channelPubkey,
     receiverPubkeys: receivers,
     code: CONTENT_KEYS_ANNOUNCE_CODE,
     payload: { ownerPubkey, keys }
@@ -237,8 +238,9 @@ export async function generateAndPublishContentKey ({
 }
 
 async function handleAnnounce (message, context) {
-  const ownerPubkey = channelOwnerPayload(message)
+  const ownerPubkey = channelOwnerPayload(message, context)
   if (!ownerPubkey) return false
+  const channelPubkey = message.channelPubkey || ownerPubkey
   const keys = (Array.isArray(messageBody(message).keys) ? messageBody(message).keys : [])
     .map(normalizeMetaKey)
     .filter(Boolean)
@@ -248,7 +250,7 @@ async function handleAnnounce (message, context) {
   emitDebug(context.debug, 'request', {
     type: 'ask',
     code: CONTENT_KEYS_ASK_CODE,
-    channelPubkey: ownerPubkey,
+    channelPubkey,
     ownerPubkey,
     receiverPubkey: message.event.pubkey,
     announcedCount: announcedPubkeys.length,
@@ -257,7 +259,7 @@ async function handleAnnounce (message, context) {
     count: pubkeys.length
   })
   await context.messenger.ask({
-    channelPubkey: ownerPubkey,
+    channelPubkey,
     receiverPubkey: message.event.pubkey,
     code: CONTENT_KEYS_ASK_CODE,
     payload: { ownerPubkey, pubkeys }
@@ -266,8 +268,9 @@ async function handleAnnounce (message, context) {
 }
 
 async function handleRequest (message, context) {
-  const ownerPubkey = channelOwnerPayload(message)
+  const ownerPubkey = channelOwnerPayload(message, context)
   if (!ownerPubkey || !message.event?.id) return false
+  const channelPubkey = message.channelPubkey || ownerPubkey
   const pubkeys = normalizePubkeyList(messageBody(message).pubkeys)
   if (!pubkeys.length) return true
 
@@ -279,14 +282,14 @@ async function handleRequest (message, context) {
       emitDebug(context.debug, 'reply', {
         type: 'reply',
         code: CONTENT_KEYS_REPLY_CODE,
-        channelPubkey: ownerPubkey,
+        channelPubkey,
         ownerPubkey,
         receiverPubkey: message.event.pubkey,
         pubkeys: keys.map(key => key.pubkey).filter(Boolean),
         count: keys.length
       })
       return context.messenger.reply({
-        channelPubkey: ownerPubkey,
+        channelPubkey,
         question: message.event,
         receiverPubkey: message.event.pubkey,
         code: CONTENT_KEYS_REPLY_CODE,
@@ -298,8 +301,9 @@ async function handleRequest (message, context) {
 }
 
 async function handleReply (message, context) {
-  const ownerPubkey = channelOwnerPayload(message)
+  const ownerPubkey = channelOwnerPayload(message, context)
   if (!ownerPubkey) return false
+  const channelPubkey = message.channelPubkey || ownerPubkey
   const label = trustedLabel(message.event.pubkey, context.trustedByPubkey)
   const existingByPubkey = new Map(contentKeysForOwner(ownerPubkey).map(key => [key.pubkey, key]))
   let changed = false
@@ -325,7 +329,7 @@ async function handleReply (message, context) {
     emitDebug(context.debug, 'import', {
       type: 'reply',
       code: CONTENT_KEYS_REPLY_CODE,
-      channelPubkey: ownerPubkey,
+      channelPubkey,
       ownerPubkey,
       senderPubkey: message.event.pubkey,
       pubkeys: importedPubkeys,
@@ -342,7 +346,7 @@ export async function handleMessage (message, context) {
     code !== CONTENT_KEYS_ASK_CODE &&
     code !== CONTENT_KEYS_REPLY_CODE
   ) return false
-  if (!isLocalNsecChannel(message?.channelPubkey)) return false
+  if (!localOwnerForChannel(message?.channelPubkey, context)) return false
   if (!isTrustedSender(message, context.trustedByPubkey)) return false
 
   if (code === CONTENT_KEYS_ANNOUNCE_CODE) return handleAnnounce(message, context)

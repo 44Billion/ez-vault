@@ -3,7 +3,12 @@ import { generateSecretKey } from 'nostr-tools'
 import { bytesToHex, hexToBytes } from '../helpers/nostr/index.js'
 import * as store from './accounts-store.js'
 import * as secrets from './secrets.js'
-import { pool } from './relays.js'
+import {
+  fetchRelayListEvent,
+  freeRelays,
+  parseRelayListEvent,
+  pool
+} from './relays.js'
 
 const PING_INTERVAL_MS = 60_000
 const PING_TIMEOUT_MS = 10_000
@@ -44,6 +49,16 @@ function buildBunkerUrl (remoteSignerPubkey, relays) {
   const u = new URL(`bunker://${remoteSignerPubkey}`)
   for (const r of relays) u.searchParams.append('relay', r)
   return u.toString()
+}
+
+async function fetchRelaysForPubkey (pubkey) {
+  const event = await fetchRelayListEvent(pubkey)
+  const { read, write } = parseRelayListEvent(event)
+  if (!read.length && !write.length) {
+    const fallback = freeRelays.slice(0, 2)
+    return { read: fallback, write: fallback }
+  }
+  return { read, write }
 }
 
 async function openSigner (bunkerUrl, clientSecretKey) {
@@ -135,7 +150,13 @@ export class BunkerHandle {
   async nip04Decrypt (pk, ct) { return this.#request(s => s.nip04Decrypt(pk, ct)) }
   async nip44Encrypt (pk, pt) { return this.#request(s => s.nip44Encrypt(pk, pt)) }
   async nip44Decrypt (pk, ct) { return this.#request(s => s.nip44Decrypt(pk, ct)) }
-  withSharedKey (peerPubkey) { return new BunkerSharedKeyHandle(this, peerPubkey) }
+  async getRelays () {
+    // `getRelays` is not a standard NIP-46 RPC. Resolve NIP-65 locally
+    // instead of asking the remote signer to support our custom method.
+    // return this.#request(s => s.getRelays())
+    return fetchRelaysForPubkey(await this.getPublicKey())
+  }
+  withSharedKey (peerPubkey, info) { return new BunkerSharedKeyHandle(this, peerPubkey, info) }
 
   // Adopt this freshly-imported handle into the secrets pool. Called by the
   // import flow after `passkey.ensureRegistered()` succeeds. The clientKey
@@ -281,15 +302,17 @@ Object.freeze(BunkerHandle)
 class BunkerSharedKeyHandle {
   #handle
   #peerPubkey
+  #info
 
-  constructor (handle, peerPubkey) {
+  constructor (handle, peerPubkey, info = '') {
     this.#handle = handle
     this.#peerPubkey = peerPubkey
+    this.#info = info
     Object.preventExtensions(this)
   }
 
   #request (method, params = []) {
-    return this.#handle.tweakedRequest(['withSharedKey', this.#peerPubkey], method, params)
+    return this.#handle.tweakedRequest(['withSharedKey', this.#peerPubkey, this.#info], method, params)
   }
 
   getPublicKey () { return this.#request('getPublicKey') }
@@ -298,7 +321,13 @@ class BunkerSharedKeyHandle {
   nip04Decrypt (pk, ct) { return this.#request('nip04Decrypt', [pk, ct]) }
   nip44Encrypt (pk, pt) { return this.#request('nip44Encrypt', [pk, pt]) }
   nip44Decrypt (pk, ct) { return this.#request('nip44Decrypt', [pk, ct]) }
-  withSharedKey (peerPubkey) { return new BunkerSharedKeyHandle(this, peerPubkey) }
+  async getRelays () {
+    // Same reason as BunkerHandle#getRelays: this is local NIP-65 discovery,
+    // not a NIP-46 request to the remote signer.
+    // return this.#request('getRelays')
+    return fetchRelaysForPubkey(await this.getPublicKey())
+  }
+  withSharedKey (peerPubkey, info = this.#info) { return new BunkerSharedKeyHandle(this.#handle, peerPubkey, info) }
 }
 Object.freeze(BunkerSharedKeyHandle.prototype)
 

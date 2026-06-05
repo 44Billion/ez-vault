@@ -107,6 +107,9 @@ test('shared-key signer derives matching deniable key from either side', async (
   const sharedPubkey = await aliceShared.getPublicKey()
   const ciphertext = await aliceShared.nip44Encrypt(sharedPubkey, 'secret')
   assert.equal(await bobShared.nip44Decrypt(sharedPubkey, ciphertext), 'secret')
+
+  const syncShared = alice.withSharedKey(bobPubkey, 'trusted-signer-sync-v1')
+  assert.notEqual(await syncShared.getPublicKey(), sharedPubkey)
 })
 
 test('multi-DH signer round-trips every content-key mode', async () => {

@@ -12,10 +12,10 @@ function isValidScalar (maybeScalar) {
 
 // Generic deterministic key derivation.
 // Ensures the result is a valid secp256k1 scalar.
-export async function deriveSecretKey (masterKeyBytes, usageLabel = new Uint8Array(), salt = new Uint8Array()) {
+export async function deriveSecretKey (masterKeyBytes, info = new Uint8Array(), salt = new Uint8Array()) {
   const encoder = new TextEncoder()
   if (typeof salt === 'string') salt = encoder.encode(salt)
-  if (typeof usageLabel === 'string') usageLabel = encoder.encode(usageLabel)
+  if (typeof info === 'string') info = encoder.encode(info)
 
   const baseKey = await globalThis.crypto.subtle.importKey(
     'raw', masterKeyBytes, { name: 'HKDF' }, false, ['deriveBits']
@@ -25,16 +25,16 @@ export async function deriveSecretKey (masterKeyBytes, usageLabel = new Uint8Arr
 
   do {
     const suffix = encoder.encode(`-${counter}`)
-    // Concatenate label + suffix
-    const info = new Uint8Array(usageLabel.length + suffix.length)
-    info.set(usageLabel)
-    info.set(suffix, usageLabel.length)
+    // Concatenate HKDF info + suffix
+    const hkdfInfo = new Uint8Array(info.length + suffix.length)
+    hkdfInfo.set(info)
+    hkdfInfo.set(suffix, info.length)
     const buffer = await globalThis.crypto.subtle.deriveBits(
       {
         name: 'HKDF',
         hash: 'SHA-256',
         salt,
-        info
+        info: hkdfInfo
       },
       baseKey, 256
     )
@@ -47,12 +47,12 @@ export async function deriveSecretKey (masterKeyBytes, usageLabel = new Uint8Arr
 }
 
 // Derives a shared scalar using HKDF
-export async function deriveSharedKey (myPrivKey, theirPubKey) {
-  const conversationKey = nip44.getConversationKey(myPrivKey, theirPubKey)
+export async function deriveSharedKey (mySeckey, theirPubkey, info = '' /* 'deniable-chat-v1' */) {
+  const conversationKey = nip44.getConversationKey(mySeckey, theirPubkey)
 
   return await deriveSecretKey(
     conversationKey,
-    'deniable-chat-v1', // nip44 v2 uses random 32 bytes nonce; e.g. 'encryption', 'signing'
+    info, // nip44 v2 uses random 32 bytes nonce; e.g. 'encryption', 'signing'
     // No additional salt because of the 'nip44-v2' one already used for the conversation key derivation
     new Uint8Array()
   )

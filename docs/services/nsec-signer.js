@@ -25,17 +25,19 @@ const createToken = Symbol('createToken')
 class SharedKeySigner {
   #signer
   #peerPubkey
+  #info
   #sharedSignerPromise = null
 
-  constructor (signer, peerPubkey) {
+  constructor (signer, peerPubkey, info = '') {
     this.#signer = signer
     this.#peerPubkey = peerPubkey
+    this.#info = info
     Object.preventExtensions(this)
   }
 
   async #sharedSigner () {
     this.#sharedSignerPromise ??= (async () => {
-      const sharedSecretKey = await deriveSharedKey(secretKeys.get(this.#signer), this.#peerPubkey)
+      const sharedSecretKey = await deriveSharedKey(secretKeys.get(this.#signer), this.#peerPubkey, this.#info)
       return NsecSigner.getOrCreate(bytesToHex(sharedSecretKey))
     })()
     return this.#sharedSignerPromise
@@ -49,7 +51,7 @@ class SharedKeySigner {
   async nip44Decrypt (peerPubkey, ciphertext) { return (await this.#sharedSigner()).nip44Decrypt(peerPubkey, ciphertext) }
   async nip44EncryptMultiDH (options) { return (await this.#sharedSigner()).nip44EncryptMultiDH(options) }
   async nip44DecryptMultiDH (options) { return (await this.#sharedSigner()).nip44DecryptMultiDH(options) }
-  withSharedKey (peerPubkey) { return new SharedKeySigner(this.#signer, peerPubkey) }
+  withSharedKey (peerPubkey, info = this.#info) { return new SharedKeySigner(this.#signer, peerPubkey, info) }
 }
 
 export default class NsecSigner {
@@ -218,8 +220,8 @@ export default class NsecSigner {
     }
   }
 
-  withSharedKey (peerPubkey) {
-    return new SharedKeySigner(this, peerPubkey)
+  withSharedKey (peerPubkey, info) {
+    return new SharedKeySigner(this, peerPubkey, info)
   }
 }
 
