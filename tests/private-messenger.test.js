@@ -35,6 +35,10 @@ function jsonlContent (...rows) {
   return Buffer.from(`${rows.join('\n')}\n`).toString('base64')
 }
 
+function payloadRow (value = 'payload-ciphertext') {
+  return JSON.stringify([value])
+}
+
 function fakePrivateMessage () {
   const watchCalls = []
   const stopped = []
@@ -681,7 +685,7 @@ test('seeder channels store router seeds separately, consume messages, and answe
       pubkey: 'router',
       created_at: now,
       tags: [['f', 'alice'], ['c', '0', '1']],
-      content: jsonlContent(userRow, otherRow)
+      content: jsonlContent(payloadRow(), userRow, otherRow)
     }
   })
   pm.watchCalls[0].onSeed({
@@ -692,7 +696,7 @@ test('seeder channels store router seeds separately, consume messages, and answe
       pubkey: 'router-duplicate',
       created_at: now + 100,
       tags: [['f', 'alice'], ['c', '0', '1']],
-      content: jsonlContent(userRow, otherRow)
+      content: jsonlContent(payloadRow(), userRow, otherRow)
     }
   })
 
@@ -738,7 +742,7 @@ test('seeder channels store router seeds separately, consume messages, and answe
   assert.equal(records.length, 1)
   assert.equal(records[0].recordType, ROUTER_SEED_RECORD_TYPE)
   assert.equal(records[0].router.kind, 263)
-  assert.equal(Buffer.from(records[0].router.content, 'base64').toString(), `${userRow}\n`)
+  assert.equal(Buffer.from(records[0].router.content, 'base64').toString(), `${payloadRow()}\n${userRow}\n`)
   assert.deepEqual(records[0].router.tags, [['f', 'alice'], ['c', '0', '1']])
   assert.equal(messenger.nextMessage(), null)
 })
@@ -761,9 +765,9 @@ test('router seed rows dedupe by proven inner id without content-key pubkey', as
       pubkey: 'router',
       created_at: now,
       tags: [['f', 'alice'], ['c', '0', '1']],
-      content: jsonlContent(oldContentRow, newContentRow)
+      content: jsonlContent(payloadRow(), oldContentRow, newContentRow)
     },
-    innerEventIdsByRowIndex: { 0: 'same-inner-id', 1: 'same-inner-id' }
+    innerEventIdsByRowIndex: { 1: 'same-inner-id', 2: 'same-inner-id' }
   })
 
   const storedSeeds = []
@@ -795,7 +799,7 @@ test('watchtower channels store router seeds without consuming normal messages',
       pubkey: 'router',
       created_at: now,
       tags: [['f', 'alice'], ['c', '0', '1']],
-      content: jsonlContent(userRow)
+      content: jsonlContent(payloadRow(), userRow)
     }
   })
 
@@ -830,7 +834,7 @@ test('watchtower channels store router seeds without consuming normal messages',
   const records = reply.options.payload.jsonl.trim().split('\n').map(line => JSON.parse(line))
   assert.equal(records.length, 1)
   assert.equal(records[0].recordType, ROUTER_SEED_RECORD_TYPE)
-  assert.equal(Buffer.from(records[0].router.content, 'base64').toString(), `${userRow}\n`)
+  assert.equal(Buffer.from(records[0].router.content, 'base64').toString(), `${payloadRow()}\n${userRow}\n`)
   assert.equal(messenger.nextMessage(), null)
 })
 
@@ -1003,7 +1007,7 @@ test('missing-message replies can recover router-only seed records', async () =>
       pubkey: 'router',
       created_at: 1,
       tags: [['f', 'alice'], ['c', '0', '1']],
-      content: jsonlContent(userRow)
+      content: jsonlContent(payloadRow(), userRow)
     }
   })}\n`
   await pm.watchCalls[0].onReply({
@@ -1018,7 +1022,7 @@ test('missing-message replies can recover router-only seed records', async () =>
   const syntheticRouter = JSON.parse(unwrapCall.event.content)
   assert.equal(encryptedTo, 'reader')
   assert.equal(unwrapCall.privateChannelReaderPubkey, 'reader')
-  assert.equal(syntheticRouter.content, jsonlContent(userRow))
+  assert.equal(syntheticRouter.content, jsonlContent(payloadRow(), userRow))
   assert.deepEqual(syntheticRouter.tags, [['f', 'alice'], ['c', '0', '1']])
   assert.equal(messenger.nextMessage().event.id, 'missed-id')
   assert.equal(messenger.nextMessage(), null)
@@ -1140,6 +1144,7 @@ test('missing-message reply packer streams compact seed routers only', async () 
     receiverPubkey: 'user',
     iykcPubkey: '',
     innerEventId: 'seeded-id',
+    payloadRow: payloadRow(),
     row: userRow,
     firstSeenAt: 10,
     lastSeenAt: 10
@@ -1156,7 +1161,7 @@ test('missing-message reply packer streams compact seed routers only', async () 
   const record = JSON.parse(lines[0])
   assert.equal(record.recordType, ROUTER_SEED_RECORD_TYPE)
   assert.equal(record.router.kind, 263)
-  assert.equal(Buffer.from(record.router.content, 'base64').toString(), `${userRow}\n`)
+  assert.equal(Buffer.from(record.router.content, 'base64').toString(), `${payloadRow()}\n${userRow}\n`)
   assert.deepEqual(record.router.tags, [['f', 'sender'], ['c', '0', '1']])
 })
 

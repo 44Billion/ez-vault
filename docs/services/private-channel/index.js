@@ -1,5 +1,6 @@
-import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash, validateEvent, verifyEvent } from 'nostr-tools'
+import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash, nip44, validateEvent, verifyEvent } from 'nostr-tools'
 import { bytesToBase64, base64ToBytes } from '../../helpers/base64.js'
+import { hexToBytes } from '../../helpers/nostr/index.js'
 import { makeContentKeyEventForPubkey, parseContentKeyEvent, verifyContentKeyProof, verifyIykcProof } from '../content-key/event.js'
 import { getIykcProofs } from '../content-key/index.js'
 import { fetchEvents, pool, publish as publishToRelays } from '../relays.js'
@@ -13,8 +14,11 @@ export { EXPIRATION_SECONDS, MAX_EVENT_BYTES, NYM_CARRIER_KIND, PRIVATE_BROADCAS
 
 const DEFAULT_IGNORED_GROUP_TTL_MS = 30 * 60 * 1000
 const DEFAULT_IGNORED_GROUP_MAX_ENTRIES = 5000
+const HEX_SECKEY = /^[0-9a-f]{64}$/i
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
+const nip44GetConversationKey = nip44.getConversationKey.bind(nip44)
+const nip44Decrypt = nip44.decrypt.bind(nip44)
 
 function uniq (values) {
   return [...new Set((values || []).filter(Boolean))]
@@ -158,8 +162,16 @@ function joinedRouter (router, content = '') {
   }
 }
 
+function parsePayloadEnvelope (line, index = 0) {
+  const record = JSON.parse(line)
+  if (!Array.isArray(record) || record.length !== 1 || typeof record[0] !== 'string') throw new Error('INVALID_PAYLOAD_ENVELOPE')
+  return { index, type: 'payload', ciphertext: record[0] }
+}
+
 function parseRecipientEnvelope (line, index = 0) {
-  const [receiverPubkey, ciphertext, iykcPubkey = '', iykcProof = ''] = JSON.parse(line)
+  const record = JSON.parse(line)
+  if (!Array.isArray(record) || (record.length !== 2 && record.length !== 4)) throw new Error('INVALID_RECIPIENT_ENVELOPE')
+  const [receiverPubkey, ciphertext, iykcPubkey = '', iykcProof = ''] = record
   return { index, receiverPubkey, ciphertext, iykcPubkey, iykcProof }
 }
 
@@ -271,9 +283,19 @@ function assertValidRouterImkcProof ({ router, senderPubkey, imkcPubkey, imkcPro
   })) throw new Error('INVALID_IMKC_PROOF')
 }
 
-async function unwrapRecipientEnvelope ({ envelope, receiverSigner, iykcSigner, receiverPubkey, senderPubkey, imkcPubkey, multiDhContext }) {
+function eventFromPayload ({ payloadCiphertext, messageSeckey, senderPubkey }) {
+  if (!HEX_SECKEY.test(messageSeckey || '')) throw new Error('INVALID_MESSAGE_SECKEY')
+  const messageSecretKey = hexToBytes(messageSeckey)
+  const messagePubkey = getPublicKey(messageSecretKey)
+  const decrypted = JSON.parse(nip44Decrypt(payloadCiphertext, nip44GetConversationKey(messageSecretKey, messagePubkey)))
+  if (isSignedEvent(decrypted)) return assertValidSignedInnerEvent(decrypted)
+  const normalized = { ...decrypted, pubkey: senderPubkey }
+  return { ...normalized, id: getEventHash(normalized) }
+}
+
+async function unwrapRecipientEnvelope ({ payloadCiphertext, envelope, receiverSigner, iykcSigner, receiverPubkey, senderPubkey, imkcPubkey, multiDhContext }) {
   if (receiverPubkey && envelope.receiverPubkey !== receiverPubkey) return null
-  let plaintext
+  let messageSeckey
   if (envelope.iykcPubkey || imkcPubkey) {
     if (!receiverSigner?.nip44DecryptMultiDH) throw new Error('RECEIVER_MULTI_DH_UNSUPPORTED')
     let ownContentSigner = null
@@ -283,7 +305,7 @@ async function unwrapRecipientEnvelope ({ envelope, receiverSigner, iykcSigner, 
         ? iykcSigner
         : null
     }
-    plaintext = (await receiverSigner.nip44DecryptMultiDH({
+    messageSeckey = (await receiverSigner.nip44DecryptMultiDH({
       peerPubkey: senderPubkey,
       peerContentPubkey: imkcPubkey,
       ownContentSigner,
@@ -293,12 +315,9 @@ async function unwrapRecipientEnvelope ({ envelope, receiverSigner, iykcSigner, 
     })).plaintext
   } else {
     if (!receiverSigner?.nip44Decrypt) throw new Error('RECEIVER_SIGNER_NIP44_DECRYPT_UNSUPPORTED')
-    plaintext = await receiverSigner.nip44Decrypt(senderPubkey, envelope.ciphertext)
+    messageSeckey = await receiverSigner.nip44Decrypt(senderPubkey, envelope.ciphertext)
   }
-  const decrypted = JSON.parse(plaintext)
-  if (isSignedEvent(decrypted)) return assertValidSignedInnerEvent(decrypted)
-  const normalized = { ...decrypted, pubkey: senderPubkey }
-  return { ...normalized, id: getEventHash(normalized) }
+  return eventFromPayload({ payloadCiphertext, messageSeckey, senderPubkey })
 }
 
 export async function unwrapEvent ({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelReaderSigner = privateChannelSigner, privateChannelReaderPubkey, event, receiverPubkey }) {
@@ -323,8 +342,11 @@ export async function unwrapEvent ({ receiverSigner, iykcSigner, privateChannelS
   const imkcPubkey = readImkcTag(router)
   assertValidRouterImkcProof({ router, senderPubkey, imkcPubkey, imkcProof: readImkcProof(router) })
   const lines = decodeChunkLines(router.content)
-  for (let index = 0; index < lines.length; index++) {
+  if (!lines.length) throw new Error('MISSING_PAYLOAD_ENVELOPE')
+  const payload = parsePayloadEnvelope(lines[0], 0)
+  for (let index = 1; index < lines.length; index++) {
     const event = await unwrapRecipientEnvelope({
+      payloadCiphertext: payload.ciphertext,
       envelope: parseRecipientEnvelope(lines[index], index),
       receiverSigner,
       iykcSigner,
@@ -669,6 +691,11 @@ function createProcessor ({
 
       const drained = await receivedChunks.drainAvailable(groupKey, {
         onLine: async (line, rowIndex, groupMeta, helpers) => {
+          if (rowIndex === 0) {
+            helpers.rememberPayloadCiphertext(groupMeta, parsePayloadEnvelope(line, rowIndex).ciphertext)
+            return
+          }
+          if (!groupMeta.payloadCiphertext) throw new Error('MISSING_PAYLOAD_ENVELOPE')
           const envelope = parseRecipientEnvelope(line, rowIndex)
           helpers.rememberReceiverPubkey(groupMeta, envelope.receiverPubkey)
 
@@ -685,6 +712,7 @@ function createProcessor ({
             })
             if (receiverSigner && !event) {
               event = await unwrapRecipientEnvelope({
+                payloadCiphertext: groupMeta.payloadCiphertext,
                 envelope,
                 receiverSigner,
                 iykcSigner,
@@ -743,13 +771,17 @@ function shouldIgnoreGroupError (err) {
     'DUPLICATE_NYM_CARRIER_CHUNK',
     'INVALID_IYKC_PROOF',
     'INVALID_IMKC_PROOF',
+    'INVALID_MESSAGE_SECKEY',
     'INVALID_NYM_CARRIER',
     'INVALID_NYM_CARRIER_ID',
     'INVALID_NYM_CARRIER_INNER_ID',
     'INVALID_NYM_CARRIER_KIND',
     'INVALID_NYM_CARRIER_PAYLOAD',
     'INVALID_NYM_RUMOR',
+    'INVALID_PAYLOAD_ENVELOPE',
+    'INVALID_RECIPIENT_ENVELOPE',
     'INVALID_SIGNED_INNER_EVENT',
+    'MISSING_PAYLOAD_ENVELOPE',
     'MISMATCHED_NYM_CARRIER_CHUNKS',
     'MISSING_NYM_CARRIER_CHUNK',
     'MISSING_NYM_CARRIER_ID'

@@ -54,6 +54,7 @@ function normalizeMeta (meta, groupKey) {
     nextIndex: Number.isSafeInteger(nextIndex) && nextIndex >= 0 ? nextIndex : 0,
     rowIndex: Number.isSafeInteger(rowIndex) && rowIndex >= 0 ? rowIndex : 0,
     carry: typeof meta.carry === 'string' ? meta.carry : '',
+    payloadCiphertext: typeof meta.payloadCiphertext === 'string' ? meta.payloadCiphertext : '',
     receiverPubkeys: uniq(meta.receiverPubkeys || []),
     byteSize: Math.max(0, Number(meta.byteSize) || 0),
     createdAt: Number(meta.createdAt) || Date.now(),
@@ -248,6 +249,7 @@ export function createReceivedChunkStore ({
         nextIndex: 0,
         rowIndex: 0,
         carry: '',
+        payloadCiphertext: '',
         receiverPubkeys: [],
         byteSize: 0,
         createdAt: now,
@@ -293,6 +295,10 @@ export function createReceivedChunkStore ({
     meta.receiverPubkeys.push(pubkey)
   }
 
+  function rememberPayloadCiphertext (meta, ciphertext) {
+    if (!meta.payloadCiphertext) meta.payloadCiphertext = ciphertext
+  }
+
   async function drainAvailable (groupKey, { onLine } = {}) {
     const meta = readMeta(groupKey)
     if (!meta) return { complete: false, stopped: false, meta: null }
@@ -310,7 +316,7 @@ export function createReceivedChunkStore ({
         const line = text.slice(start, end)
         start = end + 1
         if (line) {
-          const result = await onLine?.(line, meta.rowIndex, meta, { rememberReceiverPubkey })
+          const result = await onLine?.(line, meta.rowIndex, meta, { rememberPayloadCiphertext, rememberReceiverPubkey })
           meta.rowIndex++
           if (result?.stop) {
             meta.updatedAt = Date.now()
@@ -330,7 +336,7 @@ export function createReceivedChunkStore ({
 
     if (meta.nextIndex >= meta.total) {
       if (meta.carry) {
-        const result = await onLine?.(meta.carry, meta.rowIndex, meta, { rememberReceiverPubkey })
+        const result = await onLine?.(meta.carry, meta.rowIndex, meta, { rememberPayloadCiphertext, rememberReceiverPubkey })
         meta.rowIndex++
         meta.carry = ''
         if (result?.stop) {

@@ -52,8 +52,10 @@ function parseContentKeyProof (proof) {
   if (typeof proof !== 'string') return null
   const [createdAtString, sig, extra] = proof.split(':')
   if (extra != null || !/^\d+$/.test(createdAtString || '') || !HEX_SIG.test(sig || '')) return null
+  // eslint-disable-next-line camelcase
   const created_at = Number(createdAtString)
   if (!Number.isSafeInteger(created_at)) return null
+  // eslint-disable-next-line camelcase
   return { created_at, sig }
 }
 

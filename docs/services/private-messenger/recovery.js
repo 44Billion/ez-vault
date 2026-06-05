@@ -5,7 +5,7 @@ import { ASK_KIND, parseRumorContent } from '../../helpers/nostr/private-message
 export const SEEDER_PRESENCE_CODE = 'seederPresence_8mj8'
 export const MISSING_MESSAGES_ASK_CODE = 'missingMessages_ask_8mj8'
 export const MISSING_MESSAGES_REPLY_CODE = 'missingMessages_reply_8mj8'
-export const ROUTER_SEED_RECORD_TYPE = 'routerRow_v1'
+export const ROUTER_SEED_RECORD_TYPE = 'routerEnvelopeRow_v1'
 export const NYM_CARRIER_SEED_RECORD_TYPE = 'nymCarrier_v1'
 
 const DEFAULT_EVENTS_PER_CHUNK = 100
@@ -33,8 +33,8 @@ function decodeJsonl (content) {
   try { return decoder.decode(base64ToBytes(content || '')) } catch { return '' }
 }
 
-function encodeJsonlRow (row) {
-  return bytesToBase64(encoder.encode(String(row).endsWith('\n') ? row : `${row}\n`))
+function encodeJsonlRows (...rows) {
+  return bytesToBase64(encoder.encode(rows.map(row => String(row).endsWith('\n') ? row : `${row}\n`).join('')))
 }
 
 function eventInRange (event, since, until) {
@@ -67,7 +67,7 @@ export function compactSeedRouter (router = {}) {
 function parseRouterRow (line) {
   try {
     const record = JSON.parse(line)
-    if (!Array.isArray(record)) return null
+    if (!Array.isArray(record) || record.length === 1) return null
     return {
       receiverPubkey: record[0] || '',
       iykcPubkey: record[2] || ''
@@ -77,13 +77,23 @@ function parseRouterRow (line) {
   }
 }
 
-function rowHash (row) {
+function parsePayloadRow (line) {
+  try {
+    const record = JSON.parse(line)
+    if (!Array.isArray(record) || record.length !== 1 || typeof record[0] !== 'string') return ''
+    return line
+  } catch {
+    return ''
+  }
+}
+
+function rowHash (payloadRow, row) {
   return getEventHash({
     kind: 0,
     pubkey: HASH_PUBKEY,
     created_at: 0,
     tags: [],
-    content: row
+    content: `${payloadRow}\n${row}`
   })
 }
 
@@ -93,6 +103,8 @@ export function compactSeedRouterRows (seed = {}) {
   const rows = []
   const innerEventIdsByRowIndex = seed.innerEventIdsByRowIndex || {}
   const lines = splitJsonl(seed.jsonl || decodeJsonl(seed.router?.content))
+  const payloadRow = parsePayloadRow(lines[0])
+  if (!payloadRow) return []
   for (let index = 0; index < lines.length; index++) {
     const row = lines[index]
     const parsed = parseRouterRow(row)
@@ -105,7 +117,8 @@ export function compactSeedRouterRows (seed = {}) {
       receiverPubkey: parsed.receiverPubkey,
       iykcPubkey: parsed.iykcPubkey,
       innerEventId,
-      rowHash: innerEventId ? '' : rowHash(row),
+      rowHash: innerEventId ? '' : rowHash(payloadRow, row),
+      payloadRow,
       row,
       firstSeenAt: createdAt,
       lastSeenAt: createdAt
@@ -117,7 +130,7 @@ export function compactSeedRouterRows (seed = {}) {
 export function routerSeedRowKey (seed = {}) {
   const row = seed.row ? parseRouterRow(seed.row) : null
   const innerEventId = seed.innerEventId || ''
-  const fallbackRowHash = seed.rowHash || (seed.row ? rowHash(seed.row) : '')
+  const fallbackRowHash = seed.rowHash || (seed.payloadRow && seed.row ? rowHash(seed.payloadRow, seed.row) : '')
   return [
     seed.channelPubkey || '',
     seed.receiverPubkey || row?.receiverPubkey || '',
@@ -137,12 +150,12 @@ export function compactSeedNymCarriers (carriers = []) {
   }))
 }
 
-function routerWithSingleRow (router, row) {
+function routerWithSingleRow (router, payloadRow, row) {
   const compact = compactRouter(router)
   return {
     ...compact,
     tags: compact.tags.concat([['c', '0', '1']]),
-    content: encodeJsonlRow(row)
+    content: encodeJsonlRows(payloadRow, row)
   }
 }
 
@@ -156,11 +169,11 @@ function seedRowInRange (seed, since, until) {
 }
 
 function compactRoutersFromSeed (seed, { receiverPubkey, since, until }) {
-  if (!seed?.row || !seed?.router || !seedRowInRange(seed, since, until)) return []
+  if (!seed?.payloadRow || !seed?.row || !seed?.router || !seedRowInRange(seed, since, until)) return []
   if (receiverPubkey && seed.receiverPubkey !== receiverPubkey) return []
   return [{
     recordType: ROUTER_SEED_RECORD_TYPE,
-    router: routerWithSingleRow(seed.router, seed.row)
+    router: routerWithSingleRow(seed.router, seed.payloadRow, seed.row)
   }]
 }
 

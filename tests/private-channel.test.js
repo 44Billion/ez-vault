@@ -83,6 +83,18 @@ async function noContentKeys () {
   return {}
 }
 
+function routerJsonlRows (router) {
+  return new TextDecoder()
+    .decode(Buffer.from(router.content, 'base64'))
+    .trim()
+    .split('\n')
+    .map(line => JSON.parse(line))
+}
+
+function routerRecipientRows (router) {
+  return routerJsonlRows(router).filter(row => row.length !== 1)
+}
+
 test('shared-key signer derives matching deniable key from either side', async () => {
   const alice = signer()
   const bob = signer()
@@ -295,11 +307,11 @@ test('publish splits relay-targeted routers by receiver subset with separate rou
   assert.deepEqual(routers.map(router => router.tags.some(tag => tag[0] === 'id')), [false, false])
   assert.notEqual(routers[0].pubkey, routers[1].pubkey)
   assert.deepEqual(
-    Buffer.from(routers[0].content, 'base64').toString().trim().split('\n').map(line => JSON.parse(line)[0]).sort(),
+    routerRecipientRows(routers[0]).map(row => row[0]).sort(),
     [bobPubkey, carolPubkey].sort()
   )
   assert.deepEqual(
-    Buffer.from(routers[1].content, 'base64').toString().trim().split('\n').map(line => JSON.parse(line)[0]),
+    routerRecipientRows(routers[1]).map(row => row[0]),
     [davePubkey]
   )
 })
@@ -968,7 +980,7 @@ test('wrapEvent uses receiver content key rows when iykc is advertised', async (
     })
   })
   const router = JSON.parse(await alice.nip44Decrypt(await alice.getPublicKey(), wrapped.content))
-  const line = JSON.parse(new TextDecoder().decode(Buffer.from(router.content, 'base64')).trim())
+  const line = routerRecipientRows(router)[0]
 
   assert.deepEqual(line.slice(0, 1), [bobPubkey])
   assert.deepEqual(line.slice(2), [contentKey.iykcPubkey, contentKey.iykcProof])
@@ -1052,7 +1064,7 @@ test('wrapEvent accepts explicit receiver content keys with valid proofs', async
     _getIykcProofs: noContentKeys
   })
   const router = JSON.parse(await alice.nip44Decrypt(await alice.getPublicKey(), wrapped.content))
-  const line = JSON.parse(new TextDecoder().decode(Buffer.from(router.content, 'base64')).trim())
+  const line = routerRecipientRows(router)[0]
 
   assert.equal(line.length, 4)
   assert.deepEqual(await unwrapEvent({ receiverSigner: bob, iykcSigner: bobContent, privateChannelSigner: alice, event: wrapped, receiverPubkey: bobPubkey }), unwrappedFixture(original, await alice.getPublicKey()))
@@ -1091,8 +1103,9 @@ test('unwrapEvent rejects receiver iykc rows without valid proofs', async () => 
   })
   const channelPubkey = await alice.getPublicKey()
   const router = JSON.parse(await alice.nip44Decrypt(channelPubkey, wrapped.content))
-  const [receiverPubkey, ciphertext, iykcPubkey] = JSON.parse(new TextDecoder().decode(Buffer.from(router.content, 'base64')).trim())
-  router.content = Buffer.from(`${JSON.stringify([receiverPubkey, ciphertext, iykcPubkey, '7:bad'])}\n`).toString('base64')
+  const rows = routerJsonlRows(router)
+  const [receiverPubkey, ciphertext, iykcPubkey] = rows.find(row => row.length !== 1)
+  router.content = Buffer.from(`${JSON.stringify(rows[0])}\n${JSON.stringify([receiverPubkey, ciphertext, iykcPubkey, '7:bad'])}\n`).toString('base64')
   const tampered = await alice.signEvent({
     kind: PRIVATE_BROADCAST_KIND,
     created_at: wrapped.created_at,
@@ -1128,8 +1141,9 @@ test('subscribe only emits receiver content key usage after iykc proof validatio
     })
     const channelPubkey = await alice.getPublicKey()
     const router = JSON.parse(await alice.nip44Decrypt(channelPubkey, wrapped.content))
-    const [receiverPubkey, ciphertext, iykcPubkey] = JSON.parse(new TextDecoder().decode(Buffer.from(router.content, 'base64')).trim())
-    router.content = Buffer.from(`${JSON.stringify([receiverPubkey, ciphertext, iykcPubkey, '7:bad'])}\n`).toString('base64')
+    const rows = routerJsonlRows(router)
+    const [receiverPubkey, ciphertext, iykcPubkey] = rows.find(row => row.length !== 1)
+    router.content = Buffer.from(`${JSON.stringify(rows[0])}\n${JSON.stringify([receiverPubkey, ciphertext, iykcPubkey, '7:bad'])}\n`).toString('base64')
     const tampered = await alice.signEvent({
       kind: PRIVATE_BROADCAST_KIND,
       created_at: wrapped.created_at,

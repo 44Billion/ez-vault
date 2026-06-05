@@ -1,4 +1,6 @@
+import { generateSecretKey, getPublicKey, nip44 } from 'nostr-tools'
 import { bytesToBase64, base64ToBytes } from '../../helpers/base64.js'
+import { bytesToHex } from '../../helpers/nostr/index.js'
 import { verifyIykcProof } from '../content-key/event.js'
 import { getTemporaryItem, removeTemporaryItems, setTemporaryItem } from '../temporary-storage.js'
 import { JSONL_CHUNK_BYTES } from './chunk-size.js'
@@ -6,6 +8,8 @@ import { JSONL_CHUNK_BYTES } from './chunk-size.js'
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 const STORAGE_PREFIX = 'ez-vault:private-channel:'
+const nip44GetConversationKey = nip44.getConversationKey.bind(nip44)
+const nip44Encrypt = nip44.encrypt.bind(nip44)
 
 function appendBytes (left, right) {
   const out = new Uint8Array(left.length + right.length)
@@ -60,6 +64,28 @@ function buildLine ({ receiverPubkey, iykcPubkey, iykcProof }, ciphertext) {
   return JSON.stringify(line) + '\n'
 }
 
+function buildPayloadLine (ciphertext) {
+  return JSON.stringify([ciphertext]) + '\n'
+}
+
+function encryptedPayload ({ messageSecretKey, event }) {
+  const messagePubkey = getPublicKey(messageSecretKey)
+  return nip44Encrypt(JSON.stringify(event), nip44GetConversationKey(messageSecretKey, messagePubkey))
+}
+
+function appendLine (chunk, line, id, chunkIndex) {
+  while (line.length) {
+    const available = JSONL_CHUNK_BYTES - chunk.length
+    chunk = appendBytes(chunk, line.slice(0, available))
+    line = line.slice(available)
+    if (chunk.length === JSONL_CHUNK_BYTES) {
+      setTemporaryItem(tempKey(id, chunkIndex++), bytesToBase64(chunk))
+      chunk = new Uint8Array()
+    }
+  }
+  return { chunk, chunkIndex }
+}
+
 function joinByteChunks (parts) {
   let length = 0
   const decoded = parts.map(part => {
@@ -110,6 +136,10 @@ async function writeChunksOnce ({ senderSigner, imkcSigner, receivers, receiverC
   const useMultiDh = typeof senderSigner?.nip44EncryptMultiDH === 'function'
   let foundOwnContentPubkey = false
   let usedOwnContentPubkey = ''
+  const messageSecretKey = generateSecretKey()
+  const messageSeckey = bytesToHex(messageSecretKey)
+  const payloadLine = encoder.encode(buildPayloadLine(encryptedPayload({ messageSecretKey, event })))
+  ;({ chunk, chunkIndex } = appendLine(chunk, payloadLine, id, chunkIndex))
 
   for (const receiver of receivers) {
     const row = receiverRecord(receiver, useMultiDh ? receiverContentKeys : {})
@@ -120,7 +150,7 @@ async function writeChunksOnce ({ senderSigner, imkcSigner, receivers, receiverC
         peerContentPubkey: row.iykcPubkey,
         ownContentSigner: imkcSigner,
         context: multiDhContext,
-        plaintext: JSON.stringify(event)
+        plaintext: messageSeckey
       })
       ciphertext = encrypted.ciphertext
       const nextContentPubkey = encrypted.ownContentPubkey || ''
@@ -131,19 +161,10 @@ async function writeChunksOnce ({ senderSigner, imkcSigner, receivers, receiverC
       foundOwnContentPubkey = true
       if (nextContentPubkey) usedOwnContentPubkey = nextContentPubkey
     } else {
-      ciphertext = await senderSigner.nip44Encrypt(row.receiverPubkey, JSON.stringify(event))
+      ciphertext = await senderSigner.nip44Encrypt(row.receiverPubkey, messageSeckey)
     }
-    let line = encoder.encode(buildLine(row, ciphertext))
-
-    while (line.length) {
-      const available = JSONL_CHUNK_BYTES - chunk.length
-      chunk = appendBytes(chunk, line.slice(0, available))
-      line = line.slice(available)
-      if (chunk.length === JSONL_CHUNK_BYTES) {
-        setTemporaryItem(tempKey(id, chunkIndex++), bytesToBase64(chunk))
-        chunk = new Uint8Array()
-      }
-    }
+    const line = encoder.encode(buildLine(row, ciphertext))
+    ;({ chunk, chunkIndex } = appendLine(chunk, line, id, chunkIndex))
   }
 
   if (chunk.length || chunkIndex === 0) setTemporaryItem(tempKey(id, chunkIndex++), bytesToBase64(chunk))
