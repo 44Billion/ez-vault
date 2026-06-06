@@ -87,6 +87,23 @@ function createSubscribable (state) {
   }
 }
 
+function createRelayListUpdates () {
+  const subscriptions = []
+  return {
+    subscriptions,
+    subscribe: (pubkeys, options) => {
+      const subscription = {
+        pubkeys,
+        options,
+        closed: false,
+        emit: update => options.onChange?.(update)
+      }
+      subscriptions.push(subscription)
+      return () => { subscription.closed = true }
+    }
+  }
+}
+
 function addNsecAccount () {
   const secret = seckey()
   const pubkey = pubkeyFromSecret(secret)
@@ -222,6 +239,87 @@ test('sync orchestration watches nsec and bunker channels with identity-only syn
   assert.equal(controller.messenger, null)
 
   controller.close()
+})
+
+test('sync refreshes messenger channels when watched account read relays change', async () => {
+  const deviceSigner = signer('device')
+  const accountSigners = {
+    nsec1: signer('nsec1', { readRelays: ['wss://old-one.example', 'wss://old-two.example'] }),
+    bunker1: signer('bunker1', { readRelays: ['wss://bunker-one.example', 'wss://bunker-two.example'] })
+  }
+  const relayUpdates = createRelayListUpdates()
+  const storeStub = createSubscribable({
+    list: () => [
+      { type: 'nsec', pubkey: 'nsec1' },
+      { type: 'bunker', pubkey: 'bunker1' }
+    ]
+  })
+  const secretsStub = createSubscribable({
+    isUnlocked: () => true,
+    getDeviceSigner: async () => deviceSigner
+  })
+  const trustedStub = createSubscribable({
+    list: () => [{ pubkey: 'trusted1', platform: 'Laptop' }]
+  })
+  const instances = []
+
+  class FakeMessenger {
+    constructor () {
+      this.updates = []
+      instances.push(this)
+    }
+
+    async init (options) {
+      this.options = options
+      return this
+    }
+
+    async update (options) {
+      this.options = options
+      this.updates.push(options)
+      return this
+    }
+
+    nextMessage () { return null }
+    close () { this.closed = true }
+  }
+
+  const controller = createSyncController({
+    MessengerClass: FakeMessenger,
+    _store: storeStub,
+    _secrets: secretsStub,
+    _trustedSigners: trustedStub,
+    _claimSigner: account => accountSigners[account.pubkey],
+    _subscribeRelayListUpdates: relayUpdates.subscribe,
+    _setTimeout: () => ({}),
+    _clearTimeout: () => {},
+    _setInterval: () => ({}),
+    _clearInterval: () => {}
+  })
+
+  await controller.init()
+
+  assert.equal(relayUpdates.subscriptions.length, 1)
+  assert.deepEqual(relayUpdates.subscriptions[0].pubkeys, ['nsec1', 'bunker1'])
+  assert.equal(relayUpdates.subscriptions[0].options.relayType, 'read')
+  assert.deepEqual(instances[0].options.channels[0].relays, ['wss://old-one.example', 'wss://old-two.example'])
+
+  await relayUpdates.subscriptions[0].emit({
+    pubkey: 'nsec1',
+    relays: {
+      read: ['wss://new-one.example', 'wss://new-two.example', 'wss://new-three.example'],
+      write: []
+    }
+  })
+  await flushMicrotasks()
+
+  assert.equal(instances[0].updates.length, 1)
+  assert.deepEqual(instances[0].updates[0].channels[0].relays, ['wss://new-one.example', 'wss://new-two.example'])
+  assert.deepEqual(instances[0].updates[0].channels[1].relays, ['wss://bunker-one.example', 'wss://bunker-two.example'])
+
+  controller.close()
+
+  assert.equal(relayUpdates.subscriptions[0].closed, true)
 })
 
 test('sync drains messages enqueued while another message is being handled', async () => {

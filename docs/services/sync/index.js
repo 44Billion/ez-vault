@@ -1,5 +1,6 @@
 import { PrivateMessenger } from '../private-messenger/index.js'
 import { claimSigner } from '../signer.js'
+import { subscribeRelayListUpdates } from '../../helpers/nostr/queries.js'
 import * as store from '../accounts-store.js'
 import * as secrets from '../secrets.js'
 import * as trustedSigners from '../trusted-signers.js'
@@ -85,6 +86,7 @@ export function createSyncController ({
   _trustedSigners = trustedSigners,
   _contentKeys = contentKeys,
   _claimSigner = claimSigner,
+  _subscribeRelayListUpdates = subscribeRelayListUpdates,
   _setTimeout = globalThis.setTimeout.bind(globalThis),
   _clearTimeout = globalThis.clearTimeout.bind(globalThis),
   _setInterval = globalThis.setInterval.bind(globalThis),
@@ -102,10 +104,13 @@ export function createSyncController ({
   let announceTimer = null
   let announceInterval = null
   let pendingResetInterval = false
+  let stopRelayListWatcher = null
+  let relayListWatcherKey = ''
   const pendingAnnounceOwners = new Set()
   const unsubscribers = []
   const channelPubkeyByOwnerPubkey = new Map()
   const ownerPubkeyByChannelPubkey = new Map()
+  const readRelaysByOwnerPubkey = new Map()
   const debug = _debug === undefined ? defaultDebugSink() : _debug
 
   function emitDebug (action, detail = {}) {
@@ -116,8 +121,10 @@ export function createSyncController ({
     }
   }
 
-  async function accountReadRelays (signer) {
-    const relays = await signer.getRelays?.()
+  async function accountReadRelays (ownerPubkey, signer) {
+    const relays = readRelaysByOwnerPubkey.has(ownerPubkey)
+      ? { read: readRelaysByOwnerPubkey.get(ownerPubkey) }
+      : await signer.getRelays?.()
     const readRelays = syncRelays(relays?.read)
     if (!readRelays.length) throw new Error('SYNC_READ_RELAYS_REQUIRED')
     return readRelays
@@ -140,13 +147,15 @@ export function createSyncController ({
     const channels = []
     const nextChannelPubkeyByOwnerPubkey = new Map()
     const nextOwnerPubkeyByChannelPubkey = new Map()
+    const nextOwnerPubkeys = new Set()
     for (const account of _store.list()) {
       if (account.type !== 'nsec' && account.type !== 'bunker') continue
+      nextOwnerPubkeys.add(account.pubkey)
       try {
         const accountSigner = _claimSigner(account)
         const channelSigner = accountSigner.withSharedKey(account.pubkey, TRUSTED_SIGNER_SYNC_INFO)
         const channelPubkey = await channelSigner.getPublicKey()
-        const relays = await accountReadRelays(accountSigner)
+        const relays = await accountReadRelays(account.pubkey, accountSigner)
         nextChannelPubkeyByOwnerPubkey.set(account.pubkey, channelPubkey)
         nextOwnerPubkeyByChannelPubkey.set(channelPubkey, account.pubkey)
         channels.push({
@@ -160,6 +169,9 @@ export function createSyncController ({
         onError(err)
       }
     }
+    for (const ownerPubkey of [...readRelaysByOwnerPubkey.keys()]) {
+      if (!nextOwnerPubkeys.has(ownerPubkey)) readRelaysByOwnerPubkey.delete(ownerPubkey)
+    }
     channelPubkeyByOwnerPubkey.clear()
     ownerPubkeyByChannelPubkey.clear()
     for (const [ownerPubkey, channelPubkey] of nextChannelPubkeyByOwnerPubkey) {
@@ -169,6 +181,49 @@ export function createSyncController ({
       ownerPubkeyByChannelPubkey.set(channelPubkey, ownerPubkey)
     }
     return channels
+  }
+
+  function clearRelayListWatcher () {
+    stopRelayListWatcher?.()
+    stopRelayListWatcher = null
+    relayListWatcherKey = ''
+  }
+
+  function relayListWatcherPubkeys () {
+    return [...channelPubkeyByOwnerPubkey.keys()]
+  }
+
+  function ensureRelayListWatcher () {
+    const pubkeys = relayListWatcherPubkeys()
+    const key = [...pubkeys].sort().join(',')
+    if (!key) {
+      clearRelayListWatcher()
+      return
+    }
+    if (stopRelayListWatcher && relayListWatcherKey === key) return
+    clearRelayListWatcher()
+    relayListWatcherKey = key
+    try {
+      stopRelayListWatcher = _subscribeRelayListUpdates(pubkeys, {
+        relayType: 'read',
+        onChange: onAccountRelayListChange
+      })
+    } catch (err) {
+      clearRelayListWatcher()
+      onError(err)
+    }
+  }
+
+  function onAccountRelayListChange (update) {
+    if (!channelPubkeyByOwnerPubkey.has(update.pubkey)) return
+    const relays = syncRelays(update.relays?.read)
+    readRelaysByOwnerPubkey.set(update.pubkey, relays)
+    emitDebug('relay-list', {
+      ownerPubkey: update.pubkey,
+      relays,
+      relayCount: relays.length
+    })
+    refresh()
   }
 
   function scheduleDrain () {
@@ -297,8 +352,10 @@ export function createSyncController ({
   function stop () {
     messenger?.close?.()
     messenger = null
+    clearRelayListWatcher()
     channelPubkeyByOwnerPubkey.clear()
     ownerPubkeyByChannelPubkey.clear()
+    readRelaysByOwnerPubkey.clear()
     clearAnnouncementTimers()
     _contentKeys.resetDebugSources?.()
   }
@@ -332,6 +389,7 @@ export function createSyncController ({
       await messenger.update(options)
     }
 
+    ensureRelayListWatcher()
     ensureAnnouncementInterval()
     scheduleAnnounceAll()
     scheduleDrain()
