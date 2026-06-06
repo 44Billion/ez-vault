@@ -257,6 +257,13 @@ export class PrivateMessenger {
     return this._pickRelaysForPubkeys(pubkeys, relaysByPubkey, { relayType: 'read' })
   }
 
+  async readRelaysForPubkey (pubkey) {
+    const relaysByPubkey = await this._getRelaysByPubkey([pubkey])
+    const readRelays = uniq(relaysByPubkey?.[pubkey]?.read)
+    if (readRelays.length) return readRelays
+    return relayMapRelays(this._pickRelaysForPubkeys([pubkey], relaysByPubkey, { relayType: 'read' }))
+  }
+
   async recoveryMirrorRelays (channelPubkey) {
     const seeders = this.recoverySeeders(channelPubkey)
     if (!seeders.length) return []
@@ -270,7 +277,7 @@ export class PrivateMessenger {
 
   async resolveWatchRelays (channel) {
     if (channel.relays.length) return channel.relays
-    return relayMapRelays(await this.readRelayToReceivers([this.userPubkey]))
+    return this.readRelaysForPubkey(this.userPubkey)
   }
 
   async resolveSendRouting ({ channel, receiverPubkeys, relays, relayToReceivers }) {

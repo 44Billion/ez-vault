@@ -312,12 +312,17 @@ test('private messenger delegates send helpers with scoped signers and relays', 
 test('private messenger falls back to recipient read relays when no relay set is configured', async () => {
   const pm = fakePrivateMessage()
   const relayLookups = []
+  const readRelays = pubkey => [
+    `wss://${pubkey}.read-one.example`,
+    `wss://${pubkey}.read-two.example`,
+    `wss://${pubkey}.read-three.example`
+  ]
   const messenger = await new PrivateMessenger({
     _privateMessage: pm,
     _getRelaysByPubkey: async pubkeys => {
       relayLookups.push(pubkeys)
       return Object.fromEntries(pubkeys.map(pubkey => [pubkey, {
-        read: [`wss://${pubkey}.read.example`],
+        read: readRelays(pubkey),
         write: [`wss://${pubkey}.write.example`]
       }]))
     }
@@ -326,7 +331,7 @@ test('private messenger falls back to recipient read relays when no relay set is
     channels: [{ pubkey: 'channel', signer: signer('channel') }]
   })
 
-  assert.deepEqual(pm.watchCalls[0].relays, ['wss://user.read.example'])
+  assert.deepEqual(pm.watchCalls[0].relays, readRelays('user'))
 
   await messenger.tell({ receiverPubkey: 'alice', payload: 'note' })
   await messenger.broadcastNymRumor({
@@ -342,13 +347,64 @@ test('private messenger falls back to recipient read relays when no relay set is
 
   assert.deepEqual(relayLookups, [['user'], ['alice'], ['bob'], ['carol']])
   assert.equal(pm.sent[0].options.relays, undefined)
-  assert.deepEqual([...pm.sent[0].options.relayToReceivers.entries()], [['wss://alice.read.example', ['alice']]])
+  assert.deepEqual([...pm.sent[0].options.relayToReceivers.entries()], [
+    ['wss://alice.read-one.example', ['alice']],
+    ['wss://alice.read-two.example', ['alice']]
+  ])
   assert.equal(pm.sent[1].options.relays, undefined)
-  assert.deepEqual([...pm.sent[1].options.relayToReceivers.entries()], [['wss://bob.read.example', ['bob']]])
+  assert.deepEqual([...pm.sent[1].options.relayToReceivers.entries()], [
+    ['wss://bob.read-one.example', ['bob']],
+    ['wss://bob.read-two.example', ['bob']]
+  ])
   assert.equal(Object.prototype.hasOwnProperty.call(pm.sent[1].options, 'receiverPubkeys'), false)
   assert.equal(pm.sent[2].options.relays, undefined)
-  assert.deepEqual([...pm.sent[2].options.relayToReceivers.entries()], [['wss://carol.read.example', ['carol']]])
+  assert.deepEqual([...pm.sent[2].options.relayToReceivers.entries()], [
+    ['wss://carol.read-one.example', ['carol']],
+    ['wss://carol.read-two.example', ['carol']]
+  ])
   assert.equal(Object.prototype.hasOwnProperty.call(pm.sent[2].options, 'receiverPubkeys'), false)
+})
+
+test('private messenger reload-gap fetch uses all local read relays when channel relays are absent', async () => {
+  const pm = fakePrivateMessage()
+  const fetches = []
+  let scheduled = null
+  const now = Math.floor(Date.now() / 1000)
+  const userReadRelays = [
+    'wss://user.read-one.example',
+    'wss://user.read-two.example',
+    'wss://user.read-three.example'
+  ]
+  globalThis.localStorage.setItem('ez-vault:private-messenger:user:state', JSON.stringify({
+    channels: {
+      channel: { lastSeenAt: now - 10, lastWatchedAt: now - 10 }
+    }
+  }))
+
+  const messenger = await new PrivateMessenger({
+    _privateMessage: pm,
+    _privateChannel: {
+      fetch: async options => {
+        fetches.push(options)
+        return []
+      }
+    },
+    _getRelaysByPubkey: async pubkeys => Object.fromEntries(pubkeys.map(pubkey => [pubkey, {
+      read: pubkey === 'user' ? userReadRelays : [`wss://${pubkey}.read.example`],
+      write: []
+    }])),
+    _setTimeout: fn => { scheduled = fn }
+  }).init({
+    userSigner: signer('user'),
+    channels: [{ pubkey: 'channel', signer: signer('channel') }]
+  })
+
+  assert.deepEqual(pm.watchCalls[0].relays, userReadRelays)
+
+  await scheduled()
+
+  assert.deepEqual(fetches[0].relays, userReadRelays)
+  assert.equal(messenger.nextMessage(), null)
 })
 
 test('private messenger prefers explicit relay receiver maps over channel relays', async () => {
