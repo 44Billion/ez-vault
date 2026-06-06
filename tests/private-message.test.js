@@ -111,6 +111,32 @@ test('watch merges overlapping relay subscriptions by channel author', async () 
   assert.deepEqual(closed[0].privateChannelPubkeys, ['channel1'])
 })
 
+test('watch refresh keeps shared relay subscriptions and gracefully closes removed relays', async () => {
+  const { calls, closed, fakeSubscribe } = fakeSubscribeFactory()
+  await watch({
+    channels: ['channel1'],
+    relays: ['wss://a.example', 'wss://b.example'],
+    receiverSigner: signer('receiver'),
+    privateChannelSigner: signer('channel1'),
+    _subscribe: fakeSubscribe
+  })
+  await watch({
+    channels: ['channel1'],
+    relays: ['wss://b.example', 'wss://c.example'],
+    receiverSigner: signer('receiver'),
+    privateChannelSigner: signer('channel1'),
+    _subscribe: fakeSubscribe
+  })
+
+  assert.equal(calls.length, 3)
+  assert.deepEqual(calls.map(call => call.relays[0]), ['wss://a.example', 'wss://b.example', 'wss://c.example'])
+  assert.equal(closed.length, 0)
+
+  await new Promise(resolve => setTimeout(resolve, 550))
+  assert.equal(closed.length, 1)
+  assert.deepEqual(closed[0].relays, ['wss://a.example'])
+})
+
 test('ask requires watching the sender private channel first', async () => {
   await assert.rejects(
     () => ask({

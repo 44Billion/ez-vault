@@ -1,5 +1,5 @@
 import { CONTENT_KEY_KIND, parseContentKeyEvent } from '../../services/content-key/event.js'
-import { fetchEvents, freeRelays, parseRelayListEvent, seedRelays } from '../../services/relays.js'
+import { fetchEvents, freeRelays, parseRelayListEvent, pool, seedRelays } from '../../services/relays.js'
 
 const DEFAULT_RELAYS_PER_PUBKEY = 2
 const QUERY_CACHE_MS = 40 * 60 * 1000
@@ -8,6 +8,7 @@ const IYKC_CACHE_MAX_ITEMS = 10000
 const relaysByPubkey = Object.create(null)
 const relayCacheTimersByPubkey = Object.create(null)
 const relayCacheAddedAtByPubkey = Object.create(null)
+const relayCacheEventCreatedAtByPubkey = Object.create(null)
 const contentKeysByPubkey = Object.create(null)
 const iykcCacheTimersByPubkey = Object.create(null)
 const iykcCacheAddedAtByPubkey = Object.create(null)
@@ -26,6 +27,34 @@ function cloneRelays (relays) {
     read: [...(relays?.read || [])],
     write: [...(relays?.write || [])]
   }
+}
+
+function relayListCreatedAt (event) {
+  return Number.isFinite(event?.created_at) ? event.created_at : 0
+}
+
+function relaySetsEqual (a, b) {
+  const left = new Set(a || [])
+  const right = new Set(b || [])
+  if (left.size !== right.size) return false
+  for (const value of left) if (!right.has(value)) return false
+  return true
+}
+
+function relaySetChanges (previous, next) {
+  const read = !relaySetsEqual(previous?.read, next?.read)
+  const write = !relaySetsEqual(previous?.write, next?.write)
+  return {
+    read,
+    write,
+    both: read || write
+  }
+}
+
+function relayTypeChanged (changes, relayType) {
+  if (relayType === 'read') return changes.read
+  if (relayType === 'write') return changes.write
+  return changes.both
 }
 
 function cloneContentKey (contentKey) {
@@ -74,8 +103,33 @@ function clearCache (cache, timers, addedAt) {
   for (const key of Object.keys(addedAt)) delete addedAt[key]
 }
 
-export function clearQueryCaches () {
+function deleteCachedRelay (pubkey) {
+  deleteCachedValue(relaysByPubkey, relayCacheTimersByPubkey, relayCacheAddedAtByPubkey, pubkey)
+  delete relayCacheEventCreatedAtByPubkey[pubkey]
+}
+
+function setCachedRelays (pubkey, relays, createdAt, cacheMs) {
+  setCachedValue(relaysByPubkey, relayCacheTimersByPubkey, relayCacheAddedAtByPubkey, pubkey, cloneRelays(relays), cacheMs)
+  relayCacheEventCreatedAtByPubkey[pubkey] = createdAt
+}
+
+function pruneRelayCache () {
+  const keys = Object.keys(relaysByPubkey)
+  if (keys.length <= RELAY_CACHE_MAX_ITEMS) return
+
+  keys
+    .sort((a, b) => (relayCacheAddedAtByPubkey[a] || 0) - (relayCacheAddedAtByPubkey[b] || 0))
+    .slice(0, keys.length - RELAY_CACHE_MAX_ITEMS)
+    .forEach(deleteCachedRelay)
+}
+
+function clearRelayCache () {
   clearCache(relaysByPubkey, relayCacheTimersByPubkey, relayCacheAddedAtByPubkey)
+  for (const key of Object.keys(relayCacheEventCreatedAtByPubkey)) delete relayCacheEventCreatedAtByPubkey[key]
+}
+
+export function clearQueryCaches () {
+  clearRelayCache()
   clearCache(contentKeysByPubkey, iykcCacheTimersByPubkey, iykcCacheAddedAtByPubkey)
 }
 
@@ -112,6 +166,61 @@ export function pickRelaysForPubkeys (pubkeys, relaysByPubkey, { maxPerPubkey = 
   return relayToAuthors
 }
 
+export function cacheRelayListEvent (event, { cacheMs = QUERY_CACHE_MS } = {}) {
+  if (!event || event.kind !== 10002 || !event.pubkey) return null
+  const createdAt = relayListCreatedAt(event)
+  const previousCreatedAt = relayCacheEventCreatedAtByPubkey[event.pubkey]
+  if (previousCreatedAt != null && createdAt <= previousCreatedAt) return null
+
+  const previousRelays = hasCachedKey(relaysByPubkey, event.pubkey)
+    ? cloneRelays(relaysByPubkey[event.pubkey])
+    : null
+  const relays = parseRelayListEvent(event)
+  const changes = relaySetChanges(previousRelays, relays)
+  setCachedRelays(event.pubkey, relays, createdAt, cacheMs)
+  pruneRelayCache()
+
+  return {
+    pubkey: event.pubkey,
+    event,
+    relays: cloneRelays(relays),
+    previousRelays,
+    changes
+  }
+}
+
+export function subscribeRelayListUpdates (pubkeys, {
+  relayType = 'both',
+  onChange,
+  relays = seedRelays,
+  cacheMs = QUERY_CACHE_MS,
+  _pool = pool
+} = {}) {
+  const authors = [...new Set(pubkeys || [])].filter(Boolean)
+  if (!authors.length) return () => {}
+
+  let closed = false
+  const sub = _pool.subscribeMany(relays, {
+    kinds: [10002],
+    authors
+  }, {
+    onevent (event) {
+      if (closed || !authors.includes(event.pubkey)) return
+      const update = cacheRelayListEvent(event, { cacheMs })
+      if (!update || !relayTypeChanged(update.changes, relayType)) return
+      onChange?.({
+        ...update,
+        relayType
+      })
+    }
+  })
+
+  return () => {
+    closed = true
+    sub?.close?.()
+  }
+}
+
 export async function getRelaysByPubkey (pubkeys, { _fetchEvents = fetchEvents, cacheMs = QUERY_CACHE_MS } = {}) {
   const uniquePubkeys = [...new Set(pubkeys)].filter(Boolean)
   if (!uniquePubkeys.length) return {}
@@ -142,10 +251,10 @@ export async function getRelaysByPubkey (pubkeys, { _fetchEvents = fetchEvents, 
     const relays = latestByPubkey[pubkey]
       ? parseRelayListEvent(latestByPubkey[pubkey])
       : { read: freeRelays.slice(0, 2), write: freeRelays.slice(0, 2) }
-    setCachedValue(relaysByPubkey, relayCacheTimersByPubkey, relayCacheAddedAtByPubkey, pubkey, cloneRelays(relays), cacheMs)
+    setCachedRelays(pubkey, relays, relayListCreatedAt(latestByPubkey[pubkey]), cacheMs)
     out[pubkey] = relays
   }
-  pruneCache(relaysByPubkey, relayCacheTimersByPubkey, relayCacheAddedAtByPubkey, RELAY_CACHE_MAX_ITEMS)
+  pruneRelayCache()
   return out
 }
 

@@ -37,7 +37,7 @@
 // - For other event-list replies, use createEventReplyPacker({ messenger, question, code }).update(event).
 
 import * as privateMessage from '../../helpers/nostr/private-message.js'
-import { getRelaysByPubkey, pickRelaysForPubkeys } from '../../helpers/nostr/queries.js'
+import { getRelaysByPubkey, pickRelaysForPubkeys, subscribeRelayListUpdates } from '../../helpers/nostr/queries.js'
 import * as privateChannel from '../private-channel/index.js'
 import { createQueue } from '../web-storage-queue.js'
 import { DEFAULT_STALE_CHANNEL_SECONDS } from './constants.js'
@@ -123,6 +123,7 @@ export class PrivateMessenger {
     _privateChannel = privateChannel,
     _getRelaysByPubkey = getRelaysByPubkey,
     _pickRelaysForPubkeys = pickRelaysForPubkeys,
+    _subscribeRelayListUpdates = subscribeRelayListUpdates,
     _setTimeout = globalThis.setTimeout.bind(globalThis),
     _setInterval = globalThis.setInterval.bind(globalThis),
     _clearInterval = globalThis.clearInterval.bind(globalThis)
@@ -145,6 +146,7 @@ export class PrivateMessenger {
     this._privateChannel = _privateChannel
     this._getRelaysByPubkey = _getRelaysByPubkey
     this._pickRelaysForPubkeys = _pickRelaysForPubkeys
+    this._subscribeRelayListUpdates = _subscribeRelayListUpdates
     this._setTimeout = _setTimeout
     this._setInterval = _setInterval
     this._clearInterval = _clearInterval
@@ -160,6 +162,9 @@ export class PrivateMessenger {
     this.channels = new Map()
     this.stopByChannel = new Map()
     this.presenceTimers = new Map()
+    this.stopRelayListWatcher = null
+    this.relayListWatcherPubkey = ''
+    this.relayListRefreshPromise = null
     this.stopOnline = null
     this.stopOffline = null
   }
@@ -202,7 +207,12 @@ export class PrivateMessenger {
   }
 
   async update ({ userSigner = this.userSigner, contentKeySigner = this.contentKeySigner, nymSigner = this.nymSigner, channels = [...this.channels.values()], relays = [], mode = 'leecher' } = {}) {
-    if (userSigner) this.userSigner = userSigner
+    if (userSigner) {
+      const userPubkey = await userSigner.getPublicKey?.()
+      if (!userPubkey) throw new Error('USER_SIGNER_REQUIRED')
+      if (this.userPubkey && userPubkey !== this.userPubkey) throw new Error('USER_SIGNER_MISMATCH')
+      this.userSigner = userSigner
+    }
     this.contentKeySigner = contentKeySigner || null
     this.nymSigner = nymSigner || null
     this.contentKeyPubkey = await this.contentKeySigner?.getPublicKey?.() || ''
@@ -230,6 +240,8 @@ export class PrivateMessenger {
       const signer = channel.signer || channel.privateChannelSigner || null
       const readerSigner = channel.readerSigner || channel.privateChannelReaderSigner || signer || null
       const nymSigner = channel.nymSigner || null
+      const hasChannelRelays = Boolean(channel.relays?.length)
+      const hasDefaultRelays = Boolean(defaults.relays?.length)
       const pubkey = channel.pubkey || await signer?.getPublicKey?.()
       if (!pubkey) throw new Error('CHANNEL_PUBKEY_REQUIRED')
       if (!signer && !readerSigner) throw new Error('CHANNEL_SIGNER_REQUIRED')
@@ -242,7 +254,8 @@ export class PrivateMessenger {
         readerSigner,
         readerPubkey,
         nymSigner,
-        relays: uniq(channel.relays?.length ? channel.relays : defaults.relays),
+        relays: uniq(hasChannelRelays ? channel.relays : defaults.relays),
+        usesNip65WatchRelays: !hasChannelRelays && !hasDefaultRelays,
         mode,
         seeders: uniq(channel.seeders)
       })
@@ -276,7 +289,7 @@ export class PrivateMessenger {
   }
 
   async resolveWatchRelays (channel) {
-    if (channel.relays.length) return channel.relays
+    if (!channel.usesNip65WatchRelays && channel.relays.length) return channel.relays
     return this.readRelaysForPubkey(this.userPubkey)
   }
 
@@ -483,12 +496,11 @@ export class PrivateMessenger {
     this.writeState(state)
   }
 
-  async watch (channels = [...this.channels.keys()]) {
+  async watch (channels = [...this.channels.keys()], { scheduleReloadGap = true } = {}) {
     const channelPubkeys = uniq(channels)
     for (const pubkey of channelPubkeys) {
       const channel = this.channels.get(pubkey)
       if (!channel) throw new Error('UNKNOWN_CHANNEL')
-      this.stopByChannel.get(pubkey)?.()
       const watchRelays = await this.resolveWatchRelays(channel)
       const stop = await this._privateMessage.watch({
         channels: [pubkey],
@@ -524,9 +536,10 @@ export class PrivateMessenger {
         seeders: channel.seeders,
         seederCount: channel.seeders.length
       })
-      this.scheduleReloadGap(pubkey)
+      if (scheduleReloadGap) this.scheduleReloadGap(pubkey)
     }
     this.ensureNetworkWatchers()
+    this.ensureRelayListWatcher()
     return this
   }
 
@@ -537,6 +550,56 @@ export class PrivateMessenger {
       this.stopByChannel.delete(pubkey)
       this.stopPresencePublisher(pubkey)
     }
+    this.ensureRelayListWatcher()
+  }
+
+  nip65WatchChannelPubkeys () {
+    return [...this.channels.values()]
+      .filter(channel => channel.usesNip65WatchRelays && this.stopByChannel.has(channel.pubkey))
+      .map(channel => channel.pubkey)
+  }
+
+  ensureRelayListWatcher () {
+    const channelPubkeys = this.nip65WatchChannelPubkeys()
+    if (!channelPubkeys.length) {
+      this.stopRelayListWatcher?.()
+      this.stopRelayListWatcher = null
+      this.relayListWatcherPubkey = ''
+      return
+    }
+    if (this.stopRelayListWatcher && this.relayListWatcherPubkey === this.userPubkey) return
+    this.stopRelayListWatcher?.()
+    if (typeof window === 'undefined' && this._subscribeRelayListUpdates === subscribeRelayListUpdates) return
+    this.relayListWatcherPubkey = this.userPubkey
+    this.stopRelayListWatcher = this._subscribeRelayListUpdates([this.userPubkey], {
+      relayType: 'read',
+      onChange: () => this.refreshNip65WatchRelays()
+    })
+  }
+
+  refreshNip65WatchRelays () {
+    if (!this.relayListRefreshPromise) {
+      this.relayListRefreshPromise = Promise.resolve()
+        .then(() => this.refreshNip65WatchRelaysNow())
+        .catch(err => this.onError?.(err))
+        .finally(() => { this.relayListRefreshPromise = null })
+    }
+    return this.relayListRefreshPromise
+  }
+
+  async refreshNip65WatchRelaysNow () {
+    const channelPubkeys = this.nip65WatchChannelPubkeys()
+    if (!channelPubkeys.length) {
+      this.ensureRelayListWatcher()
+      return
+    }
+    const until = nowSeconds()
+    for (const pubkey of channelPubkeys) {
+      const lastSeenAt = this.readState().channels[pubkey]?.lastSeenAt
+      if (lastSeenAt) this.addOfflineRange(pubkey, Math.max(0, lastSeenAt - this.offlineSkewSeconds), until)
+    }
+    await this.watch(channelPubkeys, { scheduleReloadGap: false })
+    await this.recoverOfflineRanges(channelPubkeys)
   }
 
   async handleAsk (channelPubkey, message) {
@@ -1118,6 +1181,7 @@ export class PrivateMessenger {
     this.removeChannelState(pubkey)
     this.queue.removeWhere(item => item.channelPubkey === pubkey)
     this.seedQueue.removeWhere(item => item.channelPubkey === pubkey)
+    this.ensureRelayListWatcher()
   }
 
   clearQueue () {
@@ -1148,6 +1212,9 @@ export class PrivateMessenger {
   close () {
     this.unwatch()
     for (const pubkey of [...this.presenceTimers.keys()]) this.stopPresencePublisher(pubkey)
+    this.stopRelayListWatcher?.()
+    this.stopRelayListWatcher = null
+    this.relayListWatcherPubkey = ''
     this.stopOffline?.()
     this.stopOnline?.()
     this.stopOffline = null

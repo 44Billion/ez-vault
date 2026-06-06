@@ -93,6 +93,23 @@ function fakePrivateMessage () {
   }
 }
 
+function fakeRelayListUpdates () {
+  const subscriptions = []
+  return {
+    subscriptions,
+    subscribe: (pubkeys, options) => {
+      const subscription = {
+        pubkeys,
+        options,
+        closed: false,
+        emit: update => Promise.resolve(options.onChange?.(update))
+      }
+      subscriptions.push(subscription)
+      return () => { subscription.closed = true }
+    }
+  }
+}
+
 test('private messenger watches channels and queues received leecher rumors', async () => {
   const pm = fakePrivateMessage()
   const messenger = await new PrivateMessenger({ _privateMessage: pm }).init({
@@ -309,6 +326,28 @@ test('private messenger delegates send helpers with scoped signers and relays', 
   assert.equal(pm.sent[7].options.event.pubkey, 'author')
 })
 
+test('private messenger update accepts only same-user replacement signers', async () => {
+  const pm = fakePrivateMessage()
+  const originalUser = signer('user')
+  const replacementUser = signer('user')
+  const otherUser = signer('other-user')
+  const messenger = await new PrivateMessenger({ _privateMessage: pm }).init({
+    userSigner: originalUser,
+    channels: [{ pubkey: 'channel', signer: signer('channel'), relays: ['wss://relay.example'] }]
+  })
+
+  await messenger.update({ userSigner: replacementUser })
+
+  assert.equal(messenger.userSigner, replacementUser)
+  assert.equal(messenger.userPubkey, 'user')
+  await assert.rejects(
+    () => messenger.update({ userSigner: otherUser }),
+    /USER_SIGNER_MISMATCH/
+  )
+  assert.equal(messenger.userSigner, replacementUser)
+  assert.equal(messenger.userPubkey, 'user')
+})
+
 test('private messenger falls back to recipient read relays when no relay set is configured', async () => {
   const pm = fakePrivateMessage()
   const relayLookups = []
@@ -405,6 +444,83 @@ test('private messenger reload-gap fetch uses all local read relays when channel
 
   assert.deepEqual(fetches[0].relays, userReadRelays)
   assert.equal(messenger.nextMessage(), null)
+})
+
+test('private messenger refreshes NIP-65-derived watch relays from relay-list updates', async () => {
+  const pm = fakePrivateMessage()
+  const relayUpdates = fakeRelayListUpdates()
+  const fetches = []
+  const now = Math.floor(Date.now() / 1000)
+  let userReadRelays = ['wss://user.old-one.example', 'wss://user.old-two.example']
+  const messenger = await new PrivateMessenger({
+    _privateMessage: pm,
+    _privateChannel: {
+      fetch: async options => {
+        fetches.push(options)
+        options.onEvent({
+          id: 'missed-id',
+          kind: TELL_KIND,
+          pubkey: 'alice',
+          created_at: now - 5,
+          tags: [['r', 'user']],
+          content: 'missed'
+        }, { id: 'outer-id', created_at: now - 5 }, { channelPubkey: 'derived' })
+        return []
+      }
+    },
+    _getRelaysByPubkey: async pubkeys => Object.fromEntries(pubkeys.map(pubkey => [pubkey, {
+      read: pubkey === 'user' ? userReadRelays : [`wss://${pubkey}.read.example`],
+      write: []
+    }])),
+    _subscribeRelayListUpdates: relayUpdates.subscribe
+  }).init({
+    userSigner: signer('user'),
+    channels: [
+      { pubkey: 'derived', signer: signer('derived') },
+      { pubkey: 'explicit', signer: signer('explicit'), relays: ['wss://explicit.example'] }
+    ]
+  })
+  messenger.updateChannelState('derived', { lastSeenAt: now - 20 })
+  messenger.updateChannelState('explicit', { lastSeenAt: now - 20 })
+
+  assert.equal(relayUpdates.subscriptions.length, 1)
+  assert.deepEqual(relayUpdates.subscriptions[0].pubkeys, ['user'])
+  assert.equal(relayUpdates.subscriptions[0].options.relayType, 'read')
+  assert.deepEqual(pm.watchCalls[0].channels, ['derived'])
+  assert.deepEqual(pm.watchCalls[0].relays, ['wss://user.old-one.example', 'wss://user.old-two.example'])
+  assert.deepEqual(pm.watchCalls[1].channels, ['explicit'])
+  assert.deepEqual(pm.watchCalls[1].relays, ['wss://explicit.example'])
+
+  userReadRelays = ['wss://user.old-two.example', 'wss://user.new.example']
+  await relayUpdates.subscriptions[0].emit({ pubkey: 'user' })
+
+  assert.equal(pm.watchCalls.length, 3)
+  assert.deepEqual(pm.watchCalls[2].channels, ['derived'])
+  assert.deepEqual(pm.watchCalls[2].relays, ['wss://user.old-two.example', 'wss://user.new.example'])
+  assert.deepEqual(pm.stopped, [])
+  assert.equal(fetches.length, 1)
+  assert.deepEqual(fetches[0].privateChannelPubkeys, ['derived'])
+  assert.deepEqual(fetches[0].relays, ['wss://user.old-two.example', 'wss://user.new.example'])
+  assert.ok(fetches[0].since <= now - 20)
+  assert.ok(fetches[0].until >= now)
+  assert.equal(messenger.nextMessage().event.id, 'missed-id')
+  assert.deepEqual(messenger.readState().channels.derived.relays, ['wss://user.old-two.example', 'wss://user.new.example'])
+  assert.deepEqual(messenger.readState().channels.explicit.relays, ['wss://explicit.example'])
+})
+
+test('private messenger does not subscribe to relay-list updates for explicit-only channels', async () => {
+  const pm = fakePrivateMessage()
+  const relayUpdates = fakeRelayListUpdates()
+  await new PrivateMessenger({
+    _privateMessage: pm,
+    _subscribeRelayListUpdates: relayUpdates.subscribe
+  }).init({
+    userSigner: signer('user'),
+    channels: [{ pubkey: 'explicit', signer: signer('explicit'), relays: ['wss://explicit.example'] }]
+  })
+
+  assert.equal(relayUpdates.subscriptions.length, 0)
+  assert.deepEqual(pm.watchCalls[0].relays, ['wss://explicit.example'])
 })
 
 test('private messenger prefers explicit relay receiver maps over channel relays', async () => {

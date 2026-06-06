@@ -239,14 +239,19 @@ function firstWatchValue (channels, field) {
   return undefined
 }
 
-function rebuildSubscriptions ({ _subscribe = privateChannel.subscribe } = {}) {
+function closeSubscription (sub, gracefulClose) {
+  if (gracefulClose) setTimeout(() => sub.close(), RESUBSCRIBE_GRACE_MS)
+  else sub.close()
+}
+
+function rebuildSubscriptions ({ _subscribe = privateChannel.subscribe, gracefulClose = true } = {}) {
   const desired = desiredRelayState()
 
   for (const [relay, current] of subsByRelay) {
     const nextChannels = desired.get(relay)
     if (nextChannels && setEquals(current.channels, nextChannels)) continue
     if (!nextChannels) {
-      current.sub.close()
+      closeSubscription(current.sub, gracefulClose)
       subsByRelay.delete(relay)
     }
   }
@@ -297,7 +302,7 @@ function rebuildSubscriptions ({ _subscribe = privateChannel.subscribe } = {}) {
     })
 
     subsByRelay.set(relay, { channels: new Set(channels), sub })
-    if (current) setTimeout(() => current.sub.close(), RESUBSCRIBE_GRACE_MS)
+    if (current) closeSubscription(current.sub, gracefulClose)
   }
 }
 
@@ -429,7 +434,7 @@ export async function watch ({
 export function unwatch (channels) {
   const channelList = channels ? uniq(Array.isArray(channels) ? channels : [channels]) : [...watchesByChannel.keys()]
   for (const channel of channelList) watchesByChannel.delete(channel)
-  rebuildSubscriptions()
+  rebuildSubscriptions({ gracefulClose: false })
   if (!watchesByChannel.size && stopOnlineWatcher) {
     stopOnlineWatcher()
     stopOnlineWatcher = null

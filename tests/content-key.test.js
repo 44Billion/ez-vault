@@ -4,7 +4,7 @@ import { generateSecretKey, getEventHash, verifyEvent } from 'nostr-tools'
 import NsecSigner from '../docs/services/nsec-signer.js'
 import { doubleSignEvent, upsertContentKeyEvent } from '../docs/services/content-key/index.js'
 import { makeContentKeyEvent, parseContentKeyEvent, verifyContentKeyProof, verifyIykcProof, CONTENT_KEY_KIND } from '../docs/services/content-key/event.js'
-import { clearQueryCaches, getIykcProofs, getRelaysByPubkey, pickRelaysForPubkeys } from '../docs/helpers/nostr/queries.js'
+import { cacheRelayListEvent, clearQueryCaches, getIykcProofs, getRelaysByPubkey, pickRelaysForPubkeys, subscribeRelayListUpdates } from '../docs/helpers/nostr/queries.js'
 import { bytesToHex } from '../docs/helpers/nostr/index.js'
 
 afterEach(() => {
@@ -18,6 +18,34 @@ function signer () {
 
 function pubkeyFixture (index) {
   return index.toString(16).padStart(64, '0')
+}
+
+function relayListEvent (pubkey, createdAt, tags) {
+  return {
+    kind: 10002,
+    pubkey,
+    created_at: createdAt,
+    tags,
+    content: ''
+  }
+}
+
+function fakeRelayPool () {
+  const calls = []
+  const closed = []
+  return {
+    calls,
+    closed,
+    pool: {
+      subscribeMany: (relays, filter, handlers) => {
+        const call = { relays, filter, handlers }
+        calls.push(call)
+        return {
+          close: () => closed.push(call)
+        }
+      }
+    }
+  }
 }
 
 test('makeContentKeyEvent publishes a signed content pubkey', async () => {
@@ -190,6 +218,90 @@ test('getRelaysByPubkey caches relay lookups per pubkey', async () => {
   assert.deepEqual(first, second)
   assert.deepEqual(second[pubkey].write, ['wss://cached.example'])
   assert.equal(calls.length, 1)
+})
+
+test('relay-list update subscriptions emit newer read changes and ignore older events', () => {
+  const { calls, closed, pool } = fakeRelayPool()
+  const changes = []
+  cacheRelayListEvent(relayListEvent('alice', 10, [
+    ['r', 'wss://old-read.example', 'read'],
+    ['r', 'wss://old-write.example', 'write']
+  ]))
+
+  const stop = subscribeRelayListUpdates(['alice'], {
+    relayType: 'read',
+    onChange: update => changes.push(update),
+    _pool: pool
+  })
+
+  calls[0].handlers.onevent(relayListEvent('alice', 9, [
+    ['r', 'wss://older-read.example', 'read']
+  ]))
+  calls[0].handlers.onevent(relayListEvent('alice', 11, [
+    ['r', 'wss://new-read.example', 'read'],
+    ['r', 'wss://old-write.example', 'write']
+  ]))
+  calls[0].handlers.onevent(relayListEvent('alice', 11, [
+    ['r', 'wss://same-time-read.example', 'read'],
+    ['r', 'wss://old-write.example', 'write']
+  ]))
+
+  assert.equal(changes.length, 1)
+  assert.equal(changes[0].pubkey, 'alice')
+  assert.deepEqual(changes[0].relays.read, ['wss://new-read.example'])
+  assert.equal(changes[0].event.created_at, 11)
+
+  stop()
+  assert.equal(closed.length, 1)
+})
+
+test('relay-list read subscriptions ignore write-only changes while updating cache', async () => {
+  const { calls, pool } = fakeRelayPool()
+  const changes = []
+  cacheRelayListEvent(relayListEvent('alice', 10, [
+    ['r', 'wss://same-read.example', 'read'],
+    ['r', 'wss://old-write.example', 'write']
+  ]))
+
+  subscribeRelayListUpdates(['alice'], {
+    relayType: 'read',
+    onChange: update => changes.push(update),
+    _pool: pool
+  })
+  calls[0].handlers.onevent(relayListEvent('alice', 11, [
+    ['r', 'wss://same-read.example', 'read'],
+    ['r', 'wss://new-write.example', 'write']
+  ]))
+
+  assert.equal(changes.length, 0)
+  const cached = await getRelaysByPubkey(['alice'], {
+    _fetchEvents: async () => {
+      throw new Error('SHOULD_USE_CACHE')
+    }
+  })
+  assert.deepEqual(cached.alice.write, ['wss://new-write.example'])
+})
+
+test('relay-list both subscriptions emit read or write changes', () => {
+  const { calls, pool } = fakeRelayPool()
+  const changes = []
+  cacheRelayListEvent(relayListEvent('alice', 10, [
+    ['r', 'wss://same-read.example', 'read'],
+    ['r', 'wss://old-write.example', 'write']
+  ]))
+
+  subscribeRelayListUpdates(['alice'], {
+    relayType: 'both',
+    onChange: update => changes.push(update),
+    _pool: pool
+  })
+  calls[0].handlers.onevent(relayListEvent('alice', 11, [
+    ['r', 'wss://same-read.example', 'read'],
+    ['r', 'wss://new-write.example', 'write']
+  ]))
+
+  assert.equal(changes.length, 1)
+  assert.deepEqual(changes[0].changes, { read: false, write: true, both: true })
 })
 
 test('getRelaysByPubkey evicts oldest relay cache entries above the cap', async () => {
