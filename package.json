@@ -29,6 +29,7 @@
     "eslint-plugin-html": "^8.1.4",
     "globals": "^17.5.0",
     "neostandard": "^0.13.0",
-    "nostr-tools": "^2.23.3"
+    "nostr-tools": "^2.23.3",
+    "qrcode-generator": "1.4.4"
   }
 }

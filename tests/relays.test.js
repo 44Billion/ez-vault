@@ -11,6 +11,7 @@ afterEach(() => {
 function deferred () {
   let resolve
   let reject
+  // eslint-disable-next-line promise/param-names
   const promise = new Promise((res, rej) => {
     resolve = res
     reject = rej

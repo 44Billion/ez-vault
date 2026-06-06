@@ -674,6 +674,8 @@ function pairErrorToToast (err) {
       return { message: 'Pairing failed', longMessage: 'Got an unexpected response from the other device.' }
     case 'REGISTER_TRUSTED_SIGNER_FAILED':
       return { message: 'Trust exchange failed', longMessage: 'The other device could not store this device\'s signer key.' }
+    case 'VAULT_LOCKED':
+      return { message: 'Pairing device locked', longMessage: 'Unlock or create the passkey on the other device, then try pairing again.' }
     case 'invalid pairing code':
       return { message: 'Code mismatch', longMessage: 'Double-check the digits shown on the other device.' }
     case 'INVALID_NOSTRPAIR_URL':

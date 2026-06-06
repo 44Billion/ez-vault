@@ -22,6 +22,7 @@ const ICON_COPY = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" f
 const ICON_CHECK = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5l10 -10" /></svg>'
 
 const FLASH_MS = 1500
+const CLOSE_RESET_MS = 300
 
 const STYLES = /* css */`
   sync-host {
@@ -223,7 +224,9 @@ export class SyncHost extends HTMLElement {
   #status
   #copyTimer = null
   #codeCopyTimer = null
+  #resetTimer = null
   #session = null
+  #openToken = null
   // Peer signer announced over `register_trusted_signer`; folded into the
   // commit when the exchange request lands so trust + secrets persist
   // (or roll back) together.
@@ -251,30 +254,35 @@ export class SyncHost extends HTMLElement {
     this.#copyBtn.addEventListener('click', this.#onCopyUrl)
     this.#urlInput.addEventListener('focus', () => this.#urlInput.select())
     this.#codeCopyBtn.addEventListener('click', this.#onCopyCode)
+    this.#resetUi()
   }
 
   disconnectedCallback () {
     if (this.#copyTimer) clearTimeout(this.#copyTimer)
     if (this.#codeCopyTimer) clearTimeout(this.#codeCopyTimer)
+    this.#clearResetTimer()
+    this.#openToken = null
     this.#session?.close()
   }
 
   open () {
-    if (this.hasAttribute('open')) return
-    this.#startSession()
-    this.setAttribute('open', '')
-    this.list?.enterSelectionMode()
-    this.#setToolbarDisabled(true)
+    if (this.hasAttribute('open') || this.#openToken) return
+    this.#clearResetTimer()
+    this.#prepareAndStartSession()
   }
 
   close () {
-    if (!this.hasAttribute('open')) return
+    const wasOpen = this.hasAttribute('open')
+    const wasPreparing = Boolean(this.#openToken)
+    if (!wasOpen && !wasPreparing && !this.#session && !this.#intakeToken) return
+    this.#openToken = null
     this.removeAttribute('open')
-    this.list?.exitSelectionMode()
-    this.#setToolbarDisabled(false)
-    this.dataset.codeReady = ''
-    this.#codeText.textContent = '------'
-    this.#setStatus('', null)
+    if (wasOpen) {
+      this.list?.exitSelectionMode()
+      this.#setToolbarDisabled(false)
+    }
+    if (wasOpen) this.#resetUiAfterClose()
+    else this.#resetUi()
     this.#peerSigner = null
     if (this.#intakeToken) {
       abortIntake(this.#intakeToken)
@@ -294,12 +302,56 @@ export class SyncHost extends HTMLElement {
     }
   }
 
-  #startSession () {
+  #resetUi () {
+    this.#clearResetTimer()
+    this.dataset.codeReady = ''
+    this.#urlInput.value = ''
+    this.#qrImage.removeAttribute('src')
+    this.#copyBtn.disabled = true
+    this.#copyBtn.classList.remove('is-success')
+    this.#copyBtn.innerHTML = ICON_COPY
+    this.#codeText.textContent = '------'
+    this.#codeCopyBtn.disabled = true
+    this.#codeCopyBtn.classList.remove('is-success')
+    this.#codeCopyBtn.innerHTML = ICON_COPY
+    this.#setStatus('', null)
+  }
+
+  #resetUiAfterClose () {
+    this.#clearResetTimer()
+    this.#resetTimer = setTimeout(() => this.#resetUi(), CLOSE_RESET_MS)
+  }
+
+  #clearResetTimer () {
+    if (!this.#resetTimer) return
+    clearTimeout(this.#resetTimer)
+    this.#resetTimer = null
+  }
+
+  async #prepareAndStartSession () {
+    const token = {}
+    this.#openToken = token
+    this.#resetUi()
+    try {
+      await passkey.ensureRegistered()
+      if (this.#openToken !== token) return
+      await this.#startSession()
+    } catch (err) {
+      if (this.#openToken !== token) return
+      console.error('host pairing preparation failed', err?.message ?? err)
+      const { message, longMessage } = passkeyPrepareErrorToToast(err)
+      this.close()
+      toast.error(message, longMessage)
+    }
+  }
+
+  async #startSession () {
     this.#session = new HostSession({
       onJoinerConnected: () => this.#setStatus('Other device connected: exchanging trust…', null),
       // Code derived right after `connect`; reveal the code section.
       onPairingCode: (code) => {
         this.#codeText.textContent = code
+        this.#codeCopyBtn.disabled = false
         this.dataset.codeReady = 'true'
         this.#setStatus('Waiting: type the code above on the other device.', null)
       },
@@ -312,6 +364,7 @@ export class SyncHost extends HTMLElement {
       // symmetric `register_trusted_signer` back to the joiner.
       onTrustedSignerReceived: async ({ platform, signerPubkey }) => {
         this.#peerSigner = { pubkey: signerPubkey, platform }
+        await passkey.ensureRegistered()
         const ourSignerPubkey = await secrets.getDeviceSignerPubkey()
         return { signerPubkey: ourSignerPubkey, platform: detectPlatform() }
       },
@@ -326,12 +379,18 @@ export class SyncHost extends HTMLElement {
     this.#session.start()
     const url = this.#session.url
     this.#urlInput.value = url
+    this.#copyBtn.disabled = false
     try {
       this.#qrImage.src = generateQrDataUrl(url, { cellSize: 6, margin: 4 })
     } catch (err) {
       console.error('qr generation failed', err?.message ?? err)
     }
+    if (!this.#openToken) return
     this.#setStatus('Waiting for the other device to scan or paste the URL.', null)
+    this.#openToken = null
+    this.list?.enterSelectionMode()
+    this.#setToolbarDisabled(true)
+    this.setAttribute('open', '')
   }
 
   async #handleExchange (peerPlatform, peerBareKeys) {
@@ -439,6 +498,13 @@ export class SyncHost extends HTMLElement {
     this.#status.classList.toggle('is-error', kind === 'error')
     this.#status.classList.toggle('is-success', kind === 'success')
   }
+}
+
+function passkeyPrepareErrorToToast (err) {
+  if (err?.name === 'NotAllowedError') {
+    return { message: 'Pairing cancelled', longMessage: 'The passkey prompt was cancelled.' }
+  }
+  return { message: 'Pairing failed', longMessage: err?.message ?? String(err) }
 }
 
 customElements.define('sync-host', SyncHost)

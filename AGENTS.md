@@ -183,6 +183,7 @@ Rules for component CSS:
 - **Start dev server:** `npm start` (runs `server.py`).
 - **Stop dev server:** `npm run end`.
 - Add new automated tests under `tests/` using Node's built-in test runner — no extra framework.
+- Dev dependencies may be added when they materially improve testing or let Node resolve a browser-importmapped package. Keep them in `devDependencies` / `package-lock.json`; they must not introduce a browser runtime dependency or build step. When mirroring an importmap package for tests, pin the same version used by `docs/index.html`.
 - Small manual-check scripts and other developer-facing files may live at the repo root (outside `docs/`) so they are not shipped to GitHub Pages.
 
 ## Security Mindset (Read Before Every Change)
