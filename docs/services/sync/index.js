@@ -53,6 +53,10 @@ function syncRelays (relays) {
   return [...new Set((Array.isArray(relays) ? relays : []).filter(Boolean))].slice(0, 2)
 }
 
+function syncWatchRelays (relays) {
+  return [...new Set((Array.isArray(relays) ? relays : []).filter(Boolean))]
+}
+
 function trustedMap (trusted) {
   return new Map(trusted.map(entry => [entry.pubkey, entry]))
 }
@@ -125,7 +129,7 @@ export function createSyncController ({
     const relays = readRelaysByOwnerPubkey.has(ownerPubkey)
       ? { read: readRelaysByOwnerPubkey.get(ownerPubkey) }
       : await signer.getRelays?.()
-    const readRelays = syncRelays(relays?.read)
+    const readRelays = syncWatchRelays(relays?.read)
     if (!readRelays.length) throw new Error('SYNC_READ_RELAYS_REQUIRED')
     return readRelays
   }
@@ -162,6 +166,7 @@ export function createSyncController ({
           pubkey: channelPubkey,
           signer: channelSigner,
           relays,
+          sendRelays: syncRelays(relays),
           mode: 'seeder',
           seeders
         })
@@ -216,7 +221,7 @@ export function createSyncController ({
 
   function onAccountRelayListChange (update) {
     if (!channelPubkeyByOwnerPubkey.has(update.pubkey)) return
-    const relays = syncRelays(update.relays?.read)
+    const relays = syncWatchRelays(update.relays?.read)
     readRelaysByOwnerPubkey.set(update.pubkey, relays)
     emitDebug('relay-list', {
       ownerPubkey: update.pubkey,

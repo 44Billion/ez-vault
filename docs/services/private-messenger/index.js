@@ -241,6 +241,7 @@ export class PrivateMessenger {
       const readerSigner = channel.readerSigner || channel.privateChannelReaderSigner || signer || null
       const nymSigner = channel.nymSigner || null
       const hasChannelRelays = Boolean(channel.relays?.length)
+      const hasChannelSendRelays = Boolean(channel.sendRelays?.length)
       const hasDefaultRelays = Boolean(defaults.relays?.length)
       const pubkey = channel.pubkey || await signer?.getPublicKey?.()
       if (!pubkey) throw new Error('CHANNEL_PUBKEY_REQUIRED')
@@ -255,6 +256,7 @@ export class PrivateMessenger {
         readerPubkey,
         nymSigner,
         relays: uniq(hasChannelRelays ? channel.relays : defaults.relays),
+        sendRelays: uniq(hasChannelSendRelays ? channel.sendRelays : []),
         usesNip65WatchRelays: !hasChannelRelays && !hasDefaultRelays,
         mode,
         seeders: uniq(channel.seeders)
@@ -297,6 +299,7 @@ export class PrivateMessenger {
     const recoveryRelays = await this.recoveryMirrorRelays(channel.pubkey)
     if (relayToReceivers) return { relayToReceivers, recoveryRelays }
     if (relays?.length) return { relays: uniq(relays), recoveryRelays }
+    if (channel.sendRelays.length) return { relays: channel.sendRelays, recoveryRelays }
     if (channel.relays.length) return { relays: channel.relays, recoveryRelays }
     const derived = await this.readRelayToReceivers(receiverPubkeys)
     if (!relayMapRelays(derived).length) throw new Error('NO_RELAYS')

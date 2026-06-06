@@ -544,6 +544,30 @@ test('private messenger prefers explicit relay receiver maps over channel relays
   assert.equal(pm.sent[0].options.relayToReceivers, relayToReceivers)
 })
 
+test('private messenger uses channel sendRelays after per-call routing overrides', async () => {
+  const pm = fakePrivateMessage()
+  const messenger = await new PrivateMessenger({ _privateMessage: pm }).init({
+    userSigner: signer('user'),
+    channels: [{
+      pubkey: 'channel',
+      signer: signer('channel'),
+      relays: ['wss://watch-one.example', 'wss://watch-two.example', 'wss://watch-three.example'],
+      sendRelays: ['wss://send-one.example', 'wss://send-two.example']
+    }]
+  })
+  const relayToReceivers = new Map([['wss://mapped.example', ['alice']]])
+
+  await messenger.tell({ receiverPubkey: 'alice', payload: 'default send relays' })
+  await messenger.tell({ receiverPubkey: 'alice', relays: ['wss://per-call.example'], payload: 'per call relays' })
+  await messenger.tell({ receiverPubkey: 'alice', relayToReceivers, payload: 'mapped relays' })
+
+  assert.deepEqual(pm.watchCalls[0].relays, ['wss://watch-one.example', 'wss://watch-two.example', 'wss://watch-three.example'])
+  assert.deepEqual(pm.sent[0].options.relays, ['wss://send-one.example', 'wss://send-two.example'])
+  assert.deepEqual(pm.sent[1].options.relays, ['wss://per-call.example'])
+  assert.equal(pm.sent[2].options.relays, undefined)
+  assert.equal(pm.sent[2].options.relayToReceivers, relayToReceivers)
+})
+
 test('private messenger mirrors routed and nym sends to recovery seeder relays', async () => {
   const pm = fakePrivateMessage()
   const relayLookups = []
