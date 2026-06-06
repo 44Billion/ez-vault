@@ -22,6 +22,10 @@ function tempKey (id, index) {
   return `${STORAGE_PREFIX}${id}:${index}`
 }
 
+function rowTempKey (id, index) {
+  return `${STORAGE_PREFIX}${id}:row:${index}`
+}
+
 function normalizeContentKey ({ receiverPubkey, iykcPubkey = '', iykcProof = '' } = {}) {
   if (!iykcPubkey) return { iykcPubkey: '', iykcProof: '' }
   if (!verifyIykcProof({ receiverPubkey, iykcPubkey, iykcProof })) throw new Error('INVALID_IYKC_PROOF')
@@ -58,14 +62,14 @@ function receiverRecord (receiver, receiverContentKeys) {
   }
 }
 
-function buildLine ({ receiverPubkey, iykcPubkey, iykcProof }, ciphertext) {
+function buildRecipientRow ({ receiverPubkey, iykcPubkey, iykcProof }, ciphertext) {
   const line = [receiverPubkey, ciphertext]
   if (iykcPubkey) line.push(iykcPubkey, iykcProof)
-  return JSON.stringify(line) + '\n'
+  return JSON.stringify(line)
 }
 
-function buildPayloadLine (ciphertext) {
-  return JSON.stringify([ciphertext]) + '\n'
+function buildPayloadRow (ciphertext) {
+  return JSON.stringify([ciphertext])
 }
 
 function encryptedPayload ({ messageSecretKey, event }) {
@@ -84,6 +88,10 @@ function appendLine (chunk, line, id, chunkIndex) {
     }
   }
   return { chunk, chunkIndex }
+}
+
+function appendRow (chunk, row, id, chunkIndex) {
+  return appendLine(chunk, encoder.encode(`${row}\n`), id, chunkIndex)
 }
 
 function joinByteChunks (parts) {
@@ -129,17 +137,37 @@ export function receiverPubkeysWithoutContentKeys (receivers) {
     .map(receiver => receiver.receiverPubkey)
 }
 
-async function writeChunksOnce ({ senderSigner, imkcSigner, receivers, receiverContentKeys = {}, event, multiDhContext }) {
-  const id = `${Date.now()}:${Math.random().toString(16).slice(2)}`
-  let chunk = new Uint8Array()
-  let chunkIndex = 0
+function temporaryId () {
+  return `${Date.now()}:${Math.random().toString(16).slice(2)}`
+}
+
+function cleanupPreparedRows (id, totalRows) {
+  const keys = []
+  for (let i = 0; i < totalRows; i++) keys.push(rowTempKey(id, i))
+  removeTemporaryItems(keys)
+}
+
+function setPreparedRow (id, index, row) {
+  setTemporaryItem(rowTempKey(id, index), row)
+}
+
+function readPreparedRow (preparedRows, index) {
+  const row = getTemporaryItem(rowTempKey(preparedRows.id, index))
+  if (typeof row !== 'string') throw new Error('MISSING_PREPARED_ROW')
+  return row
+}
+
+async function prepareEnvelopeRowsOnce ({ id, senderSigner, imkcSigner, receivers, receiverContentKeys = {}, event, multiDhContext }) {
   const useMultiDh = typeof senderSigner?.nip44EncryptMultiDH === 'function'
   let foundOwnContentPubkey = false
   let usedOwnContentPubkey = ''
   const messageSecretKey = generateSecretKey()
   const messageSeckey = bytesToHex(messageSecretKey)
-  const payloadLine = encoder.encode(buildPayloadLine(encryptedPayload({ messageSecretKey, event })))
-  ;({ chunk, chunkIndex } = appendLine(chunk, payloadLine, id, chunkIndex))
+  const rowIndexes = []
+  const receiverPubkeys = []
+  const receiverRowIndexesByPubkey = {}
+
+  setPreparedRow(id, 0, buildPayloadRow(encryptedPayload({ messageSecretKey, event })))
 
   for (const receiver of receivers) {
     const row = receiverRecord(receiver, useMultiDh ? receiverContentKeys : {})
@@ -155,7 +183,6 @@ async function writeChunksOnce ({ senderSigner, imkcSigner, receivers, receiverC
       ciphertext = encrypted.ciphertext
       const nextContentPubkey = encrypted.ownContentPubkey || ''
       if (foundOwnContentPubkey && nextContentPubkey !== usedOwnContentPubkey) {
-        cleanupChunks(id, chunkIndex)
         throw new Error('INCONSISTENT_IMKC_PUBKEY')
       }
       foundOwnContentPubkey = true
@@ -163,21 +190,82 @@ async function writeChunksOnce ({ senderSigner, imkcSigner, receivers, receiverC
     } else {
       ciphertext = await senderSigner.nip44Encrypt(row.receiverPubkey, messageSeckey)
     }
-    const line = encoder.encode(buildLine(row, ciphertext))
-    ;({ chunk, chunkIndex } = appendLine(chunk, line, id, chunkIndex))
+    const rowIndex = rowIndexes.length + 1
+    setPreparedRow(id, rowIndex, buildRecipientRow(row, ciphertext))
+    rowIndexes.push(rowIndex)
+    receiverPubkeys.push(row.receiverPubkey)
+    if (row.receiverPubkey && receiverRowIndexesByPubkey[row.receiverPubkey] === undefined) {
+      receiverRowIndexesByPubkey[row.receiverPubkey] = rowIndex
+    }
   }
 
-  if (chunk.length || chunkIndex === 0) setTemporaryItem(tempKey(id, chunkIndex++), bytesToBase64(chunk))
-  return { id, total: chunkIndex, ownContentPubkey: usedOwnContentPubkey }
+  return {
+    id,
+    totalRows: rowIndexes.length + 1,
+    rowIndexes,
+    receiverPubkeys,
+    receiverRowIndexesByPubkey,
+    ownContentPubkey: usedOwnContentPubkey
+  }
+}
+
+export async function prepareEnvelopeRows (options) {
+  const maxRows = (options.receivers?.length || 0) + 1
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const id = temporaryId()
+    try {
+      return await prepareEnvelopeRowsOnce({ ...options, id })
+    } catch (err) {
+      cleanupPreparedRows(id, maxRows)
+      if (err?.message === 'INCONSISTENT_IMKC_PUBKEY' && attempt === 0) continue
+      throw err
+    }
+  }
+}
+
+export function cleanupEnvelopeRows (preparedRows) {
+  if (!preparedRows?.id || !Number.isSafeInteger(preparedRows.totalRows)) return
+  cleanupPreparedRows(preparedRows.id, preparedRows.totalRows)
+}
+
+export function preparedRowIndexesForReceivers (preparedRows, receivers) {
+  const indexes = []
+  const seen = new Set()
+  for (const receiver of receivers || []) {
+    const pubkey = receiverRecord(receiver, {}).receiverPubkey
+    const index = preparedRows?.receiverRowIndexesByPubkey?.[pubkey]
+    if (!pubkey || index === undefined) throw new Error('MISSING_PREPARED_RECEIVER')
+    if (seen.has(index)) continue
+    seen.add(index)
+    indexes.push(index)
+  }
+  return indexes
+}
+
+export function writeChunksFromPreparedRows (preparedRows, rowIndexes = preparedRows?.rowIndexes || []) {
+  const id = temporaryId()
+  let chunk = new Uint8Array()
+  let chunkIndex = 0
+  try {
+    ;({ chunk, chunkIndex } = appendRow(chunk, readPreparedRow(preparedRows, 0), id, chunkIndex))
+    for (const rowIndex of rowIndexes) {
+      ;({ chunk, chunkIndex } = appendRow(chunk, readPreparedRow(preparedRows, rowIndex), id, chunkIndex))
+    }
+    if (chunk.length || chunkIndex === 0) setTemporaryItem(tempKey(id, chunkIndex++), bytesToBase64(chunk))
+    return { id, total: chunkIndex, ownContentPubkey: preparedRows.ownContentPubkey || '' }
+  } catch (err) {
+    cleanupChunks(id, chunkIndex + 1)
+    throw err
+  }
 }
 
 export async function writeChunks (options) {
+  const preparedRows = await prepareEnvelopeRows(options)
   try {
-    return await writeChunksOnce(options)
-  } catch (err) {
-    if (err?.message !== 'INCONSISTENT_IMKC_PUBKEY') throw err
+    return writeChunksFromPreparedRows(preparedRows)
+  } finally {
+    cleanupEnvelopeRows(preparedRows)
   }
-  return writeChunksOnce(options)
 }
 
 export function cleanupChunks (id, total) {

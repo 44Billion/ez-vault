@@ -372,6 +372,44 @@ test('private messenger prefers explicit relay receiver maps over channel relays
   assert.equal(pm.sent[0].options.relayToReceivers, relayToReceivers)
 })
 
+test('private messenger mirrors routed and nym sends to recovery seeder relays', async () => {
+  const pm = fakePrivateMessage()
+  const relayLookups = []
+  const messenger = await new PrivateMessenger({
+    _privateMessage: pm,
+    _getRelaysByPubkey: async pubkeys => {
+      relayLookups.push(pubkeys)
+      return Object.fromEntries(pubkeys.map(pubkey => [pubkey, {
+        read: [`wss://${pubkey}.read.example`],
+        write: [`wss://${pubkey}.write.example`]
+      }]))
+    }
+  }).init({
+    userSigner: signer('user'),
+    channels: [{ pubkey: 'channel', signer: signer('channel'), seeders: ['seed1'] }]
+  })
+
+  await messenger.tell({ receiverPubkey: 'alice', payload: 'note' })
+  await messenger.broadcastNymRumor({
+    receiverPubkeys: ['bob'],
+    nymSigner: signer('nym'),
+    rumor: { kind: 9001, created_at: 1, tags: [], content: 'nym rumor' }
+  })
+  await messenger.broadcastRumor({
+    receiverPubkeys: ['carol'],
+    relayToReceivers: new Map([['wss://carol.custom.example', ['carol']]]),
+    rumor: { kind: 9002, created_at: 2, tags: [], content: 'explicit map' }
+  })
+
+  assert.deepEqual(relayLookups, [['user'], ['seed1'], ['alice'], ['seed1'], ['bob'], ['seed1']])
+  assert.deepEqual(pm.sent[0].options.recoveryRelays, ['wss://seed1.read.example'])
+  assert.deepEqual([...pm.sent[0].options.relayToReceivers.entries()], [['wss://alice.read.example', ['alice']]])
+  assert.deepEqual(pm.sent[1].options.recoveryRelays, ['wss://seed1.read.example'])
+  assert.deepEqual([...pm.sent[1].options.relayToReceivers.entries()], [['wss://bob.read.example', ['bob']]])
+  assert.deepEqual(pm.sent[2].options.recoveryRelays, ['wss://seed1.read.example'])
+  assert.deepEqual([...pm.sent[2].options.relayToReceivers.entries()], [['wss://carol.custom.example', ['carol']]])
+})
+
 test('private messenger reader-only channels watch and drain but reject sends', async () => {
   const pm = fakePrivateMessage()
   const messenger = await new PrivateMessenger({ _privateMessage: pm }).init({

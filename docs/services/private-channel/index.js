@@ -5,7 +5,17 @@ import { makeContentKeyEventForPubkey, parseContentKeyEvent, verifyContentKeyPro
 import { getIykcProofs } from '../content-key/index.js'
 import { fetchEvents, pool, publish as publishToRelays } from '../relays.js'
 import { JSONL_CHUNK_BYTES, NYM_CARRIER_CHUNK_CHARS } from './chunk-size.js'
-import { cleanupChunks, decodeChunkLines, readChunkContent, receiverPubkeys, receiverPubkeysWithoutContentKeys, writeChunks } from './chunks.js'
+import {
+  cleanupChunks,
+  cleanupEnvelopeRows,
+  decodeChunkLines,
+  prepareEnvelopeRows,
+  preparedRowIndexesForReceivers,
+  readChunkContent,
+  receiverPubkeys,
+  receiverPubkeysWithoutContentKeys,
+  writeChunksFromPreparedRows
+} from './chunks.js'
 import { EXPIRATION_SECONDS, MAX_EVENT_BYTES, NYM_CARRIER_KIND, PRIVATE_BROADCAST_KIND, ROUTER_KIND } from './constants.js'
 import { eventByteLength, hasImkcTag, makeNymCarrierEvent, makeRouterEvent, nowSeconds, readChunkTag, readIdTag, readImkcProof, readImkcTag, readReceiverTag, readSenderTag } from './event.js'
 import { createReceivedChunkStore, DEFAULT_RECEIVED_CHUNK_MAX_BYTES, DEFAULT_RECEIVED_CHUNK_TTL_MS } from './received-chunks.js'
@@ -51,8 +61,7 @@ async function makeImkcProof ({ senderSigner, senderPubkey, imkcPubkey }) {
   return parsed.iykcProof
 }
 
-// Streaming version of wrapEvent
-export async function * wrapEvents ({ senderSigner, imkcSigner, privateChannelSigner = senderSigner, privateChannelReaderPubkey, receivers, receiverTag, event, expirationSeconds = EXPIRATION_SECONDS, _getIykcProofs = getIykcProofs }) {
+async function prepareRoutedMessage ({ senderSigner, imkcSigner, privateChannelSigner = senderSigner, privateChannelReaderPubkey, receivers, event, _getIykcProofs = getIykcProofs }) {
   if (!senderSigner?.getPublicKey) throw new Error('SENDER_SIGNER_REQUIRED')
   if (!senderSigner?.nip44Encrypt) throw new Error('SIGNER_NIP44_ENCRYPT_UNSUPPORTED')
   if (!privateChannelSigner?.getPublicKey || !privateChannelSigner?.nip44Encrypt || !privateChannelSigner?.signEvent) throw new Error('PRIVATE_CHANNEL_SIGNER_REQUIRED')
@@ -62,16 +71,8 @@ export async function * wrapEvents ({ senderSigner, imkcSigner, privateChannelSi
   const useMultiDh = typeof senderSigner.nip44EncryptMultiDH === 'function'
   const channelPubkey = await privateChannelSigner.getPublicKey()
   const channelReaderPubkey = privateChannelReaderPubkey || channelPubkey
-  const routerSeckey = generateSecretKey()
-  const routerPubkey = getPublicKey(routerSeckey)
-  const receiverPubkeyList = receiverPubkeys(receivers)
-  const routerReceiverTag = receiverTag ?? (receiverPubkeyList.length === 1 ? receiverPubkeyList[0] : '')
   const receiverContentKeys = useMultiDh ? await _getIykcProofs(receiverPubkeysWithoutContentKeys(receivers)) : {}
-  const {
-    id,
-    total,
-    ownContentPubkey: imkcPubkey
-  } = await writeChunks({
+  const preparedRows = await prepareEnvelopeRows({
     senderSigner,
     imkcSigner: useMultiDh ? imkcSigner : null,
     receivers,
@@ -79,16 +80,37 @@ export async function * wrapEvents ({ senderSigner, imkcSigner, privateChannelSi
     event,
     multiDhContext: multiDhContext(channelPubkey)
   })
+  const imkcPubkey = preparedRows.ownContentPubkey || ''
   const imkcProof = imkcPubkey ? await makeImkcProof({ senderSigner, senderPubkey, imkcPubkey }) : ''
+  return {
+    senderPubkey,
+    channelPubkey,
+    channelReaderPubkey,
+    preparedRows,
+    imkcPubkey,
+    imkcProof
+  }
+}
+
+async function * wrapPreparedEvents ({ privateChannelSigner, receivers, receiverTag, expirationSeconds = EXPIRATION_SECONDS, context }) {
+  const routerSeckey = generateSecretKey()
+  const routerPubkey = getPublicKey(routerSeckey)
+  const receiverPubkeyList = receiverPubkeys(receivers)
+  const routerReceiverTag = receiverTag ?? (receiverPubkeyList.length === 1 ? receiverPubkeyList[0] : '')
+  const rowIndexes = preparedRowIndexesForReceivers(context.preparedRows, receivers)
+  const {
+    id,
+    total
+  } = writeChunksFromPreparedRows(context.preparedRows, rowIndexes)
 
   try {
     for (let index = 0; index < total; index++) {
       const content = readChunkContent(id, index)
       const router = finalizeEvent(makeRouterEvent({
         pubkey: routerPubkey,
-        senderPubkey,
-        imkcPubkey,
-        imkcProof,
+        senderPubkey: context.senderPubkey,
+        imkcPubkey: context.imkcPubkey,
+        imkcProof: context.imkcProof,
         receiverPubkey: routerReceiverTag,
         chunkIndex: index,
         chunkTotal: total,
@@ -98,13 +120,31 @@ export async function * wrapEvents ({ senderSigner, imkcSigner, privateChannelSi
         kind: PRIVATE_BROADCAST_KIND,
         created_at: nowSeconds(),
         tags: [['expiration', String(nowSeconds() + expirationSeconds)]],
-        content: await privateChannelSigner.nip44Encrypt(channelReaderPubkey, JSON.stringify(router))
+        content: await privateChannelSigner.nip44Encrypt(context.channelReaderPubkey, JSON.stringify(router))
       })
       if (eventByteLength(outer) > MAX_EVENT_BYTES) throw new Error('EVENT_TOO_LARGE')
       yield outer
     }
   } finally {
     cleanupChunks(id, total)
+  }
+}
+
+// Streaming version of wrapEvent
+export async function * wrapEvents ({ senderSigner, imkcSigner, privateChannelSigner = senderSigner, privateChannelReaderPubkey, receivers, receiverTag, event, expirationSeconds = EXPIRATION_SECONDS, _getIykcProofs = getIykcProofs }) {
+  const context = await prepareRoutedMessage({
+    senderSigner,
+    imkcSigner,
+    privateChannelSigner,
+    privateChannelReaderPubkey,
+    receivers,
+    event,
+    _getIykcProofs
+  })
+  try {
+    yield * wrapPreparedEvents({ privateChannelSigner, receivers, receiverTag, expirationSeconds, context })
+  } finally {
+    cleanupEnvelopeRows(context.preparedRows)
   }
 }
 
@@ -423,28 +463,45 @@ function relaysFromRelayReceivers (relayToReceivers) {
   return uniq(relayReceiverEntries(relayToReceivers).map(([relay]) => relay))
 }
 
-export async function publish ({ senderSigner, imkcSigner, privateChannelSigner = senderSigner, privateChannelReaderPubkey, receivers, receiverTag, event, relays, relayToReceivers, expirationSeconds, _getIykcProofs = getIykcProofs, _publish = publishToRelays }) {
+function withRecoveryRelays (relays, recoveryRelays) {
+  return uniq([...(relays || []), ...(recoveryRelays || [])])
+}
+
+export async function publish ({ senderSigner, imkcSigner, privateChannelSigner = senderSigner, privateChannelReaderPubkey, receivers, receiverTag, event, relays, relayToReceivers, recoveryRelays, expirationSeconds, _getIykcProofs = getIykcProofs, _publish = publishToRelays }) {
   const results = []
   // Relays are grouped only when they have the exact same recipient pubkey set
   const groups = groupedRelayReceivers({ relayToReceivers, receivers })
   if (groups) {
-    for (const group of groups) {
-      for await (const wrappedEvent of wrapEvents({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers: group.receivers, receiverTag, event, expirationSeconds, _getIykcProofs })) {
-        results.push(await _publish(wrappedEvent, group.relays))
+    const context = await prepareRoutedMessage({
+      senderSigner,
+      imkcSigner,
+      privateChannelSigner,
+      privateChannelReaderPubkey,
+      receivers,
+      event,
+      _getIykcProofs
+    })
+    try {
+      for (const group of groups) {
+        for await (const wrappedEvent of wrapPreparedEvents({ privateChannelSigner, receivers: group.receivers, receiverTag, expirationSeconds, context })) {
+          results.push(await _publish(wrappedEvent, withRecoveryRelays(group.relays, recoveryRelays)))
+        }
       }
+    } finally {
+      cleanupEnvelopeRows(context.preparedRows)
     }
     return { results }
   }
 
   for await (const wrappedEvent of wrapEvents({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag, event, expirationSeconds, _getIykcProofs })) {
-    results.push(await _publish(wrappedEvent, relays))
+    results.push(await _publish(wrappedEvent, withRecoveryRelays(relays, recoveryRelays)))
   }
   return { results }
 }
 
-export async function publishNymEvent ({ nymSigner, privateChannelSigner, privateChannelReaderPubkey, event, relays, relayToReceivers, expirationSeconds, _publish = publishToRelays }) {
+export async function publishNymEvent ({ nymSigner, privateChannelSigner, privateChannelReaderPubkey, event, relays, relayToReceivers, recoveryRelays, expirationSeconds, _publish = publishToRelays }) {
   const results = []
-  const publishRelays = relayToReceivers ? relaysFromRelayReceivers(relayToReceivers) : relays
+  const publishRelays = withRecoveryRelays(relayToReceivers ? relaysFromRelayReceivers(relayToReceivers) : relays, recoveryRelays)
   for await (const wrappedEvent of wrapNymEvents({ nymSigner, privateChannelSigner, privateChannelReaderPubkey, event, expirationSeconds })) {
     results.push(await _publish(wrappedEvent, publishRelays))
   }

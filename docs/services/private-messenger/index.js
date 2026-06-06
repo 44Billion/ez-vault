@@ -257,18 +257,30 @@ export class PrivateMessenger {
     return this._pickRelaysForPubkeys(pubkeys, relaysByPubkey, { relayType: 'read' })
   }
 
+  async recoveryMirrorRelays (channelPubkey) {
+    const seeders = this.recoverySeeders(channelPubkey)
+    if (!seeders.length) return []
+    try {
+      return relayMapRelays(await this.readRelayToReceivers(seeders))
+    } catch (err) {
+      this.onError?.(err)
+      return []
+    }
+  }
+
   async resolveWatchRelays (channel) {
     if (channel.relays.length) return channel.relays
     return relayMapRelays(await this.readRelayToReceivers([this.userPubkey]))
   }
 
   async resolveSendRouting ({ channel, receiverPubkeys, relays, relayToReceivers }) {
-    if (relayToReceivers) return { relayToReceivers }
-    if (relays?.length) return { relays: uniq(relays) }
-    if (channel.relays.length) return { relays: channel.relays }
+    const recoveryRelays = await this.recoveryMirrorRelays(channel.pubkey)
+    if (relayToReceivers) return { relayToReceivers, recoveryRelays }
+    if (relays?.length) return { relays: uniq(relays), recoveryRelays }
+    if (channel.relays.length) return { relays: channel.relays, recoveryRelays }
     const derived = await this.readRelayToReceivers(receiverPubkeys)
     if (!relayMapRelays(derived).length) throw new Error('NO_RELAYS')
-    return { relayToReceivers: derived }
+    return { relayToReceivers: derived, recoveryRelays }
   }
 
   stateKey () {
@@ -827,7 +839,7 @@ export class PrivateMessenger {
       console.warn('private-messenger seeder presence failed', err?.message ?? err)
     }
     const timer = this._setInterval(() => {
-      this.publishSeederPresence(channelPubkey).catch(err => {
+      return this.publishSeederPresence(channelPubkey).catch(err => {
         console.warn('private-messenger seeder presence failed', err?.message ?? err)
       })
     }, this.seederPresenceIntervalMs)

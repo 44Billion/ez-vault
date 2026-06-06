@@ -12,6 +12,7 @@ import {
   NYM_CARRIER_KIND,
   PRIVATE_BROADCAST_KIND,
   publish,
+  publishNymEvent,
   ROUTER_KIND,
   subscribe,
   unwrapEvent,
@@ -84,11 +85,14 @@ async function noContentKeys () {
 }
 
 function routerJsonlRows (router) {
+  return routerJsonlLines(router).map(line => JSON.parse(line))
+}
+
+function routerJsonlLines (router) {
   return new TextDecoder()
     .decode(Buffer.from(router.content, 'base64'))
     .trim()
     .split('\n')
-    .map(line => JSON.parse(line))
 }
 
 function routerRecipientRows (router) {
@@ -289,8 +293,9 @@ test('publish splits relay-targeted routers by receiver subset with separate rou
     relayToReceivers: new Map([
       ['wss://one.example', [bobPubkey, carolPubkey]],
       ['wss://two.example', [carolPubkey, bobPubkey]],
-      ['wss://three.example', [davePubkey]]
+      ['wss://three.example', [carolPubkey, davePubkey]]
     ]),
+    recoveryRelays: ['wss://seed.example', 'wss://one.example'],
     event,
     _getIykcProofs: noContentKeys,
     _publish: async (outer, relays) => {
@@ -300,8 +305,8 @@ test('publish splits relay-targeted routers by receiver subset with separate rou
   })
 
   assert.equal(published.length, 2)
-  assert.deepEqual(published[0].relays, ['wss://one.example', 'wss://two.example'])
-  assert.deepEqual(published[1].relays, ['wss://three.example'])
+  assert.deepEqual(published[0].relays, ['wss://one.example', 'wss://two.example', 'wss://seed.example'])
+  assert.deepEqual(published[1].relays, ['wss://three.example', 'wss://seed.example', 'wss://one.example'])
 
   const routers = []
   for (const { outer } of published) {
@@ -315,8 +320,63 @@ test('publish splits relay-targeted routers by receiver subset with separate rou
   )
   assert.deepEqual(
     routerRecipientRows(routers[1]).map(row => row[0]),
-    [davePubkey]
+    [carolPubkey, davePubkey]
   )
+  const firstLines = routerJsonlLines(routers[0])
+  const secondLines = routerJsonlLines(routers[1])
+  assert.equal(firstLines[0], secondLines[0])
+  assert.equal(
+    firstLines.find(line => JSON.parse(line)[0] === carolPubkey),
+    secondLines.find(line => JSON.parse(line)[0] === carolPubkey)
+  )
+  assert.equal(globalThis.localStorage.getItem(TEMPORARY_STORAGE_KEYS_KEY), null)
+})
+
+test('publish cleans prepared rows when grouped publishing fails', async () => {
+  const alice = signer()
+  const bob = signer()
+  const carol = signer()
+  const bobPubkey = await bob.getPublicKey()
+  const carolPubkey = await carol.getPublicKey()
+
+  await assert.rejects(
+    publish({
+      senderSigner: alice,
+      receivers: [bobPubkey, carolPubkey],
+      relayToReceivers: new Map([
+        ['wss://one.example', [bobPubkey]],
+        ['wss://two.example', [carolPubkey]]
+      ]),
+      event: eventFixture('publish fail'),
+      _getIykcProofs: noContentKeys,
+      _publish: async () => { throw new Error('relay offline') }
+    }),
+    /relay offline/
+  )
+
+  assert.equal(globalThis.localStorage.getItem(TEMPORARY_STORAGE_KEYS_KEY), null)
+})
+
+test('publishNymEvent mirrors carrier chunks to recovery relays', async () => {
+  const channel = signer()
+  const nym = signer()
+  const published = []
+
+  await publishNymEvent({
+    nymSigner: nym,
+    privateChannelSigner: channel,
+    event: eventFixture('nym mirror'),
+    relays: ['wss://receiver.example'],
+    recoveryRelays: ['wss://seed.example', 'wss://receiver.example'],
+    _publish: async (outer, relays) => {
+      published.push({ outer, relays })
+      return { success: true }
+    }
+  })
+
+  assert.equal(published.length, 1)
+  assert.deepEqual(published[0].relays, ['wss://receiver.example', 'wss://seed.example'])
+  assert.equal(globalThis.localStorage.getItem(TEMPORARY_STORAGE_KEYS_KEY), null)
 })
 
 test('received chunk default cap is proportional to private-channel chunk size', () => {
