@@ -67,6 +67,13 @@ function nsecOwnerPubkeys (_store = store) {
     .map(account => account.pubkey)
 }
 
+function syncAccountIdentityKey (_store = store) {
+  return _store.list()
+    .filter(account => account.type === 'nsec' || account.type === 'bunker')
+    .map(account => `${account.type}:${account.pubkey}`)
+    .join('|')
+}
+
 function messageCode (message) {
   return isPlainObject(message?.payload) ? message.payload.code || '' : ''
 }
@@ -108,6 +115,7 @@ export function createSyncController ({
   let announceTimer = null
   let announceInterval = null
   let pendingResetInterval = false
+  let lastStoreIdentityKey = ''
   let stopRelayListWatcher = null
   let relayListWatcherKey = ''
   const pendingAnnounceOwners = new Set()
@@ -414,12 +422,20 @@ export function createSyncController ({
     return refreshPromise
   }
 
+  function refreshOnStoreIdentityChange () {
+    const nextKey = syncAccountIdentityKey(_store)
+    if (nextKey === lastStoreIdentityKey) return null
+    lastStoreIdentityKey = nextKey
+    return refresh()
+  }
+
   function init () {
     if (initialized) return refresh()
     initialized = true
+    lastStoreIdentityKey = syncAccountIdentityKey(_store)
     unsubscribers.push(_secrets.subscribe(refresh))
     if (_secrets.subscribeContentKeys) unsubscribers.push(_secrets.subscribeContentKeys(onContentKeyChange))
-    unsubscribers.push(_store.subscribe(refresh))
+    unsubscribers.push(_store.subscribe(refreshOnStoreIdentityChange))
     unsubscribers.push(_trustedSigners.subscribe(refresh))
     return refresh()
   }

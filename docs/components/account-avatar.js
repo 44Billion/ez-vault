@@ -5,7 +5,9 @@ import * as accountStatus from '../services/account-status.js'
 import * as messengerLog from '../services/messenger-log/index.js'
 import * as secrets from '../services/secrets.js'
 import * as passkey from '../services/passkey.js'
+import * as signer from '../services/signer.js'
 import { seededAvatarDataUrl } from '../services/avatar.js'
+import { randomAccountName } from '../services/account-names.js'
 import * as toast from './shared/toast.js'
 import { injectComponentStyles, waitForFocus } from '../helpers/dom.js'
 
@@ -91,26 +93,39 @@ const STYLES = /* css */`
     display: none;
     align-items: center;
     justify-content: center;
-    background-color: oklch(0.22 0 89.88);
+    background-color: oklch(0.22 0 89.88 / 0.88);
     color: oklch(0.92 0 89.88);
     font-size: 13rem;
     line-height: 1;
     box-shadow: 0 0 0 2px oklch(0.3 0.12 274.76);
-    z-index: 1;
+    z-index: 2;
   }
   account-avatar .avatar-btn:active {
-    background-color: oklch(0.38 0.1 274.76);
+    background-color: oklch(0.38 0.1 274.76 / 0.9);
   }
-  account-avatar .avatar-btn.at-top-left { top: 2px; left: 2px; }
-  account-avatar .avatar-btn.at-top-right { top: 2px; right: 2px; }
-  account-avatar .avatar-btn.at-bottom-left { bottom: 2px; left: 2px; }
-  account-avatar .avatar-btn.at-bottom-right { bottom: 2px; right: 2px; }
+  account-avatar .avatar-btn.at-top-left { top: -4px; left: -4px; }
+  account-avatar .avatar-btn.at-top-center {
+    top: -13px;
+    left: 50%;
+    transform: translateX(-50%);
+  }
+  account-avatar .avatar-btn.at-top-right { top: -4px; right: -4px; }
+  account-avatar .avatar-btn.at-middle-left {
+    top: 50%;
+    left: -14px;
+    transform: translateY(-50%);
+  }
+  account-avatar .avatar-btn.at-middle-right {
+    top: 50%;
+    right: -14px;
+    transform: translateY(-50%);
+  }
   account-avatar .avatar-btn.at-primary {
-    background-color: oklch(0.55 0.18 145);
+    background-color: oklch(0.55 0.18 145 / 0.88);
     color: oklch(0.98 0 0);
   }
   account-avatar .avatar-btn.at-primary:active {
-    background-color: oklch(0.48 0.16 145);
+    background-color: oklch(0.48 0.16 145 / 0.92);
   }
   account-avatar[mode="creating"] .avatar-btn[data-action="cancel-create"],
   account-avatar[mode="creating"] .avatar-btn[data-action="cycle"],
@@ -124,15 +139,15 @@ const STYLES = /* css */`
   }
   account-avatar .avatar-readonly-label {
     position: absolute;
-    bottom: 2px;
-    right: 2px;
+    top: -4px;
+    left: -4px;
     display: none;
     align-items: center;
     justify-content: center;
     padding: 0 8px;
     height: 18px;
     border-radius: 9999px;
-    background-color: oklch(0.22 0 89.88);
+    background-color: oklch(0.22 0 89.88 / 0.82);
     color: oklch(0.92 0 89.88);
     font-size: 9rem;
     font-weight: 600;
@@ -140,17 +155,65 @@ const STYLES = /* css */`
     text-transform: uppercase;
     box-shadow: 0 0 0 2px oklch(0.3 0.12 274.76);
     pointer-events: none;
-    z-index: 1;
+    z-index: 2;
   }
   account-avatar[mode="normal"][data-type="npub"] .avatar-readonly-label {
     display: inline-flex;
   }
+  account-avatar .avatar-name-field {
+    position: absolute;
+    left: 50%;
+    bottom: -5px;
+    transform: translateX(-50%);
+    width: auto;
+    min-width: calc(100% - 8px);
+    max-width: calc(100% + 14px);
+    height: 18px;
+    border: 0;
+    border-radius: 9999px;
+    padding: 0 8px;
+    box-sizing: border-box;
+    background-color: oklch(0.22 0 89.88 / 0.82);
+    color: oklch(0.92 0 89.88);
+    font-size: 12rem;
+    font-weight: 600;
+    letter-spacing: 0;
+    line-height: 18px;
+    text-align: center;
+    text-transform: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    box-shadow: 0 0 0 2px oklch(0.3 0.12 274.76);
+    outline: none;
+    z-index: 1;
+  }
+  account-avatar .avatar-name-field:focus {
+    box-shadow: 0 0 0 2px oklch(0.55 0.18 145);
+  }
+  account-avatar .avatar-name-field[readonly],
+  account-avatar .avatar-name-field:disabled {
+    cursor: default;
+    opacity: 1;
+    -webkit-text-fill-color: currentColor;
+  }
+  account-avatar[mode="normal"] .avatar-name-field,
+  account-avatar[mode="editing"][data-type="npub"] .avatar-name-field {
+    caret-color: transparent;
+    pointer-events: none;
+  }
+  account-avatar .avatar-name-field.is-success {
+    box-shadow: 0 0 0 2px oklch(0.55 0.18 145);
+  }
+  account-avatar .avatar-name-field.is-error {
+    box-shadow: 0 0 0 2px oklch(0.55 0.2 25);
+  }
   account-avatar .avatar-btn.is-success {
-    background-color: oklch(0.55 0.18 145);
+    background-color: oklch(0.55 0.18 145 / 0.88);
     color: oklch(0.98 0 0);
   }
   account-avatar .avatar-btn.is-error {
-    background-color: oklch(0.55 0.2 25);
+    background-color: oklch(0.55 0.2 25 / 0.88);
     color: oklch(0.98 0 0);
   }
   account-avatar .avatar-btn-icon {
@@ -168,7 +231,8 @@ const STYLES = /* css */`
      toggle target), dim un-selected tiles, and overlay a check on selected
      ones. The list owns selection state and click handling. */
   account-avatar[selecting] .avatar-btn,
-  account-avatar[selecting] .avatar-readonly-label {
+  account-avatar[selecting] .avatar-readonly-label,
+  account-avatar[selecting] .avatar-name-field {
     display: none !important;
   }
   account-avatar[selecting] {
@@ -216,13 +280,14 @@ const TEMPLATE = `
   <div class="avatar-error-overlay" aria-hidden="true"><span class="avatar-error-icon">${ICON_ALERT}</span></div>
   <button class="avatar-btn at-top-left" data-action="cancel-create" title="Cancel" type="button"><span class="avatar-btn-icon">${ICON_TRASH}</span></button>
   <button class="avatar-btn at-top-left" data-action="delete" title="Remove account" type="button"><span class="avatar-btn-icon">${ICON_TRASH}</span></button>
-  <button class="avatar-btn at-top-right" data-action="cycle" title="Change image" type="button"><span class="avatar-btn-icon">${ICON_REFRESH}</span></button>
+  <button class="avatar-btn at-top-center" data-action="cycle" title="Change image and name" type="button"><span class="avatar-btn-icon">${ICON_REFRESH}</span></button>
   <button class="avatar-btn at-top-right" data-action="edit" title="Edit" type="button"><span class="avatar-btn-icon">${ICON_PENCIL}</span></button>
   <span class="avatar-readonly-label" aria-label="Read-only account">read-only</span>
   <button class="avatar-btn at-top-right" data-action="cancel-edit" title="Close" type="button"><span class="avatar-btn-icon">${ICON_X}</span></button>
-  <button class="avatar-btn at-bottom-left" data-action="copy-nsec" title="Copy nsec" type="button"><span class="avatar-btn-icon">${ICON_KEY}</span></button>
-  <button class="avatar-btn at-bottom-right at-primary" data-action="save" title="Save" type="button"><span class="avatar-btn-icon">${ICON_CHECK}</span></button>
-  <button class="avatar-btn at-bottom-right" data-action="copy-npub" title="Copy npub" type="button"><span class="avatar-btn-icon">${ICON_COPY}</span></button>
+  <button class="avatar-btn at-middle-left" data-action="copy-nsec" title="Copy nsec" type="button"><span class="avatar-btn-icon">${ICON_KEY}</span></button>
+  <button class="avatar-btn at-top-right at-primary" data-action="save" title="Save" type="button"><span class="avatar-btn-icon">${ICON_CHECK}</span></button>
+  <button class="avatar-btn at-middle-right" data-action="copy-npub" title="Copy npub" type="button"><span class="avatar-btn-icon">${ICON_COPY}</span></button>
+  <input class="avatar-name-field" type="text" aria-label="Account name" spellcheck="false" autocorrect="off" autocapitalize="none" />
   <span class="avatar-select-overlay" aria-hidden="true"><span class="avatar-select-badge">${ICON_CHECK}</span></span>
 `
 
@@ -231,6 +296,9 @@ export class AccountAvatar extends HTMLElement {
   #draft = null
   #account = null
   #image
+  #nameField
+  #savingName = false
+  #nameFlashTimer = null
   #flashTimers = new Map()
   #flashLabels = new Map()
   #unsubStatus = null
@@ -240,7 +308,11 @@ export class AccountAvatar extends HTMLElement {
     this.#mode = this.getAttribute('mode') || MODE.NORMAL
     this.innerHTML = TEMPLATE
     this.#image = this.querySelector('.avatar-image')
+    this.#nameField = this.querySelector('.avatar-name-field')
     this.addEventListener('click', this.#onClick)
+    this.#nameField?.addEventListener('input', this.#onNameInput)
+    this.#nameField?.addEventListener('change', this.#onNameChange)
+    this.#nameField?.addEventListener('keydown', this.#onNameKeydown)
     this.#applyMode()
 
     if (this.#mode === MODE.CREATING) {
@@ -254,6 +326,7 @@ export class AccountAvatar extends HTMLElement {
       this.#applyAccountType()
       this.#renderPicture(this.#account.picture, this.#account.pubkey)
       this.#updateCopyKeyButton()
+      this.#syncNameField()
     }
 
     this.#refreshStatus()
@@ -270,8 +343,13 @@ export class AccountAvatar extends HTMLElement {
 
   disconnectedCallback () {
     this.removeEventListener('click', this.#onClick)
+    this.#nameField?.removeEventListener('input', this.#onNameInput)
+    this.#nameField?.removeEventListener('change', this.#onNameChange)
+    this.#nameField?.removeEventListener('keydown', this.#onNameKeydown)
     this.#unsubStatus?.()
     this.#unsubStatus = null
+    clearTimeout(this.#nameFlashTimer)
+    this.#nameFlashTimer = null
     for (const id of this.#flashTimers.values()) clearTimeout(id)
     this.#flashTimers.clear()
     this.#flashLabels.clear()
@@ -286,10 +364,12 @@ export class AccountAvatar extends HTMLElement {
     }
     const picChanged = acc.picture !== this.#account?.picture
     const typeChanged = acc.type !== this.#account?.type
+    const nameChanged = acc.name !== this.#account?.name
     this.#account = acc
     if (typeChanged) this.#applyAccountType()
     if (picChanged) this.#renderPicture(acc.picture, acc.pubkey)
     if (typeChanged) this.#updateCopyKeyButton()
+    if (nameChanged || typeChanged) this.#syncNameField()
   }
 
   #applyAccountType () {
@@ -302,6 +382,114 @@ export class AccountAvatar extends HTMLElement {
     const btn = this.querySelector('button[data-action="copy-nsec"]')
     if (!btn) return
     btn.title = this.#account?.type === 'bunker' ? 'Copy bunker URL' : 'Copy nsec'
+  }
+
+  #currentName () {
+    if (this.#mode === MODE.CREATING) return this.#draft?.name || ''
+    return this.#account?.name || ''
+  }
+
+  #canEditName () {
+    if (this.#mode === MODE.CREATING) return true
+    return this.#mode === MODE.EDITING && this.#account?.type !== 'npub'
+  }
+
+  #syncNameField () {
+    const field = this.#nameField
+    if (!field) return
+    const canEdit = this.#canEditName()
+    const canRefreshValue = !this.#savingName && (document.activeElement !== field || !canEdit)
+    if (canRefreshValue) field.value = this.#currentName()
+    this.#syncNameFieldWidth()
+    field.readOnly = !canEdit
+    field.disabled = this.#savingName || (this.#mode === MODE.EDITING && this.#account?.type === 'npub')
+    field.tabIndex = canEdit ? 0 : -1
+  }
+
+  #syncNameFieldWidth () {
+    if (!this.#nameField) return
+    this.#nameField.size = Math.max(1, this.#nameField.value.length)
+  }
+
+  #readNameValue () {
+    return this.#nameField?.value.trim() || ''
+  }
+
+  #onNameInput = () => {
+    this.#syncNameFieldWidth()
+    if (this.#mode !== MODE.CREATING || !this.#draft) return
+    this.#draft.name = this.#nameField.value
+  }
+
+  #onNameChange = () => {
+    if (this.#mode === MODE.CREATING && this.#draft) {
+      this.#draft.name = this.#readNameValue()
+      this.#syncNameField()
+      return
+    }
+    if (this.#mode === MODE.EDITING) this.#saveName()
+  }
+
+  #onNameKeydown = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      this.#nameField?.blur()
+    } else if (e.key === 'Escape' && this.#mode === MODE.EDITING) {
+      e.preventDefault()
+      this.#nameField.value = this.#currentName()
+      this.#nameField.blur()
+    }
+  }
+
+  async #saveName () {
+    const account = store.get(this.#account?.pubkey) || this.#account
+    if (!account || account.type === 'npub') return this.#syncNameField()
+    const name = this.#readNameValue()
+    if (name === (account.name || '')) {
+      this.#nameField.value = name
+      return
+    }
+
+    this.#savingName = true
+    this.#nameField.classList.add('pulsate')
+    this.#syncNameField()
+    try {
+      const profileEvent = await signer.claimSigner(account).signEvent(nostr.profileEventTemplate({
+        name,
+        picture: account.picture,
+        profileEvent: account.profileEvent
+      }))
+      const writeRelays = account.writeRelays?.length
+        ? account.writeRelays
+        : await relays.resolveWriteRelays(account.pubkey)
+      const profilePublish = await relays.publish(profileEvent, writeRelays)
+      if (!profilePublish.success) throw new Error('PROFILE_PUBLISH_FAILED')
+
+      const patch = { name, profileEvent, writeRelays }
+      store.update(account.pubkey, patch)
+      this.#account = { ...account, ...patch }
+      this.#nameField.value = name
+      this.#flashNameStatus('is-success')
+    } catch (err) {
+      console.error(err)
+      this.#nameField.value = account.name || ''
+      this.#flashNameStatus('is-error')
+      toast.error('Name update failed')
+    } finally {
+      this.#savingName = false
+      this.#nameField.classList.remove('pulsate')
+      this.#syncNameField()
+    }
+  }
+
+  #flashNameStatus (cls) {
+    clearTimeout(this.#nameFlashTimer)
+    this.#nameField.classList.remove('is-success', 'is-error')
+    this.#nameField.classList.add(cls)
+    this.#nameFlashTimer = setTimeout(() => {
+      this.#nameField?.classList.remove('is-success', 'is-error')
+      this.#nameFlashTimer = null
+    }, FLASH_MS)
   }
 
   async #copyKey (btn) {
@@ -354,6 +542,7 @@ export class AccountAvatar extends HTMLElement {
 
   #applyMode () {
     this.setAttribute('mode', this.#mode)
+    this.#syncNameField()
   }
 
   async #cycleSeed () {
@@ -366,7 +555,9 @@ export class AccountAvatar extends HTMLElement {
     try {
       const kp = nostr.generateKeypair()
       const picture = await seededAvatarDataUrl(kp.pubkey)
-      this.#draft = { ...kp, picture }
+      const name = randomAccountName(this.#currentName())
+      this.#draft = { ...kp, picture, name }
+      this.#syncNameField()
       await this.#renderPicture(picture)
     } finally {
       if (cycleBtn) {
@@ -415,6 +606,7 @@ export class AccountAvatar extends HTMLElement {
     icon?.classList.add('pulsate')
     try {
       const writeRelays = relays.freeRelays.slice(0, 2)
+      const name = this.#readNameValue()
 
       const relayListEvent = nostr.signRelayListEvent({
         secretKey: this.#draft.secretKey,
@@ -423,6 +615,7 @@ export class AccountAvatar extends HTMLElement {
       })
       const profileEvent = nostr.signProfileEvent({
         secretKey: this.#draft.secretKey,
+        name,
         picture: this.#draft.picture
       })
 
@@ -440,7 +633,7 @@ export class AccountAvatar extends HTMLElement {
         type: 'nsec',
         pubkey: this.#draft.pubkey,
         picture: this.#draft.picture,
-        name: '',
+        name,
         profileEvent,
         relayListEvent,
         writeRelays

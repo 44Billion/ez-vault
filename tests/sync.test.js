@@ -148,12 +148,13 @@ test('sync orchestration watches nsec and bunker channels with identity-only syn
     nsec1: signer('nsec1', { readRelays: ['wss://nsec-one.example', 'wss://nsec-two.example', 'wss://nsec-three.example'] }),
     bunker1: signer('bunker1', { readRelays: ['wss://bunker-one.example', 'wss://bunker-two.example'] })
   }
+  let accounts = [
+    { type: 'npub', pubkey: 'npub1' },
+    { type: 'nsec', pubkey: 'nsec1' },
+    { type: 'bunker', pubkey: 'bunker1' }
+  ]
   const storeStub = createSubscribable({
-    list: () => [
-      { type: 'npub', pubkey: 'npub1' },
-      { type: 'nsec', pubkey: 'nsec1' },
-      { type: 'bunker', pubkey: 'bunker1' }
-    ]
+    list: () => accounts
   })
   let unlocked = true
   const secretsStub = createSubscribable({
@@ -226,7 +227,23 @@ test('sync orchestration watches nsec and bunker channels with identity-only syn
   assert.equal(timers[0].ms, 1000)
 
   await storeStub.emit()
+  assert.equal(instances[0].updates.length, 0)
+
+  accounts = accounts.map(account => account.pubkey === 'nsec1'
+    ? { ...account, name: 'Azure Ember', profileEvent: { kind: 0 } }
+    : account)
+  await storeStub.emit()
+  assert.equal(instances[0].updates.length, 0)
+
+  accountSigners.nsec2 = signer('nsec2')
+  accounts = [...accounts, { type: 'nsec', pubkey: 'nsec2' }]
+  await storeStub.emit()
   assert.equal(instances[0].updates.length, 1)
+  assert.deepEqual(instances[0].updates[0].channels.map(channel => channel.pubkey), [
+    `nsec1:shared:nsec1:${SYNC_INFO}`,
+    `bunker1:shared:bunker1:${SYNC_INFO}`,
+    `nsec2:shared:nsec2:${SYNC_INFO}`
+  ])
 
   await trustedStub.emit()
   assert.equal(instances[0].updates.length, 2)

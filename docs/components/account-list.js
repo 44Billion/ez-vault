@@ -6,7 +6,8 @@ const STYLES = /* css */`
   account-list {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
-    gap: 18px;
+    column-gap: 31px;
+    row-gap: 27px;
     align-content: start;
   }
   /* Hide in-progress create tiles while a selection panel is open — selecting

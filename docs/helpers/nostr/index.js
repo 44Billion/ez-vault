@@ -70,21 +70,47 @@ export function npubFromPubkey (pubkey) {
   return nip19.npubEncode(pubkey)
 }
 
-export function signProfileEvent ({ secretKey, name = '', picture }) {
-  const content = {}
-  if (name) content.name = name
-  if (picture) content.picture = picture
+function cleanProfileValue (value) {
+  return String(value ?? '').trim()
+}
 
-  const tags = []
-  if (name) tags.push(['name', name])
-  if (picture) tags.push(['picture', picture])
+function profileContentFromEvent (event) {
+  if (!event?.content) return {}
+  try {
+    const parsed = JSON.parse(event.content)
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
+  } catch {}
+  return {}
+}
 
-  return finalizeEvent({
+export function profileEventTemplate ({ name = '', picture = '', profileEvent = null } = {}) {
+  const cleanName = cleanProfileValue(name)
+  const cleanPicture = cleanProfileValue(picture)
+  const content = profileContentFromEvent(profileEvent)
+
+  if (cleanName) content.name = cleanName
+  else delete content.name
+  if (cleanPicture) content.picture = cleanPicture
+  else delete content.picture
+
+  const tags = Array.isArray(profileEvent?.tags)
+    ? profileEvent.tags
+      .filter(t => Array.isArray(t) && t[0] !== 'name' && t[0] !== 'picture')
+      .map(t => t.slice())
+    : []
+  if (cleanName) tags.push(['name', cleanName])
+  if (cleanPicture) tags.push(['picture', cleanPicture])
+
+  return {
     kind: 0,
     created_at: Math.floor(Date.now() / 1000),
     tags,
     content: JSON.stringify(content)
-  }, secretKey)
+  }
+}
+
+export function signProfileEvent ({ secretKey, name = '', picture, profileEvent = null }) {
+  return finalizeEvent(profileEventTemplate({ name, picture, profileEvent }), secretKey)
 }
 
 // Signs a NIP-65 kind:10002 relay-list event. Each URL present in both
