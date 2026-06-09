@@ -1,5 +1,3 @@
-import { generateSecretKey } from 'nostr-tools'
-import { bytesToHex } from '../helpers/nostr/index.js'
 import * as store from './accounts-store.js'
 import * as secrets from './secrets.js'
 import * as nip44MultiDh from './nip44-multi-dh.js'
@@ -67,15 +65,25 @@ function doubleSignRequest (params) {
   }
 }
 
-function contentSignerForDoubleSign (account, contentPubkey = '') {
+async function contentSignerForDoubleSign (account, userSigner, contentPubkey = '', internals = {}) {
   if (account.type !== 'nsec') throw new Error('OWN_CONTENT_KEY_UNSUPPORTED')
   if (contentPubkey) {
     const signer = secrets.getContentKeySigner(account.pubkey, contentPubkey)
     if (!signer) throw new Error('CONTENT_KEY_NOT_FOUND')
     return signer
   }
-  return secrets.getLatestContentKeySigner(account.pubkey) ||
-    secrets.setContentKeySecret(account.pubkey, bytesToHex(generateSecretKey()))
+  const warnings = []
+  const signer = await nip44MultiDh.publishedOwnContentSigner({
+    account,
+    userSigner,
+    warnings,
+    internals
+  })
+  if (signer) return signer
+  const code = warnings[warnings.length - 1]?.code || 'CONTENT_KEY_UNAVAILABLE'
+  const err = new Error(code)
+  err.warnings = warnings
+  throw err
 }
 
 // Single entry point for the (future) messenger's NIP-07/46 dispatch. Looks
@@ -99,7 +107,7 @@ export async function run ({ pubkey, method, params = [], internals = {} }) {
     const { event, contentPubkey = '' } = doubleSignRequest(params)
     return doubleSignEvent({
       userSigner: signer,
-      contentKeySigner: contentSignerForDoubleSign(account, contentPubkey),
+      contentKeySigner: await contentSignerForDoubleSign(account, signer, contentPubkey, internals),
       event
     })
   }

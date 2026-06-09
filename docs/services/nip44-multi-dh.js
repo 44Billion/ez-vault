@@ -50,8 +50,7 @@ async function createPersistedContentSigner ({ ownerPubkey, warnings }) {
   }
 }
 
-async function ownContentSignerForEncrypt ({ account, userSigner, useOwnContentKey, warnings, internals }) {
-  if (!useOwnContentKey) return null
+export async function publishedOwnContentSigner ({ account, userSigner, warnings = [], internals = {} }) {
   if (account.type !== 'nsec') {
     warning(warnings, 'OWN_CONTENT_KEY_UNSUPPORTED')
     return null
@@ -72,6 +71,11 @@ async function ownContentSignerForEncrypt ({ account, userSigner, useOwnContentK
   return await publishLocalContentKey({ userSigner, contentKeySigner: localSigner, warnings, ...internals })
     ? localSigner
     : null
+}
+
+async function ownContentSignerForEncrypt ({ account, userSigner, useOwnContentKey, warnings, internals }) {
+  if (!useOwnContentKey) return null
+  return publishedOwnContentSigner({ account, userSigner, warnings, internals })
 }
 
 async function encrypt ({ account, signer, options, internals }) {

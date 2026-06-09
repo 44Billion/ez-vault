@@ -204,6 +204,7 @@ test('signer.run doubleSignEvent signs with identity and local content key', asy
   secrets.unlock(generateSecretKey(), null)
   const alice = addNsecAccount()
   const aliceContent = addContentKey(alice.pubkey)
+  let publishCalls = 0
   const event = {
     kind: 1,
     pubkey: 'f'.repeat(64),
@@ -217,7 +218,14 @@ test('signer.run doubleSignEvent signs with identity and local content key', asy
   const signed = await run({
     pubkey: alice.pubkey,
     method: 'doubleSignEvent',
-    params: [event]
+    params: [event],
+    internals: {
+      _getIykcProofs: async () => ({ [alice.pubkey]: { iykcPubkey: aliceContent.pubkey } }),
+      _upsertContentKeyEvent: async () => {
+        publishCalls++
+        return { result: { success: true } }
+      }
+    }
   })
   const imkcTag = signed.tags.find(tag => tag[0] === 'imkc')
   const proofEvent = {
@@ -235,6 +243,68 @@ test('signer.run doubleSignEvent signs with identity and local content key', asy
   assert.equal(event.tags[1][1], 'old')
   assert.equal(verifyEvent(proofEvent), true)
   assert.equal(verifyEvent(signed), true)
+  assert.equal(publishCalls, 0)
+})
+
+test('signer.run doubleSignEvent creates and publishes a missing content key', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const alice = addNsecAccount()
+  let publishedContentPubkey = ''
+  const event = {
+    kind: 1,
+    pubkey: 'f'.repeat(64),
+    id: 'e'.repeat(64),
+    sig: 'd'.repeat(128),
+    created_at: 9,
+    tags: [['p', 'peer']],
+    content: 'clear text'
+  }
+
+  const signed = await run({
+    pubkey: alice.pubkey,
+    method: 'doubleSignEvent',
+    params: [event],
+    internals: {
+      _getIykcProofs: async () => ({}),
+      _upsertContentKeyEvent: async ({ contentKeySigner }) => {
+        publishedContentPubkey = contentKeySigner.getPublicKey()
+        return { result: { success: true } }
+      }
+    }
+  })
+  const imkcTag = signed.tags.find(tag => tag[0] === 'imkc')
+
+  assert.ok(publishedContentPubkey)
+  assert.deepEqual(imkcTag.slice(0, 2), ['imkc', publishedContentPubkey])
+  assert.ok(secrets.getContentKeySigner(alice.pubkey, publishedContentPubkey))
+  assert.equal(verifyEvent(signed), true)
+})
+
+test('signer.run doubleSignEvent rejects when a missing content key cannot be published', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const alice = addNsecAccount()
+  const event = {
+    kind: 1,
+    pubkey: 'f'.repeat(64),
+    id: 'e'.repeat(64),
+    sig: 'd'.repeat(128),
+    created_at: 9,
+    tags: [['p', 'peer']],
+    content: 'clear text'
+  }
+
+  await assert.rejects(
+    () => run({
+      pubkey: alice.pubkey,
+      method: 'doubleSignEvent',
+      params: [event],
+      internals: {
+        _getIykcProofs: async () => ({}),
+        _upsertContentKeyEvent: async () => ({ result: { success: false } })
+      }
+    }),
+    /CONTENT_KEY_PUBLISH_FAILED/
+  )
 })
 
 test('nip44-multi-dh creates own content keys in encrypted localStorage', async () => {
