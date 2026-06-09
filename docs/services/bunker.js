@@ -156,7 +156,13 @@ export class BunkerHandle {
     // return this.#request(s => s.getRelays())
     return fetchRelaysForPubkey(await this.getPublicKey())
   }
-  withSharedKey (peerPubkey, info) { return new BunkerSharedKeyHandle(this, peerPubkey, info) }
+  withSharedKey (_peerPubkey, _info) {
+    // `withSharedKey` is not a standard NIP-46 RPC, and NIP-46 has no
+    // supported-method discovery hook we can use to safely detect custom
+    // support. Unlike getRelays, we cannot emulate this locally.
+    // return new BunkerSharedKeyHandle(this, peerPubkey, info)
+    throw new Error('BUNKER_METHOD_UNSUPPORTED')
+  }
 
   // Adopt this freshly-imported handle into the secrets pool. Called by the
   // import flow after `passkey.ensureRegistered()` succeeds. The clientKey
@@ -311,8 +317,12 @@ class BunkerSharedKeyHandle {
     Object.preventExtensions(this)
   }
 
-  #request (method, params = []) {
-    return this.#handle.tweakedRequest(['withSharedKey', this.#peerPubkey, this.#info], method, params)
+  #request (_method, _params = []) {
+    // See BunkerHandle#withSharedKey. This custom tweaked request is kept as
+    // a breadcrumb but intentionally disabled because NIP-46 bunkers cannot
+    // be asked whether they support it.
+    // return this.#handle.tweakedRequest(['withSharedKey', this.#peerPubkey, this.#info], method, params)
+    throw new Error('BUNKER_METHOD_UNSUPPORTED')
   }
 
   getPublicKey () { return this.#request('getPublicKey') }
@@ -327,7 +337,10 @@ class BunkerSharedKeyHandle {
     // return this.#request('getRelays')
     return fetchRelaysForPubkey(await this.getPublicKey())
   }
-  withSharedKey (peerPubkey, info = this.#info) { return new BunkerSharedKeyHandle(this.#handle, peerPubkey, info) }
+  withSharedKey (_peerPubkey, _info = this.#info) {
+    // return new BunkerSharedKeyHandle(this.#handle, peerPubkey, info)
+    throw new Error('BUNKER_METHOD_UNSUPPORTED')
+  }
 }
 Object.freeze(BunkerSharedKeyHandle.prototype)
 

@@ -70,7 +70,7 @@ function nsecOwnerPubkeys (_store = store) {
 
 function syncAccountIdentityKey (_store = store) {
   return filterVisibleAccounts(_store.list())
-    .filter(account => account.type === 'nsec' || account.type === 'bunker')
+    .filter(account => account.type === 'nsec')
     .map(account => `${account.type}:${account.pubkey}`)
     .join('|')
 }
@@ -162,7 +162,7 @@ export function createSyncController ({
     const nextOwnerPubkeyByChannelPubkey = new Map()
     const nextOwnerPubkeys = new Set()
     for (const account of filterVisibleAccounts(_store.list())) {
-      if (account.type !== 'nsec' && account.type !== 'bunker') continue
+      if (account.type !== 'nsec') continue
       nextOwnerPubkeys.add(account.pubkey)
       try {
         const accountSigner = _claimSigner(account)

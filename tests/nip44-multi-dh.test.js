@@ -2,6 +2,7 @@ import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { generateSecretKey, getEventHash, getPublicKey, verifyEvent } from 'nostr-tools'
 import { run } from '../docs/services/signer.js'
+import { BunkerHandle } from '../docs/services/bunker.js'
 import * as store from '../docs/services/accounts-store.js'
 import * as secrets from '../docs/services/secrets.js'
 import NsecSigner from '../docs/services/nsec-signer.js'
@@ -50,12 +51,49 @@ function addNsecAccount () {
   return { pubkey, secret }
 }
 
+function addBunkerAccount () {
+  const pubkey = 'b'.repeat(64)
+  store.add({ type: 'bunker', pubkey, name: '', picture: '' })
+  return { pubkey }
+}
+
 function addContentKey (ownerPubkey) {
   const secret = seckey()
   const pubkey = getPublicKey(hexToBytes(secret))
   secrets.setContentKeySecret(ownerPubkey, secret, nowSeconds())
   return { pubkey, secret }
 }
+
+test('signer.run rejects NIP-46 bunker extended signer methods', async () => {
+  const bunker = addBunkerAccount()
+  for (const method of [
+    'nip44EncryptMultiDH',
+    'nip44DecryptMultiDH',
+    'doubleSignEvent',
+    'withSharedKey',
+    'nip44_encrypt_multi_dh',
+    'nip44_decrypt_multi_dh',
+    'double_sign_event',
+    'with_shared_key'
+  ]) {
+    await assert.rejects(
+      () => run({ pubkey: bunker.pubkey, method, params: ['peer'] }),
+      /BUNKER_METHOD_UNSUPPORTED/
+    )
+  }
+})
+
+test('BunkerHandle rejects withSharedKey without custom remote RPC', async () => {
+  const handle = BunkerHandle.create({ bunkerUrl: `bunker://${'a'.repeat(64)}` })
+  try {
+    assert.throws(
+      () => handle.withSharedKey('peer', 'info'),
+      /BUNKER_METHOD_UNSUPPORTED/
+    )
+  } finally {
+    await handle.close()
+  }
+})
 
 test('nip44-multi-dh encrypt/decrypt uses advertised content keys', async () => {
   secrets.unlock(generateSecretKey(), null)

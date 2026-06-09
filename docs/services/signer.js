@@ -20,6 +20,13 @@ const SUPPORTED_METHODS = new Set([
   'withSharedKey'
 ])
 
+const BUNKER_UNSUPPORTED_METHODS = new Set([
+  'nip44EncryptMultiDH',
+  'nip44DecryptMultiDH',
+  'doubleSignEvent',
+  'withSharedKey'
+])
+
 const METHOD_ALIASES = {
   nip44_encrypt_multi_dh: 'nip44EncryptMultiDH',
   nip44_decrypt_multi_dh: 'nip44DecryptMultiDH',
@@ -96,6 +103,9 @@ export async function run ({ pubkey, method, params = [], internals = {} }) {
   if (!account) throw new Error('UNKNOWN_ACCOUNT')
   const normalized = normalizeMethod(method)
   if (!SUPPORTED_METHODS.has(normalized)) throw new Error('UNSUPPORTED_METHOD')
+  if (account.type === 'bunker' && BUNKER_UNSUPPORTED_METHODS.has(normalized)) {
+    throw new Error('BUNKER_METHOD_UNSUPPORTED')
+  }
   const signer = claimSigner(account)
   if (normalized === 'nip44EncryptMultiDH') {
     return nip44MultiDh.nip44EncryptMultiDH({ account, signer, params, internals })

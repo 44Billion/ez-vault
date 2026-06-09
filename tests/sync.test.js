@@ -142,7 +142,7 @@ async function flushMicrotasks (turns = 6) {
   for (let i = 0; i < turns; i++) await Promise.resolve()
 }
 
-test('sync orchestration watches nsec and bunker channels with identity-only sync options', async () => {
+test('sync orchestration watches nsec channels with identity-only sync options', async () => {
   const deviceSigner = signer('device')
   const accountSigners = {
     nsec1: signer('nsec1', { readRelays: ['wss://nsec-one.example', 'wss://nsec-two.example', 'wss://nsec-three.example'] }),
@@ -214,12 +214,11 @@ test('sync orchestration watches nsec and bunker channels with identity-only syn
   assert.equal(instances[0].initOptions.mode, 'seeder')
   assert.deepEqual(instances[0].initOptions.relays, [])
   assert.deepEqual(instances[0].initOptions.channels.map(channel => channel.pubkey), [
-    `nsec1:shared:nsec1:${SYNC_INFO}`,
-    `bunker1:shared:bunker1:${SYNC_INFO}`
+    `nsec1:shared:nsec1:${SYNC_INFO}`
   ])
   assert.deepEqual(accountSigners.nsec1.sharedCalls, [{ peerPubkey: 'nsec1', info: SYNC_INFO }])
-  assert.deepEqual(accountSigners.bunker1.sharedCalls, [{ peerPubkey: 'bunker1', info: SYNC_INFO }])
-  assert.deepEqual(instances[0].initOptions.channels.map(channel => channel.mode), ['seeder', 'seeder'])
+  assert.deepEqual(accountSigners.bunker1.sharedCalls, [])
+  assert.deepEqual(instances[0].initOptions.channels.map(channel => channel.mode), ['seeder'])
   assert.deepEqual(instances[0].initOptions.channels[0].relays, ['wss://nsec-one.example', 'wss://nsec-two.example', 'wss://nsec-three.example'])
   assert.deepEqual(instances[0].initOptions.channels[0].sendRelays, ['wss://nsec-one.example', 'wss://nsec-two.example'])
   assert.deepEqual(instances[0].initOptions.channels[0].seeders, ['trusted1'])
@@ -241,7 +240,6 @@ test('sync orchestration watches nsec and bunker channels with identity-only syn
   assert.equal(instances[0].updates.length, 1)
   assert.deepEqual(instances[0].updates[0].channels.map(channel => channel.pubkey), [
     `nsec1:shared:nsec1:${SYNC_INFO}`,
-    `bunker1:shared:bunker1:${SYNC_INFO}`,
     `nsec2:shared:nsec2:${SYNC_INFO}`
   ])
 
@@ -318,7 +316,7 @@ test('sync refreshes messenger channels when watched account read relays change'
   await controller.init()
 
   assert.equal(relayUpdates.subscriptions.length, 1)
-  assert.deepEqual(relayUpdates.subscriptions[0].pubkeys, ['nsec1', 'bunker1'])
+  assert.deepEqual(relayUpdates.subscriptions[0].pubkeys, ['nsec1'])
   assert.equal(relayUpdates.subscriptions[0].options.relayType, 'read')
   assert.deepEqual(instances[0].options.channels[0].relays, ['wss://old-one.example', 'wss://old-two.example'])
 
@@ -334,7 +332,6 @@ test('sync refreshes messenger channels when watched account read relays change'
   assert.equal(instances[0].updates.length, 1)
   assert.deepEqual(instances[0].updates[0].channels[0].relays, ['wss://new-one.example', 'wss://new-two.example', 'wss://new-three.example'])
   assert.deepEqual(instances[0].updates[0].channels[0].sendRelays, ['wss://new-one.example', 'wss://new-two.example'])
-  assert.deepEqual(instances[0].updates[0].channels[1].relays, ['wss://bunker-one.example', 'wss://bunker-two.example'])
 
   controller.close()
 
