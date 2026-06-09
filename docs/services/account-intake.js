@@ -3,6 +3,7 @@ import * as nostr from '../helpers/nostr/index.js'
 import * as secrets from './secrets.js'
 import * as passkey from './passkey.js'
 import * as trustedSigners from './trusted-signers.js'
+import { runSecretAccountMutation } from './account-mutations.js'
 import {
   fetchLatestProfile,
   fetchRelayListEvent,
@@ -216,18 +217,15 @@ export async function commitPrepared (prepared, options = {}) {
   // the trusted-signers list (vault-key encryption).
   if (needsSecretsPersist || peerSigner) await passkey.ensureRegistered()
 
-  // Snapshots are taken AFTER ensureRegistered so a first-time registration
-  // is the baseline we'd revert to (an empty pool) rather than a not-yet-
-  // unlocked state.
-  const priorBlob = needsSecretsPersist ? secrets.sealCurrentEntries() : null
-  const priorContentKeysBlob = needsSecretsPersist ? secrets.snapshotContentKeySecrets() : null
+  // Store/trusted-signer snapshots are taken AFTER ensureRegistered so a
+  // first-time registration is the baseline we'd revert to.
   const priorStoreRecords = new Map()
   for (const p of prepared) priorStoreRecords.set(p.pubkey, store.get(p.pubkey))
   const priorTrustedSignersBlob = peerSigner ? trustedSigners.snapshot() : null
 
   let committedCount = 0
   let trustedSignerWritten = false
-  try {
+  const applyPrepared = () => {
     for (const p of prepared) {
       const prior = priorStoreRecords.get(p.pubkey)
       if (prior) store.replace(p.pubkey, p.record)
@@ -251,8 +249,8 @@ export async function commitPrepared (prepared, options = {}) {
       trustedSigners.add(peerSigner)
       trustedSignerWritten = true
     }
-    if (needsSecretsPersist) await passkey.writeSecretsBlob()
-  } catch (err) {
+  }
+  const rollbackPrepared = () => {
     for (let i = 0; i < committedCount; i++) {
       const p = prepared[i]
       const prior = priorStoreRecords.get(p.pubkey)
@@ -261,20 +259,35 @@ export async function commitPrepared (prepared, options = {}) {
         else store.remove(p.pubkey)
       } catch { /* noop */ }
     }
-    if (priorBlob !== null) {
-      try { secrets.reload(priorBlob) } catch (e) {
-        console.warn('secrets rollback failed', e?.message ?? e)
-      }
-    }
-    if (needsSecretsPersist) {
-      try { secrets.restoreContentKeySecrets(priorContentKeysBlob) } catch (e) {
-        console.warn('content-key rollback failed', e?.message ?? e)
-      }
-    }
     if (trustedSignerWritten) {
       try { trustedSigners.restore(priorTrustedSignersBlob) } catch (e) {
         console.warn('trusted-signers rollback failed', e?.message ?? e)
       }
+    }
+  }
+
+  try {
+    if (needsSecretsPersist) {
+      await runSecretAccountMutation({
+        operation: 'commit-prepared',
+        beforeAccounts: [...priorStoreRecords.values()].filter(Boolean),
+        afterAccounts: prepared.map(p => p.record).filter(Boolean),
+        apply: applyPrepared,
+        finalize: () => {},
+        writeOptions: {}
+      })
+    } else {
+      applyPrepared()
+    }
+  } catch (err) {
+    if (needsSecretsPersist) {
+      if (trustedSignerWritten) {
+        try { trustedSigners.restore(priorTrustedSignersBlob) } catch (e) {
+          console.warn('trusted-signers rollback failed', e?.message ?? e)
+        }
+      }
+    } else {
+      rollbackPrepared()
     }
     throw err
   }

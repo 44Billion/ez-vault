@@ -1,6 +1,7 @@
 import { generateSecretKey, getPublicKey } from 'nostr-tools'
 import * as store from '../accounts-store.js'
 import * as secrets from '../secrets.js'
+import { filterVisibleAccounts } from '../account-mutations.js'
 import { upsertContentKeyEvent } from '../content-key/index.js'
 import { bytesToHex, hexToBytes } from '../../helpers/nostr/index.js'
 
@@ -153,7 +154,7 @@ export function resetDebugSources () {
 }
 
 export function getDebugSnapshot () {
-  const accounts = store.list()
+  const accounts = filterVisibleAccounts(store.list())
     .filter(account => account.type === 'nsec')
     .map(account => {
       const keys = secrets.isUnlocked() ? contentKeysForOwner(account.pubkey) : []
@@ -196,7 +197,7 @@ export async function announceContentKeys ({ messenger, ownerPubkey, channelPubk
 
 export async function announceAllContentKeys ({ messenger, receiverPubkeys, debug }) {
   const results = []
-  for (const account of store.list()) {
+  for (const account of filterVisibleAccounts(store.list())) {
     if (account.type !== 'nsec') continue
     const result = await announceContentKeys({ messenger, ownerPubkey: account.pubkey, receiverPubkeys, debug })
     if (result) results.push(result)

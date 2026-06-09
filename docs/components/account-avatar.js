@@ -6,6 +6,7 @@ import * as messengerLog from '../services/messenger-log/index.js'
 import * as secrets from '../services/secrets.js'
 import * as passkey from '../services/passkey.js'
 import * as signer from '../services/signer.js'
+import { runSecretAccountMutation } from '../services/account-mutations.js'
 import { seededAvatarDataUrl } from '../services/avatar.js'
 import { randomAccountName } from '../services/account-names.js'
 import * as toast from './shared/toast.js'
@@ -601,6 +602,7 @@ export class AccountAvatar extends HTMLElement {
 
   async #save (btn) {
     if (!this.#draft) return
+    const draft = this.#draft
     const icon = btn.querySelector('.avatar-btn-icon')
     btn.disabled = true
     icon?.classList.add('pulsate')
@@ -640,18 +642,32 @@ export class AccountAvatar extends HTMLElement {
       }
       // Convert the draft tile in place so it keeps its DOM position
       // (account-list's render reuses tiles by pubkey).
-      const newSeckey = this.#draft.seckey
-      this.#draft = null
-      this.#account = record
-      this.setAttribute('pubkey', record.pubkey)
-      this.#applyAccountType()
-      this.#updateCopyKeyButton()
-      this.#setMode(MODE.NORMAL)
-      store.add(record)
-      secrets.setNsecSecret(record.pubkey, newSeckey)
-      await passkey.writeSecretsBlob()
+      const newSeckey = draft.seckey
+      await runSecretAccountMutation({
+        operation: 'create-account',
+        beforeAccounts: [],
+        afterAccounts: [record],
+        apply: () => {
+          this.#draft = null
+          this.#account = record
+          this.setAttribute('pubkey', record.pubkey)
+          this.#applyAccountType()
+          this.#updateCopyKeyButton()
+          this.#setMode(MODE.NORMAL)
+          store.add(record)
+          secrets.setNsecSecret(record.pubkey, newSeckey)
+        }
+      })
     } catch (err) {
       console.error(err)
+      if (!this.#draft && draft) {
+        this.#draft = draft
+        this.#account = null
+        this.removeAttribute('pubkey')
+        this.#applyAccountType()
+        this.#setMode(MODE.CREATING)
+        this.#renderPicture(draft.picture)
+      }
       this.#flashError(btn)
     } finally {
       btn.disabled = false
@@ -661,6 +677,7 @@ export class AccountAvatar extends HTMLElement {
 
   async #deleteAccount (btn) {
     if (!this.#account) return
+    const account = this.#account
     const pubkey = this.#account.pubkey
     const wasNonReadOnly = this.#account.type !== 'npub'
     if (wasNonReadOnly) {
@@ -674,24 +691,19 @@ export class AccountAvatar extends HTMLElement {
       const icon = btn?.querySelector('.avatar-btn-icon')
       if (btn) btn.disabled = true
       icon?.classList.add('pulsate')
-      let priorBlob = null
-      let priorContentKeysBlob = null
       try {
-        priorBlob = secrets.sealCurrentEntries()
-        priorContentKeysBlob = secrets.snapshotContentKeySecrets()
-        secrets.deleteSecret(pubkey)
-        await passkey.writeSecretsBlob({ fallbackOnCancel: false })
+        await runSecretAccountMutation({
+          operation: 'delete-account',
+          beforeAccounts: [account],
+          afterAccounts: [],
+          apply: () => secrets.deleteSecret(pubkey),
+          finalize: () => {
+            messengerLog.removeForPubkey(pubkey)
+            store.applyRecords([pubkey], [])
+          },
+          writeOptions: { fallbackOnCancel: false }
+        })
       } catch (err) {
-        if (priorBlob !== null) {
-          try { secrets.reload(priorBlob) } catch (e) {
-            console.warn('failed to restore secrets after delete cancellation', e?.message ?? e)
-          }
-        }
-        if (priorContentKeysBlob !== null) {
-          try { secrets.restoreContentKeySecrets(priorContentKeysBlob) } catch (e) {
-            console.warn('failed to restore content keys after delete cancellation', e?.message ?? e)
-          }
-        }
         if (err?.name !== 'NotAllowedError') {
           console.warn('failed to update vault blob after delete', err?.message ?? err)
           toast.error('Delete failed')
@@ -702,6 +714,7 @@ export class AccountAvatar extends HTMLElement {
         if (btn) btn.disabled = false
         icon?.classList.remove('pulsate')
       }
+      return
     }
     messengerLog.removeForPubkey(pubkey)
     store.remove(pubkey)

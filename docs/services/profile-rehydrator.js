@@ -3,7 +3,7 @@ import { fetchLatestProfile, fetchRelayListEvent, parseRelayListEvent, freeRelay
 import { parseProfileEvent } from '../helpers/nostr/index.js'
 import * as status from './account-status.js'
 import * as secrets from './secrets.js'
-import * as passkey from './passkey.js'
+import { filterVisibleAccounts, runSecretAccountMutation } from './account-mutations.js'
 import { seededAvatarDataUrl } from './avatar.js'
 import { isOnline, onOnline } from '../helpers/network.js'
 
@@ -12,7 +12,7 @@ let retryTimer = null
 const RETRY_BACKOFF_MS = 60_000
 
 export async function rehydrateAll () {
-  const accounts = store.list()
+  const accounts = filterVisibleAccounts(store.list())
   if (!accounts.length) return
 
   const online = await isOnline()
@@ -63,21 +63,26 @@ async function rehydrateOne (account) {
         name: '',
         picture: undefined
       }
-      // Rewrite the store record first so transferBunkerSecret can read the
-      // new bunker URL out of it when it reconstructs the moved handle.
-      store.update(oldPubkey, reset)
-      account = { ...account, ...reset }
-      // The device signer key is account-independent so it stays put across
-      // drift; trusted-signers are stored at device level too, so no
-      // per-account cleanup is needed here.
-      secrets.transferBunkerSecret(oldPubkey, liveBunkerPubkey)
-      // Re-seal the secrets blob so the moved client key survives reload.
-      // This will trigger a passkey prompt — drift is rare enough that the
-      // confirmation is acceptable and reasonably informative.
+      const afterAccount = { ...account, ...reset }
       try {
-        await passkey.writeSecretsBlob()
+        await runSecretAccountMutation({
+          operation: 'bunker-drift',
+          beforeAccounts: [account],
+          afterAccounts: [afterAccount],
+          apply: () => {
+            // Rewrite the store record first so transferBunkerSecret can read
+            // the new bunker URL out of it when it reconstructs the moved
+            // handle.
+            store.update(oldPubkey, reset)
+            // The device signer key is account-independent so it stays put
+            // across drift; trusted-signers are stored at device level too.
+            secrets.transferBunkerSecret(oldPubkey, liveBunkerPubkey)
+          }
+        })
+        account = afterAccount
       } catch (err) {
         console.warn('failed to re-seal vault blob after bunker drift', err?.message ?? err)
+        return { updated: false }
       }
     }
   }

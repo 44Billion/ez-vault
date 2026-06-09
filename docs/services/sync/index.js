@@ -5,6 +5,7 @@ import * as store from '../accounts-store.js'
 import * as secrets from '../secrets.js'
 import * as trustedSigners from '../trusted-signers.js'
 import * as contentKeys from './content-keys.js'
+import { filterVisibleAccounts } from '../account-mutations.js'
 
 const ANNOUNCE_INTERVAL_MS = 4 * 60 * 60 * 1000
 const ANNOUNCE_DEBOUNCE_MS = 1000
@@ -62,13 +63,13 @@ function trustedMap (trusted) {
 }
 
 function nsecOwnerPubkeys (_store = store) {
-  return _store.list()
+  return filterVisibleAccounts(_store.list())
     .filter(account => account.type === 'nsec')
     .map(account => account.pubkey)
 }
 
 function syncAccountIdentityKey (_store = store) {
-  return _store.list()
+  return filterVisibleAccounts(_store.list())
     .filter(account => account.type === 'nsec' || account.type === 'bunker')
     .map(account => `${account.type}:${account.pubkey}`)
     .join('|')
@@ -160,7 +161,7 @@ export function createSyncController ({
     const nextChannelPubkeyByOwnerPubkey = new Map()
     const nextOwnerPubkeyByChannelPubkey = new Map()
     const nextOwnerPubkeys = new Set()
-    for (const account of _store.list()) {
+    for (const account of filterVisibleAccounts(_store.list())) {
       if (account.type !== 'nsec' && account.type !== 'bunker') continue
       nextOwnerPubkeys.add(account.pubkey)
       try {

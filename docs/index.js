@@ -9,6 +9,7 @@ import { cleanupTemporaryStorage } from './services/temporary-storage.js'
 import * as secrets from './services/secrets.js'
 import * as passkey from './services/passkey.js'
 import { rehydrateAll } from './services/profile-rehydrator.js'
+import { recoverPendingMutation } from './services/account-mutations.js'
 import { initMessenger } from './services/messenger.js'
 import * as sync from './services/sync/index.js'
 
@@ -66,13 +67,18 @@ syncBtn.addEventListener('click', () => {
 // for an npub-only state). The subscription below re-runs rehydrate the
 // moment the user unlocks so bunker connections come back without waiting
 // for the 60s backoff timer.
+async function recoverThenRehydrate () {
+  recoverPendingMutation()
+  await rehydrateAll()
+}
+
 let lastUnlocked = secrets.isUnlocked()
 secrets.subscribe(() => {
   const nowUnlocked = secrets.isUnlocked()
-  if (!lastUnlocked && nowUnlocked) rehydrateAll()
+  if (!lastUnlocked && nowUnlocked) recoverThenRehydrate()
   lastUnlocked = nowUnlocked
 })
-rehydrateAll()
+recoverThenRehydrate()
 initMessenger()
 sync.init()
 

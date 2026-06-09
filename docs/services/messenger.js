@@ -1,6 +1,7 @@
 import { ask, reply } from '../helpers/window-message.js'
 import { serializeError } from '../helpers/error.js'
 import * as store from './accounts-store.js'
+import { filterVisibleAccounts } from './account-mutations.js'
 import * as signer from './signer.js'
 import * as log from './messenger-log/index.js'
 
@@ -51,7 +52,7 @@ function syncTrustedParentOrigin () {
 // launcher can render the account list. Secret keys and bunker URLs stay in
 // the vault.
 function snapshotAccounts () {
-  return store.list().map(({ pubkey, name, picture, type }) => ({
+  return filterVisibleAccounts(store.list()).map(({ pubkey, name, picture, type }) => ({
     pubkey, name, picture, type
   }))
 }

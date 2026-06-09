@@ -591,6 +591,18 @@ export function getBunkerHandle (pubkey) {
   return bunkerHandlesByPubkey.get(pubkey) ?? null
 }
 
+export function listSecretRefs () {
+  const refs = []
+  for (const [pubkey, type] of accountTypeByPubkey) {
+    if (type === 'nsec' || type === 'bunker') refs.push({ type, pubkey })
+  }
+  return refs
+}
+
+export function hasSecretRef ({ type, pubkey } = {}) {
+  return Boolean(pubkey && (type === 'nsec' || type === 'bunker') && accountTypeByPubkey.get(pubkey) === type)
+}
+
 // Re-encrypt the current secret set into the largeBlob ciphertext. Used by
 // passkey.writeSecretsBlob — the sealed bytes are all the passkey layer
 // ever sees, plaintext stays inside this module.

@@ -1,6 +1,7 @@
 import * as store from '../services/accounts-store.js'
 import * as secrets from '../services/secrets.js'
 import * as passkey from '../services/passkey.js'
+import { filterVisibleAccounts, pendingMutationNeedsUnlock, subscribePendingMutations } from '../services/account-mutations.js'
 import * as toast from './shared/toast.js'
 import { injectComponentStyles } from '../helpers/dom.js'
 
@@ -88,12 +89,14 @@ const STYLES = /* css */`
 // UI fully reachable.
 function shouldShow () {
   if (secrets.isUnlocked()) return false
-  return store.list().some(a => a.type !== 'npub')
+  if (pendingMutationNeedsUnlock()) return true
+  return filterVisibleAccounts(store.list()).some(a => a.type !== 'npub')
 }
 
 export class LockOverlay extends HTMLElement {
   #unsubStore = null
   #unsubSecrets = null
+  #unsubPending = null
   #unlockBtn = null
   #unlockIcon = null
 
@@ -115,6 +118,7 @@ export class LockOverlay extends HTMLElement {
     this.#applyVisibility()
     this.#unsubStore = store.subscribe(() => this.#applyVisibility())
     this.#unsubSecrets = secrets.subscribe(() => this.#applyVisibility())
+    this.#unsubPending = subscribePendingMutations(() => this.#applyVisibility())
   }
 
   disconnectedCallback () {
@@ -122,6 +126,8 @@ export class LockOverlay extends HTMLElement {
     this.#unsubStore = null
     this.#unsubSecrets?.()
     this.#unsubSecrets = null
+    this.#unsubPending?.()
+    this.#unsubPending = null
     this.#unlockBtn?.removeEventListener('click', this.#onUnlock)
   }
 

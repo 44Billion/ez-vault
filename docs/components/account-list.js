@@ -1,4 +1,5 @@
 import * as store from '../services/accounts-store.js'
+import { filterVisibleAccounts, subscribePendingMutations } from '../services/account-mutations.js'
 import { injectComponentStyles } from '../helpers/dom.js'
 import './account-avatar.js'
 
@@ -19,6 +20,7 @@ const STYLES = /* css */`
 
 export class AccountList extends HTMLElement {
   #unsub
+  #unsubPending
   #observer = null
   #selected = new Set()
   #wasCreating = false
@@ -34,6 +36,7 @@ export class AccountList extends HTMLElement {
     injectComponentStyles('account-list', STYLES)
     this.#render()
     this.#unsub = store.subscribe(() => this.#render())
+    this.#unsubPending = subscribePendingMutations(() => this.#render())
     this.addEventListener('click', this.#onClick)
     // Cancel-create removes the tile; save flips its `mode` to 'normal'.
     // Watching both events lets a single sync function cover both exits.
@@ -48,6 +51,8 @@ export class AccountList extends HTMLElement {
 
   disconnectedCallback () {
     this.#unsub?.()
+    this.#unsubPending?.()
+    this.#unsubPending = null
     this.removeEventListener('click', this.#onClick)
     this.#observer?.disconnect()
     this.#observer = null
@@ -128,7 +133,7 @@ export class AccountList extends HTMLElement {
   }
 
   #render () {
-    const accounts = store.list()
+    const accounts = filterVisibleAccounts(store.list())
     const accountPubkeys = new Set(accounts.map(a => a.pubkey))
     const existing = new Map()
     for (const tile of this.querySelectorAll('account-avatar[pubkey]:not([mode="creating"])')) {
