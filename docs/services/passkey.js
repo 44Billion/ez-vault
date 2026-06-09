@@ -314,9 +314,10 @@ export async function unlock () {
 // Re-seal the current secrets snapshot and push it into the passkey
 // largeBlob. The plaintext never enters this module — `secrets` returns
 // already-encrypted bytes via `sealCurrentEntries()`. Falls back to
-// localStorage if the authenticator declines the write (or the user
-// cancels the second prompt).
-export async function writeSecretsBlob () {
+// localStorage if the authenticator declines the write. Most callers also
+// allow fallback when the user cancels the secondary prompt; destructive
+// flows can opt out so a cancelled prompt aborts the mutation instead.
+export async function writeSecretsBlob ({ fallbackOnCancel = true } = {}) {
   if (!secrets.isUnlocked()) throw new Error('VAULT_LOCKED')
   const credentialId = localStorage.getItem(CRED_ID_KEY)
   if (!credentialId) throw new Error('PASSKEY_NOT_REGISTERED')
@@ -346,7 +347,7 @@ export async function writeSecretsBlob () {
   } catch (err) {
     // NotAllowedError can mean the user cancelled the secondary prompt.
     // Treat as "largeBlob write didn't happen" and fall back below.
-    if (err.name !== 'NotAllowedError') throw err
+    if (err.name !== 'NotAllowedError' || !fallbackOnCancel) throw err
   }
 
   const ext = extractExtensions(credential)

@@ -23,7 +23,7 @@ afterEach(() => {
   globalThis.localStorage.clear()
 })
 
-function installCredentialMocks ({ prfBytes, onCreate }) {
+function installCredentialMocks ({ prfBytes, onCreate, onGet }) {
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
     value: {
@@ -43,6 +43,15 @@ function installCredentialMocks ({ prfBytes, onCreate }) {
             authenticatorAttachment: 'platform',
             getClientExtensionResults: () => ({
               prf: { results: { first: prfBytes } }
+            })
+          }
+        },
+        get: async options => {
+          if (onGet) return onGet(options)
+          return {
+            getClientExtensionResults: () => ({
+              prf: { results: { first: prfBytes } },
+              largeBlob: { written: true }
             })
           }
         }
@@ -73,4 +82,39 @@ test('empty vault can register passkey and derive a device signer pubkey', async
   assert.equal(createCalls, 1)
   assert.equal(secrets.isUnlocked(), true)
   assert.match(pubkey, /^[0-9a-f]{64}$/)
+})
+
+test('writeSecretsBlob falls back to localStorage when secondary prompt is cancelled by default', async () => {
+  const prfBytes = new Uint8Array(32)
+  prfBytes[0] = 2
+  const cancelled = Object.assign(new Error('User cancelled'), { name: 'NotAllowedError' })
+
+  installCredentialMocks({
+    prfBytes,
+    onGet: async () => { throw cancelled }
+  })
+
+  await passkey.ensureRegistered()
+  await passkey.writeSecretsBlob()
+
+  assert.ok(globalThis.localStorage.getItem('ez-vault:passkey:blob'))
+})
+
+test('writeSecretsBlob can reject cancellation for destructive flows', async () => {
+  const prfBytes = new Uint8Array(32)
+  prfBytes[0] = 3
+  const cancelled = Object.assign(new Error('User cancelled'), { name: 'NotAllowedError' })
+
+  installCredentialMocks({
+    prfBytes,
+    onGet: async () => { throw cancelled }
+  })
+
+  await passkey.ensureRegistered()
+  await assert.rejects(
+    passkey.writeSecretsBlob({ fallbackOnCancel: false }),
+    /User cancelled/
+  )
+
+  assert.equal(globalThis.localStorage.getItem('ez-vault:passkey:blob'), null)
 })

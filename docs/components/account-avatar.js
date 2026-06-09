@@ -674,14 +674,30 @@ export class AccountAvatar extends HTMLElement {
       const icon = btn?.querySelector('.avatar-btn-icon')
       if (btn) btn.disabled = true
       icon?.classList.add('pulsate')
-      secrets.deleteSecret(pubkey)
+      let priorBlob = null
+      let priorContentKeysBlob = null
       try {
-        await passkey.writeSecretsBlob()
+        priorBlob = secrets.sealCurrentEntries()
+        priorContentKeysBlob = secrets.snapshotContentKeySecrets()
+        secrets.deleteSecret(pubkey)
+        await passkey.writeSecretsBlob({ fallbackOnCancel: false })
       } catch (err) {
-        // The in-memory secret is already gone; failing to re-seal the
-        // largeBlob is recoverable on the next mutation since the seal
-        // path always writes the full snapshot.
-        console.warn('failed to update vault blob after delete', err?.message ?? err)
+        if (priorBlob !== null) {
+          try { secrets.reload(priorBlob) } catch (e) {
+            console.warn('failed to restore secrets after delete cancellation', e?.message ?? e)
+          }
+        }
+        if (priorContentKeysBlob !== null) {
+          try { secrets.restoreContentKeySecrets(priorContentKeysBlob) } catch (e) {
+            console.warn('failed to restore content keys after delete cancellation', e?.message ?? e)
+          }
+        }
+        if (err?.name !== 'NotAllowedError') {
+          console.warn('failed to update vault blob after delete', err?.message ?? err)
+          toast.error('Delete failed')
+        }
+        this.#flashError(btn)
+        return
       } finally {
         if (btn) btn.disabled = false
         icon?.classList.remove('pulsate')
