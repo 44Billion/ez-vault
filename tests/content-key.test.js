@@ -1,15 +1,34 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { generateSecretKey, getEventHash, verifyEvent } from 'nostr-tools'
+import { generateSecretKey, getEventHash, getPublicKey, verifyEvent } from 'nostr-tools'
 import NsecSigner from '../docs/services/nsec-signer.js'
-import { doubleSignEvent, upsertContentKeyEvent } from '../docs/services/content-key/index.js'
-import { makeContentKeyEvent, parseContentKeyEvent, verifyContentKeyProof, verifyIykcProof, CONTENT_KEY_KIND } from '../docs/services/content-key/event.js'
+import { doubleSignEvent, refreshStoredContentKeyEvents, refreshStoredContentKeyEventsIfDue, startContentKeyEventRefresh, upsertContentKeyEvent } from '../docs/services/content-key/index.js'
+import { makeContentKeyEvent, makeContentKeyEventForPubkey, parseContentKeyEvent, verifyContentKeyProof, verifyIykcProof, CONTENT_KEY_KIND } from '../docs/services/content-key/event.js'
 import { cacheRelayListEvent, clearQueryCaches, getIykcProofs, getRelaysByPubkey, pickRelaysForPubkeys, subscribeRelayListUpdates } from '../docs/helpers/nostr/queries.js'
-import { bytesToHex } from '../docs/helpers/nostr/index.js'
+import * as store from '../docs/services/accounts-store.js'
+import * as secrets from '../docs/services/secrets.js'
+import { freeRelays, seedRelays } from '../docs/services/relays.js'
+import { bytesToHex, hexToBytes } from '../docs/helpers/nostr/index.js'
+
+if (!globalThis.localStorage) {
+  const data = new Map()
+  globalThis.localStorage = {
+    clear: () => data.clear(),
+    getItem: key => data.has(String(key)) ? data.get(String(key)) : null,
+    removeItem: key => { data.delete(String(key)) },
+    setItem: (key, value) => { data.set(String(key), String(value)) }
+  }
+}
+
+if (!globalThis.crypto) globalThis.crypto = crypto
+if (!globalThis.btoa) globalThis.btoa = s => Buffer.from(s, 'binary').toString('base64')
+if (!globalThis.atob) globalThis.atob = s => Buffer.from(s, 'base64').toString('binary')
 
 afterEach(() => {
+  secrets.lock()
   clearQueryCaches()
   NsecSigner.releaseAll()
+  globalThis.localStorage.clear()
 })
 
 function signer () {
@@ -18,6 +37,29 @@ function signer () {
 
 function pubkeyFixture (index) {
   return index.toString(16).padStart(64, '0')
+}
+
+function seckey () {
+  return bytesToHex(generateSecretKey())
+}
+
+function pubkeyFromSecret (secret) {
+  return getPublicKey(hexToBytes(secret))
+}
+
+function addNsecAccount () {
+  const secret = seckey()
+  const pubkey = pubkeyFromSecret(secret)
+  store.add({ type: 'nsec', pubkey, name: '', picture: '' })
+  secrets.setNsecSecret(pubkey, secret)
+  return { pubkey, secret }
+}
+
+function addContentKey (ownerPubkey, createdAt = 10) {
+  const secret = seckey()
+  const pubkey = pubkeyFromSecret(secret)
+  secrets.setContentKeySecret(ownerPubkey, secret, createdAt)
+  return { pubkey, secret, createdAt }
 }
 
 function relayListEvent (pubkey, createdAt, tags) {
@@ -148,6 +190,188 @@ test('doubleSignEvent signs event with per-event imkc proof', async () => {
   assert.equal(event.tags[1][1], 'old')
   assert.equal(verifyEvent(proofEvent), true)
   assert.equal(verifyEvent(signed), true)
+})
+
+test('refreshStoredContentKeyEvents republishes newest remote key only where absent or older with another pubkey', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const account = addNsecAccount()
+  addContentKey(account.pubkey, 50)
+  const userSigner = secrets.getNsecSigner(account.pubkey)
+  const remoteContentPubkey = pubkeyFixture(11)
+  const staleContentPubkey = pubkeyFixture(12)
+  const newest = await makeContentKeyEventForPubkey({ userSigner, contentPubkey: remoteContentPubkey, createdAt: 100 })
+  const olderSame = await makeContentKeyEventForPubkey({ userSigner, contentPubkey: remoteContentPubkey, createdAt: 80 })
+  const olderOther = await makeContentKeyEventForPubkey({ userSigner, contentPubkey: staleContentPubkey, createdAt: 70 })
+  const relayList = await userSigner.signEvent({
+    kind: 10002,
+    created_at: 6,
+    tags: [
+      ['r', 'wss://newest.example', 'write'],
+      ['r', 'wss://absent.example', 'write'],
+      ['r', 'wss://same.example', 'write'],
+      ['r', 'wss://older.example', 'write']
+    ],
+    content: ''
+  })
+  const published = []
+
+  const result = await refreshStoredContentKeyEvents({
+    _isOnline: async () => true,
+    _nowSeconds: () => 200,
+    _fetchRelayListEvent: async () => relayList,
+    _fetchEvents: async (_filter, relays) => {
+      const relay = relays[0]
+      if (relay === 'wss://newest.example') return [newest]
+      if (relay === 'wss://same.example') return [olderSame]
+      if (relay === 'wss://older.example') return [olderOther]
+      return []
+    },
+    _publish: async (event, relays) => {
+      published.push({ event, relays })
+      return { success: true }
+    }
+  })
+
+  assert.equal(result.checked, 1)
+  assert.equal(result.published, 2)
+  assert.equal(published.length, 1)
+  assert.deepEqual(published[0].relays, ['wss://absent.example', 'wss://older.example'])
+  assert.equal(published[0].event.created_at, 200)
+  assert.equal(parseContentKeyEvent(published[0].event).iykcPubkey, remoteContentPubkey)
+})
+
+test('refreshStoredContentKeyEvents publishes local key only when no valid event is found', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const account = addNsecAccount()
+  const localContentKey = addContentKey(account.pubkey, 50)
+  const userSigner = secrets.getNsecSigner(account.pubkey)
+  const relayList = await userSigner.signEvent({
+    kind: 10002,
+    created_at: 6,
+    tags: [['r', 'wss://one.example', 'write'], ['r', 'wss://two.example', 'write']],
+    content: ''
+  })
+  const published = []
+
+  await refreshStoredContentKeyEvents({
+    _isOnline: async () => true,
+    _nowSeconds: () => 200,
+    _fetchRelayListEvent: async () => relayList,
+    _fetchEvents: async () => [],
+    _publish: async (event, relays) => {
+      published.push({ event, relays })
+      return { success: true }
+    }
+  })
+
+  assert.equal(published.length, 1)
+  assert.deepEqual(published[0].relays, ['wss://one.example', 'wss://two.example'])
+  assert.equal(parseContentKeyEvent(published[0].event).iykcPubkey, localContentKey.pubkey)
+})
+
+test('refreshStoredContentKeyEvents skips offline instead of treating missing relay results as absence', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const account = addNsecAccount()
+  addContentKey(account.pubkey, 50)
+  let fetched = false
+  let published = false
+
+  const result = await refreshStoredContentKeyEvents({
+    _isOnline: async () => false,
+    _fetchRelayListEvent: async () => { fetched = true; return null },
+    _fetchEvents: async () => { fetched = true; return [] },
+    _publish: async () => { published = true }
+  })
+
+  assert.deepEqual(result, { skipped: 'offline', accounts: [account.pubkey] })
+  assert.equal(fetched, false)
+  assert.equal(published, false)
+})
+
+test('refreshStoredContentKeyEvents publishes a fallback relay list when none exists', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const account = addNsecAccount()
+  const localContentKey = addContentKey(account.pubkey, 50)
+  const published = []
+
+  await refreshStoredContentKeyEvents({
+    _isOnline: async () => true,
+    _nowSeconds: () => 200,
+    _fetchRelayListEvent: async () => null,
+    _fetchEvents: async () => [],
+    _publish: async (event, relays) => {
+      published.push({ event, relays })
+      return { success: true }
+    }
+  })
+
+  assert.equal(published.length, 2)
+  assert.equal(published[0].event.kind, 10002)
+  assert.deepEqual(published[0].relays, seedRelays)
+  assert.deepEqual(published[0].event.tags, freeRelays.slice(0, 2).map(relay => ['r', relay]))
+  assert.equal(parseContentKeyEvent(published[1].event).iykcPubkey, localContentKey.pubkey)
+  assert.deepEqual(published[1].relays, freeRelays.slice(0, 2))
+})
+
+test('refreshStoredContentKeyEvents adds fallback write relays without duplicate read tags', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const account = addNsecAccount()
+  addContentKey(account.pubkey, 50)
+  const userSigner = secrets.getNsecSigner(account.pubkey)
+  const relayList = await userSigner.signEvent({
+    kind: 10002,
+    created_at: 6,
+    tags: [
+      ['r', freeRelays[0], 'read'],
+      ['r', 'wss://read.example', 'read']
+    ],
+    content: ''
+  })
+  const published = []
+
+  await refreshStoredContentKeyEvents({
+    _isOnline: async () => true,
+    _nowSeconds: () => 200,
+    _fetchRelayListEvent: async () => relayList,
+    _fetchEvents: async () => [],
+    _publish: async (event, relays) => {
+      published.push({ event, relays })
+      return { success: true }
+    }
+  })
+
+  assert.equal(published[0].event.kind, 10002)
+  assert.deepEqual(published[0].event.tags, [
+    ['r', freeRelays[0]],
+    ['r', freeRelays[1]],
+    ['r', 'wss://read.example', 'read']
+  ])
+})
+
+test('refreshStoredContentKeyEventsIfDue persists a four-hour cadence across visits', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const first = await refreshStoredContentKeyEventsIfDue({ _nowMs: () => 10_000 })
+  const second = await refreshStoredContentKeyEventsIfDue({ _nowMs: () => 10_000 + 60_000 })
+
+  assert.deepEqual(first, { checked: 0, accounts: [] })
+  assert.equal(second.skipped, 'fresh')
+})
+
+test('startContentKeyEventRefresh does not arm its clock while locked', () => {
+  const timers = []
+  const stop = startContentKeyEventRefresh({
+    _setTimeout: (fn, ms) => {
+      timers.push({ fn, ms })
+      return { unref () {} }
+    },
+    _clearTimeout: () => {}
+  })
+
+  try {
+    assert.deepEqual(timers, [])
+  } finally {
+    stop()
+  }
 })
 
 test('getIykcProofs fetches content key events from grouped write relays', async () => {

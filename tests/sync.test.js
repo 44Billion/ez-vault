@@ -486,6 +486,75 @@ test('sync announces content-key changes immediately and restarts the four-hour 
   controller.close()
 })
 
+test('sync close cancels init work that resolves later', async () => {
+  let resolveInit
+  const timers = []
+  const intervals = []
+  const closed = []
+
+  class FakeMessenger {
+    async init (options) {
+      this.options = options
+      return new Promise(resolve => {
+        resolveInit = () => resolve(this)
+      })
+    }
+
+    nextMessage () { return null }
+
+    close () { closed.push(this) }
+  }
+
+  const controller = createSyncController({
+    MessengerClass: FakeMessenger,
+    _store: {
+      list: () => [{ type: 'nsec', pubkey: 'nsec1' }],
+      subscribe: () => () => {}
+    },
+    _secrets: {
+      isUnlocked: () => true,
+      getDeviceSigner: async () => signer('device'),
+      subscribe: () => () => {},
+      subscribeContentKeys: () => () => {}
+    },
+    _trustedSigners: {
+      list: () => [{ pubkey: 'trusted1', platform: 'Laptop' }],
+      subscribe: () => () => {}
+    },
+    _contentKeys: {
+      resetDebugSources: () => {},
+      handleMessage: async () => false,
+      announceContentKeys: async () => {}
+    },
+    _claimSigner: () => signer('nsec1'),
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: () => {},
+    _setInterval: (fn, ms) => {
+      const interval = { fn, ms }
+      intervals.push(interval)
+      return interval
+    },
+    _clearInterval: () => {}
+  })
+
+  const initPromise = controller.init()
+  await flushMicrotasks()
+  assert.equal(typeof resolveInit, 'function')
+
+  controller.close()
+  resolveInit()
+  await initPromise
+
+  assert.equal(controller.messenger, null)
+  assert.equal(closed.length, 1)
+  assert.equal(timers.length, 0)
+  assert.equal(intervals.length, 0)
+})
+
 test('setContentKeySecret causes one immediate announce through the sync subscription', async () => {
   secrets.unlock(generateSecretKey(), null)
   const owner = addNsecAccount()
@@ -537,6 +606,7 @@ test('setContentKeySecret causes one immediate announce through the sync subscri
       subscribe: () => () => {}
     },
     _claimSigner: () => signer(owner.pubkey),
+    _subscribeRelayListUpdates: () => () => {},
     _setTimeout: (fn, ms) => {
       const timer = { fn, ms }
       timers.push(timer)
@@ -839,6 +909,7 @@ test('content-key replies can import a stale key when it is the only key', async
 test('dev content-key generation persists, publishes, updates debug source, and keeps key on publish failure', async () => {
   secrets.unlock(generateSecretKey(), null)
   const owner = addNsecAccount()
+  // owner.pubkey = ''
   const scheduled = []
   const notified = []
   const calls = []

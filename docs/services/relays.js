@@ -130,7 +130,7 @@ export function fetchEvents (filter, relays, {
       },
       oneose () {
         if (settled || graceTimer) return
-        graceTimer = setTimeout(finish, graceMs)
+        graceTimer = maybeUnref(setTimeout(finish, graceMs))
       },
       onclose () {
         // A single relay closing is not enough to finish — only give up when
@@ -138,7 +138,7 @@ export function fetchEvents (filter, relays, {
       }
     })
 
-    hardTimer = setTimeout(finish, hardTimeoutMs)
+    hardTimer = maybeUnref(setTimeout(finish, hardTimeoutMs))
   })
 }
 

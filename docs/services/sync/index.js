@@ -119,6 +119,7 @@ export function createSyncController ({
   let lastStoreIdentityKey = ''
   let stopRelayListWatcher = null
   let relayListWatcherKey = ''
+  let lifecycleId = 0
   const pendingAnnounceOwners = new Set()
   const unsubscribers = []
   const channelPubkeyByOwnerPubkey = new Map()
@@ -132,6 +133,10 @@ export function createSyncController ({
     } catch (err) {
       onError(err)
     }
+  }
+
+  function isCurrentLifecycle (id) {
+    return initialized && id === lifecycleId
   }
 
   async function accountReadRelays (ownerPubkey, signer) {
@@ -216,6 +221,7 @@ export function createSyncController ({
     }
     if (stopRelayListWatcher && relayListWatcherKey === key) return
     clearRelayListWatcher()
+    if (typeof window === 'undefined' && _subscribeRelayListUpdates === subscribeRelayListUpdates) return
     relayListWatcherKey = key
     try {
       stopRelayListWatcher = _subscribeRelayListUpdates(pubkeys, {
@@ -241,24 +247,27 @@ export function createSyncController ({
   }
 
   function scheduleDrain () {
+    if (!initialized) return
+    const id = lifecycleId
     drainQueued = true
     if (draining || drainScheduled) return
     drainScheduled = true
-    Promise.resolve().then(drainMessages)
+    Promise.resolve().then(() => drainMessages(id))
   }
 
-  async function drainMessages () {
+  async function drainMessages (id = lifecycleId) {
     drainScheduled = false
+    if (!isCurrentLifecycle(id)) return
     if (draining) return
     draining = true
     try {
-      while (drainQueued) {
+      while (drainQueued && isCurrentLifecycle(id)) {
         drainQueued = false
         let handled = 0
         emitDebug('drain', { phase: 'start' })
         let reachedEmptyQueue = false
         // eslint-disable-next-line no-unmodified-loop-condition
-        while (messenger && _secrets.isUnlocked()) {
+        while (isCurrentLifecycle(id) && messenger && _secrets.isUnlocked()) {
           const message = messenger.nextMessage?.()
           if (!message) {
             reachedEmptyQueue = true
@@ -284,7 +293,8 @@ export function createSyncController ({
       onError(err)
     } finally {
       draining = false
-      if (drainQueued) scheduleDrain()
+      if (isCurrentLifecycle(id) && drainQueued) scheduleDrain()
+      else if (!isCurrentLifecycle(id) && initialized && drainQueued) scheduleDrain()
     }
   }
 
@@ -293,12 +303,16 @@ export function createSyncController ({
     if (announceInterval) _clearInterval(announceInterval)
     announceTimer = null
     announceInterval = null
+    pendingResetInterval = false
     pendingAnnounceOwners.clear()
   }
 
   function ensureAnnouncementInterval () {
     if (announceInterval) return
-    announceInterval = _setInterval(() => scheduleAnnounceAll(), ANNOUNCE_INTERVAL_MS)
+    const id = lifecycleId
+    announceInterval = _setInterval(() => {
+      if (isCurrentLifecycle(id)) scheduleAnnounceAll()
+    }, ANNOUNCE_INTERVAL_MS)
     announceInterval?.unref?.()
   }
 
@@ -308,7 +322,8 @@ export function createSyncController ({
     if (messenger && _secrets.isUnlocked()) ensureAnnouncementInterval()
   }
 
-  async function flushAnnouncements () {
+  async function flushAnnouncements (id = lifecycleId) {
+    if (!isCurrentLifecycle(id)) return
     announceTimer = null
     const resetInterval = pendingResetInterval
     pendingResetInterval = false
@@ -328,6 +343,7 @@ export function createSyncController ({
     pendingAnnounceOwners.clear()
 
     for (const ownerPubkey of owners) {
+      if (!isCurrentLifecycle(id)) return
       try {
         await _contentKeys.announceContentKeys({
           messenger,
@@ -340,16 +356,18 @@ export function createSyncController ({
         onError(err)
       }
     }
-    if (resetInterval) resetAnnouncementInterval()
+    if (resetInterval && isCurrentLifecycle(id)) resetAnnouncementInterval()
   }
 
   function scheduleAnnounce (ownerPubkey, { immediate = false, resetInterval = false } = {}) {
+    if (!initialized) return
+    const id = lifecycleId
     if (ownerPubkey) pendingAnnounceOwners.add(ownerPubkey)
     else pendingAnnounceOwners.add(ANNOUNCE_ALL)
     pendingResetInterval = pendingResetInterval || resetInterval
     if (announceTimer && !immediate) return
     if (announceTimer) _clearTimeout(announceTimer)
-    announceTimer = _setTimeout(flushAnnouncements, immediate ? 0 : ANNOUNCE_DEBOUNCE_MS)
+    announceTimer = _setTimeout(() => flushAnnouncements(id), immediate ? 0 : ANNOUNCE_DEBOUNCE_MS)
     announceTimer?.unref?.()
   }
 
@@ -366,6 +384,8 @@ export function createSyncController ({
   function stop () {
     messenger?.close?.()
     messenger = null
+    drainQueued = false
+    drainScheduled = false
     clearRelayListWatcher()
     channelPubkeyByOwnerPubkey.clear()
     ownerPubkeyByChannelPubkey.clear()
@@ -374,7 +394,8 @@ export function createSyncController ({
     _contentKeys.resetDebugSources?.()
   }
 
-  async function refreshNow () {
+  async function refreshNow (id = lifecycleId) {
+    if (!isCurrentLifecycle(id)) return null
     if (!_secrets.isUnlocked()) {
       stop()
       return null
@@ -382,12 +403,14 @@ export function createSyncController ({
 
     trustedByPubkey = trustedMap(_trustedSigners.list())
     const channels = await buildChannels()
+    if (!isCurrentLifecycle(id)) return null
     if (!channels.length) {
       stop()
       return null
     }
 
     const userSigner = await _secrets.getDeviceSigner()
+    if (!isCurrentLifecycle(id)) return null
     const options = {
       userSigner,
       contentKeySigner: null,
@@ -397,10 +420,20 @@ export function createSyncController ({
     }
 
     if (!messenger) {
-      messenger = new MessengerClass({ onMessageQueued: scheduleDrain, onError, useContentKeys: false, onDebug: debug })
-      await messenger.init(options)
+      const nextMessenger = new MessengerClass({ onMessageQueued: scheduleDrain, onError, useContentKeys: false, onDebug: debug })
+      messenger = nextMessenger
+      await nextMessenger.init(options)
+      if (!isCurrentLifecycle(id)) {
+        if (messenger === nextMessenger) {
+          nextMessenger.close?.()
+          messenger = null
+        }
+        return null
+      }
     } else {
-      await messenger.update(options)
+      const currentMessenger = messenger
+      await currentMessenger.update(options)
+      if (!isCurrentLifecycle(id) || messenger !== currentMessenger) return null
     }
 
     ensureRelayListWatcher()
@@ -412,13 +445,17 @@ export function createSyncController ({
 
   function refresh () {
     if (!refreshPromise) {
-      refreshPromise = Promise.resolve()
-        .then(refreshNow)
+      const id = lifecycleId
+      const promise = Promise.resolve()
+        .then(() => refreshNow(id))
         .catch(err => {
           onError(err)
           return null
         })
-        .finally(() => { refreshPromise = null })
+        .finally(() => {
+          if (refreshPromise === promise) refreshPromise = null
+        })
+      refreshPromise = promise
     }
     return refreshPromise
   }
@@ -433,6 +470,7 @@ export function createSyncController ({
   function init () {
     if (initialized) return refresh()
     initialized = true
+    lifecycleId += 1
     lastStoreIdentityKey = syncAccountIdentityKey(_store)
     unsubscribers.push(_secrets.subscribe(refresh))
     if (_secrets.subscribeContentKeys) unsubscribers.push(_secrets.subscribeContentKeys(onContentKeyChange))
@@ -442,8 +480,10 @@ export function createSyncController ({
   }
 
   function close () {
+    lifecycleId += 1
     for (const unsubscribe of unsubscribers.splice(0)) unsubscribe()
     initialized = false
+    refreshPromise = null
     stop()
   }
 

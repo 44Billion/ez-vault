@@ -241,6 +241,9 @@ test('sync-host keeps qr image loaded while close animation runs', async () => {
 })
 
 test('sync-host returns to picker and shows toast when passkey prompt is cancelled', async () => {
+  const originalError = console.error
+  const errors = []
+  console.error = (...args) => errors.push(args)
   setNavigator({
     userAgent: 'Node Test',
     credentials: {
@@ -254,14 +257,19 @@ test('sync-host returns to picker and shows toast when passkey prompt is cancell
   const host = mountHost()
   host.onClosed = () => { closed += 1 }
 
-  host.open()
-  await flushMicrotasks()
+  try {
+    host.open()
+    await flushMicrotasks()
 
-  assert.equal(host.hasAttribute('open'), false)
-  assert.equal(closed, 1)
-  assert.deepEqual(toastMessages.at(-1), {
-    type: 'error',
-    message: 'Pairing cancelled',
-    longMessage: 'The passkey prompt was cancelled.'
-  })
+    assert.equal(host.hasAttribute('open'), false)
+    assert.equal(closed, 1)
+    assert.deepEqual(toastMessages.at(-1), {
+      type: 'error',
+      message: 'Pairing cancelled',
+      longMessage: 'The passkey prompt was cancelled.'
+    })
+    assert.deepEqual(errors, [])
+  } finally {
+    console.error = originalError
+  }
 })

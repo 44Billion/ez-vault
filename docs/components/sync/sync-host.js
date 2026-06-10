@@ -338,7 +338,9 @@ export class SyncHost extends HTMLElement {
       await this.#startSession()
     } catch (err) {
       if (this.#openToken !== token) return
-      console.error('host pairing preparation failed', err?.message ?? err)
+      if (err?.name !== 'NotAllowedError') {
+        console.error('host pairing preparation failed', err?.message ?? err)
+      }
       const { message, longMessage } = passkeyPrepareErrorToToast(err)
       this.close()
       toast.error(message, longMessage)

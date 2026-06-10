@@ -148,6 +148,7 @@ export default class NsecSigner {
         .forEach(v => delete this.#conversationKeys[v])
       this.#scheduleConversationKeyGc()
     }, 60000)
+    this.#conversationKeyGcTimeout?.unref?.()
   }
 
   nip44Encrypt (peerPubkey, plaintext) {

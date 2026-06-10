@@ -12,6 +12,7 @@ import { rehydrateAll } from './services/profile-rehydrator.js'
 import { recoverPendingMutation } from './services/account-mutations.js'
 import { initMessenger } from './services/messenger.js'
 import * as sync from './services/sync/index.js'
+import { startContentKeyEventRefresh } from './services/content-key/index.js'
 
 cleanupTemporaryStorage()
 
@@ -81,6 +82,7 @@ secrets.subscribe(() => {
 recoverThenRehydrate()
 initMessenger()
 sync.init()
+startContentKeyEventRefresh()
 
 if (window === window.top) {
   document.body.classList.add('dev')

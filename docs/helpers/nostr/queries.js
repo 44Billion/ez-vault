@@ -5,6 +5,7 @@ const DEFAULT_RELAYS_PER_PUBKEY = 2
 const QUERY_CACHE_MS = 40 * 60 * 1000
 const RELAY_CACHE_MAX_ITEMS = 500
 const IYKC_CACHE_MAX_ITEMS = 10000
+const HEX_PUBKEY = /^[0-9a-f]{64}$/i
 const relaysByPubkey = Object.create(null)
 const relayCacheTimersByPubkey = Object.create(null)
 const relayCacheAddedAtByPubkey = Object.create(null)
@@ -27,6 +28,11 @@ function cloneRelays (relays) {
     read: [...(relays?.read || [])],
     write: [...(relays?.write || [])]
   }
+}
+
+function uniquePubkeys (pubkeys, { requireHex = false } = {}) {
+  const values = [...new Set(pubkeys || [])].filter(Boolean)
+  return requireHex ? values.filter(pubkey => HEX_PUBKEY.test(pubkey)) : values
 }
 
 function relayListCreatedAt (event) {
@@ -196,7 +202,7 @@ export function subscribeRelayListUpdates (pubkeys, {
   cacheMs = QUERY_CACHE_MS,
   _pool = pool
 } = {}) {
-  const authors = [...new Set(pubkeys || [])].filter(Boolean)
+  const authors = uniquePubkeys(pubkeys, { requireHex: _pool === pool })
   if (!authors.length) return () => {}
 
   let closed = false
@@ -222,12 +228,12 @@ export function subscribeRelayListUpdates (pubkeys, {
 }
 
 export async function getRelaysByPubkey (pubkeys, { _fetchEvents = fetchEvents, cacheMs = QUERY_CACHE_MS } = {}) {
-  const uniquePubkeys = [...new Set(pubkeys)].filter(Boolean)
-  if (!uniquePubkeys.length) return {}
+  const pubkeyList = uniquePubkeys(pubkeys, { requireHex: _fetchEvents === fetchEvents })
+  if (!pubkeyList.length) return {}
 
   const out = {}
   const missingPubkeys = []
-  for (const pubkey of uniquePubkeys) {
+  for (const pubkey of pubkeyList) {
     if (hasCachedKey(relaysByPubkey, pubkey)) out[pubkey] = cloneRelays(relaysByPubkey[pubkey])
     else missingPubkeys.push(pubkey)
   }
@@ -263,12 +269,12 @@ export async function getIykcProofs (pubkeys, {
   _getRelaysByPubkey = getRelaysByPubkey,
   cacheMs = QUERY_CACHE_MS
 } = {}) {
-  const uniquePubkeys = [...new Set(pubkeys)].filter(Boolean)
-  if (!uniquePubkeys.length) return {}
+  const pubkeyList = uniquePubkeys(pubkeys, { requireHex: _fetchEvents === fetchEvents })
+  if (!pubkeyList.length) return {}
 
   const out = {}
   const missingPubkeys = []
-  for (const pubkey of uniquePubkeys) {
+  for (const pubkey of pubkeyList) {
     if (!hasCachedKey(contentKeysByPubkey, pubkey)) {
       missingPubkeys.push(pubkey)
       continue
