@@ -59,3 +59,14 @@ test('buildSyncAccountPayload carries self-contained account entries', () => {
     }
   }])
 })
+
+test('buildSyncAccountPayload omits oversized inline pictures from pairing profile', () => {
+  const { account, secretEntry } = nsecAccount()
+  account.picture = `data:image/svg+xml,${'x'.repeat(5000)}`
+  const payload = buildSyncAccountPayload([account], [secretEntry], { nsecFromHex, npubFromPubkey })
+
+  assert.deepEqual(payload.accounts[0].profile, {
+    name: 'Azure Ember',
+    about: 'paired account'
+  })
+})

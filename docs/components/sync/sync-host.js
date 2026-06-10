@@ -378,7 +378,8 @@ export class SyncHost extends HTMLElement {
         return this.#handleExchange(peerPlatform, peerAccounts)
       }
     })
-    this.#session.start()
+    await this.#session.start()
+    if (!this.#openToken || !this.#session) return
     const url = this.#session.url
     this.#urlInput.value = url
     this.#copyBtn.disabled = false

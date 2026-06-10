@@ -28,16 +28,59 @@ const PAIRING_CODE_DOMAIN_TAG = 'ez-vault:nostrpair:pairing-code:v1' // Or 'nost
 
 const SECRET_BYTES = 16
 const CONNECT_TIMEOUT_MS = 30_000
+const REQUEST_TIMEOUT_MS = 120_000
+const EXCHANGE_TIMEOUT_MS = 180_000
+const PUBLISH_TIMEOUT_MS = 10_000
+const SUBSCRIPTION_CONNECTION_TIMEOUT_MS = 10_000
 const PAIRING_CODE_DIGITS = 6
+const PROFILE_NAME_MAX_LENGTH = 128
+const PROFILE_ABOUT_MAX_LENGTH = 4096
+const PROFILE_PICTURE_MAX_LENGTH = 4096
 
 function isPlainObject (value) {
   return value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function maybeUnref (timer) {
+  timer?.unref?.()
+  return timer
+}
+
+function timeoutError (label = 'SYNC_TIMEOUT') {
+  return new Error(label)
 }
 
 function randomHex (bytes) {
   const buf = new Uint8Array(bytes)
   crypto.getRandomValues(buf)
   return bytesToHex(buf)
+}
+
+function settlePublishPromise (promise, timeoutMs = PUBLISH_TIMEOUT_MS) {
+  let timer = null
+  const timeoutPromise = new Promise(resolve => {
+    timer = maybeUnref(setTimeout(() => resolve({ status: 'rejected', reason: timeoutError('PAIRING_PUBLISH_TIMEOUT') }), timeoutMs))
+  })
+  const publishPromise = Promise.resolve(promise).then(
+    value => ({ status: 'fulfilled', value }),
+    reason => ({ status: 'rejected', reason })
+  )
+  return Promise.race([publishPromise, timeoutPromise]).finally(() => clearTimeout(timer))
+}
+
+async function subscribeFrame ({ relay, filter, handlers, _pool = pool }) {
+  if (typeof _pool.ensureRelay !== 'function') {
+    return _pool.subscribeMany([relay], filter, handlers)
+  }
+  const relayConnection = await _pool.ensureRelay(relay, {
+    connectionTimeout: SUBSCRIPTION_CONNECTION_TIMEOUT_MS
+  })
+  const sub = relayConnection.subscribe([filter], handlers)
+  // AbstractRelay.send() queues the actual WebSocket send in a promise
+  // continuation. Yield once so callers don't publish/expose the pairing URL
+  // before the REQ has at least been handed to the socket.
+  await Promise.resolve()
+  return sub
 }
 
 // Derives the 6-digit pairing code shown on one device and typed on the
@@ -59,7 +102,7 @@ export async function derivePairingCode (seckey, peerPubkey) {
   return String(n % 10 ** PAIRING_CODE_DIGITS).padStart(PAIRING_CODE_DIGITS, '0')
 }
 
-async function publishFrame ({ seckey, toPubkey, payload, relay }) {
+async function publishFrame ({ seckey, toPubkey, payload, relay, _pool = pool }) {
   const ck = getConversationKey(seckey, toPubkey)
   const content = nip44Encrypt(JSON.stringify(payload), ck)
   const event = finalizeEvent({
@@ -68,7 +111,14 @@ async function publishFrame ({ seckey, toPubkey, payload, relay }) {
     tags: [['p', toPubkey]],
     content
   }, seckey)
-  await Promise.allSettled(pool.publish([relay], event))
+  const publishPromises = _pool.publish([relay], event)
+  if (!Array.isArray(publishPromises) || !publishPromises.length) throw new Error('PAIRING_PUBLISH_FAILED')
+  const results = await Promise.all(publishPromises.map(promise => settlePublishPromise(promise)))
+  if (!results.some(result => result.status === 'fulfilled')) {
+    const reason = results.find(result => result.status === 'rejected')?.reason
+    throw reason instanceof Error ? reason : new Error('PAIRING_PUBLISH_FAILED')
+  }
+  return event
 }
 
 function tryDecodeFrame (event, seckey) {
@@ -102,17 +152,21 @@ export class HostSession {
   #ephPubkey
   #secret
   #relay
+  #pool
+  #publishFrame
   #handlers
   #sub = null
   #joinerPubkey = null
   #closed = false
   #connectTimer = null
 
-  constructor ({ onJoinerConnected, onPairingCode, onError, onTrustedSignerReceived, onExchangeRequest } = {}) {
+  constructor ({ onJoinerConnected, onPairingCode, onError, onTrustedSignerReceived, onExchangeRequest, _pool = pool, _publishFrame = publishFrame } = {}) {
     this.#ephSecretKey = generateSecretKey()
     this.#ephPubkey = getPublicKey(this.#ephSecretKey)
     this.#secret = randomHex(SECRET_BYTES)
     this.#relay = pairingRelay
+    this.#pool = _pool
+    this.#publishFrame = _publishFrame
     this.#handlers = { onJoinerConnected, onPairingCode, onError, onTrustedSignerReceived, onExchangeRequest }
   }
 
@@ -120,16 +174,22 @@ export class HostSession {
     return buildNostrpairUrl({ pubkey: this.#ephPubkey, relay: this.#relay, secret: this.#secret })
   }
 
-  start () {
+  async start () {
     if (this.#sub || this.#closed) return
     const since = Math.floor(Date.now() / 1000) - 5
-    this.#sub = pool.subscribeMany(
-      [this.#relay],
-      { kinds: [NIP46_KIND], '#p': [this.#ephPubkey], since },
-      {
+    const sub = await subscribeFrame({
+      relay: this.#relay,
+      filter: { kinds: [NIP46_KIND], '#p': [this.#ephPubkey], since },
+      handlers: {
         onevent: (e) => this.#onEvent(e).catch(err => this.#handlers.onError?.(err))
-      }
-    )
+      },
+      _pool: this.#pool
+    })
+    if (this.#closed) {
+      try { sub?.close?.() } catch { /* noop */ }
+      return
+    }
+    this.#sub = sub
     // If nobody connects in CONNECT_TIMEOUT_MS we don't auto-close — the user
     // may still be carrying their other device across the room. The session
     // only ends when the user cancels or completes it.
@@ -190,7 +250,7 @@ export class HostSession {
       // the joiner's #onEvent loop will pick it up and respond, and the
       // result of that response isn't load-bearing for the host's flow.
       if (ourTrust?.signerPubkey) {
-        await publishFrame({
+        await this.#publishFrame({
           seckey: this.#ephSecretKey,
           toPubkey: event.pubkey,
           payload: {
@@ -198,7 +258,8 @@ export class HostSession {
             method: 'register_trusted_signer',
             params: { platform: ourTrust.platform || '', signerPubkey: ourTrust.signerPubkey }
           },
-          relay: this.#relay
+          relay: this.#relay,
+          _pool: this.#pool
         })
       }
       return
@@ -240,7 +301,7 @@ export class HostSession {
     // channel. Reply with an explicit error so the joiner sees why instead
     // of timing out.
     if (req.id != null) {
-      this.#reply(event.pubkey, req.id, null, 'method not supported on nostrpair channel')
+      return this.#reply(event.pubkey, req.id, null, 'method not supported on nostrpair channel')
     }
   }
 
@@ -262,11 +323,12 @@ export class HostSession {
 
   #reply (toPubkey, id, result, error) {
     if (this.#closed) return
-    return publishFrame({
+    return this.#publishFrame({
       seckey: this.#ephSecretKey,
       toPubkey,
       payload: { id, result, error },
-      relay: this.#relay
+      relay: this.#relay,
+      _pool: this.#pool
     })
   }
 }
@@ -284,8 +346,13 @@ export class JoinerSession {
   #ephPubkey
   #remotePubkey
   #relay
+  #pool
+  #publishFrame
   #secret
   #handlers
+  #connectTimeoutMs
+  #requestTimeoutMs
+  #exchangeTimeoutMs
   #sub = null
   #pending = new Map()
   #closed = false
@@ -298,11 +365,26 @@ export class JoinerSession {
   #peerSignerReceived = null
   #peerSignerResolve = null
   #peerSignerReject = null
+  #peerSignerTimer = null
 
-  constructor (url, { onPairingCode, onConnected, onError } = {}) {
+  constructor (url, {
+    onPairingCode,
+    onConnected,
+    onError,
+    _pool = pool,
+    _publishFrame = publishFrame,
+    _connectTimeoutMs = CONNECT_TIMEOUT_MS,
+    _requestTimeoutMs = REQUEST_TIMEOUT_MS,
+    _exchangeTimeoutMs = EXCHANGE_TIMEOUT_MS
+  } = {}) {
     const parsed = parseNostrpairInput(url)
     this.#remotePubkey = parsed.pubkey
     this.#relay = parsed.relay
+    this.#pool = _pool
+    this.#publishFrame = _publishFrame
+    this.#connectTimeoutMs = _connectTimeoutMs
+    this.#requestTimeoutMs = _requestTimeoutMs
+    this.#exchangeTimeoutMs = _exchangeTimeoutMs
     this.#secret = parsed.secret
     this.#ephSecretKey = generateSecretKey()
     this.#ephPubkey = getPublicKey(this.#ephSecretKey)
@@ -310,8 +392,9 @@ export class JoinerSession {
   }
 
   async connect () {
-    this.#startSubscription()
-    await this.#request('connect', [this.#remotePubkey, this.#secret], { timeoutMs: CONNECT_TIMEOUT_MS })
+    await this.#startSubscription()
+    if (this.#closed) throw new Error('SYNC_CANCELLED')
+    await this.#request('connect', [this.#remotePubkey, this.#secret], { timeoutMs: this.#connectTimeoutMs })
     this.#handlers.onConnected?.()
 
     // Surface the pairing code as soon as we have both keys — the host's
@@ -330,20 +413,34 @@ export class JoinerSession {
   // `{ platform, signerPubkey }` which the caller folds into the
   // commit's trusted-signers write.
   async exchangeTrust (params) {
-    const ackPromise = this.#request('register_trusted_signer', params)
+    const ackPromise = this.#request('register_trusted_signer', params, { timeoutMs: this.#requestTimeoutMs })
       .then(result => {
         if (result !== 'ack') throw new Error('REGISTER_TRUSTED_SIGNER_FAILED')
       })
-    const peerPromise = this.#awaitPeerTrustedSigner()
+    const peerPromise = this.#awaitPeerTrustedSigner({ timeoutMs: this.#requestTimeoutMs })
     const [, peer] = await Promise.all([ackPromise, peerPromise])
     return peer
   }
 
-  #awaitPeerTrustedSigner () {
+  #awaitPeerTrustedSigner ({ timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
     if (this.#peerSignerReceived) return Promise.resolve(this.#peerSignerReceived)
     return new Promise((resolve, reject) => {
-      this.#peerSignerResolve = resolve
-      this.#peerSignerReject = reject
+      this.#peerSignerTimer = maybeUnref(setTimeout(() => {
+        this.#peerSignerResolve = null
+        this.#peerSignerReject = null
+        this.#peerSignerTimer = null
+        reject(timeoutError())
+      }, timeoutMs))
+      this.#peerSignerResolve = value => {
+        clearTimeout(this.#peerSignerTimer)
+        this.#peerSignerTimer = null
+        resolve(value)
+      }
+      this.#peerSignerReject = err => {
+        clearTimeout(this.#peerSignerTimer)
+        this.#peerSignerTimer = null
+        reject(err)
+      }
     })
   }
 
@@ -353,7 +450,7 @@ export class JoinerSession {
   // surfaces as a rejected promise. The reply carries the host's
   // `{ platform, accounts }` envelope.
   async exchangeAccounts (params) {
-    const resultJson = await this.#request('exchange_accounts', params)
+    const resultJson = await this.#request('exchange_accounts', params, { timeoutMs: this.#exchangeTimeoutMs })
     let parsed
     try { parsed = JSON.parse(resultJson) } catch { throw new Error('SYNC_BAD_RESPONSE') }
     if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.accounts)) {
@@ -375,18 +472,27 @@ export class JoinerSession {
       reject(new Error('SYNC_CANCELLED'))
     }
     this.#pending.clear()
+    clearTimeout(this.#peerSignerTimer)
+    this.#peerSignerTimer = null
     this.#peerSignerReject?.(new Error('SYNC_CANCELLED'))
     this.#peerSignerResolve = null
     this.#peerSignerReject = null
   }
 
-  #startSubscription () {
+  async #startSubscription () {
+    if (this.#sub) return
     const since = Math.floor(Date.now() / 1000) - 5
-    this.#sub = pool.subscribeMany(
-      [this.#relay],
-      { kinds: [NIP46_KIND], '#p': [this.#ephPubkey], authors: [this.#remotePubkey], since },
-      { onevent: (e) => this.#onEvent(e).catch(err => this.#handlers.onError?.(err)) }
-    )
+    const sub = await subscribeFrame({
+      relay: this.#relay,
+      filter: { kinds: [NIP46_KIND], '#p': [this.#ephPubkey], authors: [this.#remotePubkey], since },
+      handlers: { onevent: (e) => this.#onEvent(e).catch(err => this.#handlers.onError?.(err)) },
+      _pool: this.#pool
+    })
+    if (this.#closed) {
+      try { sub?.close?.() } catch { /* noop */ }
+      return
+    }
+    this.#sub = sub
   }
 
   async #onEvent (event) {
@@ -403,11 +509,12 @@ export class JoinerSession {
       const platform = typeof params.platform === 'string' ? params.platform : ''
       const signerPubkey = typeof params.signerPubkey === 'string' ? params.signerPubkey : ''
       if (!signerPubkey) {
-        await publishFrame({
+        await this.#publishFrame({
           seckey: this.#ephSecretKey,
           toPubkey: this.#remotePubkey,
           payload: { id: frame.id, result: null, error: 'missing signerPubkey' },
-          relay: this.#relay
+          relay: this.#relay,
+          _pool: this.#pool
         })
         return
       }
@@ -415,11 +522,12 @@ export class JoinerSession {
       this.#peerSignerResolve?.(this.#peerSignerReceived)
       this.#peerSignerResolve = null
       this.#peerSignerReject = null
-      await publishFrame({
+      await this.#publishFrame({
         seckey: this.#ephSecretKey,
         toPubkey: this.#remotePubkey,
         payload: { id: frame.id, result: 'ack', error: null },
-        relay: this.#relay
+        relay: this.#relay,
+        _pool: this.#pool
       })
       return
     }
@@ -437,20 +545,20 @@ export class JoinerSession {
     pending.resolve(frame.result)
   }
 
-  #request (method, params, { timeoutMs } = {}) {
+  #request (method, params, { timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
+    if (this.#closed) return Promise.reject(new Error('SYNC_CANCELLED'))
     return new Promise((resolve, reject) => {
       const id = randomHex(8)
-      const timer = timeoutMs
-        ? setTimeout(() => {
-          if (this.#pending.delete(id)) reject(new Error('SYNC_TIMEOUT'))
-        }, timeoutMs)
-        : null
+      const timer = maybeUnref(setTimeout(() => {
+        if (this.#pending.delete(id)) reject(timeoutError())
+      }, timeoutMs))
       this.#pending.set(id, { resolve, reject, timer })
-      publishFrame({
+      this.#publishFrame({
         seckey: this.#ephSecretKey,
         toPubkey: this.#remotePubkey,
         payload: { id, method, params },
-        relay: this.#relay
+        relay: this.#relay,
+        _pool: this.#pool
       }).catch(err => {
         if (this.#pending.delete(id)) {
           clearTimeout(timer)
@@ -522,14 +630,19 @@ function profileContent (event) {
   }
 }
 
+function cleanProfileField (value, maxLength) {
+  const clean = typeof value === 'string' ? value.trim() : ''
+  return clean.length <= maxLength ? clean : ''
+}
+
 function profileForAccount (account) {
   const profile = {}
   const content = profileContent(account.profileEvent)
-  const name = typeof account.name === 'string' ? account.name.trim() : ''
-  const picture = typeof account.picture === 'string' ? account.picture.trim() : ''
-  const contentName = typeof content.name === 'string' ? content.name.trim() : ''
-  const contentPicture = typeof content.picture === 'string' ? content.picture.trim() : ''
-  const about = typeof content.about === 'string' ? content.about.trim() : ''
+  const name = cleanProfileField(account.name, PROFILE_NAME_MAX_LENGTH)
+  const picture = cleanProfileField(account.picture, PROFILE_PICTURE_MAX_LENGTH)
+  const contentName = cleanProfileField(content.name, PROFILE_NAME_MAX_LENGTH)
+  const contentPicture = cleanProfileField(content.picture, PROFILE_PICTURE_MAX_LENGTH)
+  const about = cleanProfileField(content.about, PROFILE_ABOUT_MAX_LENGTH)
 
   if (name || contentName) profile.name = name || contentName
   if (about) profile.about = about

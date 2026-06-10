@@ -369,6 +369,7 @@ export class SyncJoiner extends HTMLElement {
 
   async #startPair (url) {
     this.#setBusy(true)
+    this.#setPinDisabled(false)
     this.dataset.pair = 'active'
     this.#setStatus('Connecting…', null)
     this.list?.enterSelectionMode()
@@ -379,6 +380,8 @@ export class SyncJoiner extends HTMLElement {
           // Stash but don't render — the user types what they see on the
           // host. Local compare prevents a round-trip on typos.
           this.#expectedCode = code
+          this.#setPinDisabled(false)
+          this.#setConnectPending(false)
           this.#setStatus('Type the code shown on the other device.', null)
           this.#pinCells[0]?.focus()
         },
@@ -391,21 +394,27 @@ export class SyncJoiner extends HTMLElement {
     } catch (err) {
       this.#setBusy(false)
       console.error('joiner connect failed', err?.message ?? err)
-      toast.error('Pairing failed', err?.message ?? String(err))
+      const { message, longMessage } = pairErrorToToast(err)
+      toast.error(message, longMessage)
       this.#tearDownPair()
       this.list?.exitSelectionMode()
-      // eslint-disable-next-line no-useless-return
       return
     }
     // Keep #busy true to lock the URL input/scan button while pairing is
     // in progress — the user's next action is typing the code, not
     // submitting another URL.
+    this.#setConnectPending(false)
   }
 
   #tearDownPair () {
     this.dataset.pair = ''
     this.#expectedCode = null
+    if (this.#pinErrorTimer) {
+      clearTimeout(this.#pinErrorTimer)
+      this.#pinErrorTimer = null
+    }
     this.#clearPin()
+    this.#setPinDisabled(false)
     this.#pinWrap.classList.remove('is-error')
     this.#setStatus('', null)
     if (this.#session) {
@@ -589,6 +598,10 @@ export class SyncJoiner extends HTMLElement {
     this.#input.disabled = on
     this.#scanBtn.disabled = on
     this.#connectBtn.disabled = on
+    this.#setConnectPending(on)
+  }
+
+  #setConnectPending (on) {
     this.#connectIcon.classList.toggle('pulsate', on)
   }
 
@@ -672,6 +685,9 @@ function pairErrorToToast (err) {
       return { message: 'Pairing rejected', longMessage: 'The other device declined the request.' }
     case 'SYNC_BAD_RESPONSE':
       return { message: 'Pairing failed', longMessage: 'Got an unexpected response from the other device.' }
+    case 'PAIRING_PUBLISH_FAILED':
+    case 'PAIRING_PUBLISH_TIMEOUT':
+      return { message: 'Pairing relay failed', longMessage: 'The relay did not accept the pairing message. Try again, or generate a fresh pairing URL.' }
     case 'REGISTER_TRUSTED_SIGNER_FAILED':
       return { message: 'Trust exchange failed', longMessage: 'The other device could not store this device\'s signer key.' }
     case 'VAULT_LOCKED':
