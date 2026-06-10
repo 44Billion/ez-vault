@@ -4,7 +4,7 @@ import * as passkey from '../../services/passkey.js'
 import * as secrets from '../../services/secrets.js'
 import {
   JoinerSession,
-  buildSyncAccountList
+  buildSyncAccountPayload
 } from '../../services/nostrpair.js'
 import {
   createIntakeToken,
@@ -499,11 +499,11 @@ export class SyncJoiner extends HTMLElement {
       // Build outgoing envelope (selected accounts only).
       const selectedPubkeys = this.list?.getSelectedPubkeys() ?? []
       const accountsToSend = store.list().filter(a => selectedPubkeys.includes(a.pubkey))
-      let outgoingAccounts = []
+      let outgoing = { accounts: [] }
       if (accountsToSend.length) {
         const entries = await passkey.openSecrets()
         if (token.cancelled) throw new Error('IMPORT_CANCELLED')
-        outgoingAccounts = buildSyncAccountList(accountsToSend, entries, {
+        outgoing = buildSyncAccountPayload(accountsToSend, entries, {
           nsecFromHex: nostr.nsecFromHex,
           npubFromPubkey: nostr.npubFromPubkey
         })
@@ -515,7 +515,7 @@ export class SyncJoiner extends HTMLElement {
       const reply = await this.#session.exchangeAccounts({
         code,
         platform: detectPlatform(),
-        accounts: outgoingAccounts
+        accounts: outgoing.accounts
       })
       if (token.cancelled) throw new Error('IMPORT_CANCELLED')
 

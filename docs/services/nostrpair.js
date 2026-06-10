@@ -30,6 +30,10 @@ const SECRET_BYTES = 16
 const CONNECT_TIMEOUT_MS = 30_000
 const PAIRING_CODE_DIGITS = 6
 
+function isPlainObject (value) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+}
+
 function randomHex (bytes) {
   const buf = new Uint8Array(bytes)
   crypto.getRandomValues(buf)
@@ -201,6 +205,7 @@ export class HostSession {
     }
 
     // Joiner's account exchange request. Params: { code, platform, accounts }.
+    // Each account is a self-contained { type, value, pubkey, profile } object.
     // `code` is the pairing code the user read off OUR display and typed on
     // the joiner; we validate it against our own derivation (same shared
     // ECDH state) before replying. Mismatch → error reply, channel stays
@@ -222,7 +227,10 @@ export class HostSession {
         return this.#reply(event.pubkey, req.id, null, err?.message || 'exchange_accounts failed')
       }
       const envelope = outgoing && typeof outgoing === 'object'
-        ? { platform: outgoing.platform || '', accounts: Array.isArray(outgoing.accounts) ? outgoing.accounts : [] }
+        ? {
+            platform: outgoing.platform || '',
+            accounts: Array.isArray(outgoing.accounts) ? outgoing.accounts : []
+          }
         : { platform: '', accounts: [] }
       return this.#reply(event.pubkey, req.id, JSON.stringify(envelope), null)
     }
@@ -351,7 +359,10 @@ export class JoinerSession {
     if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.accounts)) {
       throw new Error('SYNC_BAD_RESPONSE')
     }
-    return { platform: typeof parsed.platform === 'string' ? parsed.platform : '', accounts: parsed.accounts }
+    return {
+      platform: typeof parsed.platform === 'string' ? parsed.platform : '',
+      accounts: parsed.accounts
+    }
   }
 
   close () {
@@ -450,22 +461,19 @@ export class JoinerSession {
   }
 }
 
-// Build the array of strings carried in `exchange_accounts`. Each entry
-// is one of: nsec1... (hex secret converted to bech32), npub1... (read-
-// only), or bunker://...#client_key=... where the URL fragment carries the
-// per-account persistent client key. The fragment is local-only — the bunker
-// itself never sees it because relays don't transmit URL fragments — so it's
-// just a convenient way to pack two values into one string.
+// Build the self-contained objects carried in `exchange_accounts.accounts`.
+// `value` is nsec1..., npub1..., or bunker://...#client_key=... where the URL
+// fragment carries the per-account persistent client key. The fragment is
+// local-only — the bunker itself never sees it because relays don't transmit
+// URL fragments — so it's just a convenient way to pack two values into one
+// string.
 //
 // `secretEntries` is the snapshot returned by `passkey.openSecrets()` — the
 // caller has just performed a fresh passkey reauth to obtain the raw key
 // material. Threading it in explicitly keeps the secret-extraction call
 // site visible at the sync boundary.
 //
-// Each account becomes a single bare string in the returned array. There is
-// no per-account signer pubkey here anymore — the device-level signer is
-// exchanged once via `register_trusted_signer` ahead of this call.
-export function buildSyncAccountList (accounts, secretEntries, { nsecFromHex, npubFromPubkey }) {
+function buildSyncAccountEntries (accounts, secretEntries, { nsecFromHex, npubFromPubkey }) {
   const nsecByPubkey = new Map()
   const clientKeyByPubkey = new Map()
   for (const e of secretEntries) {
@@ -477,14 +485,60 @@ export function buildSyncAccountList (accounts, secretEntries, { nsecFromHex, np
     if (acc.type === 'nsec') {
       const seckey = nsecByPubkey.get(acc.pubkey)
       if (!seckey) continue
-      out.push(nsecFromHex(seckey))
+      out.push({
+        type: 'nsec',
+        value: nsecFromHex(seckey),
+        pubkey: acc.pubkey,
+        profile: profileForAccount(acc)
+      })
     } else if (acc.type === 'npub') {
-      out.push(npubFromPubkey(acc.pubkey))
+      out.push({
+        type: 'npub',
+        value: npubFromPubkey(acc.pubkey),
+        pubkey: acc.pubkey,
+        profile: profileForAccount(acc)
+      })
     } else if (acc.type === 'bunker') {
       const clientKey = clientKeyByPubkey.get(acc.pubkey)
       if (!clientKey) continue
-      out.push(buildBunkerUrlWithClientKey(acc.bunker, clientKey))
+      out.push({
+        type: 'bunker',
+        value: buildBunkerUrlWithClientKey(acc.bunker, clientKey),
+        pubkey: acc.pubkey,
+        profile: profileForAccount(acc)
+      })
     }
   }
   return out
+}
+
+function profileContent (event) {
+  if (!event?.content) return {}
+  try {
+    const parsed = JSON.parse(event.content)
+    return isPlainObject(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function profileForAccount (account) {
+  const profile = {}
+  const content = profileContent(account.profileEvent)
+  const name = typeof account.name === 'string' ? account.name.trim() : ''
+  const picture = typeof account.picture === 'string' ? account.picture.trim() : ''
+  const contentName = typeof content.name === 'string' ? content.name.trim() : ''
+  const contentPicture = typeof content.picture === 'string' ? content.picture.trim() : ''
+  const about = typeof content.about === 'string' ? content.about.trim() : ''
+
+  if (name || contentName) profile.name = name || contentName
+  if (about) profile.about = about
+  if (picture || contentPicture) profile.picture = picture || contentPicture
+  return profile
+}
+
+export function buildSyncAccountPayload (accounts, secretEntries, converters) {
+  return {
+    accounts: buildSyncAccountEntries(accounts, secretEntries, converters)
+  }
 }

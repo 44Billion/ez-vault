@@ -54,18 +54,67 @@ export function abortIntake (token) {
   token.cancelReject?.(new Error('IMPORT_CANCELLED'))
 }
 
-export async function resolveMetadata (pubkey) {
-  const relayListEvent = await fetchRelayListEvent(pubkey)
+function isPlainObject (value) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function cleanString (value) {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function cleanProfile (profile) {
+  if (!isPlainObject(profile)) return {}
+  const out = {}
+  const name = cleanString(profile.name)
+  const about = cleanString(profile.about)
+  const picture = cleanString(profile.picture)
+  if (name) out.name = name
+  if (about) out.about = about
+  if (picture) out.picture = picture
+  return out
+}
+
+function profileEventFromProfile (pubkey, profile) {
+  if (!Object.keys(profile).length) return undefined
+  const tags = []
+  if (profile.name) tags.push(['name', profile.name])
+  if (profile.picture) tags.push(['picture', profile.picture])
+  return {
+    kind: 0,
+    pubkey,
+    created_at: 0,
+    tags,
+    content: JSON.stringify(profile)
+  }
+}
+
+async function fetchOrNull (fn) {
+  try {
+    return await fn()
+  } catch {
+    return null
+  }
+}
+
+export async function resolveMetadata (pubkey, {
+  pairedProfile = {},
+  _fetchRelayListEvent = fetchRelayListEvent,
+  _fetchLatestProfile = fetchLatestProfile
+} = {}) {
+  const paired = cleanProfile(pairedProfile)
+  const fetchedRelayListEvent = await fetchOrNull(() => _fetchRelayListEvent(pubkey))
+  const relayListEvent = fetchedRelayListEvent || undefined
   const parsed = relayListEvent ? parseRelayListEvent(relayListEvent) : { write: [] }
   const writeRelays = parsed.write.length ? parsed.write : freeRelays.slice(0, 2)
-  const profileEvent = await fetchLatestProfile(pubkey, { writeRelays })
+  const fetchedProfileEvent = await fetchOrNull(() => _fetchLatestProfile(pubkey, { writeRelays }))
+  const profileEvent = fetchedProfileEvent || profileEventFromProfile(pubkey, paired)
   const parsedProfile = profileEvent ? nostr.parseProfileEvent(profileEvent) : { name: '', picture: '' }
   return {
     profileEvent: profileEvent || undefined,
     relayListEvent: relayListEvent || undefined,
     writeRelays,
-    name: parsedProfile.name || '',
-    picture: parsedProfile.picture || ''
+    name: parsedProfile.name || paired.name || '',
+    picture: parsedProfile.picture || paired.picture || ''
   }
 }
 
@@ -75,7 +124,7 @@ export async function resolveMetadata (pubkey) {
 // apply the mutation synchronously, so the passkey + largeBlob prompts can
 // fire back-to-back with no awaited work splitting them.
 
-export async function prepareSeckey (raw) {
+export async function prepareSeckey (raw, options = {}) {
   const { pubkey, seckey } = nostr.keypairFromSeckey(raw)
   // A bare secret key gives strictly more capability than a bunker URL or a
   // read-only npub, so importing a seckey for a pubkey currently held as
@@ -88,7 +137,9 @@ export async function prepareSeckey (raw) {
   if (existing && existing.type === 'nsec') {
     return { type: 'nsec', pubkey, skipped: true, reason: 'ACCOUNT_EXISTS' }
   }
-  const meta = await resolveMetadata(pubkey)
+  const meta = await resolveMetadata(pubkey, {
+    pairedProfile: options.pairedProfile
+  })
   const picture = meta.picture || existing?.picture || await seededAvatarDataUrl(pubkey)
   const record = {
     type: 'nsec',
@@ -102,14 +153,16 @@ export async function prepareSeckey (raw) {
   return { type: 'nsec', pubkey, record, seckey }
 }
 
-export async function prepareNpub (npub) {
+export async function prepareNpub (npub, options = {}) {
   const pubkey = nostr.pubkeyFromNpub(npub)
   // npub is the weakest form (read-only), so it can never overwrite an
   // existing entry — any nsec/bunker/npub at this pubkey wins.
   if (store.get(pubkey)) {
     return { type: 'npub', pubkey, skipped: true, reason: 'ACCOUNT_EXISTS' }
   }
-  const meta = await resolveMetadata(pubkey)
+  const meta = await resolveMetadata(pubkey, {
+    pairedProfile: options.pairedProfile
+  })
   const picture = meta.picture || await seededAvatarDataUrl(pubkey)
   const record = {
     type: 'npub',
@@ -123,7 +176,7 @@ export async function prepareNpub (npub) {
   return { type: 'npub', pubkey, record }
 }
 
-export async function prepareBunker (bunkerUrlInput, token) {
+export async function prepareBunker (bunkerUrlInput, token, options = {}) {
   // Pairing-imported bunker URLs carry the persistent client key as a
   // local-only `#client_key=` fragment so the receiving device can adopt
   // the same client identity instead of generating a fresh one (a fresh
@@ -160,7 +213,9 @@ export async function prepareBunker (bunkerUrlInput, token) {
       }
       return { type: 'bunker', pubkey, skipped: true, reason: 'ACCOUNT_EXISTS' }
     }
-    const meta = await resolveMetadata(pubkey)
+    const meta = await resolveMetadata(pubkey, {
+      pairedProfile: options.pairedProfile
+    })
     if (token?.cancelled) throw new Error('IMPORT_CANCELLED')
     const picture = meta.picture || existing?.picture || await seededAvatarDataUrl(pubkey)
     if (token?.cancelled) throw new Error('IMPORT_CANCELLED')
@@ -293,13 +348,29 @@ export async function commitPrepared (prepared, options = {}) {
   }
 }
 
-// Dispatch a peer-sent bare key (nsec1.../npub1.../bunker://) to the
-// matching prepare function. Sync flows iterate over the peer envelope's
-// accounts array and call this per-entry.
-export async function prepareBareKey (bareKey, token) {
-  if (typeof bareKey !== 'string') throw new Error('invalid entry')
-  if (bareKey.startsWith('bunker://')) return prepareBunker(bareKey, token)
-  if (bareKey.startsWith('npub1')) return prepareNpub(bareKey)
-  if (bareKey.startsWith('nsec1')) return prepareSeckey(bareKey)
-  throw new Error(`unknown entry: ${bareKey.slice(0, 16)}…`)
+function normalizeAccountEntry (entry) {
+  if (typeof entry === 'string') {
+    if (entry.startsWith('bunker://')) return { type: 'bunker', value: entry, profile: {} }
+    if (entry.startsWith('npub1')) return { type: 'npub', value: entry, profile: {} }
+    if (entry.startsWith('nsec1')) return { type: 'nsec', value: entry, profile: {} }
+    throw new Error(`unknown entry: ${entry.slice(0, 16)}…`)
+  }
+  if (!isPlainObject(entry) || typeof entry.value !== 'string') throw new Error('invalid entry')
+  return {
+    type: typeof entry.type === 'string' ? entry.type : '',
+    value: entry.value,
+    pubkey: cleanString(entry.pubkey),
+    profile: cleanProfile(entry.profile)
+  }
+}
+
+// Dispatch a peer-sent account entry to the matching prepare function. Sync
+// flows iterate over the peer envelope's accounts array and call this per-entry.
+export async function prepareBareKey (entry, token, options = {}) {
+  const account = normalizeAccountEntry(entry)
+  const prepareOptions = { ...options, pairedProfile: account.profile }
+  if (account.type === 'bunker') return prepareBunker(account.value, token, prepareOptions)
+  if (account.type === 'npub') return prepareNpub(account.value, prepareOptions)
+  if (account.type === 'nsec') return prepareSeckey(account.value, prepareOptions)
+  throw new Error(`unknown entry: ${account.type || account.value.slice(0, 16)}…`)
 }

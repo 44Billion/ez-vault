@@ -192,6 +192,10 @@ const STYLES = /* css */`
   account-avatar .avatar-name-field:focus {
     box-shadow: 0 0 0 2px oklch(0.55 0.18 145);
   }
+  account-avatar .avatar-name-field::placeholder {
+    color: oklch(0.78 0 89.88 / 0.72);
+    opacity: 1;
+  }
   account-avatar .avatar-name-field[readonly],
   account-avatar .avatar-name-field:disabled {
     cursor: default;
@@ -288,7 +292,7 @@ const TEMPLATE = `
   <button class="avatar-btn at-middle-left" data-action="copy-nsec" title="Copy nsec" type="button"><span class="avatar-btn-icon">${ICON_KEY}</span></button>
   <button class="avatar-btn at-top-right at-primary" data-action="save" title="Save" type="button"><span class="avatar-btn-icon">${ICON_CHECK}</span></button>
   <button class="avatar-btn at-middle-right" data-action="copy-npub" title="Copy npub" type="button"><span class="avatar-btn-icon">${ICON_COPY}</span></button>
-  <input class="avatar-name-field" type="text" aria-label="Account name" spellcheck="false" autocorrect="off" autocapitalize="none" />
+  <input class="avatar-name-field" type="text" aria-label="Account name" placeholder="unnamed" spellcheck="false" autocorrect="off" autocapitalize="none" />
   <span class="avatar-select-overlay" aria-hidden="true"><span class="avatar-select-badge">${ICON_CHECK}</span></span>
 `
 
@@ -409,7 +413,7 @@ export class AccountAvatar extends HTMLElement {
 
   #syncNameFieldWidth () {
     if (!this.#nameField) return
-    this.#nameField.size = Math.max(1, this.#nameField.value.length)
+    this.#nameField.size = Math.max(1, this.#nameField.value.length, this.#nameField.placeholder.length)
   }
 
   #readNameValue () {

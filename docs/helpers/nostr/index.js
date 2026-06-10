@@ -143,6 +143,7 @@ export function parseProfileEvent (event) {
   const fromTag = name => event.tags.find(t => t[0] === name)?.[1]
   return {
     name: (fromTag('name') || parsed.name || parsed.display_name || '').trim(),
+    about: (parsed.about || '').trim(),
     picture: (fromTag('picture') || parsed.picture || '').trim()
   }
 }

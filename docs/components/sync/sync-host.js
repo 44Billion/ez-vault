@@ -4,7 +4,7 @@ import * as passkey from '../../services/passkey.js'
 import * as secrets from '../../services/secrets.js'
 import {
   HostSession,
-  buildSyncAccountList
+  buildSyncAccountPayload
 } from '../../services/nostrpair.js'
 import {
   createIntakeToken,
@@ -395,7 +395,7 @@ export class SyncHost extends HTMLElement {
     this.setAttribute('open', '')
   }
 
-  async #handleExchange (peerPlatform, peerBareKeys) {
+  async #handleExchange (peerPlatform, peerAccounts) {
     const token = createIntakeToken()
     this.#intakeToken = token
     try {
@@ -409,7 +409,7 @@ export class SyncHost extends HTMLElement {
         if (token.cancelled) throw new Error('IMPORT_CANCELLED')
         outgoing = {
           platform: detectPlatform(),
-          accounts: buildSyncAccountList(accountsToSend, entries, {
+          ...buildSyncAccountPayload(accountsToSend, entries, {
             nsecFromHex: nostr.nsecFromHex,
             npubFromPubkey: nostr.npubFromPubkey
           })
@@ -422,10 +422,10 @@ export class SyncHost extends HTMLElement {
       this.#setStatus('Importing accounts from the other device…', null)
       const prepared = []
       const errors = []
-      for (let i = peerBareKeys.length - 1; i >= 0; i--) {
+      for (let i = peerAccounts.length - 1; i >= 0; i--) {
         if (token.cancelled) throw new Error('IMPORT_CANCELLED')
         try {
-          const p = await prepareBareKey(peerBareKeys[i], token)
+          const p = await prepareBareKey(peerAccounts[i], token)
           if (p.skipped) errors.push(p.reason)
           else prepared.push(p)
         } catch (err) {
@@ -441,7 +441,7 @@ export class SyncHost extends HTMLElement {
       await commitPrepared(prepared, { peerSigner })
 
       // Success toast — varies by what arrived.
-      const summary = peerBareKeys.length === 0
+      const summary = peerAccounts.length === 0
         ? 'Devices synced'
         : `Synced: imported ${prepared.length} account${prepared.length === 1 ? '' : 's'}`
       if (errors.length) toast.warning(`${summary} (${errors.length} failed)`, errors.join('\n'))
