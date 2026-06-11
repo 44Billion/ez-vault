@@ -14,6 +14,8 @@ const SUPPORTED_METHODS = new Set([
   'nip04Decrypt',
   'nip44Encrypt',
   'nip44Decrypt',
+  'nip44v3Encrypt',
+  'nip44v3Decrypt',
   'nip44EncryptMultiDH',
   'nip44DecryptMultiDH',
   'doubleSignEvent',
@@ -21,6 +23,8 @@ const SUPPORTED_METHODS = new Set([
 ])
 
 const BUNKER_UNSUPPORTED_METHODS = new Set([
+  'nip44v3Encrypt',
+  'nip44v3Decrypt',
   'nip44EncryptMultiDH',
   'nip44DecryptMultiDH',
   'doubleSignEvent',
@@ -28,6 +32,8 @@ const BUNKER_UNSUPPORTED_METHODS = new Set([
 ])
 
 const METHOD_ALIASES = {
+  nip44_v3_encrypt: 'nip44v3Encrypt',
+  nip44_v3_decrypt: 'nip44v3Decrypt',
   nip44_encrypt_multi_dh: 'nip44EncryptMultiDH',
   nip44_decrypt_multi_dh: 'nip44DecryptMultiDH',
   double_sign_event: 'doubleSignEvent'

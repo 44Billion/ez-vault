@@ -150,6 +150,8 @@ export class BunkerHandle {
   async nip04Decrypt (pk, ct) { return this.#request(s => s.nip04Decrypt(pk, ct)) }
   async nip44Encrypt (pk, pt) { return this.#request(s => s.nip44Encrypt(pk, pt)) }
   async nip44Decrypt (pk, ct) { return this.#request(s => s.nip44Decrypt(pk, ct)) }
+  async nip44v3Encrypt (_pk, _kind, _scope, _pt) { throw new Error('BUNKER_METHOD_UNSUPPORTED') }
+  async nip44v3Decrypt (_pk, _kind, _scope, _ct) { throw new Error('BUNKER_METHOD_UNSUPPORTED') }
   async getRelays () {
     // `getRelays` is not a standard NIP-46 RPC. Resolve NIP-65 locally
     // instead of asking the remote signer to support our custom method.
@@ -331,6 +333,8 @@ class BunkerSharedKeyHandle {
   nip04Decrypt (pk, ct) { return this.#request('nip04Decrypt', [pk, ct]) }
   nip44Encrypt (pk, pt) { return this.#request('nip44Encrypt', [pk, pt]) }
   nip44Decrypt (pk, ct) { return this.#request('nip44Decrypt', [pk, ct]) }
+  nip44v3Encrypt (_pk, _kind, _scope, _pt) { throw new Error('BUNKER_METHOD_UNSUPPORTED') }
+  nip44v3Decrypt (_pk, _kind, _scope, _ct) { throw new Error('BUNKER_METHOD_UNSUPPORTED') }
   async getRelays () {
     // Same reason as BunkerHandle#getRelays: this is local NIP-65 discovery,
     // not a NIP-46 request to the remote signer.

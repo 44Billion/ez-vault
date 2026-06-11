@@ -350,6 +350,12 @@ function methodLabel (method, eventKind, _code) {
     case 'nip44_decrypt':
     case 'nip44Decrypt':
       return 'Decrypt (NIP-44)'
+    case 'nip44v3_encrypt':
+    case 'nip44v3Encrypt':
+      return 'Encrypt (NIP-44 v3)'
+    case 'nip44v3_decrypt':
+    case 'nip44v3Decrypt':
+      return 'Decrypt (NIP-44 v3)'
     case 'nip44_encrypt_multi_dh':
     case 'nip44EncryptMultiDH':
       return 'Encrypt (NIP-44 Multi-DH)'
@@ -374,6 +380,9 @@ function previewFor (entry) {
     case 'nip44_encrypt':
     case 'nip44Encrypt':
       return entry.params?.[1] ?? ''
+    case 'nip44v3_encrypt':
+    case 'nip44v3Encrypt':
+      return entry.params?.[3] ?? ''
     case 'nip44_encrypt_multi_dh':
     case 'nip44EncryptMultiDH':
       return entry.params?.[0]?.plaintext ?? ''
@@ -381,6 +390,9 @@ function previewFor (entry) {
     case 'nip04Decrypt':
     case 'nip44_decrypt':
     case 'nip44Decrypt':
+      return entry.result ?? ''
+    case 'nip44v3_decrypt':
+    case 'nip44v3Decrypt':
       return entry.result ?? ''
     case 'nip44_decrypt_multi_dh':
     case 'nip44DecryptMultiDH':

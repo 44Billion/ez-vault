@@ -23,13 +23,14 @@
     "end": "pkill -f 'python3 server.py'"
   },
   "devDependencies": {
-    "@noble/curves": "2.0.1",
-    "@noble/hashes": "2.0.1",
+    "@noble/ciphers": "2.2.0",
+    "@noble/curves": "2.2.0",
+    "@noble/hashes": "2.2.0",
     "eslint": "^9.39.4",
     "eslint-plugin-html": "^8.1.4",
     "globals": "^17.5.0",
     "neostandard": "^0.13.0",
-    "nostr-tools": "^2.23.3",
+    "nostr-tools": "2.23.5",
     "qrcode-generator": "1.4.4"
   }
 }

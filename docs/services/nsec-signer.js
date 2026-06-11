@@ -2,6 +2,7 @@ import { getPublicKey, finalizeEvent, nip04, nip44 } from 'nostr-tools'
 import { bytesToHex, hexToBytes } from '../helpers/nostr/index.js'
 import { deriveSharedKey } from '../helpers/crypto.js'
 import { deriveMultiDhConversationKey } from '../helpers/nostr/multi-dh.js'
+import * as nip44v3 from './nip44-v3.js'
 import {
   fetchRelayListEvent,
   parseRelayListEvent,
@@ -49,6 +50,8 @@ class SharedKeySigner {
   async nip04Decrypt (peerPubkey, ciphertext) { return (await this.#sharedSigner()).nip04Decrypt(peerPubkey, ciphertext) }
   async nip44Encrypt (peerPubkey, plaintext) { return (await this.#sharedSigner()).nip44Encrypt(peerPubkey, plaintext) }
   async nip44Decrypt (peerPubkey, ciphertext) { return (await this.#sharedSigner()).nip44Decrypt(peerPubkey, ciphertext) }
+  async nip44v3Encrypt (peerPubkey, kind, scope, plaintextB64) { return (await this.#sharedSigner()).nip44v3Encrypt(peerPubkey, kind, scope, plaintextB64) }
+  async nip44v3Decrypt (peerPubkey, kind, scope, ciphertext) { return (await this.#sharedSigner()).nip44v3Decrypt(peerPubkey, kind, scope, ciphertext) }
   async nip44EncryptMultiDH (options) { return (await this.#sharedSigner()).nip44EncryptMultiDH(options) }
   async nip44DecryptMultiDH (options) { return (await this.#sharedSigner()).nip44DecryptMultiDH(options) }
   withSharedKey (peerPubkey, info = this.#info) { return new SharedKeySigner(this.#signer, peerPubkey, info) }
@@ -161,6 +164,14 @@ export default class NsecSigner {
     const ck = this.#conversationKeys[peerPubkey] ??=
       nip44GetConversationKey(this.#secretKey, peerPubkey)
     return nip44Decrypt(ciphertext, ck)
+  }
+
+  nip44v3Encrypt (peerPubkey, kind, scope, plaintextB64) {
+    return nip44v3.nip07Encrypt(this.#secretKey, peerPubkey, kind, scope, plaintextB64)
+  }
+
+  nip44v3Decrypt (peerPubkey, kind, scope, ciphertext) {
+    return nip44v3.nip07Decrypt(this.#secretKey, peerPubkey, kind, scope, ciphertext)
   }
 
   async #contentKeyMaterial (contentSigner, requestedContentPubkey = '') {
