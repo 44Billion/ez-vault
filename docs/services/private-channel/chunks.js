@@ -1,15 +1,15 @@
-import { generateSecretKey, getPublicKey, nip44 } from 'nostr-tools'
+import { generateSecretKey, getPublicKey } from 'nostr-tools'
 import { bytesToBase64, base64ToBytes } from '../../helpers/base64.js'
 import { bytesToHex } from '../../helpers/nostr/index.js'
 import { verifyIykcProof } from '../content-key/event.js'
 import { getTemporaryItem, removeTemporaryItems, setTemporaryItem } from '../temporary-storage.js'
+import * as nip44v3 from '../nip44-v3.js'
 import { JSONL_CHUNK_BYTES } from './chunk-size.js'
+import { ROUTER_KIND } from './constants.js'
 
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 const STORAGE_PREFIX = 'ez-vault:private-channel:'
-const nip44GetConversationKey = nip44.getConversationKey.bind(nip44)
-const nip44Encrypt = nip44.encrypt.bind(nip44)
 
 function appendBytes (left, right) {
   const out = new Uint8Array(left.length + right.length)
@@ -74,7 +74,7 @@ function buildPayloadRow (ciphertext) {
 
 function encryptedPayload ({ messageSecretKey, event }) {
   const messagePubkey = getPublicKey(messageSecretKey)
-  return nip44Encrypt(JSON.stringify(event), nip44GetConversationKey(messageSecretKey, messagePubkey))
+  return nip44v3.encrypt(messageSecretKey, messagePubkey, ROUTER_KIND, '', JSON.stringify(event))
 }
 
 function appendLine (chunk, line, id, chunkIndex) {
@@ -178,6 +178,8 @@ async function prepareEnvelopeRowsOnce ({ id, senderSigner, imkcSigner, receiver
         peerContentPubkey: row.iykcPubkey,
         ownContentSigner: imkcSigner,
         context: multiDhContext,
+        kind: ROUTER_KIND,
+        scope: '',
         plaintext: messageSeckey
       })
       ciphertext = encrypted.ciphertext
@@ -188,7 +190,7 @@ async function prepareEnvelopeRowsOnce ({ id, senderSigner, imkcSigner, receiver
       foundOwnContentPubkey = true
       if (nextContentPubkey) usedOwnContentPubkey = nextContentPubkey
     } else {
-      ciphertext = await senderSigner.nip44Encrypt(row.receiverPubkey, messageSeckey)
+      ciphertext = await senderSigner.nip44v3Encrypt(row.receiverPubkey, ROUTER_KIND, '', bytesToBase64(encoder.encode(messageSeckey)))
     }
     const rowIndex = rowIndexes.length + 1
     setPreparedRow(id, rowIndex, buildRecipientRow(row, ciphertext))

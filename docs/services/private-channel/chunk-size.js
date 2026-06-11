@@ -1,8 +1,7 @@
 import { MAX_EVENT_BYTES, PRIVATE_BROADCAST_KIND, ROUTER_KIND } from './constants.js'
 import { eventByteLength } from './event.js'
+import { payloadByteLength as nip44v3PayloadByteLength } from '../nip44-v3.js'
 
-const NIP44_MAX_PLAINTEXT_BYTES = 65535
-const NIP44_RAW_PAYLOAD_OVERHEAD_BYTES = 67
 const MAX_TIME_SECONDS = 9999999999
 const MAX_CHUNK_TAG_VALUE = '9999999999'
 const SAMPLE_PUBKEY = 'f'.repeat(64)
@@ -10,19 +9,6 @@ const SAMPLE_SIGNATURE = 'f'.repeat(128)
 
 function base64EncodedByteLength (byteLength) {
   return Math.ceil(byteLength / 3) * 4
-}
-
-function nip44PaddedByteLength (byteLength) {
-  if (!Number.isSafeInteger(byteLength) || byteLength < 1 || byteLength > NIP44_MAX_PLAINTEXT_BYTES) return Infinity
-  if (byteLength <= 32) return 32
-
-  const nextPower = 2 ** (Math.floor(Math.log2(byteLength - 1)) + 1)
-  const chunk = nextPower <= 256 ? 32 : nextPower / 8
-  return chunk * (Math.floor((byteLength - 1) / chunk) + 1)
-}
-
-function nip44PayloadByteLength (plaintextByteLength) {
-  return base64EncodedByteLength(NIP44_RAW_PAYLOAD_OVERHEAD_BYTES + nip44PaddedByteLength(plaintextByteLength))
 }
 
 function routerPlaintextByteLengthForChunk (jsonlByteLength) {
@@ -38,7 +24,7 @@ function routerPlaintextByteLengthForChunk (jsonlByteLength) {
 }
 
 function outerEventByteLengthForChunk (jsonlByteLength) {
-  const contentByteLength = nip44PayloadByteLength(routerPlaintextByteLengthForChunk(jsonlByteLength))
+  const contentByteLength = nip44v3PayloadByteLength(routerPlaintextByteLengthForChunk(jsonlByteLength), 0)
   if (!Number.isFinite(contentByteLength)) return Infinity
 
   return eventByteLength({
@@ -54,7 +40,7 @@ function outerEventByteLengthForChunk (jsonlByteLength) {
 
 function maxJsonlChunkByteSize () {
   let min = 1
-  let max = NIP44_MAX_PLAINTEXT_BYTES
+  let max = MAX_EVENT_BYTES
 
   while (min < max) {
     const mid = Math.ceil((min + max) / 2)
@@ -65,7 +51,7 @@ function maxJsonlChunkByteSize () {
   return min
 }
 
-// NIP-44 padding has large size jumps, so derive this from the actual signed
+// NIP-44 v3 padding has large size jumps, so derive this from the actual signed
 // event shapes instead of estimating a flat overhead.
 export const JSONL_CHUNK_BYTES = maxJsonlChunkByteSize()
 // Nym carrier content is a base64 slice of the inner event JSON. The router

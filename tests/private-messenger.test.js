@@ -1207,10 +1207,14 @@ test('missing-message replies can recover router-only seed records', async () =>
   const pm = fakePrivateMessage()
   let unwrapCall = null
   let encryptedTo = null
+  let encryptedKind = null
+  let encryptedScope = null
   const channel = {
     ...signer('channel'),
-    nip44Encrypt: async (pubkey, content) => {
+    nip44v3Encrypt: async (pubkey, kind, scope, content) => {
       encryptedTo = pubkey
+      encryptedKind = kind
+      encryptedScope = scope
       return content
     }
   }
@@ -1253,8 +1257,10 @@ test('missing-message replies can recover router-only seed records', async () =>
     reply: { id: 'reply-id' }
   })
 
-  const syntheticRouter = JSON.parse(unwrapCall.event.content)
+  const syntheticRouter = JSON.parse(Buffer.from(unwrapCall.event.content, 'base64').toString())
   assert.equal(encryptedTo, 'reader')
+  assert.equal(encryptedKind, 3560)
+  assert.equal(encryptedScope, '')
   assert.equal(unwrapCall.privateChannelReaderPubkey, 'reader')
   assert.equal(syntheticRouter.content, jsonlContent(payloadRow(), userRow))
   assert.deepEqual(syntheticRouter.tags, [['f', 'alice'], ['c', '0', '1']])
@@ -1354,7 +1360,6 @@ test('missing-message reply packer streams compact seed routers only', async () 
     eventsPerChunk: 1
   })
   const userRow = JSON.stringify(['user', 'ciphertext'])
-  const otherRow = JSON.stringify(['other', 'ciphertext'])
 
   await packer.update({
     id: 'event-id',

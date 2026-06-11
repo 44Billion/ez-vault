@@ -22,15 +22,6 @@ const SUPPORTED_METHODS = new Set([
   'withSharedKey'
 ])
 
-const BUNKER_UNSUPPORTED_METHODS = new Set([
-  'nip44v3Encrypt',
-  'nip44v3Decrypt',
-  'nip44EncryptMultiDH',
-  'nip44DecryptMultiDH',
-  'doubleSignEvent',
-  'withSharedKey'
-])
-
 const METHOD_ALIASES = {
   nip44_v3_encrypt: 'nip44v3Encrypt',
   nip44_v3_decrypt: 'nip44v3Decrypt',
@@ -109,9 +100,6 @@ export async function run ({ pubkey, method, params = [], internals = {} }) {
   if (!account) throw new Error('UNKNOWN_ACCOUNT')
   const normalized = normalizeMethod(method)
   if (!SUPPORTED_METHODS.has(normalized)) throw new Error('UNSUPPORTED_METHOD')
-  if (account.type === 'bunker' && BUNKER_UNSUPPORTED_METHODS.has(normalized)) {
-    throw new Error('BUNKER_METHOD_UNSUPPORTED')
-  }
   const signer = claimSigner(account)
   if (normalized === 'nip44EncryptMultiDH') {
     return nip44MultiDh.nip44EncryptMultiDH({ account, signer, params, internals })
@@ -120,7 +108,9 @@ export async function run ({ pubkey, method, params = [], internals = {} }) {
     return nip44MultiDh.nip44DecryptMultiDH({ account, signer, params })
   }
   if (normalized === 'doubleSignEvent') {
-    const { event, contentPubkey = '' } = doubleSignRequest(params)
+    const request = doubleSignRequest(params)
+    if (account.type === 'bunker') return signer.doubleSignEvent(request)
+    const { event, contentPubkey = '' } = request
     return doubleSignEvent({
       userSigner: signer,
       contentKeySigner: await contentSignerForDoubleSign(account, signer, contentPubkey, internals),

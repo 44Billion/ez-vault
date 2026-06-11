@@ -37,6 +37,7 @@
 // - For other event-list replies, use createEventReplyPacker({ messenger, question, code }).update(event).
 
 import * as privateMessage from '../../helpers/nostr/private-message.js'
+import { bytesToBase64 } from '../../helpers/base64.js'
 import { getRelaysByPubkey, pickRelaysForPubkeys, subscribeRelayListUpdates } from '../../helpers/nostr/queries.js'
 import * as privateChannel from '../private-channel/index.js'
 import { createQueue } from '../web-storage-queue.js'
@@ -77,7 +78,12 @@ const DEFAULT_SEEDER_ONLINE_SECONDS = 20 * 60
 const DEFAULT_MAX_DYNAMIC_RECOVERY_SEEDERS = 8
 const DEFAULT_MESSAGE_QUEUE_MAX_BYTES = 1024 * 1024 // 1 MiB
 const DEFAULT_SEED_QUEUE_MAX_BYTES = 3 * 1024 * 1024 // 3 MiB
+const encoder = new TextEncoder()
 const noContentKeys = async () => ({})
+
+function textToBase64 (text) {
+  return bytesToBase64(encoder.encode(text))
+}
 
 function defaultOnError (err) {
   console.warn('private-messenger failed', err?.message ?? err)
@@ -1106,7 +1112,12 @@ export class PrivateMessenger {
       pubkey: channelPubkey,
       created_at: router.created_at,
       tags: [],
-      content: await encryptSigner.nip44Encrypt(encryptPeerPubkey, JSON.stringify(router))
+      content: await encryptSigner.nip44v3Encrypt(
+        encryptPeerPubkey,
+        privateChannel.PRIVATE_BROADCAST_KIND,
+        '',
+        textToBase64(JSON.stringify(router))
+      )
     }
     const event = await this._privateChannel.unwrapEvent({
       receiverSigner: this.userSigner,

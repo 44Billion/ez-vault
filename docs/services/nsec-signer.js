@@ -188,7 +188,8 @@ export default class NsecSigner {
     }
   }
 
-  async nip44EncryptMultiDH ({ peerPubkey, peerContentPubkey = '', ownContentSigner, ownContentPubkey = '', plaintext, context }) {
+  async nip44EncryptMultiDH ({ peerPubkey, peerContentPubkey = '', ownContentSigner, ownContentPubkey = '', plaintext, kind, scope = '', context }) {
+    const normalizedKind = nip44v3.normalizeKind(kind)
     const { contentPubkey, contentSecretKey } = await this.#contentKeyMaterial(ownContentSigner, ownContentPubkey)
     const { mode, conversationKey } = deriveMultiDhConversationKey({
       role: 'sender',
@@ -202,15 +203,16 @@ export default class NsecSigner {
     })
     return {
       ciphertext: conversationKey
-        ? nip44Encrypt(plaintext, conversationKey)
-        : this.nip44Encrypt(peerPubkey, plaintext),
+        ? nip44v3.encryptWithConversationKey(conversationKey, normalizedKind, scope, plaintext)
+        : nip44v3.encrypt(this.#secretKey, peerPubkey, normalizedKind, scope, plaintext),
       mode,
       ownContentPubkey: contentPubkey,
       peerContentPubkey: peerContentPubkey || ''
     }
   }
 
-  async nip44DecryptMultiDH ({ peerPubkey, peerContentPubkey = '', ownContentSigner, ownContentPubkey = '', ciphertext, context }) {
+  async nip44DecryptMultiDH ({ peerPubkey, peerContentPubkey = '', ownContentSigner, ownContentPubkey = '', ciphertext, kind, scope = '', context }) {
+    const normalizedKind = nip44v3.normalizeKind(kind)
     const { contentPubkey, contentSecretKey } = await this.#contentKeyMaterial(ownContentSigner, ownContentPubkey)
     const { mode, conversationKey } = deriveMultiDhConversationKey({
       role: 'receiver',
@@ -224,8 +226,8 @@ export default class NsecSigner {
     })
     return {
       plaintext: conversationKey
-        ? nip44Decrypt(ciphertext, conversationKey)
-        : this.nip44Decrypt(peerPubkey, ciphertext),
+        ? nip44v3.decryptWithConversationKey(conversationKey, normalizedKind, scope, ciphertext)
+        : nip44v3.decrypt(this.#secretKey, peerPubkey, normalizedKind, scope, ciphertext),
       mode,
       ownContentPubkey: contentPubkey,
       peerContentPubkey: peerContentPubkey || ''

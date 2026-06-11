@@ -73,10 +73,32 @@ function chacha (key, data) {
   return chacha20(key, ZERO_NONCE, data)
 }
 
+function base64EncodedByteLength (byteLength) {
+  return Math.ceil(byteLength / 3) * 4
+}
+
+export function payloadByteLength (plaintextByteLength, scopeByteLength = 0) {
+  return base64EncodedByteLength(73 + scopeByteLength + targetSize(plaintextByteLength + 4))
+}
+
+export function deriveKeysFromConversationKey (conversationKey, nonce) {
+  const salt = concatBytes(utf8ToBytes('nip44-v3\x00'), nonce)
+  const prk = hkdfExtract(sha256, conversationKey, salt)
+  return {
+    prk,
+    encryption_key: hkdfExpand(sha256, prk, utf8ToBytes('encryption_key'), 32),
+    mac_key: hkdfExpand(sha256, prk, utf8ToBytes('mac_key'), 32)
+  }
+}
+
 // seckey: Uint8Array, pubkey: hex, scope/plaintext: Uint8Array. Returns base64 string.
 export function encryptBytes (seckey, pubkey, kind, scope, plaintext, nonce) {
+  return encryptWithConversationKeyBytes(deriveSharedConversationKey(seckey, pubkey), kind, scope, plaintext, nonce)
+}
+
+export function encryptWithConversationKeyBytes (conversationKey, kind, scope, plaintext, nonce) {
   nonce ??= randomBytes32()
-  const { encryption_key: encryptionKey, mac_key: macKey } = deriveKeys(seckey, pubkey, nonce)
+  const { encryption_key: encryptionKey, mac_key: macKey } = deriveKeysFromConversationKey(conversationKey, nonce)
   const prefixed = concatBytes(u32be(plaintext.length), plaintext)
   const padded = new Uint8Array(targetSize(prefixed.length))
   padded.set(prefixed)
@@ -87,6 +109,10 @@ export function encryptBytes (seckey, pubkey, kind, scope, plaintext, nonce) {
 }
 
 export function decryptBytes (seckey, pubkey, expectedKind, expectedScope, ciphertext) {
+  return decryptWithConversationKeyBytes(deriveSharedConversationKey(seckey, pubkey), expectedKind, expectedScope, ciphertext)
+}
+
+export function decryptWithConversationKeyBytes (conversationKey, expectedKind, expectedScope, ciphertext) {
   if (!ciphertext || ciphertext.length === 0) throw new Error('empty ciphertext')
   if (ciphertext[0] === '#') throw new Error('unsupported future version')
   let decoded
@@ -104,7 +130,7 @@ export function decryptBytes (seckey, pubkey, expectedKind, expectedScope, ciphe
   if (ct.length < 4) throw new Error('ciphertext too short')
   if (kind !== expectedKind) throw new Error(`kind mismatch: got ${kind}, expected ${expectedKind}`)
   if (!equalBytes(scope, expectedScope)) throw new Error('scope mismatch')
-  const { encryption_key: encryptionKey, mac_key: macKey } = deriveKeys(seckey, pubkey, nonce)
+  const { encryption_key: encryptionKey, mac_key: macKey } = deriveKeysFromConversationKey(conversationKey, nonce)
   const authData = concatBytes(nonce, u32be(kind), u32be(scope.length), scope, ct)
   if (!equalBytes(mac, hmac(sha256, macKey, authData))) throw new Error('invalid MAC')
   const padded = chacha(encryptionKey, ct)
@@ -116,6 +142,10 @@ export function decryptBytes (seckey, pubkey, expectedKind, expectedScope, ciphe
   const padding = padded.subarray(4 + plaintextLength)
   if (!equalBytes(padding, new Uint8Array(padding.length))) throw new Error('invalid padding')
   return padded.subarray(4, 4 + plaintextLength)
+}
+
+function deriveSharedConversationKey (seckey, pubkey) {
+  return sharedSecret(seckey, pubkey)
 }
 
 export function normalizeKind (kind) {
@@ -132,6 +162,14 @@ export function encrypt (seckey, pubkey, kind, scope, plaintext) {
 
 export function decrypt (seckey, pubkey, kind, scope, ciphertext) {
   return textDecoder.decode(decryptBytes(seckey, pubkey, normalizeKind(kind), utf8ToBytes(scope || ''), ciphertext))
+}
+
+export function encryptWithConversationKey (conversationKey, kind, scope, plaintext) {
+  return encryptWithConversationKeyBytes(conversationKey, normalizeKind(kind), utf8ToBytes(scope || ''), utf8ToBytes(plaintext))
+}
+
+export function decryptWithConversationKey (conversationKey, kind, scope, ciphertext) {
+  return textDecoder.decode(decryptWithConversationKeyBytes(conversationKey, normalizeKind(kind), utf8ToBytes(scope || ''), ciphertext))
 }
 
 export function nip07Encrypt (seckey, pubkey, kind, scope, plaintextB64) {

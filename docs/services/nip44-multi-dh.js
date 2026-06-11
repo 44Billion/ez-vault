@@ -82,6 +82,8 @@ async function encrypt ({ account, signer, options, internals }) {
   const {
     peerPubkey,
     plaintext,
+    kind,
+    scope = '',
     peerContentPubkey: forcedPeerContentPubkey,
     useOwnContentKey = true,
     usePeerContentKey = true
@@ -90,18 +92,6 @@ async function encrypt ({ account, signer, options, internals }) {
   if (typeof plaintext !== 'string') throw new Error('PLAINTEXT_REQUIRED')
 
   const warnings = []
-  if (!signer.nip44EncryptMultiDH || account.type !== 'nsec') {
-    warning(warnings, 'MULTI_DH_UNSUPPORTED')
-    return {
-      ciphertext: await signer.nip44Encrypt(peerPubkey, plaintext),
-      senderPubkey: account.pubkey,
-      receiverPubkey: peerPubkey,
-      senderContentPubkey: '',
-      receiverContentPubkey: '',
-      mode: 'identity',
-      warnings
-    }
-  }
 
   const ownContentSigner = await ownContentSignerForEncrypt({ account, userSigner: signer, useOwnContentKey, warnings, internals })
   const peerContentPubkey = forcedPeerContentPubkey || (usePeerContentKey
@@ -113,6 +103,8 @@ async function encrypt ({ account, signer, options, internals }) {
     peerContentPubkey,
     ownContentSigner,
     ownContentPubkey: await ownContentSigner?.getPublicKey?.() || '',
+    kind,
+    scope,
     plaintext
   })
   return {
@@ -130,6 +122,8 @@ async function decrypt ({ account, signer, options }) {
   const {
     peerPubkey,
     ciphertext,
+    kind,
+    scope = '',
     ownContentPubkey = '',
     peerContentPubkey = ''
   } = options
@@ -140,23 +134,13 @@ async function decrypt ({ account, signer, options }) {
     ? secrets.getContentKeySigner(account.pubkey, ownContentPubkey)
     : null
   if (ownContentPubkey && !ownContentSigner) throw new Error('CONTENT_KEY_NOT_FOUND')
-
-  if (!signer.nip44DecryptMultiDH || account.type !== 'nsec') {
-    return {
-      plaintext: await signer.nip44Decrypt(peerPubkey, ciphertext),
-      senderPubkey: peerPubkey,
-      receiverPubkey: account.pubkey,
-      senderContentPubkey: '',
-      receiverContentPubkey: '',
-      mode: 'identity'
-    }
-  }
-
   const result = await signer.nip44DecryptMultiDH({
     peerPubkey,
     peerContentPubkey,
     ownContentSigner,
     ownContentPubkey,
+    kind,
+    scope,
     ciphertext
   })
   return {
@@ -171,10 +155,12 @@ async function decrypt ({ account, signer, options }) {
 
 export async function nip44EncryptMultiDH ({ account, signer, params = [], options, internals = {} }) {
   const request = options || firstParamObject(params)
+  if (account.type !== 'nsec') return signer.nip44EncryptMultiDH(request)
   return encrypt({ account, signer, options: request, internals })
 }
 
 export async function nip44DecryptMultiDH ({ account, signer, params = [], options }) {
   const request = options || firstParamObject(params)
+  if (account.type !== 'nsec') return signer.nip44DecryptMultiDH(request)
   return decrypt({ account, signer, options: request })
 }

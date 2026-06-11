@@ -49,12 +49,6 @@ function addNsecAccount () {
   return { pubkey, secret }
 }
 
-function addBunkerAccount () {
-  const pubkey = 'b'.repeat(64)
-  store.add({ type: 'bunker', pubkey, name: '', picture: '' })
-  return { pubkey }
-}
-
 // https://github.com/greenart7c3/Nip46Lab/blob/de046f8b6f2078a21835f11f87b1dc11fbca1afc/index.html#L2111
 test('nip44-v3 service passes the vendored upstream self-test vectors', () => {
   const sections = {}
@@ -159,21 +153,4 @@ test('signer.run normalizes snake_case NIP-44 v3 wire methods', async () => {
     method: 'nip44v3_decrypt',
     params: [alice.pubkey, 1, '', ciphertext]
   }), plaintextB64)
-})
-
-test('signer.run rejects NIP-44 v3 methods for bunker accounts', async () => {
-  const bunker = addBunkerAccount()
-  for (const method of [
-    'nip44v3Encrypt',
-    'nip44v3Decrypt',
-    'nip44v3_encrypt',
-    'nip44v3_decrypt',
-    'nip44_v3_encrypt',
-    'nip44_v3_decrypt'
-  ]) {
-    await assert.rejects(
-      () => run({ pubkey: bunker.pubkey, method, params: [] }),
-      /BUNKER_METHOD_UNSUPPORTED/
-    )
-  }
 })

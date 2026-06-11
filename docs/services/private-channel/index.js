@@ -1,8 +1,9 @@
-import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash, nip44, validateEvent, verifyEvent } from 'nostr-tools'
+import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash, validateEvent, verifyEvent } from 'nostr-tools'
 import { bytesToBase64, base64ToBytes } from '../../helpers/base64.js'
 import { hexToBytes } from '../../helpers/nostr/index.js'
 import { makeContentKeyEventForPubkey, parseContentKeyEvent, verifyContentKeyProof, verifyIykcProof } from '../content-key/event.js'
 import { getIykcProofs } from '../content-key/index.js'
+import * as nip44v3 from '../nip44-v3.js'
 import { fetchEvents, pool, publish as publishToRelays } from '../relays.js'
 import { JSONL_CHUNK_BYTES, NYM_CARRIER_CHUNK_CHARS } from './chunk-size.js'
 import {
@@ -27,8 +28,7 @@ const DEFAULT_IGNORED_GROUP_MAX_ENTRIES = 5000
 const HEX_SECKEY = /^[0-9a-f]{64}$/i
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
-const nip44GetConversationKey = nip44.getConversationKey.bind(nip44)
-const nip44Decrypt = nip44.decrypt.bind(nip44)
+const NIP44_V3_SCOPE = ''
 
 function uniq (values) {
   return [...new Set((values || []).filter(Boolean))]
@@ -40,6 +40,22 @@ export function getJsonlChunkByteSize () {
 
 export function getNymCarrierChunkSize () {
   return NYM_CARRIER_CHUNK_CHARS
+}
+
+function textToBase64 (text) {
+  return bytesToBase64(encoder.encode(text))
+}
+
+function base64ToText (b64) {
+  return decoder.decode(base64ToBytes(b64))
+}
+
+async function nip44v3EncryptText (signer, peerPubkey, kind, plaintext) {
+  return signer.nip44v3Encrypt(peerPubkey, kind, NIP44_V3_SCOPE, textToBase64(plaintext))
+}
+
+async function nip44v3DecryptText (signer, peerPubkey, kind, ciphertext) {
+  return base64ToText(await signer.nip44v3Decrypt(peerPubkey, kind, NIP44_V3_SCOPE, ciphertext))
 }
 
 function multiDhContext (channelPubkey) {
@@ -63,8 +79,8 @@ async function makeImkcProof ({ senderSigner, senderPubkey, imkcPubkey }) {
 
 async function prepareRoutedMessage ({ senderSigner, imkcSigner, privateChannelSigner = senderSigner, privateChannelReaderPubkey, receivers, event, _getIykcProofs = getIykcProofs }) {
   if (!senderSigner?.getPublicKey) throw new Error('SENDER_SIGNER_REQUIRED')
-  if (!senderSigner?.nip44Encrypt) throw new Error('SIGNER_NIP44_ENCRYPT_UNSUPPORTED')
-  if (!privateChannelSigner?.getPublicKey || !privateChannelSigner?.nip44Encrypt || !privateChannelSigner?.signEvent) throw new Error('PRIVATE_CHANNEL_SIGNER_REQUIRED')
+  if (!senderSigner?.nip44EncryptMultiDH && !senderSigner?.nip44v3Encrypt) throw new Error('SIGNER_NIP44V3_ENCRYPT_UNSUPPORTED')
+  if (!privateChannelSigner?.getPublicKey || !privateChannelSigner?.nip44v3Encrypt || !privateChannelSigner?.signEvent) throw new Error('PRIVATE_CHANNEL_SIGNER_REQUIRED')
   if (!Array.isArray(receivers) || !receivers.length) throw new Error('NO_RECEIVERS')
 
   const senderPubkey = await senderSigner.getPublicKey()
@@ -120,7 +136,7 @@ async function * wrapPreparedEvents ({ privateChannelSigner, receivers, receiver
         kind: PRIVATE_BROADCAST_KIND,
         created_at: nowSeconds(),
         tags: [['expiration', String(nowSeconds() + expirationSeconds)]],
-        content: await privateChannelSigner.nip44Encrypt(context.channelReaderPubkey, JSON.stringify(router))
+        content: await nip44v3EncryptText(privateChannelSigner, context.channelReaderPubkey, PRIVATE_BROADCAST_KIND, JSON.stringify(router))
       })
       if (eventByteLength(outer) > MAX_EVENT_BYTES) throw new Error('EVENT_TOO_LARGE')
       yield outer
@@ -156,7 +172,7 @@ export async function wrapEvent (options) {
 
 export async function * wrapNymEvents ({ nymSigner, privateChannelSigner, privateChannelReaderPubkey, event, expirationSeconds = EXPIRATION_SECONDS }) {
   if (!nymSigner?.getPublicKey || !nymSigner?.signEvent) throw new Error('NYM_SIGNER_REQUIRED')
-  if (!privateChannelSigner?.getPublicKey || !privateChannelSigner?.nip44Encrypt || !privateChannelSigner?.signEvent) throw new Error('PRIVATE_CHANNEL_SIGNER_REQUIRED')
+  if (!privateChannelSigner?.getPublicKey || !privateChannelSigner?.nip44v3Encrypt || !privateChannelSigner?.signEvent) throw new Error('PRIVATE_CHANNEL_SIGNER_REQUIRED')
 
   const nymPubkey = await nymSigner.getPublicKey()
   const channelPubkey = await privateChannelSigner.getPublicKey()
@@ -181,7 +197,7 @@ export async function * wrapNymEvents ({ nymSigner, privateChannelSigner, privat
       kind: PRIVATE_BROADCAST_KIND,
       created_at: nowSeconds(),
       tags: [['expiration', String(nowSeconds() + expirationSeconds)]],
-      content: await privateChannelSigner.nip44Encrypt(channelReaderPubkey, JSON.stringify(carrier))
+      content: await nip44v3EncryptText(privateChannelSigner, channelReaderPubkey, PRIVATE_BROADCAST_KIND, JSON.stringify(carrier))
     })
     if (eventByteLength(outer) > MAX_EVENT_BYTES) throw new Error('EVENT_TOO_LARGE')
     yield outer
@@ -327,7 +343,7 @@ function eventFromPayload ({ payloadCiphertext, messageSeckey, senderPubkey }) {
   if (!HEX_SECKEY.test(messageSeckey || '')) throw new Error('INVALID_MESSAGE_SECKEY')
   const messageSecretKey = hexToBytes(messageSeckey)
   const messagePubkey = getPublicKey(messageSecretKey)
-  const decrypted = JSON.parse(nip44Decrypt(payloadCiphertext, nip44GetConversationKey(messageSecretKey, messagePubkey)))
+  const decrypted = JSON.parse(nip44v3.decrypt(messageSecretKey, messagePubkey, ROUTER_KIND, NIP44_V3_SCOPE, payloadCiphertext))
   if (isSignedEvent(decrypted)) return assertValidSignedInnerEvent(decrypted)
   const normalized = { ...decrypted, pubkey: senderPubkey }
   return { ...normalized, id: getEventHash(normalized) }
@@ -351,20 +367,22 @@ async function unwrapRecipientEnvelope ({ payloadCiphertext, envelope, receiverS
       ownContentSigner,
       ownContentPubkey: envelope.iykcPubkey || '',
       context: multiDhContext,
+      kind: ROUTER_KIND,
+      scope: NIP44_V3_SCOPE,
       ciphertext: envelope.ciphertext
     })).plaintext
   } else {
-    if (!receiverSigner?.nip44Decrypt) throw new Error('RECEIVER_SIGNER_NIP44_DECRYPT_UNSUPPORTED')
-    messageSeckey = await receiverSigner.nip44Decrypt(senderPubkey, envelope.ciphertext)
+    if (!receiverSigner?.nip44v3Decrypt) throw new Error('RECEIVER_SIGNER_NIP44V3_DECRYPT_UNSUPPORTED')
+    messageSeckey = await nip44v3DecryptText(receiverSigner, senderPubkey, ROUTER_KIND, envelope.ciphertext)
   }
   return eventFromPayload({ payloadCiphertext, messageSeckey, senderPubkey })
 }
 
 export async function unwrapEvent ({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelReaderSigner = privateChannelSigner, privateChannelReaderPubkey, event, receiverPubkey }) {
   if (!event || event.kind !== PRIVATE_BROADCAST_KIND) return null
-  if (!receiverSigner?.nip44Decrypt) throw new Error('RECEIVER_SIGNER_NIP44_DECRYPT_UNSUPPORTED')
+  if (!receiverSigner?.nip44DecryptMultiDH && !receiverSigner?.nip44v3Decrypt) throw new Error('RECEIVER_SIGNER_NIP44V3_DECRYPT_UNSUPPORTED')
   const channelReaderSigner = privateChannelReaderSigner || privateChannelSigner
-  if (!channelReaderSigner?.nip44Decrypt) throw new Error('PRIVATE_CHANNEL_READER_REQUIRED')
+  if (!channelReaderSigner?.nip44v3Decrypt) throw new Error('PRIVATE_CHANNEL_READER_REQUIRED')
 
   const channelPubkey = event.pubkey || await privateChannelSigner?.getPublicKey?.()
   if (!channelPubkey) throw new Error('PRIVATE_CHANNEL_PUBKEY_REQUIRED')
@@ -516,14 +534,14 @@ function readSignerFromMap (signersByPubkey, pubkey) {
 
 async function decryptRouter ({ content, channelPubkey, channelSigner, channelReaderSigner, channelReaderPubkey }) {
   const signer = channelReaderSigner || channelSigner
-  if (!signer?.nip44Decrypt) throw new Error('PRIVATE_CHANNEL_READER_REQUIRED')
+  if (!signer?.nip44v3Decrypt) throw new Error('PRIVATE_CHANNEL_READER_REQUIRED')
 
   const readerPubkey = channelReaderPubkey || channelPubkey
   const signerPubkey = await signer.getPublicKey?.()
   // Writer-side reads use writer secret + reader pubkey; reader-side reads use reader secret + channel pubkey.
   const isWriterSide = readerPubkey !== channelPubkey && (signer === channelSigner || signerPubkey === channelPubkey)
   const peerPubkey = isWriterSide ? readerPubkey : channelPubkey
-  return JSON.parse(await signer.nip44Decrypt(peerPubkey, content))
+  return JSON.parse(await nip44v3DecryptText(signer, peerPubkey, PRIVATE_BROADCAST_KIND, content))
 }
 
 function readValueFromMap (map, key) {
@@ -863,7 +881,7 @@ export async function fetch ({ receiverSigner, iykcSigner, privateChannelSigner 
 
 export function subscribe ({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelSignersByPubkey, privateChannelReaderSigner = privateChannelSigner, privateChannelReaderSignersByPubkey, privateChannelReaderPubkey, privateChannelReaderPubkeysByPubkey, privateChannelPubkey, privateChannelPubkeys, receiverPubkey, relays, onChunk, onEvent, onNymEvent, onSeedEvent, onContentKeyUsage, onError, onEose, since = nowSeconds() - 5, limit, liveOnly = false, mode = 'leecher', modeByPubkey, receivedChunkTtlMs = DEFAULT_RECEIVED_CHUNK_TTL_MS, receivedChunkMaxBytes = DEFAULT_RECEIVED_CHUNK_MAX_BYTES, receivedChunkStorageArea, ignoredGroupTtlMs = DEFAULT_IGNORED_GROUP_TTL_MS, ignoredGroupMaxEntries = DEFAULT_IGNORED_GROUP_MAX_ENTRIES }) {
   if (!relays?.length) throw new Error('NO_RELAYS')
-  if (receiverSigner && !receiverSigner?.nip44Decrypt) throw new Error('RECEIVER_SIGNER_NIP44_DECRYPT_UNSUPPORTED')
+  if (receiverSigner && !receiverSigner?.nip44DecryptMultiDH && !receiverSigner?.nip44v3Decrypt) throw new Error('RECEIVER_SIGNER_NIP44V3_DECRYPT_UNSUPPORTED')
   if (!privateChannelReaderSigner && !privateChannelReaderSignersByPubkey && !privateChannelSigner && !privateChannelSignersByPubkey) throw new Error('PRIVATE_CHANNEL_READER_REQUIRED')
 
   const authors = privateChannelPubkeyList({ privateChannelPubkey, privateChannelPubkeys })

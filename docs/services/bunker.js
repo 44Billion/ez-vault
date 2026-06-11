@@ -31,6 +31,10 @@ function withTimeout (promise, ms, label = 'TIMEOUT') {
   })
 }
 
+function parseJsonResult (value) {
+  return typeof value === 'string' ? JSON.parse(value) : value
+}
+
 // A bunker URL's `secret` is a one-use token consumed by the first successful
 // `connect`. Reusing it is both pointless and the source of the bunker-side
 // "already connected" rejections we've hit. Always reconnect secret-less.
@@ -150,20 +154,19 @@ export class BunkerHandle {
   async nip04Decrypt (pk, ct) { return this.#request(s => s.nip04Decrypt(pk, ct)) }
   async nip44Encrypt (pk, pt) { return this.#request(s => s.nip44Encrypt(pk, pt)) }
   async nip44Decrypt (pk, ct) { return this.#request(s => s.nip44Decrypt(pk, ct)) }
-  async nip44v3Encrypt (_pk, _kind, _scope, _pt) { throw new Error('BUNKER_METHOD_UNSUPPORTED') }
-  async nip44v3Decrypt (_pk, _kind, _scope, _ct) { throw new Error('BUNKER_METHOD_UNSUPPORTED') }
+  async nip44v3Encrypt (pk, kind, scope = '', pt) { return this.#sendRequest('nip44v3_encrypt', [pk, String(kind), scope || '', pt]) }
+  async nip44v3Decrypt (pk, kind, scope = '', ct) { return this.#sendRequest('nip44v3_decrypt', [pk, String(kind), scope || '', ct]) }
+  async nip44EncryptMultiDH (options) { return parseJsonResult(await this.#sendRequest('nip44_encrypt_multi_dh', [JSON.stringify(options || {})])) }
+  async nip44DecryptMultiDH (options) { return parseJsonResult(await this.#sendRequest('nip44_decrypt_multi_dh', [JSON.stringify(options || {})])) }
+  async doubleSignEvent (request) { return parseJsonResult(await this.#sendRequest('double_sign_event', [JSON.stringify(request || {})])) }
   async getRelays () {
     // `getRelays` is not a standard NIP-46 RPC. Resolve NIP-65 locally
     // instead of asking the remote signer to support our custom method.
     // return this.#request(s => s.getRelays())
     return fetchRelaysForPubkey(await this.getPublicKey())
   }
-  withSharedKey (_peerPubkey, _info) {
-    // `withSharedKey` is not a standard NIP-46 RPC, and NIP-46 has no
-    // supported-method discovery hook we can use to safely detect custom
-    // support. Unlike getRelays, we cannot emulate this locally.
-    // return new BunkerSharedKeyHandle(this, peerPubkey, info)
-    throw new Error('BUNKER_METHOD_UNSUPPORTED')
+  withSharedKey (peerPubkey, info) {
+    return new BunkerSharedKeyHandle(this, peerPubkey, info)
   }
 
   // Adopt this freshly-imported handle into the secrets pool. Called by the
@@ -208,7 +211,19 @@ export class BunkerHandle {
     return fn(signer)
   }
 
+  async #sendRequest (method, params = []) {
+    return this.#request(signer => signer.sendRequest(method, params))
+  }
+
+  async tweakedSendRequest (tweak, method, params = []) {
+    return this.#withTweakedSendRequest(tweak, signer => signer.sendRequest(method, params))
+  }
+
   async tweakedRequest (tweak, method, params = []) {
+    return this.#withTweakedSendRequest(tweak, signer => signer[method](...params))
+  }
+
+  async #withTweakedSendRequest (tweak, fn) {
     return this.#request(signer => {
       const original = signer.sendRequest.bind(signer)
       signer.sendRequest = function (sentMethod, sentParams) {
@@ -226,7 +241,7 @@ export class BunkerHandle {
           signer.sendRequest = original
         }
       }
-      return signer[method](...params)
+      return fn(signer)
     })
   }
 
@@ -319,12 +334,20 @@ class BunkerSharedKeyHandle {
     Object.preventExtensions(this)
   }
 
-  #request (_method, _params = []) {
-    // See BunkerHandle#withSharedKey. This custom tweaked request is kept as
-    // a breadcrumb but intentionally disabled because NIP-46 bunkers cannot
-    // be asked whether they support it.
-    // return this.#handle.tweakedRequest(['withSharedKey', this.#peerPubkey, this.#info], method, params)
-    throw new Error('BUNKER_METHOD_UNSUPPORTED')
+  #tweak () {
+    return ['withSharedKey', this.#peerPubkey, this.#info]
+  }
+
+  #request (method, params = []) {
+    return this.#handle.tweakedRequest(this.#tweak(), method, params)
+  }
+
+  #sendRequest (method, params = []) {
+    return this.#handle.tweakedSendRequest(this.#tweak(), method, params)
+  }
+
+  async #jsonRequest (method, value) {
+    return parseJsonResult(await this.#sendRequest(method, [JSON.stringify(value || {})]))
   }
 
   getPublicKey () { return this.#request('getPublicKey') }
@@ -333,17 +356,19 @@ class BunkerSharedKeyHandle {
   nip04Decrypt (pk, ct) { return this.#request('nip04Decrypt', [pk, ct]) }
   nip44Encrypt (pk, pt) { return this.#request('nip44Encrypt', [pk, pt]) }
   nip44Decrypt (pk, ct) { return this.#request('nip44Decrypt', [pk, ct]) }
-  nip44v3Encrypt (_pk, _kind, _scope, _pt) { throw new Error('BUNKER_METHOD_UNSUPPORTED') }
-  nip44v3Decrypt (_pk, _kind, _scope, _ct) { throw new Error('BUNKER_METHOD_UNSUPPORTED') }
+  nip44v3Encrypt (pk, kind, scope = '', pt) { return this.#sendRequest('nip44v3_encrypt', [pk, String(kind), scope || '', pt]) }
+  nip44v3Decrypt (pk, kind, scope = '', ct) { return this.#sendRequest('nip44v3_decrypt', [pk, String(kind), scope || '', ct]) }
+  nip44EncryptMultiDH (options) { return this.#jsonRequest('nip44_encrypt_multi_dh', options) }
+  nip44DecryptMultiDH (options) { return this.#jsonRequest('nip44_decrypt_multi_dh', options) }
+  doubleSignEvent (request) { return this.#jsonRequest('double_sign_event', request) }
   async getRelays () {
     // Same reason as BunkerHandle#getRelays: this is local NIP-65 discovery,
     // not a NIP-46 request to the remote signer.
     // return this.#request('getRelays')
     return fetchRelaysForPubkey(await this.getPublicKey())
   }
-  withSharedKey (_peerPubkey, _info = this.#info) {
-    // return new BunkerSharedKeyHandle(this.#handle, peerPubkey, info)
-    throw new Error('BUNKER_METHOD_UNSUPPORTED')
+  withSharedKey (peerPubkey, info = this.#info) {
+    return new BunkerSharedKeyHandle(this.#handle, peerPubkey, info)
   }
 }
 Object.freeze(BunkerSharedKeyHandle.prototype)
