@@ -157,7 +157,7 @@ function readPreparedRow (preparedRows, index) {
   return row
 }
 
-async function prepareEnvelopeRowsOnce ({ id, senderSigner, imkcSigner, receivers, receiverContentKeys = {}, event, multiDhContext }) {
+async function prepareEnvelopeRowsOnce ({ id, senderSigner, receivers, receiverContentKeys = {}, event }) {
   const useMultiDh = typeof senderSigner?.nip44EncryptMultiDH === 'function'
   let foundOwnContentPubkey = false
   let usedOwnContentPubkey = ''
@@ -173,17 +173,15 @@ async function prepareEnvelopeRowsOnce ({ id, senderSigner, imkcSigner, receiver
     const row = receiverRecord(receiver, useMultiDh ? receiverContentKeys : {})
     let ciphertext
     if (useMultiDh) {
-      const encrypted = await senderSigner.nip44EncryptMultiDH({
-        peerPubkey: row.receiverPubkey,
-        peerContentPubkey: row.iykcPubkey,
-        ownContentSigner: imkcSigner,
-        context: multiDhContext,
-        kind: ROUTER_KIND,
-        scope: '',
-        plaintext: messageSeckey
-      })
-      ciphertext = encrypted.ciphertext
-      const nextContentPubkey = encrypted.ownContentPubkey || ''
+      const encrypted = await senderSigner.nip44EncryptMultiDH(
+        row.receiverPubkey,
+        ROUTER_KIND,
+        '',
+        bytesToBase64(encoder.encode(messageSeckey)),
+        row.iykcPubkey
+      )
+      ciphertext = encrypted[0]
+      const nextContentPubkey = encrypted[1] || ''
       if (foundOwnContentPubkey && nextContentPubkey !== usedOwnContentPubkey) {
         throw new Error('INCONSISTENT_IMKC_PUBKEY')
       }

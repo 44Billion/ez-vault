@@ -156,9 +156,15 @@ export class BunkerHandle {
   async nip44Decrypt (pk, ct) { return this.#request(s => s.nip44Decrypt(pk, ct)) }
   async nip44v3Encrypt (pk, kind, scope = '', pt) { return this.#sendRequest('nip44v3_encrypt', [pk, String(kind), scope || '', pt]) }
   async nip44v3Decrypt (pk, kind, scope = '', ct) { return this.#sendRequest('nip44v3_decrypt', [pk, String(kind), scope || '', ct]) }
-  async nip44EncryptMultiDH (options) { return parseJsonResult(await this.#sendRequest('nip44_encrypt_multi_dh', [JSON.stringify(options || {})])) }
-  async nip44DecryptMultiDH (options) { return parseJsonResult(await this.#sendRequest('nip44_decrypt_multi_dh', [JSON.stringify(options || {})])) }
-  async doubleSignEvent (request) { return parseJsonResult(await this.#sendRequest('double_sign_event', [JSON.stringify(request || {})])) }
+  async nip44EncryptMultiDH (pk, kind, scope = '', pt, peerContentPubkey = '') {
+    return parseJsonResult(await this.#sendRequest('nip44v3_encrypt_multi_dh', [pk, String(kind), scope || '', pt, peerContentPubkey || '']))
+  }
+
+  async nip44DecryptMultiDH (pk, kind, scope = '', ct, peerContentPubkey = '', ownContentPubkey = '') {
+    return parseJsonResult(await this.#sendRequest('nip44v3_decrypt_multi_dh', [pk, String(kind), scope || '', ct, peerContentPubkey || '', ownContentPubkey || '']))
+  }
+
+  async doubleSignEvent (event) { return parseJsonResult(await this.#sendRequest('double_sign_event', [JSON.stringify(event || {})])) }
   async getRelays () {
     // `getRelays` is not a standard NIP-46 RPC. Resolve NIP-65 locally
     // instead of asking the remote signer to support our custom method.
@@ -346,10 +352,6 @@ class BunkerSharedKeyHandle {
     return this.#handle.tweakedSendRequest(this.#tweak(), method, params)
   }
 
-  async #jsonRequest (method, value) {
-    return parseJsonResult(await this.#sendRequest(method, [JSON.stringify(value || {})]))
-  }
-
   getPublicKey () { return this.#request('getPublicKey') }
   signEvent (event) { return this.#request('signEvent', [event]) }
   nip04Encrypt (pk, pt) { return this.#request('nip04Encrypt', [pk, pt]) }
@@ -358,9 +360,15 @@ class BunkerSharedKeyHandle {
   nip44Decrypt (pk, ct) { return this.#request('nip44Decrypt', [pk, ct]) }
   nip44v3Encrypt (pk, kind, scope = '', pt) { return this.#sendRequest('nip44v3_encrypt', [pk, String(kind), scope || '', pt]) }
   nip44v3Decrypt (pk, kind, scope = '', ct) { return this.#sendRequest('nip44v3_decrypt', [pk, String(kind), scope || '', ct]) }
-  nip44EncryptMultiDH (options) { return this.#jsonRequest('nip44_encrypt_multi_dh', options) }
-  nip44DecryptMultiDH (options) { return this.#jsonRequest('nip44_decrypt_multi_dh', options) }
-  doubleSignEvent (request) { return this.#jsonRequest('double_sign_event', request) }
+  async nip44EncryptMultiDH (pk, kind, scope = '', pt, peerContentPubkey = '') {
+    return parseJsonResult(await this.#sendRequest('nip44v3_encrypt_multi_dh', [pk, String(kind), scope || '', pt, peerContentPubkey || '']))
+  }
+
+  async nip44DecryptMultiDH (pk, kind, scope = '', ct, peerContentPubkey = '', ownContentPubkey = '') {
+    return parseJsonResult(await this.#sendRequest('nip44v3_decrypt_multi_dh', [pk, String(kind), scope || '', ct, peerContentPubkey || '', ownContentPubkey || '']))
+  }
+
+  async doubleSignEvent (event) { return parseJsonResult(await this.#sendRequest('double_sign_event', [JSON.stringify(event || {})])) }
   async getRelays () {
     // Same reason as BunkerHandle#getRelays: this is local NIP-65 discovery,
     // not a NIP-46 request to the remote signer.

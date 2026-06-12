@@ -3,13 +3,7 @@ import { isOnline } from '../helpers/network.js'
 import { bytesToHex } from '../helpers/nostr/index.js'
 import { getIykcProofs, upsertContentKeyEvent } from './content-key/index.js'
 import * as secrets from './secrets.js'
-
-function firstParamObject (params) {
-  if (params && !Array.isArray(params) && typeof params === 'object') return params
-  const [options] = params || []
-  if (!options || typeof options !== 'object' || Array.isArray(options)) throw new Error('OPTIONS_REQUIRED')
-  return options
-}
+import { normalizeKind } from './nip44-v3.js'
 
 function warning (warnings, code, message = '') {
   warnings.push(message ? { code, message } : { code })
@@ -73,94 +67,58 @@ export async function publishedOwnContentSigner ({ account, userSigner, warnings
     : null
 }
 
-async function ownContentSignerForEncrypt ({ account, userSigner, useOwnContentKey, warnings, internals }) {
-  if (!useOwnContentKey) return null
-  return publishedOwnContentSigner({ account, userSigner, warnings, internals })
+function encryptParams (params) {
+  const [peerPubkey, kind, scope = '', plaintextB64, peerContentPubkey = ''] = params || []
+  return { peerPubkey, kind, scope, plaintextB64, peerContentPubkey }
 }
 
-async function encrypt ({ account, signer, options, internals }) {
-  const {
-    peerPubkey,
-    plaintext,
-    kind,
-    scope = '',
-    peerContentPubkey: forcedPeerContentPubkey,
-    useOwnContentKey = true,
-    usePeerContentKey = true
-  } = options
+function decryptParams (params) {
+  const [peerPubkey, kind, scope = '', ciphertext, peerContentPubkey = '', ownContentPubkey = ''] = params || []
+  return { peerPubkey, kind, scope, ciphertext, peerContentPubkey, ownContentPubkey }
+}
+
+async function encrypt ({ account, signer, params, internals }) {
+  const { peerPubkey, kind, scope, plaintextB64, peerContentPubkey } = encryptParams(params)
   if (!peerPubkey) throw new Error('PEER_PUBKEY_REQUIRED')
-  if (typeof plaintext !== 'string') throw new Error('PLAINTEXT_REQUIRED')
+  if (typeof plaintextB64 !== 'string') throw new Error('PLAINTEXT_REQUIRED')
+  const normalizedKind = normalizeKind(kind)
 
   const warnings = []
+  await publishedOwnContentSigner({ account, userSigner: signer, warnings, internals })
 
-  const ownContentSigner = await ownContentSignerForEncrypt({ account, userSigner: signer, useOwnContentKey, warnings, internals })
-  const peerContentPubkey = forcedPeerContentPubkey || (usePeerContentKey
-    ? (await lookupContentPubkey(peerPubkey, warnings, internals)).pubkey
-    : '')
-
-  const result = await signer.nip44EncryptMultiDH({
+  const [ciphertext, senderContentPubkey = ''] = await signer.nip44EncryptMultiDH(
     peerPubkey,
-    peerContentPubkey,
-    ownContentSigner,
-    ownContentPubkey: await ownContentSigner?.getPublicKey?.() || '',
-    kind,
+    normalizedKind,
     scope,
-    plaintext
-  })
-  return {
-    ciphertext: result.ciphertext,
-    senderPubkey: account.pubkey,
-    receiverPubkey: peerPubkey,
-    senderContentPubkey: result.ownContentPubkey,
-    receiverContentPubkey: result.peerContentPubkey,
-    mode: result.mode,
-    warnings
-  }
+    plaintextB64,
+    peerContentPubkey
+  )
+  return [ciphertext, senderContentPubkey]
 }
 
-async function decrypt ({ account, signer, options }) {
-  const {
-    peerPubkey,
-    ciphertext,
-    kind,
-    scope = '',
-    ownContentPubkey = '',
-    peerContentPubkey = ''
-  } = options
+async function decrypt ({ account, signer, params }) {
+  const { peerPubkey, kind, scope, ciphertext, peerContentPubkey, ownContentPubkey } = decryptParams(params)
   if (!peerPubkey) throw new Error('PEER_PUBKEY_REQUIRED')
   if (typeof ciphertext !== 'string') throw new Error('CIPHERTEXT_REQUIRED')
+  const normalizedKind = normalizeKind(kind)
 
-  const ownContentSigner = ownContentPubkey
-    ? secrets.getContentKeySigner(account.pubkey, ownContentPubkey)
-    : null
-  if (ownContentPubkey && !ownContentSigner) throw new Error('CONTENT_KEY_NOT_FOUND')
-  const result = await signer.nip44DecryptMultiDH({
+  if (ownContentPubkey && !secrets.getContentKeySigner(account.pubkey, ownContentPubkey)) throw new Error('CONTENT_KEY_NOT_FOUND')
+  return signer.nip44DecryptMultiDH(
     peerPubkey,
-    peerContentPubkey,
-    ownContentSigner,
-    ownContentPubkey,
-    kind,
+    normalizedKind,
     scope,
-    ciphertext
-  })
-  return {
-    plaintext: result.plaintext,
-    senderPubkey: peerPubkey,
-    receiverPubkey: account.pubkey,
-    senderContentPubkey: result.peerContentPubkey,
-    receiverContentPubkey: result.ownContentPubkey,
-    mode: result.mode
-  }
+    ciphertext,
+    peerContentPubkey,
+    ownContentPubkey
+  )
 }
 
-export async function nip44EncryptMultiDH ({ account, signer, params = [], options, internals = {} }) {
-  const request = options || firstParamObject(params)
-  if (account.type !== 'nsec') return signer.nip44EncryptMultiDH(request)
-  return encrypt({ account, signer, options: request, internals })
+export async function nip44EncryptMultiDH ({ account, signer, params = [], internals = {} }) {
+  if (account.type !== 'nsec') return signer.nip44EncryptMultiDH(...params)
+  return encrypt({ account, signer, params, internals })
 }
 
-export async function nip44DecryptMultiDH ({ account, signer, params = [], options }) {
-  const request = options || firstParamObject(params)
-  if (account.type !== 'nsec') return signer.nip44DecryptMultiDH(request)
-  return decrypt({ account, signer, options: request })
+export async function nip44DecryptMultiDH ({ account, signer, params = [] }) {
+  if (account.type !== 'nsec') return signer.nip44DecryptMultiDH(...params)
+  return decrypt({ account, signer, params })
 }

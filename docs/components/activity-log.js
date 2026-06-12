@@ -336,32 +336,25 @@ function appDisplayName (app) {
 function methodLabel (method, eventKind, _code) {
   switch (method) {
     case 'sign_event':
-    case 'signEvent':
       return eventKind != null ? `Sign event (kind ${eventKind})` : 'Sign event'
+    case 'double_sign_event':
+      return eventKind != null ? `Double-sign event (kind ${eventKind})` : 'Double-sign event'
     case 'nip04_encrypt':
-    case 'nip04Encrypt':
       return 'Encrypt (NIP-04)'
     case 'nip04_decrypt':
-    case 'nip04Decrypt':
       return 'Decrypt (NIP-04)'
     case 'nip44_encrypt':
-    case 'nip44Encrypt':
       return 'Encrypt (NIP-44)'
     case 'nip44_decrypt':
-    case 'nip44Decrypt':
       return 'Decrypt (NIP-44)'
     case 'nip44v3_encrypt':
-    case 'nip44v3Encrypt':
       return 'Encrypt (NIP-44 v3)'
     case 'nip44v3_decrypt':
-    case 'nip44v3Decrypt':
       return 'Decrypt (NIP-44 v3)'
-    case 'nip44_encrypt_multi_dh':
-    case 'nip44EncryptMultiDH':
-      return 'Encrypt (NIP-44 Multi-DH)'
-    case 'nip44_decrypt_multi_dh':
-    case 'nip44DecryptMultiDH':
-      return 'Decrypt (NIP-44 Multi-DH)'
+    case 'nip44v3_encrypt_multi_dh':
+      return 'Encrypt (NIP-44 v3 Multi-DH)'
+    case 'nip44v3_decrypt_multi_dh':
+      return 'Decrypt (NIP-44 v3 Multi-DH)'
     default:
       return method ?? 'Unknown'
   }
@@ -373,30 +366,22 @@ function previewFor (entry) {
   if (entry.status === 'failure') return entry.error?.message ?? '(failed)'
   switch (entry.method) {
     case 'sign_event':
-    case 'signEvent':
+    case 'double_sign_event':
       return entry.params?.[0]?.content ?? ''
     case 'nip04_encrypt':
-    case 'nip04Encrypt':
     case 'nip44_encrypt':
-    case 'nip44Encrypt':
       return entry.params?.[1] ?? ''
     case 'nip44v3_encrypt':
-    case 'nip44v3Encrypt':
       return entry.params?.[3] ?? ''
-    case 'nip44_encrypt_multi_dh':
-    case 'nip44EncryptMultiDH':
-      return entry.params?.[0]?.plaintext ?? ''
+    case 'nip44v3_encrypt_multi_dh':
+      return entry.params?.[3] ?? ''
     case 'nip04_decrypt':
-    case 'nip04Decrypt':
     case 'nip44_decrypt':
-    case 'nip44Decrypt':
       return entry.result ?? ''
     case 'nip44v3_decrypt':
-    case 'nip44v3Decrypt':
       return entry.result ?? ''
-    case 'nip44_decrypt_multi_dh':
-    case 'nip44DecryptMultiDH':
-      return entry.params?.[0]?.ciphertext ?? ''
+    case 'nip44v3_decrypt_multi_dh':
+      return entry.params?.[3] ?? ''
     default:
       return ''
   }

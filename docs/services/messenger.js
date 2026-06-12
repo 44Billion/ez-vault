@@ -110,7 +110,7 @@ function onPortMessage (e) {
 }
 
 async function handleSignerRequest (e, { code, run }) {
-  const { pubkey, method, params = [], app = {} } = e.data.payload ?? {}
+  const { pubkey, method, params = [], app = {}, with_shared_key: withSharedKey = null } = e.data.payload ?? {}
   const eventKind = method === 'sign_event'
     ? params?.[0]?.kind
     : undefined
@@ -127,7 +127,7 @@ async function handleSignerRequest (e, { code, run }) {
   const shouldLog = !UNLOGGED_METHODS.has(method)
 
   try {
-    const payload = await run({ pubkey, method, params })
+    const payload = await run({ pubkey, method, params, withSharedKey })
     if (shouldLog) {
       log.append({ ...logBase, status: 'success', params, result: payload })
     }

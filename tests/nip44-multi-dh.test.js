@@ -67,6 +67,14 @@ function addContentKey (ownerPubkey) {
   return { pubkey, secret }
 }
 
+function textToBase64 (text) {
+  return Buffer.from(text).toString('base64')
+}
+
+function base64ToText (text) {
+  return Buffer.from(text, 'base64').toString()
+}
+
 test('signer.run delegates bunker extended signer methods to the handle', async () => {
   secrets.unlock(generateSecretKey(), null)
   const calls = []
@@ -80,16 +88,16 @@ test('signer.run delegates bunker extended signer methods to the handle', async 
       calls.push({ method: 'nip44v3Decrypt', args })
       return 'plaintext-b64'
     },
-    nip44EncryptMultiDH: async options => {
-      calls.push({ method: 'nip44EncryptMultiDH', options })
-      return { ciphertext: 'multi-ciphertext' }
+    nip44EncryptMultiDH: async (...args) => {
+      calls.push({ method: 'nip44EncryptMultiDH', args })
+      return ['multi-ciphertext', 'sender-content']
     },
-    nip44DecryptMultiDH: async options => {
-      calls.push({ method: 'nip44DecryptMultiDH', options })
-      return { plaintext: 'multi-plain' }
+    nip44DecryptMultiDH: async (...args) => {
+      calls.push({ method: 'nip44DecryptMultiDH', args })
+      return 'multi-plain-b64'
     },
-    doubleSignEvent: async request => {
-      calls.push({ method: 'doubleSignEvent', request })
+    doubleSignEvent: async event => {
+      calls.push({ method: 'doubleSignEvent', event })
       return { id: 'signed-id' }
     },
     withSharedKey: (peerPubkey, info) => {
@@ -99,23 +107,23 @@ test('signer.run delegates bunker extended signer methods to the handle', async 
     close: async () => {}
   }
   const bunker = addBunkerAccount(fakeHandle)
-  const multiEncryptRequest = { peerPubkey: 'peer', plaintext: 'plain', kind: 263, scope: '' }
-  const multiDecryptRequest = { peerPubkey: 'peer', ciphertext: 'cipher', kind: 263, scope: '' }
-  const doubleSignRequest = { event: { kind: 1, tags: [], content: 'x' }, contentPubkey: 'content' }
+  const multiEncryptParams = ['peer', 263, '', 'plain-b64', 'peer-content']
+  const multiDecryptParams = ['peer', 263, '', 'cipher', 'peer-content', 'own-content']
+  const event = { kind: 1, tags: [], content: 'x' }
 
   assert.equal(await run({ pubkey: bunker.pubkey, method: 'nip44v3_encrypt', params: ['peer', 3560, '', 'plain-b64'] }), 'v3-ciphertext')
   assert.equal(await run({ pubkey: bunker.pubkey, method: 'nip44v3_decrypt', params: ['peer', 3560, '', 'cipher'] }), 'plaintext-b64')
-  assert.deepEqual(await run({ pubkey: bunker.pubkey, method: 'nip44_encrypt_multi_dh', params: [multiEncryptRequest] }), { ciphertext: 'multi-ciphertext' })
-  assert.deepEqual(await run({ pubkey: bunker.pubkey, method: 'nip44_decrypt_multi_dh', params: [multiDecryptRequest] }), { plaintext: 'multi-plain' })
-  assert.deepEqual(await run({ pubkey: bunker.pubkey, method: 'double_sign_event', params: [doubleSignRequest] }), { id: 'signed-id' })
-  assert.equal(await run({ pubkey: bunker.pubkey, method: 'with_shared_key', params: ['peer', 'info'] }), shared)
+  assert.deepEqual(await run({ pubkey: bunker.pubkey, method: 'nip44v3_encrypt_multi_dh', params: multiEncryptParams }), ['multi-ciphertext', 'sender-content'])
+  assert.equal(await run({ pubkey: bunker.pubkey, method: 'nip44v3_decrypt_multi_dh', params: multiDecryptParams }), 'multi-plain-b64')
+  assert.deepEqual(await run({ pubkey: bunker.pubkey, method: 'double_sign_event', params: [event] }), { id: 'signed-id' })
+  assert.equal(await run({ pubkey: bunker.pubkey, method: 'get_public_key', params: [], withSharedKey: ['peer', 'info'] }), 'shared-pubkey')
 
   assert.deepEqual(calls, [
     { method: 'nip44v3Encrypt', args: ['peer', 3560, '', 'plain-b64'] },
     { method: 'nip44v3Decrypt', args: ['peer', 3560, '', 'cipher'] },
-    { method: 'nip44EncryptMultiDH', options: multiEncryptRequest },
-    { method: 'nip44DecryptMultiDH', options: multiDecryptRequest },
-    { method: 'doubleSignEvent', request: doubleSignRequest },
+    { method: 'nip44EncryptMultiDH', args: multiEncryptParams },
+    { method: 'nip44DecryptMultiDH', args: multiDecryptParams },
+    { method: 'doubleSignEvent', event },
     { method: 'withSharedKey', args: ['peer', 'info'] }
   ])
 })
@@ -134,39 +142,22 @@ test('nip44-multi-dh encrypt/decrypt uses advertised content keys', async () => 
   const encrypted = await run({
     pubkey: alice.pubkey,
     method: 'nip44EncryptMultiDH',
-    params: [{ peerPubkey: bob.pubkey, plaintext: 'hello bob', kind: MULTI_DH_KIND, scope: MULTI_DH_SCOPE }],
+    params: [bob.pubkey, MULTI_DH_KIND, MULTI_DH_SCOPE, textToBase64('hello bob'), bobContent.pubkey],
     internals: { _getIykcProofs }
   })
   const decrypted = await run({
     pubkey: bob.pubkey,
     method: 'nip44DecryptMultiDH',
-    params: [{
-      peerPubkey: alice.pubkey,
-      ciphertext: encrypted.ciphertext,
-      ownContentPubkey: encrypted.receiverContentPubkey,
-      peerContentPubkey: encrypted.senderContentPubkey,
-      kind: MULTI_DH_KIND,
-      scope: MULTI_DH_SCOPE
-    }]
+    params: [alice.pubkey, MULTI_DH_KIND, MULTI_DH_SCOPE, encrypted[0], encrypted[1], bobContent.pubkey]
   })
 
-  assert.equal(encrypted.mode, 'both-content')
-  assert.equal(encrypted.senderContentPubkey, aliceContent.pubkey)
-  assert.equal(encrypted.receiverContentPubkey, bobContent.pubkey)
-  assert.equal(decrypted.plaintext, 'hello bob')
-  assert.equal(decrypted.mode, 'both-content')
+  assert.deepEqual(encrypted.slice(1), [aliceContent.pubkey])
+  assert.equal(base64ToText(decrypted), 'hello bob')
   await assert.rejects(
     () => run({
       pubkey: bob.pubkey,
       method: 'nip44DecryptMultiDH',
-      params: [{
-        peerPubkey: alice.pubkey,
-        ciphertext: encrypted.ciphertext,
-        ownContentPubkey: encrypted.receiverContentPubkey,
-        peerContentPubkey: encrypted.senderContentPubkey,
-        kind: MULTI_DH_KIND + 1,
-        scope: MULTI_DH_SCOPE
-      }]
+      params: [alice.pubkey, MULTI_DH_KIND + 1, MULTI_DH_SCOPE, encrypted[0], encrypted[1], bobContent.pubkey]
     }),
     /kind mismatch/
   )
@@ -181,24 +172,17 @@ test('nip44-multi-dh self-encryption with content keys round-trips', async () =>
   const encrypted = await run({
     pubkey: alice.pubkey,
     method: 'nip44EncryptMultiDH',
-    params: [{ peerPubkey: alice.pubkey, plaintext: 'note to self', kind: MULTI_DH_KIND, scope: MULTI_DH_SCOPE }],
+    params: [alice.pubkey, MULTI_DH_KIND, MULTI_DH_SCOPE, textToBase64('note to self'), aliceContent.pubkey],
     internals: { _getIykcProofs }
   })
   const decrypted = await run({
     pubkey: alice.pubkey,
     method: 'nip44DecryptMultiDH',
-    params: [{
-      peerPubkey: alice.pubkey,
-      ciphertext: encrypted.ciphertext,
-      ownContentPubkey: encrypted.receiverContentPubkey,
-      peerContentPubkey: encrypted.senderContentPubkey,
-      kind: MULTI_DH_KIND,
-      scope: MULTI_DH_SCOPE
-    }]
+    params: [alice.pubkey, MULTI_DH_KIND, MULTI_DH_SCOPE, encrypted[0], encrypted[1], aliceContent.pubkey]
   })
 
-  assert.equal(encrypted.mode, 'both-content')
-  assert.equal(decrypted.plaintext, 'note to self')
+  assert.deepEqual(encrypted.slice(1), [aliceContent.pubkey])
+  assert.equal(base64ToText(decrypted), 'note to self')
 })
 
 test('nip44-multi-dh decrypt resolves older stored own content keys by pubkey', async () => {
@@ -215,27 +199,14 @@ test('nip44-multi-dh decrypt resolves older stored own content keys by pubkey', 
 
   const aliceSigner = secrets.getNsecSigner(alice.pubkey)
   const bobSigner = secrets.getNsecSigner(bob.pubkey)
-  const encrypted = await aliceSigner.nip44EncryptMultiDH({
-    peerPubkey: bob.pubkey,
-    peerContentPubkey: olderPubkey,
-    kind: MULTI_DH_KIND,
-    scope: MULTI_DH_SCOPE,
-    plaintext: 'old key message'
-  })
-  const decrypted = await bobSigner.nip44DecryptMultiDH({
-    peerPubkey: alice.pubkey,
-    ownContentPubkey: olderPubkey,
-    kind: MULTI_DH_KIND,
-    scope: MULTI_DH_SCOPE,
-    ciphertext: encrypted.ciphertext
-  })
+  const encrypted = await aliceSigner.nip44EncryptMultiDH(bob.pubkey, MULTI_DH_KIND, MULTI_DH_SCOPE, textToBase64('old key message'), olderPubkey)
+  const decrypted = await bobSigner.nip44DecryptMultiDH(alice.pubkey, MULTI_DH_KIND, MULTI_DH_SCOPE, encrypted[0], encrypted[1], olderPubkey)
 
   assert.equal(secrets.getLatestContentKeySigner(bob.pubkey).getPublicKey(), newerPubkey)
-  assert.equal(decrypted.ownContentPubkey, olderPubkey)
-  assert.equal(decrypted.plaintext, 'old key message')
+  assert.equal(base64ToText(decrypted), 'old key message')
 })
 
-test('nip44-multi-dh can opt out of content-key lookup', async () => {
+test('nip44-multi-dh returns the sender content key when no peer content key is provided', async () => {
   secrets.unlock(generateSecretKey(), null)
   const alice = addNsecAccount()
   const bob = addNsecAccount()
@@ -243,25 +214,16 @@ test('nip44-multi-dh can opt out of content-key lookup', async () => {
   const encrypted = await run({
     pubkey: alice.pubkey,
     method: 'nip44EncryptMultiDH',
-    params: [{
-      peerPubkey: bob.pubkey,
-      plaintext: 'identity only',
-      kind: MULTI_DH_KIND,
-      scope: MULTI_DH_SCOPE,
-      useOwnContentKey: false,
-      usePeerContentKey: false
-    }]
+    params: [bob.pubkey, MULTI_DH_KIND, MULTI_DH_SCOPE, textToBase64('identity only')]
   })
   const decrypted = await run({
     pubkey: bob.pubkey,
     method: 'nip44DecryptMultiDH',
-    params: [{ peerPubkey: alice.pubkey, ciphertext: encrypted.ciphertext, kind: MULTI_DH_KIND, scope: MULTI_DH_SCOPE }]
+    params: [alice.pubkey, MULTI_DH_KIND, MULTI_DH_SCOPE, encrypted[0], encrypted[1]]
   })
 
-  assert.equal(encrypted.mode, 'identity')
-  assert.equal(encrypted.senderContentPubkey, '')
-  assert.equal(encrypted.receiverContentPubkey, '')
-  assert.equal(decrypted.plaintext, 'identity only')
+  assert.ok(encrypted[1])
+  assert.equal(base64ToText(decrypted), 'identity only')
 })
 
 test('signer.run normalizes snake_case multi-DH wire methods', async () => {
@@ -271,23 +233,16 @@ test('signer.run normalizes snake_case multi-DH wire methods', async () => {
 
   const encrypted = await run({
     pubkey: alice.pubkey,
-    method: 'nip44_encrypt_multi_dh',
-    params: [{
-      peerPubkey: bob.pubkey,
-      plaintext: 'snake case',
-      kind: MULTI_DH_KIND,
-      scope: MULTI_DH_SCOPE,
-      useOwnContentKey: false,
-      usePeerContentKey: false
-    }]
+    method: 'nip44v3_encrypt_multi_dh',
+    params: [bob.pubkey, MULTI_DH_KIND, MULTI_DH_SCOPE, textToBase64('snake case')]
   })
   const decrypted = await run({
     pubkey: bob.pubkey,
-    method: 'nip44_decrypt_multi_dh',
-    params: [{ peerPubkey: alice.pubkey, ciphertext: encrypted.ciphertext, kind: MULTI_DH_KIND, scope: MULTI_DH_SCOPE }]
+    method: 'nip44v3_decrypt_multi_dh',
+    params: [alice.pubkey, MULTI_DH_KIND, MULTI_DH_SCOPE, encrypted[0], encrypted[1]]
   })
 
-  assert.equal(decrypted.plaintext, 'snake case')
+  assert.equal(base64ToText(decrypted), 'snake case')
 })
 
 test('signer.run doubleSignEvent signs with identity and local content key', async () => {
@@ -407,7 +362,7 @@ test('nip44-multi-dh creates own content keys in encrypted localStorage', async 
   const encrypted = await run({
     pubkey: alice.pubkey,
     method: 'nip44EncryptMultiDH',
-    params: [{ peerPubkey: bob.pubkey, plaintext: 'hello bob', kind: MULTI_DH_KIND, scope: MULTI_DH_SCOPE }],
+    params: [bob.pubkey, MULTI_DH_KIND, MULTI_DH_SCOPE, textToBase64('hello bob')],
     internals: {
       _getIykcProofs: async () => ({}),
       _upsertContentKeyEvent: async ({ contentKeySigner }) => {
@@ -418,7 +373,7 @@ test('nip44-multi-dh creates own content keys in encrypted localStorage', async 
   })
   const accountBlob = secrets.sealCurrentEntries()
 
-  assert.equal(encrypted.senderContentPubkey, publishedContentPubkey)
+  assert.equal(encrypted[1], publishedContentPubkey)
   assert.ok(globalThis.localStorage.getItem(CONTENT_KEYS_STORAGE_KEY))
 
   secrets.lock()

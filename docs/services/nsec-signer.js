@@ -52,8 +52,8 @@ class SharedKeySigner {
   async nip44Decrypt (peerPubkey, ciphertext) { return (await this.#sharedSigner()).nip44Decrypt(peerPubkey, ciphertext) }
   async nip44v3Encrypt (peerPubkey, kind, scope, plaintextB64) { return (await this.#sharedSigner()).nip44v3Encrypt(peerPubkey, kind, scope, plaintextB64) }
   async nip44v3Decrypt (peerPubkey, kind, scope, ciphertext) { return (await this.#sharedSigner()).nip44v3Decrypt(peerPubkey, kind, scope, ciphertext) }
-  async nip44EncryptMultiDH (options) { return (await this.#sharedSigner()).nip44EncryptMultiDH(options) }
-  async nip44DecryptMultiDH (options) { return (await this.#sharedSigner()).nip44DecryptMultiDH(options) }
+  async nip44EncryptMultiDH (...params) { return (await this.#sharedSigner()).nip44EncryptMultiDH(...params) }
+  async nip44DecryptMultiDH (...params) { return (await this.#sharedSigner()).nip44DecryptMultiDH(...params) }
   withSharedKey (peerPubkey, info = this.#info) { return new SharedKeySigner(this.#signer, peerPubkey, info) }
 }
 
@@ -188,50 +188,55 @@ export default class NsecSigner {
     }
   }
 
-  async nip44EncryptMultiDH ({ peerPubkey, peerContentPubkey = '', ownContentSigner, ownContentPubkey = '', plaintext, kind, scope = '', context }) {
+  async #latestContentKeyMaterial () {
+    const signers = NsecSigner.#contentSignersByOwnerSigner.get(this)
+    const contentSigner = signers?.size ? [...signers.values()].at(-1) : null
+    return this.#contentKeyMaterial(contentSigner)
+  }
+
+  async nip44EncryptMultiDH (peerPubkey, kind, scope = '', plaintextB64, peerContentPubkey = '') {
     const normalizedKind = nip44v3.normalizeKind(kind)
-    const { contentPubkey, contentSecretKey } = await this.#contentKeyMaterial(ownContentSigner, ownContentPubkey)
-    const { mode, conversationKey } = deriveMultiDhConversationKey({
+    const { contentPubkey, contentSecretKey } = await this.#latestContentKeyMaterial()
+    const { conversationKey } = deriveMultiDhConversationKey({
       role: 'sender',
       identitySecretKey: this.#secretKey,
       identityPubkey: this.#pubkey,
       contentSecretKey,
       contentPubkey,
       peerIdentityPubkey: peerPubkey,
-      peerContentPubkey,
-      context
+      peerContentPubkey
     })
-    return {
-      ciphertext: conversationKey
-        ? nip44v3.encryptWithConversationKey(conversationKey, normalizedKind, scope, plaintext)
-        : nip44v3.encrypt(this.#secretKey, peerPubkey, normalizedKind, scope, plaintext),
-      mode,
-      ownContentPubkey: contentPubkey,
-      peerContentPubkey: peerContentPubkey || ''
-    }
+    const ciphertext = conversationKey
+      ? nip44v3.encryptWithConversationKeyBytes(
+        conversationKey,
+        normalizedKind,
+        nip44v3.toBytes(scope || ''),
+        nip44v3.b64decode(plaintextB64)
+      )
+      : nip44v3.nip07Encrypt(this.#secretKey, peerPubkey, normalizedKind, scope, plaintextB64)
+    return [ciphertext, contentPubkey]
   }
 
-  async nip44DecryptMultiDH ({ peerPubkey, peerContentPubkey = '', ownContentSigner, ownContentPubkey = '', ciphertext, kind, scope = '', context }) {
+  async nip44DecryptMultiDH (peerPubkey, kind, scope = '', ciphertext, peerContentPubkey = '', ownContentPubkey = '') {
     const normalizedKind = nip44v3.normalizeKind(kind)
-    const { contentPubkey, contentSecretKey } = await this.#contentKeyMaterial(ownContentSigner, ownContentPubkey)
-    const { mode, conversationKey } = deriveMultiDhConversationKey({
+    const { contentPubkey, contentSecretKey } = await this.#contentKeyMaterial(null, ownContentPubkey)
+    const { conversationKey } = deriveMultiDhConversationKey({
       role: 'receiver',
       identitySecretKey: this.#secretKey,
       identityPubkey: this.#pubkey,
       contentSecretKey,
       contentPubkey,
       peerIdentityPubkey: peerPubkey,
-      peerContentPubkey,
-      context
+      peerContentPubkey
     })
-    return {
-      plaintext: conversationKey
-        ? nip44v3.decryptWithConversationKey(conversationKey, normalizedKind, scope, ciphertext)
-        : nip44v3.decrypt(this.#secretKey, peerPubkey, normalizedKind, scope, ciphertext),
-      mode,
-      ownContentPubkey: contentPubkey,
-      peerContentPubkey: peerContentPubkey || ''
-    }
+    return conversationKey
+      ? nip44v3.b64encode(nip44v3.decryptWithConversationKeyBytes(
+        conversationKey,
+        normalizedKind,
+        nip44v3.toBytes(scope || ''),
+        ciphertext
+      ))
+      : nip44v3.nip07Decrypt(this.#secretKey, peerPubkey, normalizedKind, scope, ciphertext)
   }
 
   withSharedKey (peerPubkey, info) {

@@ -58,10 +58,6 @@ async function nip44v3DecryptText (signer, peerPubkey, kind, ciphertext) {
   return base64ToText(await signer.nip44v3Decrypt(peerPubkey, kind, NIP44_V3_SCOPE, ciphertext))
 }
 
-function multiDhContext (channelPubkey) {
-  return { protocol: 'private-channel', channelPubkey }
-}
-
 function storesRecoverySeeds (mode) {
   return mode === 'seeder' || mode === 'watchtower'
 }
@@ -93,8 +89,7 @@ async function prepareRoutedMessage ({ senderSigner, imkcSigner, privateChannelS
     imkcSigner: useMultiDh ? imkcSigner : null,
     receivers,
     receiverContentKeys,
-    event,
-    multiDhContext: multiDhContext(channelPubkey)
+    event
   })
   const imkcPubkey = preparedRows.ownContentPubkey || ''
   const imkcProof = imkcPubkey ? await makeImkcProof({ senderSigner, senderPubkey, imkcPubkey }) : ''
@@ -349,28 +344,22 @@ function eventFromPayload ({ payloadCiphertext, messageSeckey, senderPubkey }) {
   return { ...normalized, id: getEventHash(normalized) }
 }
 
-async function unwrapRecipientEnvelope ({ payloadCiphertext, envelope, receiverSigner, iykcSigner, receiverPubkey, senderPubkey, imkcPubkey, multiDhContext }) {
+async function unwrapRecipientEnvelope ({ payloadCiphertext, envelope, receiverSigner, receiverPubkey, senderPubkey, imkcPubkey }) {
   if (receiverPubkey && envelope.receiverPubkey !== receiverPubkey) return null
   let messageSeckey
   if (envelope.iykcPubkey || imkcPubkey) {
     if (!receiverSigner?.nip44DecryptMultiDH) throw new Error('RECEIVER_MULTI_DH_UNSUPPORTED')
-    let ownContentSigner = null
     if (envelope.iykcPubkey) {
       assertValidEnvelopeIykcProof(envelope)
-      ownContentSigner = iykcSigner?.getPublicKey && await iykcSigner.getPublicKey() === envelope.iykcPubkey
-        ? iykcSigner
-        : null
     }
-    messageSeckey = (await receiverSigner.nip44DecryptMultiDH({
-      peerPubkey: senderPubkey,
-      peerContentPubkey: imkcPubkey,
-      ownContentSigner,
-      ownContentPubkey: envelope.iykcPubkey || '',
-      context: multiDhContext,
-      kind: ROUTER_KIND,
-      scope: NIP44_V3_SCOPE,
-      ciphertext: envelope.ciphertext
-    })).plaintext
+    messageSeckey = base64ToText(await receiverSigner.nip44DecryptMultiDH(
+      senderPubkey,
+      ROUTER_KIND,
+      NIP44_V3_SCOPE,
+      envelope.ciphertext,
+      imkcPubkey,
+      envelope.iykcPubkey || ''
+    ))
   } else {
     if (!receiverSigner?.nip44v3Decrypt) throw new Error('RECEIVER_SIGNER_NIP44V3_DECRYPT_UNSUPPORTED')
     messageSeckey = await nip44v3DecryptText(receiverSigner, senderPubkey, ROUTER_KIND, envelope.ciphertext)
@@ -378,7 +367,7 @@ async function unwrapRecipientEnvelope ({ payloadCiphertext, envelope, receiverS
   return eventFromPayload({ payloadCiphertext, messageSeckey, senderPubkey })
 }
 
-export async function unwrapEvent ({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelReaderSigner = privateChannelSigner, privateChannelReaderPubkey, event, receiverPubkey }) {
+export async function unwrapEvent ({ receiverSigner, privateChannelSigner = receiverSigner, privateChannelReaderSigner = privateChannelSigner, privateChannelReaderPubkey, event, receiverPubkey }) {
   if (!event || event.kind !== PRIVATE_BROADCAST_KIND) return null
   if (!receiverSigner?.nip44DecryptMultiDH && !receiverSigner?.nip44v3Decrypt) throw new Error('RECEIVER_SIGNER_NIP44V3_DECRYPT_UNSUPPORTED')
   const channelReaderSigner = privateChannelReaderSigner || privateChannelSigner
@@ -407,11 +396,9 @@ export async function unwrapEvent ({ receiverSigner, iykcSigner, privateChannelS
       payloadCiphertext: payload.ciphertext,
       envelope: parseRecipientEnvelope(lines[index], index),
       receiverSigner,
-      iykcSigner,
       receiverPubkey,
       senderPubkey,
-      imkcPubkey,
-      multiDhContext: multiDhContext(channelPubkey)
+      imkcPubkey
     })
     if (event) return event
   }
@@ -633,7 +620,6 @@ function emitReceivedContentKeyUsage ({ outer, router, channelPubkey, receiverPu
 
 function createProcessor ({
   receiverSigner,
-  iykcSigner,
   privateChannelSigner,
   privateChannelSignersByPubkey,
   privateChannelReaderSigner = privateChannelSigner,
@@ -790,11 +776,9 @@ function createProcessor ({
                 payloadCiphertext: groupMeta.payloadCiphertext,
                 envelope,
                 receiverSigner,
-                iykcSigner,
                 receiverPubkey,
                 senderPubkey,
-                imkcPubkey,
-                multiDhContext: multiDhContext(channelPubkey)
+                imkcPubkey
               })
               if (event) {
                 innerEventIdsByRowIndex[rowIndex] = event.id
