@@ -198,7 +198,9 @@ test('multi-DH conversation key is pair-oriented, not direction-oriented', () =>
     contentSecretKey: aliceContentSecret,
     contentPubkey: aliceContentPubkey,
     peerIdentityPubkey: bobPubkey,
-    peerContentPubkey: bobContentPubkey
+    peerContentPubkey: bobContentPubkey,
+    kind: ROUTER_KIND,
+    scope: ''
   })
   const bobReceiving = deriveMultiDhConversationKey({
     role: 'receiver',
@@ -207,7 +209,9 @@ test('multi-DH conversation key is pair-oriented, not direction-oriented', () =>
     contentSecretKey: bobContentSecret,
     contentPubkey: bobContentPubkey,
     peerIdentityPubkey: alicePubkey,
-    peerContentPubkey: aliceContentPubkey
+    peerContentPubkey: aliceContentPubkey,
+    kind: ROUTER_KIND,
+    scope: ''
   })
   const bobToAlice = deriveMultiDhConversationKey({
     role: 'sender',
@@ -216,7 +220,9 @@ test('multi-DH conversation key is pair-oriented, not direction-oriented', () =>
     contentSecretKey: bobContentSecret,
     contentPubkey: bobContentPubkey,
     peerIdentityPubkey: alicePubkey,
-    peerContentPubkey: aliceContentPubkey
+    peerContentPubkey: aliceContentPubkey,
+    kind: ROUTER_KIND,
+    scope: ''
   })
   const aliceToBobInChannel = deriveMultiDhConversationKey({
     role: 'sender',
@@ -226,7 +232,8 @@ test('multi-DH conversation key is pair-oriented, not direction-oriented', () =>
     contentPubkey: aliceContentPubkey,
     peerIdentityPubkey: bobPubkey,
     peerContentPubkey: bobContentPubkey,
-    context: { channelPubkey: '1'.repeat(64), protocol: 'private-channel' }
+    kind: ROUTER_KIND,
+    scope: '1'.repeat(64)
   })
   const bobReceivingInChannel = deriveMultiDhConversationKey({
     role: 'receiver',
@@ -236,7 +243,8 @@ test('multi-DH conversation key is pair-oriented, not direction-oriented', () =>
     contentPubkey: bobContentPubkey,
     peerIdentityPubkey: alicePubkey,
     peerContentPubkey: aliceContentPubkey,
-    context: { protocol: 'private-channel', channelPubkey: '1'.repeat(64) }
+    kind: ROUTER_KIND,
+    scope: '1'.repeat(64)
   })
   const aliceToBobInOtherChannel = deriveMultiDhConversationKey({
     role: 'sender',
@@ -246,7 +254,19 @@ test('multi-DH conversation key is pair-oriented, not direction-oriented', () =>
     contentPubkey: aliceContentPubkey,
     peerIdentityPubkey: bobPubkey,
     peerContentPubkey: bobContentPubkey,
-    context: { protocol: 'private-channel', channelPubkey: '2'.repeat(64) }
+    kind: ROUTER_KIND,
+    scope: '2'.repeat(64)
+  })
+  const aliceToBobInOtherKind = deriveMultiDhConversationKey({
+    role: 'sender',
+    identitySecretKey: aliceSecret,
+    identityPubkey: alicePubkey,
+    contentSecretKey: aliceContentSecret,
+    contentPubkey: aliceContentPubkey,
+    peerIdentityPubkey: bobPubkey,
+    peerContentPubkey: bobContentPubkey,
+    kind: ROUTER_KIND + 1,
+    scope: '1'.repeat(64)
   })
 
   assert.equal(bytesToHex(aliceToBob.conversationKey), bytesToHex(bobReceiving.conversationKey))
@@ -254,6 +274,7 @@ test('multi-DH conversation key is pair-oriented, not direction-oriented', () =>
   assert.equal(bytesToHex(aliceToBobInChannel.conversationKey), bytesToHex(bobReceivingInChannel.conversationKey))
   assert.notEqual(bytesToHex(aliceToBob.conversationKey), bytesToHex(aliceToBobInChannel.conversationKey))
   assert.notEqual(bytesToHex(aliceToBobInChannel.conversationKey), bytesToHex(aliceToBobInOtherChannel.conversationKey))
+  assert.notEqual(bytesToHex(aliceToBobInChannel.conversationKey), bytesToHex(aliceToBobInOtherKind.conversationKey))
 })
 
 test('multi-DH self-encryption with a content key still requires the identity key', async () => {
@@ -1057,6 +1078,7 @@ test('wrapEvent uses receiver content key rows when iykc is advertised', async (
   const alice = signer()
   const bob = signer()
   const bobContent = signer()
+  const alicePubkey = await alice.getPublicKey()
   const bobPubkey = await bob.getPublicKey()
   const contentKeyEvent = await makeContentKeyEvent({ userSigner: bob, contentKeySigner: bobContent, createdAt: 7 })
   const contentKey = parseContentKeyEvent(contentKeyEvent)
@@ -1069,7 +1091,7 @@ test('wrapEvent uses receiver content key rows when iykc is advertised', async (
       [bobPubkey]: contentKey
     })
   })
-  const router = await decryptPrivateBroadcast(alice, await alice.getPublicKey(), wrapped.content)
+  const router = await decryptPrivateBroadcast(alice, alicePubkey, wrapped.content)
   const line = routerRecipientRows(router)[0]
 
   assert.deepEqual(line.slice(0, 1), [bobPubkey])
@@ -1079,7 +1101,11 @@ test('wrapEvent uses receiver content key rows when iykc is advertised', async (
     /RECEIVER_CONTENT_KEY_REQUIRED/
   )
   NsecSigner.setContentSigners(bob, [bobContent])
-  assert.deepEqual(await unwrapEvent({ receiverSigner: bob, iykcSigner: bobContent, privateChannelSigner: alice, event: wrapped, receiverPubkey: bobPubkey }), unwrappedFixture(original, await alice.getPublicKey()))
+  await assert.rejects(
+    () => bob.nip44DecryptMultiDH(alicePubkey, ROUTER_KIND, '', line[1], router.tags.find(t => t[0] === 'imkc')?.[1] || '', contentKey.iykcPubkey),
+    /scope mismatch/
+  )
+  assert.deepEqual(await unwrapEvent({ receiverSigner: bob, iykcSigner: bobContent, privateChannelSigner: alice, event: wrapped, receiverPubkey: bobPubkey }), unwrappedFixture(original, alicePubkey))
 })
 
 test('unwrapEvent can decrypt iykc rows through receiverSigner without direct content signer access', async () => {

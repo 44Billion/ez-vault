@@ -157,7 +157,7 @@ function readPreparedRow (preparedRows, index) {
   return row
 }
 
-async function prepareEnvelopeRowsOnce ({ id, senderSigner, receivers, receiverContentKeys = {}, event }) {
+async function prepareEnvelopeRowsOnce ({ id, senderSigner, receivers, receiverContentKeys = {}, event, rowScope = '' }) {
   const useMultiDh = typeof senderSigner?.nip44EncryptMultiDH === 'function'
   let foundOwnContentPubkey = false
   let usedOwnContentPubkey = ''
@@ -176,7 +176,7 @@ async function prepareEnvelopeRowsOnce ({ id, senderSigner, receivers, receiverC
       const encrypted = await senderSigner.nip44EncryptMultiDH(
         row.receiverPubkey,
         ROUTER_KIND,
-        '',
+        rowScope,
         bytesToBase64(encoder.encode(messageSeckey)),
         row.iykcPubkey
       )
@@ -188,7 +188,7 @@ async function prepareEnvelopeRowsOnce ({ id, senderSigner, receivers, receiverC
       foundOwnContentPubkey = true
       if (nextContentPubkey) usedOwnContentPubkey = nextContentPubkey
     } else {
-      ciphertext = await senderSigner.nip44v3Encrypt(row.receiverPubkey, ROUTER_KIND, '', bytesToBase64(encoder.encode(messageSeckey)))
+      ciphertext = await senderSigner.nip44v3Encrypt(row.receiverPubkey, ROUTER_KIND, rowScope, bytesToBase64(encoder.encode(messageSeckey)))
     }
     const rowIndex = rowIndexes.length + 1
     setPreparedRow(id, rowIndex, buildRecipientRow(row, ciphertext))

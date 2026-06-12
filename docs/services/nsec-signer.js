@@ -204,7 +204,9 @@ export default class NsecSigner {
       contentSecretKey,
       contentPubkey,
       peerIdentityPubkey: peerPubkey,
-      peerContentPubkey
+      peerContentPubkey,
+      kind: normalizedKind,
+      scope
     })
     const ciphertext = conversationKey
       ? nip44v3.encryptWithConversationKeyBytes(
@@ -227,7 +229,9 @@ export default class NsecSigner {
       contentSecretKey,
       contentPubkey,
       peerIdentityPubkey: peerPubkey,
-      peerContentPubkey
+      peerContentPubkey,
+      kind: normalizedKind,
+      scope
     })
     return conversationKey
       ? nip44v3.b64encode(nip44v3.decryptWithConversationKeyBytes(

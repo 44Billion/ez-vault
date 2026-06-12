@@ -89,7 +89,8 @@ async function prepareRoutedMessage ({ senderSigner, imkcSigner, privateChannelS
     imkcSigner: useMultiDh ? imkcSigner : null,
     receivers,
     receiverContentKeys,
-    event
+    event,
+    rowScope: channelPubkey
   })
   const imkcPubkey = preparedRows.ownContentPubkey || ''
   const imkcProof = imkcPubkey ? await makeImkcProof({ senderSigner, senderPubkey, imkcPubkey }) : ''
@@ -344,7 +345,7 @@ function eventFromPayload ({ payloadCiphertext, messageSeckey, senderPubkey }) {
   return { ...normalized, id: getEventHash(normalized) }
 }
 
-async function unwrapRecipientEnvelope ({ payloadCiphertext, envelope, receiverSigner, receiverPubkey, senderPubkey, imkcPubkey }) {
+async function unwrapRecipientEnvelope ({ payloadCiphertext, envelope, receiverSigner, receiverPubkey, senderPubkey, imkcPubkey, rowScope = '' }) {
   if (receiverPubkey && envelope.receiverPubkey !== receiverPubkey) return null
   let messageSeckey
   if (envelope.iykcPubkey || imkcPubkey) {
@@ -355,14 +356,14 @@ async function unwrapRecipientEnvelope ({ payloadCiphertext, envelope, receiverS
     messageSeckey = base64ToText(await receiverSigner.nip44DecryptMultiDH(
       senderPubkey,
       ROUTER_KIND,
-      NIP44_V3_SCOPE,
+      rowScope,
       envelope.ciphertext,
       imkcPubkey,
       envelope.iykcPubkey || ''
     ))
   } else {
     if (!receiverSigner?.nip44v3Decrypt) throw new Error('RECEIVER_SIGNER_NIP44V3_DECRYPT_UNSUPPORTED')
-    messageSeckey = await nip44v3DecryptText(receiverSigner, senderPubkey, ROUTER_KIND, envelope.ciphertext)
+    messageSeckey = base64ToText(await receiverSigner.nip44v3Decrypt(senderPubkey, ROUTER_KIND, rowScope, envelope.ciphertext))
   }
   return eventFromPayload({ payloadCiphertext, messageSeckey, senderPubkey })
 }
@@ -398,7 +399,8 @@ export async function unwrapEvent ({ receiverSigner, privateChannelSigner = rece
       receiverSigner,
       receiverPubkey,
       senderPubkey,
-      imkcPubkey
+      imkcPubkey,
+      rowScope: channelPubkey
     })
     if (event) return event
   }
@@ -778,7 +780,8 @@ function createProcessor ({
                 receiverSigner,
                 receiverPubkey,
                 senderPubkey,
-                imkcPubkey
+                imkcPubkey,
+                rowScope: channelPubkey
               })
               if (event) {
                 innerEventIdsByRowIndex[rowIndex] = event.id

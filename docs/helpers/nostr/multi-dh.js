@@ -6,10 +6,38 @@ import { hexToBytes } from './index.js'
 
 const textEncoder = new TextEncoder()
 
-// HKDF extract salt, equivalent in role to NIP-44's "nip44-v2" salt. This
-// names the generic multi-DH key schedule; it is not tied to ez-vault or to
-// private-channel so other implementations can derive the same key.
-const MULTI_DH_SALT = textEncoder.encode('nip44-multi-dh-v1')
+// HKDF extract salt, equivalent in role to NIP-44 v3's "nip44-v3\x00" salt.
+// This names the generic multi-DH key schedule; it is not tied to ez-vault or
+// to private-channel so other implementations can derive the same key.
+const MULTI_DH_SALT = textEncoder.encode('nip44-multi-dh-v1\x00')
+
+// Multi-DH transcript sizes:
+// - identity mode uses no Multi-DH transcript; callers fall back to identity NIP-44 v3.
+// - one content key uses 2 DH outputs: identity/identity plus identity/content.
+// - two content keys use 3 DH outputs: cross-identity uses both identity/content sides
+//   plus content/content; self-encryption uses identity/identity, identity/content,
+//   and content/content.
+// A/B step ids refer to lexicographically ordered identity pubkeys, not sender/receiver.
+const STEP = Object.freeze({
+  IDENTITY_IDENTITY: 0,
+  IDENTITY_CONTENT: 1,
+  CONTENT_CONTENT: 2,
+  A_CONTENT_B_IDENTITY: 3,
+  A_IDENTITY_B_CONTENT: 4,
+  A_CONTENT_B_CONTENT: 5
+})
+
+function u32be (n) {
+  const b = new Uint8Array(4)
+  new DataView(b.buffer).setUint32(0, n >>> 0, false)
+  return b
+}
+
+function normalizeKind (kind) {
+  const n = typeof kind === 'string' && kind.trim() !== '' ? Number(kind) : kind
+  if (!Number.isInteger(n) || n < 0 || n > 0xffffffff) throw new Error('INVALID_KIND')
+  return n
+}
 
 function publicKeyBytes (pubkey) {
   // Nostr pubkeys are x-only. secp256k1 ECDH expects a compressed point, so
@@ -21,16 +49,11 @@ function sharedX (secretKey, pubkey) {
   return secp256k1.getSharedSecret(secretKey, publicKeyBytes(pubkey)).subarray(1, 33)
 }
 
-function stepBytes (stepName, secretKey, pubkey) {
-  // A step name is local transcript metadata, not HKDF info. It says which
-  // pair of keys produced this DH output. In self-encryption,
+function stepBytes (stepId, secretKey, pubkey) {
+  // The step id tags the DH output before HKDF extract. In self-encryption,
   // DH(identitySecret, contentPubkey) and DH(contentSecret, identityPubkey)
-  // are the same raw sharedX, so naming the step keeps that value's role
-  // unambiguous. The "both keys are needed" property comes from including
-  // identity/identity and content/content self-encryption steps below.
-  const name = textEncoder.encode(stepName)
-  if (name.length > 255) throw new Error('MULTI_DH_STEP_NAME_TOO_LONG')
-  return concatBytes(Uint8Array.of(name.length), name, sharedX(secretKey, pubkey))
+  // are the same raw sharedX; the tag keeps that value's role unambiguous.
+  return concatBytes(u32be(stepId), sharedX(secretKey, pubkey))
 }
 
 function modeFor ({ senderContentPubkey, receiverContentPubkey }) {
@@ -46,54 +69,32 @@ function orderedPair ({ identityPubkey, contentPubkey, peerIdentityPubkey, peerC
   return identityPubkey <= peerIdentityPubkey ? [self, peer] : [peer, self]
 }
 
-function stableContextValue (value) {
-  if (value == null || value === '') return null
-  if (Array.isArray(value)) return value.map(stableContextValue)
-  if (typeof value === 'object') {
-    const out = {}
-    for (const key of Object.keys(value).sort()) {
-      const child = stableContextValue(value[key])
-      if (child != null) out[key] = child
-    }
-    return out
-  }
-  return value
+function hkdfInfo ({ kind, scope = '' }) {
+  const scopeBytes = textEncoder.encode(scope || '')
+  // Match NIP-44 v3's public context encoding so the Multi-DH conversation key
+  // is separated by the same kind/scope the ciphertext envelope authenticates.
+  // The salt names/versions the Multi-DH schedule; HKDF info stays context-only.
+  return concatBytes(u32be(normalizeKind(kind)), u32be(scopeBytes.length), scopeBytes)
 }
 
-function participantInfo ({ identityPubkey, contentPubkey }) {
-  return { identityPubkey, contentPubkey }
-}
-
-function hkdfInfo ({ pair, context }) {
-  // HKDF expand info, not salt. It binds the pair of public keys without
-  // saying who sent the message. Context is optional public domain separation;
-  // for example, private-channel passes the channel pubkey so a leaked final
-  // key is only useful inside that channel.
-  return textEncoder.encode(JSON.stringify({
-    version: 'nip44-multi-dh-v1',
-    participants: pair.map(participantInfo),
-    context: stableContextValue(context)
-  }))
-}
-
-function stepFor ({ stepName, a, b, identitySecretKey, contentSecretKey }) {
-  if (stepName === 'identity/identity') {
-    return stepBytes(stepName, identitySecretKey, b.isSelf ? a.identityPubkey : b.identityPubkey)
+function stepFor ({ stepId, a, b, identitySecretKey, contentSecretKey }) {
+  if (stepId === STEP.IDENTITY_IDENTITY) {
+    return stepBytes(stepId, identitySecretKey, b.isSelf ? a.identityPubkey : b.identityPubkey)
   }
-  if (stepName === 'a-content/b-identity') {
+  if (stepId === STEP.A_CONTENT_B_IDENTITY) {
     return a.isSelf
-      ? stepBytes(stepName, contentSecretKey, b.identityPubkey)
-      : stepBytes(stepName, identitySecretKey, a.contentPubkey)
+      ? stepBytes(stepId, contentSecretKey, b.identityPubkey)
+      : stepBytes(stepId, identitySecretKey, a.contentPubkey)
   }
-  if (stepName === 'a-identity/b-content') {
+  if (stepId === STEP.A_IDENTITY_B_CONTENT) {
     return a.isSelf
-      ? stepBytes(stepName, identitySecretKey, b.contentPubkey)
-      : stepBytes(stepName, contentSecretKey, a.identityPubkey)
+      ? stepBytes(stepId, identitySecretKey, b.contentPubkey)
+      : stepBytes(stepId, contentSecretKey, a.identityPubkey)
   }
-  if (stepName === 'a-content/b-content') {
+  if (stepId === STEP.A_CONTENT_B_CONTENT) {
     return a.isSelf
-      ? stepBytes(stepName, contentSecretKey, b.contentPubkey)
-      : stepBytes(stepName, contentSecretKey, a.contentPubkey)
+      ? stepBytes(stepId, contentSecretKey, b.contentPubkey)
+      : stepBytes(stepId, contentSecretKey, a.contentPubkey)
   }
   throw new Error('UNKNOWN_MULTI_DH_STEP')
 }
@@ -106,7 +107,8 @@ export function deriveMultiDhConversationKey ({
   contentPubkey = '',
   peerIdentityPubkey,
   peerContentPubkey = '',
-  context
+  kind,
+  scope = ''
 }) {
   if (role !== 'sender' && role !== 'receiver') throw new Error('INVALID_MULTI_DH_ROLE')
   if (!identitySecretKey || !identityPubkey || !peerIdentityPubkey) throw new Error('MULTI_DH_IDENTITY_REQUIRED')
@@ -125,28 +127,28 @@ export function deriveMultiDhConversationKey ({
 
   if (identityPubkey === peerIdentityPubkey) {
     const ownContentPubkey = contentPubkey || peerContentPubkey
-    steps.push(stepBytes('identity/identity', identitySecretKey, identityPubkey))
+    steps.push(stepBytes(STEP.IDENTITY_IDENTITY, identitySecretKey, identityPubkey))
     if (ownContentPubkey) {
       steps.push(contentSecretKey
-        ? stepBytes('identity/content', contentSecretKey, identityPubkey)
-        : stepBytes('identity/content', identitySecretKey, ownContentPubkey))
+        ? stepBytes(STEP.IDENTITY_CONTENT, contentSecretKey, identityPubkey)
+        : stepBytes(STEP.IDENTITY_CONTENT, identitySecretKey, ownContentPubkey))
     }
     if (contentPubkey && peerContentPubkey) {
-      steps.push(stepBytes('content/content', contentSecretKey, peerContentPubkey))
+      steps.push(stepBytes(STEP.CONTENT_CONTENT, contentSecretKey, peerContentPubkey))
     }
   } else {
     const includeIdentityIdentity = mode !== 'both-content'
     if (includeIdentityIdentity) {
-      steps.push(stepFor({ stepName: 'identity/identity', a, b, identitySecretKey, contentSecretKey }))
+      steps.push(stepFor({ stepId: STEP.IDENTITY_IDENTITY, a, b, identitySecretKey, contentSecretKey }))
     }
     if (a.contentPubkey) {
-      steps.push(stepFor({ stepName: 'a-content/b-identity', a, b, identitySecretKey, contentSecretKey }))
+      steps.push(stepFor({ stepId: STEP.A_CONTENT_B_IDENTITY, a, b, identitySecretKey, contentSecretKey }))
     }
     if (b.contentPubkey) {
-      steps.push(stepFor({ stepName: 'a-identity/b-content', a, b, identitySecretKey, contentSecretKey }))
+      steps.push(stepFor({ stepId: STEP.A_IDENTITY_B_CONTENT, a, b, identitySecretKey, contentSecretKey }))
     }
     if (a.contentPubkey && b.contentPubkey) {
-      steps.push(stepFor({ stepName: 'a-content/b-content', a, b, identitySecretKey, contentSecretKey }))
+      steps.push(stepFor({ stepId: STEP.A_CONTENT_B_CONTENT, a, b, identitySecretKey, contentSecretKey }))
     }
   }
 
@@ -154,6 +156,6 @@ export function deriveMultiDhConversationKey ({
   const prk = extract(sha256, ikm, MULTI_DH_SALT)
   return {
     mode,
-    conversationKey: expand(sha256, prk, hkdfInfo({ pair: [a, b], context }), 32)
+    conversationKey: expand(sha256, prk, hkdfInfo({ kind, scope }), 32)
   }
 }
