@@ -156,12 +156,12 @@ export class BunkerHandle {
   async nip44Decrypt (pk, ct) { return this.#request(s => s.nip44Decrypt(pk, ct)) }
   async nip44v3Encrypt (pk, kind, scope = '', pt) { return this.#sendRequest('nip44v3_encrypt', [pk, String(kind), scope || '', pt]) }
   async nip44v3Decrypt (pk, kind, scope = '', ct) { return this.#sendRequest('nip44v3_decrypt', [pk, String(kind), scope || '', ct]) }
-  async nip44EncryptMultiDH (pk, kind, scope = '', pt, peerContentPubkey = '') {
-    return parseJsonResult(await this.#sendRequest('nip44v3_encrypt_multi_dh', [pk, String(kind), scope || '', pt, peerContentPubkey || '']))
+  async nip44EncryptDoubleDH (pk, kind, scope = '', pt, peerContentPubkey = '') {
+    return parseJsonResult(await this.#sendRequest('nip44v3_encrypt_double_dh', [pk, String(kind), scope || '', pt, peerContentPubkey || '']))
   }
 
-  async nip44DecryptMultiDH (pk, kind, scope = '', ct, peerContentPubkey = '', ownContentPubkey = '') {
-    return parseJsonResult(await this.#sendRequest('nip44v3_decrypt_multi_dh', [pk, String(kind), scope || '', ct, peerContentPubkey || '', ownContentPubkey || '']))
+  async nip44DecryptDoubleDH (pk, kind, scope = '', ct, peerContentPubkey = '', ownContentPubkey = '') {
+    return parseJsonResult(await this.#sendRequest('nip44v3_decrypt_double_dh', [pk, String(kind), scope || '', ct, peerContentPubkey || '', ownContentPubkey || '']))
   }
 
   async doubleSignEvent (event) { return parseJsonResult(await this.#sendRequest('double_sign_event', [JSON.stringify(event || {})])) }
@@ -360,12 +360,12 @@ class BunkerSharedKeyHandle {
   nip44Decrypt (pk, ct) { return this.#request('nip44Decrypt', [pk, ct]) }
   nip44v3Encrypt (pk, kind, scope = '', pt) { return this.#sendRequest('nip44v3_encrypt', [pk, String(kind), scope || '', pt]) }
   nip44v3Decrypt (pk, kind, scope = '', ct) { return this.#sendRequest('nip44v3_decrypt', [pk, String(kind), scope || '', ct]) }
-  async nip44EncryptMultiDH (pk, kind, scope = '', pt, peerContentPubkey = '') {
-    return parseJsonResult(await this.#sendRequest('nip44v3_encrypt_multi_dh', [pk, String(kind), scope || '', pt, peerContentPubkey || '']))
+  async nip44EncryptDoubleDH (pk, kind, scope = '', pt, peerContentPubkey = '') {
+    return parseJsonResult(await this.#sendRequest('nip44v3_encrypt_double_dh', [pk, String(kind), scope || '', pt, peerContentPubkey || '']))
   }
 
-  async nip44DecryptMultiDH (pk, kind, scope = '', ct, peerContentPubkey = '', ownContentPubkey = '') {
-    return parseJsonResult(await this.#sendRequest('nip44v3_decrypt_multi_dh', [pk, String(kind), scope || '', ct, peerContentPubkey || '', ownContentPubkey || '']))
+  async nip44DecryptDoubleDH (pk, kind, scope = '', ct, peerContentPubkey = '', ownContentPubkey = '') {
+    return parseJsonResult(await this.#sendRequest('nip44v3_decrypt_double_dh', [pk, String(kind), scope || '', ct, peerContentPubkey || '', ownContentPubkey || '']))
   }
 
   async doubleSignEvent (event) { return parseJsonResult(await this.#sendRequest('double_sign_event', [JSON.stringify(event || {})])) }

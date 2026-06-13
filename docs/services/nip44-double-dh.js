@@ -86,7 +86,7 @@ async function encrypt ({ account, signer, params, internals }) {
   const warnings = []
   await publishedOwnContentSigner({ account, userSigner: signer, warnings, internals })
 
-  const [ciphertext, senderContentPubkey = ''] = await signer.nip44EncryptMultiDH(
+  const [ciphertext, senderContentPubkey = ''] = await signer.nip44EncryptDoubleDH(
     peerPubkey,
     normalizedKind,
     scope,
@@ -103,7 +103,7 @@ async function decrypt ({ account, signer, params }) {
   const normalizedKind = normalizeKind(kind)
 
   if (ownContentPubkey && !secrets.getContentKeySigner(account.pubkey, ownContentPubkey)) throw new Error('CONTENT_KEY_NOT_FOUND')
-  return signer.nip44DecryptMultiDH(
+  return signer.nip44DecryptDoubleDH(
     peerPubkey,
     normalizedKind,
     scope,
@@ -113,12 +113,12 @@ async function decrypt ({ account, signer, params }) {
   )
 }
 
-export async function nip44EncryptMultiDH ({ account, signer, params = [], internals = {} }) {
-  if (account.type !== 'nsec') return signer.nip44EncryptMultiDH(...params)
+export async function nip44EncryptDoubleDH ({ account, signer, params = [], internals = {} }) {
+  if (account.type !== 'nsec') return signer.nip44EncryptDoubleDH(...params)
   return encrypt({ account, signer, params, internals })
 }
 
-export async function nip44DecryptMultiDH ({ account, signer, params = [] }) {
-  if (account.type !== 'nsec') return signer.nip44DecryptMultiDH(...params)
+export async function nip44DecryptDoubleDH ({ account, signer, params = [] }) {
+  if (account.type !== 'nsec') return signer.nip44DecryptDoubleDH(...params)
   return decrypt({ account, signer, params })
 }

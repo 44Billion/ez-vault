@@ -75,18 +75,18 @@ async function makeImkcProof ({ senderSigner, senderPubkey, imkcPubkey }) {
 
 async function prepareRoutedMessage ({ senderSigner, imkcSigner, privateChannelSigner = senderSigner, privateChannelReaderPubkey, receivers, event, _getIykcProofs = getIykcProofs }) {
   if (!senderSigner?.getPublicKey) throw new Error('SENDER_SIGNER_REQUIRED')
-  if (!senderSigner?.nip44EncryptMultiDH && !senderSigner?.nip44v3Encrypt) throw new Error('SIGNER_NIP44V3_ENCRYPT_UNSUPPORTED')
+  if (!senderSigner?.nip44EncryptDoubleDH && !senderSigner?.nip44v3Encrypt) throw new Error('SIGNER_NIP44V3_ENCRYPT_UNSUPPORTED')
   if (!privateChannelSigner?.getPublicKey || !privateChannelSigner?.nip44v3Encrypt || !privateChannelSigner?.signEvent) throw new Error('PRIVATE_CHANNEL_SIGNER_REQUIRED')
   if (!Array.isArray(receivers) || !receivers.length) throw new Error('NO_RECEIVERS')
 
   const senderPubkey = await senderSigner.getPublicKey()
-  const useMultiDh = typeof senderSigner.nip44EncryptMultiDH === 'function'
+  const useDoubleDh = typeof senderSigner.nip44EncryptDoubleDH === 'function'
   const channelPubkey = await privateChannelSigner.getPublicKey()
   const channelReaderPubkey = privateChannelReaderPubkey || channelPubkey
-  const receiverContentKeys = useMultiDh ? await _getIykcProofs(receiverPubkeysWithoutContentKeys(receivers)) : {}
+  const receiverContentKeys = useDoubleDh ? await _getIykcProofs(receiverPubkeysWithoutContentKeys(receivers)) : {}
   const preparedRows = await prepareEnvelopeRows({
     senderSigner,
-    imkcSigner: useMultiDh ? imkcSigner : null,
+    imkcSigner: useDoubleDh ? imkcSigner : null,
     receivers,
     receiverContentKeys,
     event,
@@ -349,11 +349,11 @@ async function unwrapRecipientEnvelope ({ payloadCiphertext, envelope, receiverS
   if (receiverPubkey && envelope.receiverPubkey !== receiverPubkey) return null
   let messageSeckey
   if (envelope.iykcPubkey || imkcPubkey) {
-    if (!receiverSigner?.nip44DecryptMultiDH) throw new Error('RECEIVER_MULTI_DH_UNSUPPORTED')
+    if (!receiverSigner?.nip44DecryptDoubleDH) throw new Error('RECEIVER_DOUBLE_DH_UNSUPPORTED')
     if (envelope.iykcPubkey) {
       assertValidEnvelopeIykcProof(envelope)
     }
-    messageSeckey = base64ToText(await receiverSigner.nip44DecryptMultiDH(
+    messageSeckey = base64ToText(await receiverSigner.nip44DecryptDoubleDH(
       senderPubkey,
       ROUTER_KIND,
       rowScope,
@@ -370,7 +370,7 @@ async function unwrapRecipientEnvelope ({ payloadCiphertext, envelope, receiverS
 
 export async function unwrapEvent ({ receiverSigner, privateChannelSigner = receiverSigner, privateChannelReaderSigner = privateChannelSigner, privateChannelReaderPubkey, event, receiverPubkey }) {
   if (!event || event.kind !== PRIVATE_BROADCAST_KIND) return null
-  if (!receiverSigner?.nip44DecryptMultiDH && !receiverSigner?.nip44v3Decrypt) throw new Error('RECEIVER_SIGNER_NIP44V3_DECRYPT_UNSUPPORTED')
+  if (!receiverSigner?.nip44DecryptDoubleDH && !receiverSigner?.nip44v3Decrypt) throw new Error('RECEIVER_SIGNER_NIP44V3_DECRYPT_UNSUPPORTED')
   const channelReaderSigner = privateChannelReaderSigner || privateChannelSigner
   if (!channelReaderSigner?.nip44v3Decrypt) throw new Error('PRIVATE_CHANNEL_READER_REQUIRED')
 
@@ -868,7 +868,7 @@ export async function fetch ({ receiverSigner, iykcSigner, privateChannelSigner 
 
 export function subscribe ({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelSignersByPubkey, privateChannelReaderSigner = privateChannelSigner, privateChannelReaderSignersByPubkey, privateChannelReaderPubkey, privateChannelReaderPubkeysByPubkey, privateChannelPubkey, privateChannelPubkeys, receiverPubkey, relays, onChunk, onEvent, onNymEvent, onSeedEvent, onContentKeyUsage, onError, onEose, since = nowSeconds() - 5, limit, liveOnly = false, mode = 'leecher', modeByPubkey, receivedChunkTtlMs = DEFAULT_RECEIVED_CHUNK_TTL_MS, receivedChunkMaxBytes = DEFAULT_RECEIVED_CHUNK_MAX_BYTES, receivedChunkStorageArea, ignoredGroupTtlMs = DEFAULT_IGNORED_GROUP_TTL_MS, ignoredGroupMaxEntries = DEFAULT_IGNORED_GROUP_MAX_ENTRIES }) {
   if (!relays?.length) throw new Error('NO_RELAYS')
-  if (receiverSigner && !receiverSigner?.nip44DecryptMultiDH && !receiverSigner?.nip44v3Decrypt) throw new Error('RECEIVER_SIGNER_NIP44V3_DECRYPT_UNSUPPORTED')
+  if (receiverSigner && !receiverSigner?.nip44DecryptDoubleDH && !receiverSigner?.nip44v3Decrypt) throw new Error('RECEIVER_SIGNER_NIP44V3_DECRYPT_UNSUPPORTED')
   if (!privateChannelReaderSigner && !privateChannelReaderSignersByPubkey && !privateChannelSigner && !privateChannelSignersByPubkey) throw new Error('PRIVATE_CHANNEL_READER_REQUIRED')
 
   const authors = privateChannelPubkeyList({ privateChannelPubkey, privateChannelPubkeys })

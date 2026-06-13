@@ -174,10 +174,10 @@ test('private messenger forwards watch errors to the configured error handler', 
     channels: [{ signer: signer('channel'), relays: ['wss://relay.example'] }]
   })
 
-  pm.watchCalls[0].onError(new Error('RECEIVER_MULTI_DH_UNSUPPORTED'))
+  pm.watchCalls[0].onError(new Error('RECEIVER_DOUBLE_DH_UNSUPPORTED'))
 
   assert.equal(errors.length, 1)
-  assert.equal(errors[0].message, 'RECEIVER_MULTI_DH_UNSUPPORTED')
+  assert.equal(errors[0].message, 'RECEIVER_DOUBLE_DH_UNSUPPORTED')
 })
 
 test('private messenger queues nym messages without dispatching helper kinds', async () => {

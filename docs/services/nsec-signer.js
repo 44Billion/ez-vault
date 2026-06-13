@@ -1,7 +1,7 @@
 import { getPublicKey, finalizeEvent, nip04, nip44 } from 'nostr-tools'
 import { bytesToHex, hexToBytes } from '../helpers/nostr/index.js'
 import { deriveSharedKey } from '../helpers/crypto.js'
-import { deriveMultiDhConversationKey } from '../helpers/nostr/multi-dh.js'
+import { deriveDoubleDhConversationKey } from '../helpers/nostr/double-dh.js'
 import * as nip44v3 from './nip44-v3.js'
 import {
   fetchRelayListEvent,
@@ -52,8 +52,8 @@ class SharedKeySigner {
   async nip44Decrypt (peerPubkey, ciphertext) { return (await this.#sharedSigner()).nip44Decrypt(peerPubkey, ciphertext) }
   async nip44v3Encrypt (peerPubkey, kind, scope, plaintextB64) { return (await this.#sharedSigner()).nip44v3Encrypt(peerPubkey, kind, scope, plaintextB64) }
   async nip44v3Decrypt (peerPubkey, kind, scope, ciphertext) { return (await this.#sharedSigner()).nip44v3Decrypt(peerPubkey, kind, scope, ciphertext) }
-  async nip44EncryptMultiDH (...params) { return (await this.#sharedSigner()).nip44EncryptMultiDH(...params) }
-  async nip44DecryptMultiDH (...params) { return (await this.#sharedSigner()).nip44DecryptMultiDH(...params) }
+  async nip44EncryptDoubleDH (...params) { return (await this.#sharedSigner()).nip44EncryptDoubleDH(...params) }
+  async nip44DecryptDoubleDH (...params) { return (await this.#sharedSigner()).nip44DecryptDoubleDH(...params) }
   withSharedKey (peerPubkey, info = this.#info) { return new SharedKeySigner(this.#signer, peerPubkey, info) }
 }
 
@@ -194,10 +194,10 @@ export default class NsecSigner {
     return this.#contentKeyMaterial(contentSigner)
   }
 
-  async nip44EncryptMultiDH (peerPubkey, kind, scope = '', plaintextB64, peerContentPubkey = '') {
+  async nip44EncryptDoubleDH (peerPubkey, kind, scope = '', plaintextB64, peerContentPubkey = '') {
     const normalizedKind = nip44v3.normalizeKind(kind)
     const { contentPubkey, contentSecretKey } = await this.#latestContentKeyMaterial()
-    const { conversationKey } = deriveMultiDhConversationKey({
+    const { conversationKey } = deriveDoubleDhConversationKey({
       role: 'sender',
       identitySecretKey: this.#secretKey,
       identityPubkey: this.#pubkey,
@@ -219,10 +219,10 @@ export default class NsecSigner {
     return [ciphertext, contentPubkey]
   }
 
-  async nip44DecryptMultiDH (peerPubkey, kind, scope = '', ciphertext, peerContentPubkey = '', ownContentPubkey = '') {
+  async nip44DecryptDoubleDH (peerPubkey, kind, scope = '', ciphertext, peerContentPubkey = '', ownContentPubkey = '') {
     const normalizedKind = nip44v3.normalizeKind(kind)
     const { contentPubkey, contentSecretKey } = await this.#contentKeyMaterial(null, ownContentPubkey)
-    const { conversationKey } = deriveMultiDhConversationKey({
+    const { conversationKey } = deriveDoubleDhConversationKey({
       role: 'receiver',
       identitySecretKey: this.#secretKey,
       identityPubkey: this.#pubkey,

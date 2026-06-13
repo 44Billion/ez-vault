@@ -2,7 +2,7 @@ import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { finalizeEvent, generateSecretKey, getEventHash, getPublicKey } from 'nostr-tools'
 import NsecSigner from '../docs/services/nsec-signer.js'
-import { deriveMultiDhConversationKey } from '../docs/helpers/nostr/multi-dh.js'
+import { deriveDoubleDhConversationKey } from '../docs/helpers/nostr/double-dh.js'
 import {
   EXPIRATION_SECONDS,
   eventFromNymCarriers,
@@ -85,8 +85,8 @@ async function signerWithInternalContentKey (identitySigner, contentSigner) {
     nip44Decrypt: (peerPubkey, ciphertext) => identitySigner.nip44Decrypt(peerPubkey, ciphertext),
     nip44v3Encrypt: (peerPubkey, kind, scope, plaintextB64) => identitySigner.nip44v3Encrypt(peerPubkey, kind, scope, plaintextB64),
     nip44v3Decrypt: (peerPubkey, kind, scope, ciphertext) => identitySigner.nip44v3Decrypt(peerPubkey, kind, scope, ciphertext),
-    nip44EncryptMultiDH: (...params) => identitySigner.nip44EncryptMultiDH(...params),
-    nip44DecryptMultiDH: (...params) => identitySigner.nip44DecryptMultiDH(...params)
+    nip44EncryptDoubleDH: (...params) => identitySigner.nip44EncryptDoubleDH(...params),
+    nip44DecryptDoubleDH: (...params) => identitySigner.nip44DecryptDoubleDH(...params)
   }
 }
 
@@ -135,7 +135,7 @@ test('shared-key signer derives matching deniable key from either side', async (
   assert.notEqual(await syncShared.getPublicKey(), sharedPubkey)
 })
 
-test('multi-DH signer round-trips every content-key mode', async () => {
+test('double-DH signer round-trips every content-key mode', async () => {
   const alice = signer()
   const bob = signer()
   const aliceContent = signer()
@@ -155,14 +155,14 @@ test('multi-DH signer round-trips every content-key mode', async () => {
   for (const c of cases) {
     NsecSigner.setContentSigners(alice, c.aliceContent ? [aliceContent] : [])
     NsecSigner.setContentSigners(bob, c.bobContent ? [bobContent] : [])
-    const encrypted = await alice.nip44EncryptMultiDH(
+    const encrypted = await alice.nip44EncryptDoubleDH(
       bobPubkey,
       ROUTER_KIND,
       '',
       textToBase64(c.mode),
       c.bobContent ? bobContentPubkey : ''
     )
-    const decrypted = await bob.nip44DecryptMultiDH(
+    const decrypted = await bob.nip44DecryptDoubleDH(
       alicePubkey,
       ROUTER_KIND,
       '',
@@ -175,14 +175,14 @@ test('multi-DH signer round-trips every content-key mode', async () => {
     assert.equal(decoder.decode(base64ToBytes(decrypted)), c.mode)
     if (c.mode === 'both-content') {
       await assert.rejects(
-        () => bob.nip44DecryptMultiDH(alicePubkey, ROUTER_KIND + 1, '', encrypted[0], aliceContentPubkey, bobContentPubkey),
+        () => bob.nip44DecryptDoubleDH(alicePubkey, ROUTER_KIND + 1, '', encrypted[0], aliceContentPubkey, bobContentPubkey),
         /kind mismatch/
       )
     }
   }
 })
 
-test('multi-DH conversation key is pair-oriented, not direction-oriented', () => {
+test('double-DH conversation key is pair-oriented, not direction-oriented', () => {
   const aliceSecret = generateSecretKey()
   const bobSecret = generateSecretKey()
   const aliceContentSecret = generateSecretKey()
@@ -191,7 +191,7 @@ test('multi-DH conversation key is pair-oriented, not direction-oriented', () =>
   const bobPubkey = getPublicKey(bobSecret)
   const aliceContentPubkey = getPublicKey(aliceContentSecret)
   const bobContentPubkey = getPublicKey(bobContentSecret)
-  const aliceToBob = deriveMultiDhConversationKey({
+  const aliceToBob = deriveDoubleDhConversationKey({
     role: 'sender',
     identitySecretKey: aliceSecret,
     identityPubkey: alicePubkey,
@@ -202,7 +202,7 @@ test('multi-DH conversation key is pair-oriented, not direction-oriented', () =>
     kind: ROUTER_KIND,
     scope: ''
   })
-  const bobReceiving = deriveMultiDhConversationKey({
+  const bobReceiving = deriveDoubleDhConversationKey({
     role: 'receiver',
     identitySecretKey: bobSecret,
     identityPubkey: bobPubkey,
@@ -213,7 +213,7 @@ test('multi-DH conversation key is pair-oriented, not direction-oriented', () =>
     kind: ROUTER_KIND,
     scope: ''
   })
-  const bobToAlice = deriveMultiDhConversationKey({
+  const bobToAlice = deriveDoubleDhConversationKey({
     role: 'sender',
     identitySecretKey: bobSecret,
     identityPubkey: bobPubkey,
@@ -224,7 +224,7 @@ test('multi-DH conversation key is pair-oriented, not direction-oriented', () =>
     kind: ROUTER_KIND,
     scope: ''
   })
-  const aliceToBobInChannel = deriveMultiDhConversationKey({
+  const aliceToBobInChannel = deriveDoubleDhConversationKey({
     role: 'sender',
     identitySecretKey: aliceSecret,
     identityPubkey: alicePubkey,
@@ -235,7 +235,7 @@ test('multi-DH conversation key is pair-oriented, not direction-oriented', () =>
     kind: ROUTER_KIND,
     scope: '1'.repeat(64)
   })
-  const bobReceivingInChannel = deriveMultiDhConversationKey({
+  const bobReceivingInChannel = deriveDoubleDhConversationKey({
     role: 'receiver',
     identitySecretKey: bobSecret,
     identityPubkey: bobPubkey,
@@ -246,7 +246,7 @@ test('multi-DH conversation key is pair-oriented, not direction-oriented', () =>
     kind: ROUTER_KIND,
     scope: '1'.repeat(64)
   })
-  const aliceToBobInOtherChannel = deriveMultiDhConversationKey({
+  const aliceToBobInOtherChannel = deriveDoubleDhConversationKey({
     role: 'sender',
     identitySecretKey: aliceSecret,
     identityPubkey: alicePubkey,
@@ -257,7 +257,7 @@ test('multi-DH conversation key is pair-oriented, not direction-oriented', () =>
     kind: ROUTER_KIND,
     scope: '2'.repeat(64)
   })
-  const aliceToBobInOtherKind = deriveMultiDhConversationKey({
+  const aliceToBobInOtherKind = deriveDoubleDhConversationKey({
     role: 'sender',
     identitySecretKey: aliceSecret,
     identityPubkey: alicePubkey,
@@ -277,7 +277,7 @@ test('multi-DH conversation key is pair-oriented, not direction-oriented', () =>
   assert.notEqual(bytesToHex(aliceToBobInChannel.conversationKey), bytesToHex(aliceToBobInOtherKind.conversationKey))
 })
 
-test('multi-DH self-encryption with a content key still requires the identity key', async () => {
+test('double-DH self-encryption with a content key requires both secrets', async () => {
   const alice = signer()
   const aliceContent = signer()
   const wrongIdentity = signer()
@@ -285,10 +285,10 @@ test('multi-DH self-encryption with a content key still requires the identity ke
   const aliceContentPubkey = await aliceContent.getPublicKey()
   NsecSigner.setContentSigners(alice, [aliceContent])
 
-  const encrypted = await alice.nip44EncryptMultiDH(alicePubkey, ROUTER_KIND, '', textToBase64('note to self'), aliceContentPubkey)
+  const encrypted = await alice.nip44EncryptDoubleDH(alicePubkey, ROUTER_KIND, '', textToBase64('note to self'), aliceContentPubkey)
 
   assert.equal(encrypted[1], aliceContentPubkey)
-  assert.equal(decoder.decode(base64ToBytes(await alice.nip44DecryptMultiDH(
+  assert.equal(decoder.decode(base64ToBytes(await alice.nip44DecryptDoubleDH(
     alicePubkey,
     ROUTER_KIND,
     '',
@@ -297,9 +297,14 @@ test('multi-DH self-encryption with a content key still requires the identity ke
     aliceContentPubkey
   ))), 'note to self')
 
+  await assert.rejects(
+    () => alice.nip44DecryptDoubleDH(alicePubkey, ROUTER_KIND, '', encrypted[0], aliceContentPubkey, ''),
+    /RECEIVER_CONTENT_KEY_REQUIRED/
+  )
+
   NsecSigner.setContentSigners(wrongIdentity, [aliceContent])
   await assert.rejects(
-    () => wrongIdentity.nip44DecryptMultiDH(alicePubkey, ROUTER_KIND, '', encrypted[0], aliceContentPubkey, aliceContentPubkey),
+    () => wrongIdentity.nip44DecryptDoubleDH(alicePubkey, ROUTER_KIND, '', encrypted[0], aliceContentPubkey, aliceContentPubkey),
     /invalid MAC/
   )
 })
@@ -806,7 +811,7 @@ test('unwrapEvent uses imkc tag as the row encryption pubkey', async () => {
   )
 })
 
-test('wrapEvent can add imkc from senderSigner Multi-DH without direct content signer access', async () => {
+test('wrapEvent can add imkc from senderSigner Double-DH without direct content signer access', async () => {
   const alice = signer()
   const aliceContent = signer()
   const bob = signer()
@@ -838,7 +843,7 @@ test('wrapEvent can add imkc from senderSigner Multi-DH without direct content s
   )
 })
 
-test('wrapEvent uses Multi-DH returned own content pubkey for imkc tag', async () => {
+test('wrapEvent uses Double-DH returned own content pubkey for imkc tag', async () => {
   const alice = signer()
   const oldContent = signer()
   const actualContent = signer()
@@ -851,9 +856,9 @@ test('wrapEvent uses Multi-DH returned own content pubkey for imkc tag', async (
     signEvent: event => alice.signEvent(event),
     nip44Encrypt: (peerPubkey, plaintext) => alice.nip44Encrypt(peerPubkey, plaintext),
     nip44v3Encrypt: (peerPubkey, kind, scope, plaintextB64) => alice.nip44v3Encrypt(peerPubkey, kind, scope, plaintextB64),
-    nip44EncryptMultiDH: (...params) => {
+    nip44EncryptDoubleDH: (...params) => {
       NsecSigner.setContentSigners(alice, [actualContent])
-      return alice.nip44EncryptMultiDH(...params)
+      return alice.nip44EncryptDoubleDH(...params)
     }
   }
   const [wrapped] = await wrapEvent({
@@ -887,10 +892,10 @@ test('wrapEvent retries once when sender content key rotates while writing chunk
     signEvent: event => alice.signEvent(event),
     nip44Encrypt: (peerPubkey, plaintext) => alice.nip44Encrypt(peerPubkey, plaintext),
     nip44v3Encrypt: (peerPubkey, kind, scope, plaintextB64) => alice.nip44v3Encrypt(peerPubkey, kind, scope, plaintextB64),
-    nip44EncryptMultiDH: (...params) => {
+    nip44EncryptDoubleDH: (...params) => {
       encryptCalls++
       NsecSigner.setContentSigners(alice, [encryptCalls === 1 ? oldContent : actualContent])
-      return alice.nip44EncryptMultiDH(...params)
+      return alice.nip44EncryptDoubleDH(...params)
     }
   }
   const original = eventFixture('private after rotation')
@@ -1102,7 +1107,7 @@ test('wrapEvent uses receiver content key rows when iykc is advertised', async (
   )
   NsecSigner.setContentSigners(bob, [bobContent])
   await assert.rejects(
-    () => bob.nip44DecryptMultiDH(alicePubkey, ROUTER_KIND, '', line[1], router.tags.find(t => t[0] === 'imkc')?.[1] || '', contentKey.iykcPubkey),
+    () => bob.nip44DecryptDoubleDH(alicePubkey, ROUTER_KIND, '', line[1], router.tags.find(t => t[0] === 'imkc')?.[1] || '', contentKey.iykcPubkey),
     /scope mismatch/
   )
   assert.deepEqual(await unwrapEvent({ receiverSigner: bob, iykcSigner: bobContent, privateChannelSigner: alice, event: wrapped, receiverPubkey: bobPubkey }), unwrappedFixture(original, alicePubkey))

@@ -158,7 +158,7 @@ function readPreparedRow (preparedRows, index) {
 }
 
 async function prepareEnvelopeRowsOnce ({ id, senderSigner, receivers, receiverContentKeys = {}, event, rowScope = '' }) {
-  const useMultiDh = typeof senderSigner?.nip44EncryptMultiDH === 'function'
+  const useDoubleDh = typeof senderSigner?.nip44EncryptDoubleDH === 'function'
   let foundOwnContentPubkey = false
   let usedOwnContentPubkey = ''
   const messageSecretKey = generateSecretKey()
@@ -170,10 +170,10 @@ async function prepareEnvelopeRowsOnce ({ id, senderSigner, receivers, receiverC
   setPreparedRow(id, 0, buildPayloadRow(encryptedPayload({ messageSecretKey, event })))
 
   for (const receiver of receivers) {
-    const row = receiverRecord(receiver, useMultiDh ? receiverContentKeys : {})
+    const row = receiverRecord(receiver, useDoubleDh ? receiverContentKeys : {})
     let ciphertext
-    if (useMultiDh) {
-      const encrypted = await senderSigner.nip44EncryptMultiDH(
+    if (useDoubleDh) {
+      const encrypted = await senderSigner.nip44EncryptDoubleDH(
         row.receiverPubkey,
         ROUTER_KIND,
         rowScope,

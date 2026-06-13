@@ -1,6 +1,6 @@
 import * as store from './accounts-store.js'
 import * as secrets from './secrets.js'
-import * as nip44MultiDh from './nip44-multi-dh.js'
+import * as nip44DoubleDh from './nip44-double-dh.js'
 import { doubleSignEvent } from './content-key/index.js'
 
 // NIP-07 / NIP-46 method whitelist. Anything outside this set is rejected
@@ -16,14 +16,14 @@ const SUPPORTED_METHODS = new Set([
   'nip44Decrypt',
   'nip44v3Encrypt',
   'nip44v3Decrypt',
-  'nip44EncryptMultiDH',
-  'nip44DecryptMultiDH',
+  'nip44EncryptDoubleDH',
+  'nip44DecryptDoubleDH',
   'doubleSignEvent'
 ])
 
 const METHOD_ALIASES = {
-  nip44v3_encrypt_multi_dh: 'nip44EncryptMultiDH',
-  nip44v3_decrypt_multi_dh: 'nip44DecryptMultiDH',
+  nip44v3_encrypt_double_dh: 'nip44EncryptDoubleDH',
+  nip44v3_decrypt_double_dh: 'nip44DecryptDoubleDH',
   double_sign_event: 'doubleSignEvent'
 }
 
@@ -59,7 +59,7 @@ export function claimSigner (account) {
 async function contentSignerForDoubleSign (account, userSigner, internals = {}) {
   if (account.type !== 'nsec') throw new Error('OWN_CONTENT_KEY_UNSUPPORTED')
   const warnings = []
-  const signer = await nip44MultiDh.publishedOwnContentSigner({
+  const signer = await nip44DoubleDh.publishedOwnContentSigner({
     account,
     userSigner,
     warnings,
@@ -102,11 +102,11 @@ export async function run ({ pubkey, method, params = [], internals = {}, withSh
     withSharedKey
   })
   const { account, signer } = scoped
-  if (normalized === 'nip44EncryptMultiDH') {
-    return nip44MultiDh.nip44EncryptMultiDH({ account, signer, params, internals })
+  if (normalized === 'nip44EncryptDoubleDH') {
+    return nip44DoubleDh.nip44EncryptDoubleDH({ account, signer, params, internals })
   }
-  if (normalized === 'nip44DecryptMultiDH') {
-    return nip44MultiDh.nip44DecryptMultiDH({ account, signer, params })
+  if (normalized === 'nip44DecryptDoubleDH') {
+    return nip44DoubleDh.nip44DecryptDoubleDH({ account, signer, params })
   }
   if (normalized === 'doubleSignEvent') {
     const [event] = params || []
