@@ -12,6 +12,31 @@ const UNLOGGED_METHODS = new Set([
   'getRelays', 'get_relays'
 ])
 
+const NIP44_V3_CONTEXT_METHODS = new Set([
+  'nip44v3_encrypt',
+  'nip44v3_decrypt',
+  'nip44v3_encrypt_double_dh',
+  'nip44v3_decrypt_double_dh'
+])
+
+function normalizedEventKind (kind) {
+  const n = typeof kind === 'string' && kind.trim() !== '' ? Number(kind) : kind
+  return Number.isInteger(n) && n >= 0 && n <= 0xffffffff ? n : undefined
+}
+
+export function signerRequestContext (method, params = []) {
+  if (method === 'sign_event' || method === 'double_sign_event') {
+    return params?.[0]?.kind == null ? {} : { eventKind: params[0].kind }
+  }
+  if (!NIP44_V3_CONTEXT_METHODS.has(method)) return {}
+
+  const eventKind = normalizedEventKind(params?.[1])
+  return {
+    ...(eventKind === undefined ? {} : { eventKind }),
+    eventScope: String(params?.[2] ?? '')
+  }
+}
+
 // Only parents on this list are treated as the launcher. When we can resolve
 // the parent's origin (ancestorOrigins or document.referrer), we target
 // VAULT_READY at it specifically so the port never reaches an untrusted
@@ -111,9 +136,7 @@ function onPortMessage (e) {
 
 async function handleSignerRequest (e, { code, run }) {
   const { pubkey, method, params = [], app = {}, with_shared_key: withSharedKey = null } = e.data.payload ?? {}
-  const eventKind = method === 'sign_event'
-    ? params?.[0]?.kind
-    : undefined
+  const context = signerRequestContext(method, params)
 
   const logBase = {
     code,
@@ -121,7 +144,7 @@ async function handleSignerRequest (e, { code, run }) {
     method,
     app: { id: app.id ?? '', name: app.name ?? '', icon: app.icon ?? '' },
     origin: launcherOrigin,
-    eventKind
+    ...context
   }
 
   const shouldLog = !UNLOGGED_METHODS.has(method)
@@ -133,7 +156,7 @@ async function handleSignerRequest (e, { code, run }) {
     }
     reply(e, { payload }, { to: launcherPort })
   } catch (err) {
-    const serialized = serializeError(err, { eventKind })
+    const serialized = serializeError(err, context)
     if (shouldLog) {
       log.append({
         ...logBase,

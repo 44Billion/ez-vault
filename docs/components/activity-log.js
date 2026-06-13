@@ -333,6 +333,12 @@ function appDisplayName (app) {
   return id || 'Unknown app'
 }
 
+function nip44v3Label (action, suffix, eventKind) {
+  return eventKind != null
+    ? `${action} (NIP-44 v3${suffix}, kind ${eventKind})`
+    : `${action} (NIP-44 v3${suffix})`
+}
+
 function methodLabel (method, eventKind, _code) {
   switch (method) {
     case 'sign_event':
@@ -348,13 +354,13 @@ function methodLabel (method, eventKind, _code) {
     case 'nip44_decrypt':
       return 'Decrypt (NIP-44)'
     case 'nip44v3_encrypt':
-      return 'Encrypt (NIP-44 v3)'
+      return nip44v3Label('Encrypt', '', eventKind)
     case 'nip44v3_decrypt':
-      return 'Decrypt (NIP-44 v3)'
+      return nip44v3Label('Decrypt', '', eventKind)
     case 'nip44v3_encrypt_double_dh':
-      return 'Encrypt (NIP-44 v3 Double-DH)'
+      return nip44v3Label('Encrypt', ' Double-DH', eventKind)
     case 'nip44v3_decrypt_double_dh':
-      return 'Decrypt (NIP-44 v3 Double-DH)'
+      return nip44v3Label('Decrypt', ' Double-DH', eventKind)
     default:
       return method ?? 'Unknown'
   }
