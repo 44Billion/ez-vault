@@ -1,9 +1,13 @@
-import { ask, reply } from '../helpers/window-message.js'
+import { ask, reply, tell } from '../helpers/window-message.js'
 import { serializeError } from '../helpers/error.js'
 import * as store from './accounts-store.js'
 import { filterVisibleAccounts } from './account-mutations.js'
+import * as accountMutationJournal from './account-mutation-journal.js'
 import * as signer from './signer.js'
 import * as log from './messenger-log/index.js'
+import * as secrets from './secrets.js'
+import { npubFromPubkey, parseProfileEvent } from '../helpers/nostr/index.js'
+import { parseRelayListEvent } from './relays.js'
 
 // Read-only disclosures — the result is publicly derivable, so logging them
 // would just be noise in the audit trail. Match both wire and JS spellings.
@@ -73,18 +77,112 @@ function syncTrustedParentOrigin () {
   }
 }
 
-// Only non-sensitive fields: pubkey, display metadata, and `type` so the
-// launcher can render the account list. Secret keys and bunker URLs stay in
-// the vault.
-function snapshotAccounts () {
-  return filterVisibleAccounts(store.list()).map(({ pubkey, name, picture, type }) => ({
-    pubkey, name, picture, type
-  }))
+function eventList (event) {
+  return event ? [event] : []
+}
+
+function launcherProfile (account) {
+  const parsed = parseProfileEvent(account.profileEvent)
+  return {
+    name: parsed.name || account.name || '',
+    about: parsed.about || '',
+    picture: parsed.picture || account.picture || '',
+    npub: npubFromPubkey(account.pubkey),
+    meta: { events: eventList(account.profileEvent) }
+  }
+}
+
+function launcherRelays (account) {
+  const parsed = parseRelayListEvent(account.relayListEvent)
+  return {
+    read: parsed.read,
+    write: parsed.write.length ? parsed.write : [...(account.writeRelays || [])],
+    meta: { events: eventList(account.relayListEvent) }
+  }
+}
+
+function isAccountLocked (account) {
+  if (account.type === 'npub') return false
+  if (account.type === 'nsec') return !secrets.getNsecSigner(account.pubkey)
+  if (account.type === 'bunker') return !secrets.getBunkerHandle(account.pubkey)
+  return true
+}
+
+// Launcher-facing account shape. Secret keys and bunker URLs stay in the vault.
+export function accountForLauncher (account) {
+  return {
+    pubkey: account.pubkey,
+    profile: launcherProfile(account),
+    relays: launcherRelays(account),
+    isReadOnly: account.type === 'npub',
+    isLocked: isAccountLocked(account)
+  }
+}
+
+export function snapshotAccounts () {
+  return filterVisibleAccounts(store.list()).map(accountForLauncher)
+}
+
+function isNewerEvent (event, storedEvent) {
+  return Number.isFinite(event?.created_at) && event.created_at > (storedEvent?.created_at ?? 0)
+}
+
+export function applyAccountEvents (pubkey, events) {
+  const account = pubkey ? store.get(pubkey) : null
+  if (!account || !Array.isArray(events) || !events.length) return false
+
+  const patch = {}
+  for (const event of events) {
+    if (event?.kind === 0 && isNewerEvent(event, patch.profileEvent || account.profileEvent)) {
+      const parsed = parseProfileEvent(event)
+      patch.profileEvent = event
+      patch.name = parsed.name || account.name || ''
+      patch.picture = parsed.picture || account.picture || ''
+    } else if (event?.kind === 10002 && isNewerEvent(event, patch.relayListEvent || account.relayListEvent)) {
+      const relays = parseRelayListEvent(event)
+      patch.relayListEvent = event
+      patch.writeRelays = relays.write
+    }
+  }
+
+  if (!Object.keys(patch).length) return false
+  store.update(pubkey, patch)
+  return true
 }
 
 let launcherPort = null
 let launcherOrigin = null
 let handshakeComplete = false
+let unsubscribeStore = null
+let unsubscribeSecrets = null
+let unsubscribeJournal = null
+let accountsStateQueued = false
+
+export function setAccountsState () {
+  if (!handshakeComplete || !launcherPort) return
+  tell(launcherPort, {
+    code: 'SET_ACCOUNTS_STATE',
+    payload: { accounts: snapshotAccounts() }
+  })
+}
+
+function scheduleAccountsState () {
+  if (accountsStateQueued) return
+  accountsStateQueued = true
+  queueMicrotask(() => {
+    accountsStateQueued = false
+    setAccountsState()
+  })
+}
+
+function startAccountStateSubscriptions () {
+  unsubscribeStore?.()
+  unsubscribeSecrets?.()
+  unsubscribeJournal?.()
+  unsubscribeStore = store.subscribe(scheduleAccountsState)
+  unsubscribeSecrets = secrets.subscribe(scheduleAccountsState)
+  unsubscribeJournal = accountMutationJournal.subscribe(scheduleAccountsState)
+}
 
 export async function initMessenger () {
   // No parent to talk to — we're top-level (opened directly).
@@ -122,6 +220,7 @@ export async function initMessenger () {
   }
   launcherOrigin ??= origin
   handshakeComplete = true
+  startAccountStateSubscriptions()
 }
 
 function onPortMessage (e) {
@@ -131,7 +230,17 @@ function onPortMessage (e) {
   // port-side asks. We currently don't, but guard against stray ones.
   if (code === 'REPLY') return
   if (!handshakeComplete) return
+  if (code === 'UPDATE_ACCOUNT_EVENTS') return handleUpdateAccountEvents(e)
   if (code === 'NIP07') return handleNip07(e)
+}
+
+function handleUpdateAccountEvents (e) {
+  const { pubkey, events } = e.data.payload ?? {}
+  try {
+    applyAccountEvents(pubkey, events)
+  } catch (err) {
+    console.warn('UPDATE_ACCOUNT_EVENTS failed', err?.message ?? err)
+  }
 }
 
 async function handleSignerRequest (e, { code, run }) {
