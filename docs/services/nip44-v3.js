@@ -1,10 +1,10 @@
-import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { extract as hkdfExtract, expand as hkdfExpand } from '@noble/hashes/hkdf.js'
 import { hmac } from '@noble/hashes/hmac.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { concatBytes, utf8ToBytes } from '@noble/hashes/utils.js'
 import { chacha20 } from '@noble/ciphers/chacha.js'
 import { bytesToBase64, base64ToBytes } from '../helpers/base64.js'
+import { sharedXOnlySecret } from '../helpers/ecdh.js'
 
 // NIP-44 v3 — local implementation (spec.nostr.land/nip44v3)
 // Copied from the bunker testbench and verified against the vendored
@@ -47,19 +47,8 @@ function randomBytes32 () {
   return bytes
 }
 
-function hexToBytes (hex) {
-  const out = new Uint8Array(hex.length / 2)
-  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16)
-  return out
-}
-
-function sharedSecret (seckey, pubkey) {
-  // x-only ECDH per BIP-340: drop the leading parity byte.
-  return secp256k1.getSharedSecret(seckey, hexToBytes(`02${pubkey}`)).subarray(1, 33)
-}
-
 export function deriveKeys (seckey, pubkey, nonce) {
-  const shared = sharedSecret(seckey, pubkey)
+  const shared = sharedXOnlySecret(seckey, pubkey)
   const salt = concatBytes(utf8ToBytes('nip44-v3\x00'), nonce)
   const prk = hkdfExtract(sha256, shared, salt)
   return {
@@ -145,7 +134,7 @@ export function decryptWithConversationKeyBytes (conversationKey, expectedKind, 
 }
 
 function deriveSharedConversationKey (seckey, pubkey) {
-  return sharedSecret(seckey, pubkey)
+  return sharedXOnlySecret(seckey, pubkey)
 }
 
 export function normalizeKind (kind) {

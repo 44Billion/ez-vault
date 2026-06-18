@@ -1,15 +1,14 @@
-import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { extract, expand } from '@noble/hashes/hkdf.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { concatBytes } from '@noble/hashes/utils.js'
-import { hexToBytes } from './index.js'
+import { sharedXOnlySecret } from '../ecdh.js'
 
 const textEncoder = new TextEncoder()
 
-// HKDF extract salt, equivalent in role to NIP-44 v3's "nip44-v3\x00" salt.
-// This names the generic double-DH key schedule; it is not tied to ez-vault or
-// to private-channel so other implementations can derive the same key.
-const DOUBLE_DH_SALT = textEncoder.encode('nip44-double-dh-v1\x00')
+// HKDF extract salt naming this generic double-DH key schedule. It has no NUL
+// suffix because this fixed label is not concatenated with variable bytes
+// (unlike NIP-44 v3's "nip44-v3\x00" || nonce salt).
+const DOUBLE_DH_SALT = textEncoder.encode('nip44-double-dh-v1')
 
 /*
 Considering the following nomenclature, where a/b are lexicographically
@@ -62,14 +61,8 @@ function normalizeKind (kind) {
   return n
 }
 
-function publicKeyBytes (pubkey) {
-  // Nostr pubkeys are x-only. secp256k1 ECDH expects a compressed point, so
-  // use the even-y prefix, matching nostr-tools' NIP-44 implementation.
-  return hexToBytes(`02${pubkey}`)
-}
-
 function sharedX (secretKey, pubkey) {
-  return secp256k1.getSharedSecret(secretKey, publicKeyBytes(pubkey)).subarray(1, 33)
+  return sharedXOnlySecret(secretKey, pubkey)
 }
 
 function modeFor ({ senderContentPubkey, receiverContentPubkey }) {

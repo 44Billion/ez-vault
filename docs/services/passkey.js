@@ -1,9 +1,11 @@
-import { nip44, getPublicKey } from 'nostr-tools'
+import { getPublicKey } from 'nostr-tools'
 import { hexToBytes, bytesToHex } from '../helpers/nostr/index.js'
 import { decodeSecretEntries } from './secret-blob.js'
 import { base64ToBytes } from '../helpers/base64.js'
 import { detectPlatform } from '../helpers/platform.js'
 import { fetchFaviconBase64 } from '../helpers/favicon.js'
+import { sharedXOnlySecret } from '../helpers/ecdh.js'
+import * as nip44v3 from './nip44-v3.js'
 import * as secrets from './secrets.js'
 
 // EZ Vault's passkey integration. One passkey custodies the encryption key
@@ -41,6 +43,8 @@ const USER_ID_KEY = 'ez-vault:passkey:user-id'
 const ICON_KEY = 'ez-vault:passkey:icon'
 const PRF_BACKUP_KEY = 'ez-vault:passkey:prf'
 const BLOB_FALLBACK_KEY = 'ez-vault:passkey:blob'
+const VAULT_NIP44_KIND = 2
+const VAULT_SECRETS_SCOPE = 'vault-secrets-v1'
 
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
@@ -367,8 +371,8 @@ export async function writeSecretsBlob ({ fallbackOnCancel = true } = {}) {
 // `secrets.js` deliberately does not export a "give me plaintext if I hand
 // you the prf" surface, which is the whole point of this approach.
 function unsealEntries (prfBytes, ciphertext) {
-  const ck = nip44.getConversationKey(prfBytes, getPublicKey(prfBytes))
-  const plaintextBase64 = nip44.decrypt(ciphertext, ck)
+  const ck = sharedXOnlySecret(prfBytes, getPublicKey(prfBytes))
+  const plaintextBase64 = nip44v3.decryptWithConversationKey(ck, VAULT_NIP44_KIND, VAULT_SECRETS_SCOPE, ciphertext)
   return decodeSecretEntries(base64ToBytes(plaintextBase64))
 }
 

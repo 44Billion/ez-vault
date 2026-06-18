@@ -196,6 +196,31 @@ test('double-DH signer round-trips every content-key mode', async () => {
   }
 })
 
+test('double-DH conversation key matches the fixed salt vector', () => {
+  const aliceSecret = hexToBytes('0000000000000000000000000000000000000000000000000000000000000001')
+  const bobSecret = hexToBytes('0000000000000000000000000000000000000000000000000000000000000002')
+  const aliceContentSecret = hexToBytes('0000000000000000000000000000000000000000000000000000000000000003')
+  const bobContentSecret = hexToBytes('0000000000000000000000000000000000000000000000000000000000000004')
+  const alicePubkey = getPublicKey(aliceSecret)
+  const bobPubkey = getPublicKey(bobSecret)
+  const aliceContentPubkey = getPublicKey(aliceContentSecret)
+  const bobContentPubkey = getPublicKey(bobContentSecret)
+  const { mode, conversationKey } = deriveDoubleDhConversationKey({
+    role: 'sender',
+    identitySecretKey: aliceSecret,
+    identityPubkey: alicePubkey,
+    contentSecretKey: aliceContentSecret,
+    contentPubkey: aliceContentPubkey,
+    peerIdentityPubkey: bobPubkey,
+    peerContentPubkey: bobContentPubkey,
+    kind: ROUTER_KIND,
+    scope: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+  })
+
+  assert.equal(mode, 'both-content')
+  assert.equal(bytesToHex(conversationKey), '125d46227df5f910c2bc82edb186ebb9c4897417edc2536f95118d7431d6ea96')
+})
+
 test('double-DH conversation key is pair-oriented, not direction-oriented', () => {
   const aliceSecret = generateSecretKey()
   const bobSecret = generateSecretKey()

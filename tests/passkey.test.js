@@ -1,9 +1,11 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { webcrypto } from 'node:crypto'
+import { generateSecretKey, getPublicKey } from 'nostr-tools'
 import * as passkey from '../docs/services/passkey.js'
 import * as secrets from '../docs/services/secrets.js'
 import * as store from '../docs/services/accounts-store.js'
+import { bytesToHex, hexToBytes } from '../docs/helpers/nostr/index.js'
 
 const data = new Map()
 
@@ -117,4 +119,35 @@ test('writeSecretsBlob can reject cancellation for destructive flows', async () 
   )
 
   assert.equal(globalThis.localStorage.getItem('ez-vault:passkey:blob'), null)
+})
+
+test('openSecrets decrypts NIP-44 v3 sealed largeBlob payloads', async () => {
+  const prfBytes = new Uint8Array(32)
+  prfBytes[0] = 4
+
+  installCredentialMocks({ prfBytes })
+  await passkey.ensureRegistered()
+
+  const secret = bytesToHex(generateSecretKey())
+  const pubkey = getPublicKey(hexToBytes(secret))
+  store.add({ type: 'nsec', pubkey, name: '', picture: '' })
+  secrets.setNsecSecret(pubkey, secret)
+  await secrets.getDeviceSignerPubkey()
+
+  const ciphertext = secrets.sealCurrentEntries()
+  assert.equal(Buffer.from(ciphertext, 'base64')[0], 3)
+
+  installCredentialMocks({
+    prfBytes,
+    onGet: async () => ({
+      getClientExtensionResults: () => ({
+        prf: { results: { first: prfBytes } },
+        largeBlob: { blob: new TextEncoder().encode(ciphertext) }
+      })
+    })
+  })
+
+  const entries = await passkey.openSecrets()
+  assert.equal(entries.find(entry => entry.type === 'nsec' && entry.pubkey === pubkey)?.seckey, secret)
+  assert.equal(entries.some(entry => entry.type === 'device-signer'), true)
 })

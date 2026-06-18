@@ -1,12 +1,13 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { generateSecretKey, getEventHash, getPublicKey, verifyEvent } from 'nostr-tools'
+import { generateSecretKey, getEventHash, getPublicKey, nip44, verifyEvent } from 'nostr-tools'
 import { run } from '../docs/services/signer.js'
 import * as store from '../docs/services/accounts-store.js'
 import * as secrets from '../docs/services/secrets.js'
 import NsecSigner from '../docs/services/nsec-signer.js'
 import { DEFAULT_STALE_CHANNEL_SECONDS } from '../docs/services/private-messenger/index.js'
 import { bytesToHex, hexToBytes } from '../docs/helpers/nostr/index.js'
+import { encodeSecretEntries } from '../docs/services/secret-blob.js'
 
 const CONTENT_KEYS_STORAGE_KEY = 'ez-vault:content-keys'
 const DOUBLE_DH_KIND = 263
@@ -390,6 +391,29 @@ test('nip44-double-dh creates own content keys in encrypted localStorage', async
   assert.ok(secrets.getContentKeySigner(alice.pubkey, publishedContentPubkey))
 })
 
+test('vault self-encryption stores account blobs as NIP-44 v3 and rejects old v2 blobs', () => {
+  const vaultKey = generateSecretKey()
+  secrets.unlock(vaultKey, null)
+  const alice = addNsecAccount()
+  const bunker = addBunkerAccount({ close: async () => {} })
+  const accountBlob = secrets.sealCurrentEntries()
+
+  assert.equal(Buffer.from(accountBlob, 'base64')[0], 3)
+
+  secrets.lock()
+  NsecSigner.releaseAll()
+  secrets.unlock(vaultKey, accountBlob)
+  assert.ok(secrets.getNsecSigner(alice.pubkey))
+  assert.ok(secrets.getBunkerHandle(bunker.pubkey))
+
+  const oldConversationKey = nip44.getConversationKey(vaultKey, getPublicKey(vaultKey))
+  const oldBlob = nip44.encrypt(Buffer.from(encodeSecretEntries([])).toString('base64'), oldConversationKey)
+  assert.throws(
+    () => secrets.reload(oldBlob),
+    /unsupported (future )?version/
+  )
+})
+
 test('content keys persist in vault-key encrypted localStorage, not the largeBlob blob', async () => {
   const vaultKey = generateSecretKey()
   secrets.unlock(vaultKey, null)
@@ -399,6 +423,7 @@ test('content keys persist in vault-key encrypted localStorage, not the largeBlo
   const sealedContentKeys = globalThis.localStorage.getItem(CONTENT_KEYS_STORAGE_KEY)
 
   assert.ok(sealedContentKeys)
+  assert.equal(Buffer.from(sealedContentKeys, 'base64')[0], 3)
   assert.equal(sealedContentKeys.includes(aliceContent.secret), false)
 
   secrets.lock()

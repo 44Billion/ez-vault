@@ -1,4 +1,4 @@
-import { nip44, getPublicKey } from 'nostr-tools'
+import { getPublicKey } from 'nostr-tools'
 import NsecSigner from './nsec-signer.js'
 import { BunkerHandle, persistHandleState } from './bunker.js'
 import * as store from './accounts-store.js'
@@ -7,6 +7,8 @@ import { DEFAULT_STALE_CHANNEL_SECONDS } from './private-messenger/constants.js'
 import { bytesToBase64, base64ToBytes } from '../helpers/base64.js'
 import { hexToBytes } from '../helpers/nostr/index.js'
 import { deriveSignerSeckey } from '../helpers/signer-key.js'
+import { sharedXOnlySecret } from '../helpers/ecdh.js'
+import * as nip44v3 from './nip44-v3.js'
 
 // In-memory home for every account's secret material plus the deterministic
 // vault key derived from the passkey PRF extension. Account secrets live in
@@ -29,12 +31,16 @@ import { deriveSignerSeckey } from '../helpers/signer-key.js'
 //   raw bytes by going through `passkey.openSecrets()`, which prompts the
 //   user for fresh verification and decrypts the largeBlob ad-hoc.
 //
-// The vault key doubles as a NIP-44 self-encryption key; messenger-log and
+// The vault key doubles as a NIP-44 v3 self-encryption key; messenger-log and
 // content-key persistence use it to seal sensitive localStorage payloads
 // while unlocked.
 
 const CONTENT_KEYS_KEY = 'ez-vault:content-keys'
 const HEX32 = /^[0-9a-f]{64}$/i
+const VAULT_NIP44_KIND = 2
+const VAULT_SECRETS_SCOPE = 'vault-secrets-v1'
+const VAULT_CONTENT_KEYS_SCOPE = 'vault-content-keys-v1'
+const VAULT_LOCAL_STORAGE_SCOPE = 'vault-local-storage-v1'
 
 let vaultPrivkey = null
 let vaultConversationKey = null
@@ -79,6 +85,20 @@ function notifyContentKeys (ownerPubkey) {
 
 function nowSeconds () {
   return Math.floor(Date.now() / 1000)
+}
+
+function deriveVaultConversationKey (vaultKeyBytes) {
+  return sharedXOnlySecret(vaultKeyBytes, getPublicKey(vaultKeyBytes))
+}
+
+function vaultEncryptWithScope (plaintext, scope) {
+  if (!vaultConversationKey) throw new Error('VAULT_LOCKED')
+  return nip44v3.encryptWithConversationKey(vaultConversationKey, VAULT_NIP44_KIND, scope, plaintext)
+}
+
+function vaultDecryptWithScope (ciphertext, scope) {
+  if (!vaultConversationKey) throw new Error('VAULT_LOCKED')
+  return nip44v3.decryptWithConversationKey(vaultConversationKey, VAULT_NIP44_KIND, scope, ciphertext)
 }
 
 function dropPriorEntry (pubkey) {
@@ -262,7 +282,7 @@ export function isUnlocked () {
 // registration where there is nothing to load yet.
 export function unlock (vaultKeyBytes, ciphertext) {
   vaultPrivkey = vaultKeyBytes
-  vaultConversationKey = nip44.getConversationKey(vaultKeyBytes, getPublicKey(vaultKeyBytes))
+  vaultConversationKey = deriveVaultConversationKey(vaultKeyBytes)
   loadEntries(ciphertext)
   notify()
 }
@@ -282,7 +302,7 @@ export function reload (ciphertext) {
 function loadEntries (ciphertext) {
   clearAll()
   if (ciphertext) {
-    const tlvBytes = base64ToBytes(nip44.decrypt(ciphertext, vaultConversationKey))
+    const tlvBytes = base64ToBytes(vaultDecryptWithScope(ciphertext, VAULT_SECRETS_SCOPE))
     for (const e of decodeSecretEntries(tlvBytes)) {
       if (e.type === 'nsec') adoptNsec(e.pubkey, e.seckey)
       else if (e.type === 'bunker') adoptBunkerFromUnlock(e.pubkey, e.clientKey)
@@ -319,7 +339,7 @@ function readPersistedContentKeyEntries () {
   if (!raw) return []
   if (!vaultConversationKey) return []
   try {
-    const parsed = JSON.parse(vaultDecrypt(raw))
+    const parsed = JSON.parse(vaultDecryptWithScope(raw, VAULT_CONTENT_KEYS_SCOPE))
     return Array.isArray(parsed) ? parsed.map(normalizeContentKeyEntry).filter(Boolean) : []
   } catch (err) {
     console.warn('content keys decrypt failed', err?.message ?? err)
@@ -341,7 +361,7 @@ function persistContentKeyEntries ({ pruneStale = true } = {}) {
     localStorage.removeItem(CONTENT_KEYS_KEY)
     return
   }
-  localStorage.setItem(CONTENT_KEYS_KEY, vaultEncrypt(JSON.stringify(entries)))
+  localStorage.setItem(CONTENT_KEYS_KEY, vaultEncryptWithScope(JSON.stringify(entries), VAULT_CONTENT_KEYS_SCOPE))
 }
 
 export function snapshotContentKeySecrets () {
@@ -615,7 +635,7 @@ export function hasSecretRef ({ type, pubkey } = {}) {
 export function sealCurrentEntries () {
   if (!isUnlocked()) throw new Error('VAULT_LOCKED')
   const tlvBytes = encodeSecretEntries(listRawEntriesInternal())
-  return nip44.encrypt(bytesToBase64(tlvBytes), vaultConversationKey)
+  return vaultEncryptWithScope(bytesToBase64(tlvBytes), VAULT_SECRETS_SCOPE)
 }
 
 function listRawEntriesInternal () {
@@ -650,11 +670,9 @@ function listRawContentKeyEntriesInternal () {
 }
 
 export function vaultEncrypt (plaintext) {
-  if (!vaultConversationKey) throw new Error('VAULT_LOCKED')
-  return nip44.encrypt(plaintext, vaultConversationKey)
+  return vaultEncryptWithScope(plaintext, VAULT_LOCAL_STORAGE_SCOPE)
 }
 
 export function vaultDecrypt (ciphertext) {
-  if (!vaultConversationKey) throw new Error('VAULT_LOCKED')
-  return nip44.decrypt(ciphertext, vaultConversationKey)
+  return vaultDecryptWithScope(ciphertext, VAULT_LOCAL_STORAGE_SCOPE)
 }
