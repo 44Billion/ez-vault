@@ -2,6 +2,7 @@ import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { finalizeEvent, generateSecretKey, getEventHash, getPublicKey } from 'nostr-tools'
 import NsecSigner from '../docs/services/nsec-signer.js'
+import { deriveSharedKey } from '../docs/helpers/crypto.js'
 import { deriveDoubleDhConversationKey } from '../docs/helpers/nostr/double-dh.js'
 import {
   EXPIRATION_SECONDS,
@@ -24,7 +25,7 @@ import { createReceivedChunkStore, DEFAULT_RECEIVED_CHUNK_MAX_BYTES } from '../d
 import { makeContentKeyEvent, parseContentKeyEvent, verifyContentKeyProof } from '../docs/services/content-key/event.js'
 import { TEMPORARY_STORAGE_KEYS_KEY } from '../docs/services/temporary-storage.js'
 import { bytesToBase64, base64ToBytes } from '../docs/helpers/base64.js'
-import { bytesToHex } from '../docs/helpers/nostr/index.js'
+import { bytesToHex, hexToBytes } from '../docs/helpers/nostr/index.js'
 import { pool } from '../docs/services/relays.js'
 
 if (!globalThis.localStorage) {
@@ -133,6 +134,19 @@ test('shared-key signer derives matching deniable key from either side', async (
 
   const syncShared = alice.withSharedKey(bobPubkey, 'trusted-signer-sync-v1')
   assert.notEqual(await syncShared.getPublicKey(), sharedPubkey)
+})
+
+test('shared-key derivation matches the 48-byte reduction vector', async () => {
+  const aliceSecret = hexToBytes('0000000000000000000000000000000000000000000000000000000000000001')
+  const bobSecret = hexToBytes('0000000000000000000000000000000000000000000000000000000000000002')
+  const alicePubkey = getPublicKey(aliceSecret)
+  const bobPubkey = getPublicKey(bobSecret)
+
+  const aliceShared = await deriveSharedKey(aliceSecret, bobPubkey, 'trusted-signer-sync-v1')
+  const bobShared = await deriveSharedKey(bobSecret, alicePubkey, 'trusted-signer-sync-v1')
+
+  assert.equal(bytesToHex(aliceShared), 'f68f218e9fbfac374dbfbb5772d0a7f65c1d03ad3897b50c517970d89334eb3b')
+  assert.equal(bytesToHex(bobShared), bytesToHex(aliceShared))
 })
 
 test('double-DH signer round-trips every content-key mode', async () => {

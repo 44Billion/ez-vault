@@ -1,59 +1,55 @@
-import { nip44 } from 'nostr-tools'
+import { sharedXOnlySecret } from './ecdh.js'
 
-// Validates if a 32-byte array is a valid secp256k1 scalar,
-// i.e. if it can generate a valid public key and a valid Schnorr signature
-// else it would be useful just for nip44 encryption (like conversation keys are)
-// but not for signing
-function isValidScalar (maybeScalar) {
-  const n = BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141')
-  const val = BigInt('0x' + Array.from(maybeScalar).map(b => b.toString(16).padStart(2, '0')).join(''))
-  return val > 0n && val < n
+const textEncoder = new TextEncoder()
+const SECP256K1_N = BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141')
+const SHARED_KEY_SALT = textEncoder.encode('sharedkey-v1')
+
+function bytesToBigInt (bytes) {
+  return BigInt('0x' + Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(''))
+}
+
+function bigIntTo32Bytes (n) {
+  const hex = n.toString(16).padStart(64, '0')
+  const out = new Uint8Array(32)
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16)
+  return out
 }
 
 // Generic deterministic key derivation.
 // Ensures the result is a valid secp256k1 scalar.
 export async function deriveSecretKey (masterKeyBytes, info = new Uint8Array(), salt = new Uint8Array()) {
-  const encoder = new TextEncoder()
-  if (typeof salt === 'string') salt = encoder.encode(salt)
-  if (typeof info === 'string') info = encoder.encode(info)
+  if (typeof salt === 'string') salt = textEncoder.encode(salt)
+  if (typeof info === 'string') info = textEncoder.encode(info)
 
   const baseKey = await globalThis.crypto.subtle.importKey(
     'raw', masterKeyBytes, { name: 'HKDF' }, false, ['deriveBits']
   )
-  let derivedScalar
-  let counter = 0
+  const buffer = await globalThis.crypto.subtle.deriveBits(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt,
+      info
+    },
+    baseKey, 48 * 8
+  )
 
-  do {
-    const suffix = encoder.encode(`-${counter}`)
-    // Concatenate HKDF info + suffix
-    const hkdfInfo = new Uint8Array(info.length + suffix.length)
-    hkdfInfo.set(info)
-    hkdfInfo.set(suffix, info.length)
-    const buffer = await globalThis.crypto.subtle.deriveBits(
-      {
-        name: 'HKDF',
-        hash: 'SHA-256',
-        salt,
-        info: hkdfInfo
-      },
-      baseKey, 256
-    )
-
-    derivedScalar = new Uint8Array(buffer)
-    counter++
-  } while (!isValidScalar(derivedScalar))
-
-  return derivedScalar
+  // Wide reduction follows hash-to-field practice for 256-bit groups:
+  // L = 48 means 48 HKDF output bytes: 32 bytes for a 256-bit scalar plus
+  // 16 bytes / 128 bits of bias margin before reducing into [1, n).
+  const wide = bytesToBigInt(new Uint8Array(buffer))
+  return bigIntTo32Bytes((wide % (SECP256K1_N - 1n)) + 1n)
 }
 
 // Derives a shared scalar using HKDF
 export async function deriveSharedKey (mySeckey, theirPubkey, info = '' /* 'deniable-chat-v1' */) {
-  const conversationKey = nip44.getConversationKey(mySeckey, theirPubkey)
+  const sharedSecret = sharedXOnlySecret(mySeckey, theirPubkey)
 
   return await deriveSecretKey(
-    conversationKey,
-    info, // nip44 v2 uses random 32 bytes nonce; e.g. 'encryption', 'signing'
-    // No additional salt because of the 'nip44-v2' one already used for the conversation key derivation
-    new Uint8Array()
+    sharedSecret,
+    // Caller/protocol context. The fixed salt below names this shared-key
+    // scalar derivation, while info separates uses within that derivation.
+    info,
+    SHARED_KEY_SALT
   )
 }
