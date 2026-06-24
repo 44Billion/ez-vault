@@ -339,31 +339,49 @@ function nip44v3Label (action, suffix, eventKind) {
     : `${action} (NIP-44 v3${suffix})`
 }
 
-function methodLabel (method, eventKind, _code) {
+function contextLabel (context) {
+  if (context === 'nostrdb_merge') return 'NostrDB merge'
+  return ''
+}
+
+function methodLabel (method, eventKind, _code, context) {
+  let label
   switch (method) {
     case 'sign_event':
-      return eventKind != null ? `Sign event (kind ${eventKind})` : 'Sign event'
+      label = eventKind != null ? `Sign event (kind ${eventKind})` : 'Sign event'
+      break
     case 'double_sign_event':
-      return eventKind != null ? `Double-sign event (kind ${eventKind})` : 'Double-sign event'
+      label = eventKind != null ? `Double-sign event (kind ${eventKind})` : 'Double-sign event'
+      break
     case 'nip04_encrypt':
-      return 'Encrypt (NIP-04)'
+      label = 'Encrypt (NIP-04)'
+      break
     case 'nip04_decrypt':
-      return 'Decrypt (NIP-04)'
+      label = 'Decrypt (NIP-04)'
+      break
     case 'nip44_encrypt':
-      return 'Encrypt (NIP-44)'
+      label = 'Encrypt (NIP-44)'
+      break
     case 'nip44_decrypt':
-      return 'Decrypt (NIP-44)'
+      label = 'Decrypt (NIP-44)'
+      break
     case 'nip44v3_encrypt':
-      return nip44v3Label('Encrypt', '', eventKind)
+      label = nip44v3Label('Encrypt', '', eventKind)
+      break
     case 'nip44v3_decrypt':
-      return nip44v3Label('Decrypt', '', eventKind)
+      label = nip44v3Label('Decrypt', '', eventKind)
+      break
     case 'nip44v3_encrypt_double_dh':
-      return nip44v3Label('Encrypt', ' Double-DH', eventKind)
+      label = nip44v3Label('Encrypt', ' Double-DH', eventKind)
+      break
     case 'nip44v3_decrypt_double_dh':
-      return nip44v3Label('Decrypt', ' Double-DH', eventKind)
+      label = nip44v3Label('Decrypt', ' Double-DH', eventKind)
+      break
     default:
-      return method ?? 'Unknown'
+      label = method ?? 'Unknown'
   }
+  const suffix = contextLabel(context)
+  return suffix ? `${label} · ${suffix}` : label
 }
 
 // Pick the most user-relevant single field per method for the collapsed row
@@ -478,7 +496,7 @@ export class ActivityLog extends HTMLElement {
     const app = entry.app ?? {}
     const fallback = appFallbackLetters(app)
     const name = appDisplayName(app)
-    const op = methodLabel(entry.method, entry.eventKind, entry.code)
+    const op = methodLabel(entry.method, entry.eventKind, entry.code, entry.context)
     const preview = previewFor(entry)
     const fullJson = JSON.stringify(entry, null, 2)
     const status = entry.status ?? 'success'

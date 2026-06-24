@@ -244,8 +244,13 @@ function handleUpdateAccountEvents (e) {
 }
 
 async function handleSignerRequest (e, { code, run }) {
-  const { pubkey, method, params = [], app = {}, with_shared_key: withSharedKey = null } = e.data.payload ?? {}
-  const context = signerRequestContext(method, params)
+  const { pubkey, method, params = [], app = {}, with_shared_key: withSharedKey = null, context: requestContext = '' } = e.data.payload ?? {}
+  const signerContext = signerRequestContext(method, params)
+  const context = typeof requestContext === 'string' && requestContext ? requestContext : ''
+  const errorContext = {
+    ...signerContext,
+    ...(context ? { context } : {})
+  }
 
   const logBase = {
     code,
@@ -253,7 +258,8 @@ async function handleSignerRequest (e, { code, run }) {
     method,
     app: { id: app.id ?? '', name: app.name ?? '', icon: app.icon ?? '' },
     origin: launcherOrigin,
-    ...context
+    ...signerContext,
+    ...(context ? { context } : {})
   }
 
   const shouldLog = !UNLOGGED_METHODS.has(method)
@@ -265,7 +271,7 @@ async function handleSignerRequest (e, { code, run }) {
     }
     reply(e, { payload }, { to: launcherPort })
   } catch (err) {
-    const serialized = serializeError(err, context)
+    const serialized = serializeError(err, errorContext)
     if (shouldLog) {
       log.append({
         ...logBase,
