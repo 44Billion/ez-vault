@@ -1,6 +1,6 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { accountForLauncher, applyAccountEvents, signerRequestContext, snapshotAccounts } from '../docs/services/messenger.js'
+import { accountForLauncher, applyAccountEvents, signerRequestApp, signerRequestContext, snapshotAccounts } from '../docs/services/messenger.js'
 import * as store from '../docs/services/accounts-store.js'
 import * as secrets from '../docs/services/secrets.js'
 import * as journal from '../docs/services/account-mutation-journal.js'
@@ -37,6 +37,16 @@ test('signerRequestContext extracts NIP-44 v3 kind and scope', () => {
   assert.deepEqual(
     signerRequestContext('nip44v3_decrypt_double_dh', ['peer', '3560', '', 'ciphertext', 'peer-content', 'own-content']),
     { eventKind: 3560, eventScope: '' }
+  )
+})
+
+test('signerRequestApp labels empty app metadata as the launcher', () => {
+  assert.deepEqual(signerRequestApp(undefined), { id: '', name: 'App launcher', icon: '' })
+  assert.deepEqual(signerRequestApp({}), { id: '', name: 'App launcher', icon: '' })
+  assert.deepEqual(signerRequestApp({ id: '', name: '', icon: '' }), { id: '', name: 'App launcher', icon: '' })
+  assert.deepEqual(
+    signerRequestApp({ id: '+app', name: 'Real App', icon: 'icon' }),
+    { id: '+app', name: 'Real App', icon: 'icon' }
   )
 })
 

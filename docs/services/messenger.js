@@ -24,9 +24,21 @@ const NIP44_V3_CONTEXT_METHODS = new Set([
   'nip44v3_decrypt_double_dh'
 ])
 
+const LAUNCHER_APP_NAME = 'App launcher'
+
 function normalizedEventKind (kind) {
   const n = typeof kind === 'string' && kind.trim() !== '' ? Number(kind) : kind
   return Number.isInteger(n) && n >= 0 && n <= 0xffffffff ? n : undefined
+}
+
+export function signerRequestApp (app) {
+  const id = app?.id ?? ''
+  const name = app?.name ?? ''
+  const icon = app?.icon ?? ''
+  if (!String(id).trim() && !String(name).trim() && !String(icon).trim()) {
+    return { id: '', name: LAUNCHER_APP_NAME, icon: '' }
+  }
+  return { id, name, icon }
 }
 
 export function signerRequestContext (method, params = []) {
@@ -259,7 +271,7 @@ async function handleSignerRequest (e, { code, run }) {
     code,
     pubkey,
     method,
-    app: { id: app.id ?? '', name: app.name ?? '', icon: app.icon ?? '' },
+    app: signerRequestApp(app),
     origin: launcherOrigin,
     ...signerContext,
     ...(context ? { context } : {})

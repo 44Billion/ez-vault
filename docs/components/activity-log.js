@@ -341,6 +341,7 @@ function nip44v3Label (action, suffix, eventKind) {
 
 function contextLabel (context) {
   if (context === 'nostrdb_merge') return 'NostrDB merge'
+  if (context === 'nostrdb_maintenance') return 'NostrDB maintenance'
   return ''
 }
 
