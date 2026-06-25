@@ -12,6 +12,12 @@ const ANNOUNCE_DEBOUNCE_MS = 1000
 const ANNOUNCE_ALL = '*'
 const TRUSTED_SIGNER_SYNC_INFO = 'trusted-signer-sync-v1'
 
+// Trusted-signer sync currently derives one private channel per unlocked nsec
+// account and talks only to configured trusted signer pubkeys. The payloads
+// exchanged here are content-key announcements, requests, and secret-key
+// replies; trusted-signer registry sync and local NostrDB sync are future
+// layers, not part of this controller yet.
+
 function defaultOnError (err) {
   console.warn('sync failed', err?.message ?? err)
 }

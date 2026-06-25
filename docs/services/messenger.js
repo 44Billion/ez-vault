@@ -6,6 +6,7 @@ import * as accountMutationJournal from './account-mutation-journal.js'
 import * as signer from './signer.js'
 import * as log from './messenger-log/index.js'
 import * as secrets from './secrets.js'
+import * as nostrdb from './nostrdb.js'
 import { npubFromPubkey, parseProfileEvent } from '../helpers/nostr/index.js'
 import { parseRelayListEvent } from './relays.js'
 
@@ -215,11 +216,13 @@ export async function initMessenger () {
     // the "*" fallback; closing port1 guarantees any message they post on it
     // can no longer reach us.
     try { port1.close() } catch { /* noop */ }
+    nostrdb.disconnect(port1)
     launcherPort = null
     return
   }
   launcherOrigin ??= origin
   handshakeComplete = true
+  nostrdb.connect(launcherPort)
   startAccountStateSubscriptions()
 }
 

@@ -9,6 +9,11 @@ export const CONTENT_KEYS_ANNOUNCE_CODE = 'contentKeys_announce_t7y8'
 export const CONTENT_KEYS_ASK_CODE = 'contentKeys_ask_t7y8'
 export const CONTENT_KEYS_REPLY_CODE = 'contentKeys_reply_t7y8'
 
+// The current trusted-device sync payload is intentionally narrow:
+// announce advertises held content-key pubkeys, ask requests missing ones,
+// and reply sends those requested content-key secrets over the private channel.
+// It does not sync trusted-signer configuration or the local NostrDB yet.
+
 const HEX32 = /^[0-9a-f]{64}$/i
 
 const listeners = new Set()
