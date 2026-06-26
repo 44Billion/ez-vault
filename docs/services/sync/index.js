@@ -5,6 +5,7 @@ import * as store from '../accounts-store.js'
 import * as secrets from '../secrets.js'
 import * as trustedSigners from '../trusted-signers.js'
 import * as contentKeys from './content-keys.js'
+import { createNostrDbSyncController } from './nostrdb.js'
 import { filterVisibleAccounts } from '../account-mutations.js'
 
 const ANNOUNCE_INTERVAL_MS = 4 * 60 * 60 * 1000
@@ -12,11 +13,10 @@ const ANNOUNCE_DEBOUNCE_MS = 1000
 const ANNOUNCE_ALL = '*'
 const TRUSTED_SIGNER_SYNC_INFO = 'trusted-signer-sync-v1'
 
-// Trusted-signer sync currently derives one private channel per unlocked nsec
-// account and talks only to configured trusted signer pubkeys. The payloads
-// exchanged here are content-key announcements, requests, and secret-key
-// replies; trusted-signer registry sync and local NostrDB sync are future
-// layers, not part of this controller yet.
+// Trusted-signer sync derives one private channel per unlocked nsec account and
+// talks only to configured trusted signer pubkeys. Content-key sync exchanges
+// key metadata/secrets, while NostrDB sync uses the same account-scoped channel
+// context to exchange local database inventory and event rows.
 
 function defaultOnError (err) {
   console.warn('sync failed', err?.message ?? err)
@@ -103,6 +103,7 @@ export function createSyncController ({
   _secrets = secrets,
   _trustedSigners = trustedSigners,
   _contentKeys = contentKeys,
+  _createNostrDbSyncController = createNostrDbSyncController,
   _claimSigner = claimSigner,
   _subscribeRelayListUpdates = subscribeRelayListUpdates,
   _setTimeout = globalThis.setTimeout.bind(globalThis),
@@ -132,6 +133,12 @@ export function createSyncController ({
   const ownerPubkeyByChannelPubkey = new Map()
   const readRelaysByOwnerPubkey = new Map()
   const debug = _debug === undefined ? defaultDebugSink() : _debug
+  const nostrDbSync = _createNostrDbSyncController({
+    _setTimeout,
+    _clearTimeout,
+    onError,
+    storage: globalThis.localStorage
+  })
 
   function emitDebug (action, detail = {}) {
     try {
@@ -282,12 +289,22 @@ export function createSyncController ({
           handled += 1
           emitDebug('handle', messageDebugInfo(message))
           try {
-            await _contentKeys.handleMessage(message, {
+            const handled = await _contentKeys.handleMessage(message, {
               messenger,
               trustedByPubkey,
               ownerPubkeyForChannel,
               debug
             })
+            if (!handled) {
+              await nostrDbSync.handleMessage(message, {
+                messenger,
+                trustedByPubkey,
+                ownerPubkeyForChannel,
+                channelPubkeyForOwner,
+                ownerPubkeys: new Set(nsecOwnerPubkeys(_store)),
+                debug
+              })
+            }
           } catch (err) {
             onError(err)
           }
@@ -358,6 +375,13 @@ export function createSyncController ({
           receiverPubkeys: receivers,
           debug
         })
+        await nostrDbSync.announceRange({
+          messenger,
+          channelPubkey: channelPubkeyForOwner(ownerPubkey),
+          ownerPubkey,
+          receiverPubkeys: receivers,
+          debug
+        })
       } catch (err) {
         onError(err)
       }
@@ -397,6 +421,7 @@ export function createSyncController ({
     ownerPubkeyByChannelPubkey.clear()
     readRelaysByOwnerPubkey.clear()
     clearAnnouncementTimers()
+    nostrDbSync.stop()
     _contentKeys.resetDebugSources?.()
   }
 
@@ -443,6 +468,14 @@ export function createSyncController ({
     }
 
     ensureRelayListWatcher()
+    nostrDbSync.ensureSubscriptions({
+      messenger,
+      trustedByPubkey,
+      channelPubkeyForOwner,
+      ownerPubkeyForChannel,
+      ownerPubkeys: new Set(nsecOwnerPubkeys(_store)),
+      debug
+    })
     ensureAnnouncementInterval()
     scheduleAnnounceAll()
     scheduleDrain()

@@ -5,14 +5,24 @@ import { filterVisibleAccounts } from '../account-mutations.js'
 import { upsertContentKeyEvent } from '../content-key/index.js'
 import { bytesToHex, hexToBytes } from '../../helpers/nostr/index.js'
 
-export const CONTENT_KEYS_ANNOUNCE_CODE = 'contentKeys_announce_t7y8'
-export const CONTENT_KEYS_ASK_CODE = 'contentKeys_ask_t7y8'
-export const CONTENT_KEYS_REPLY_CODE = 'contentKeys_reply_t7y8'
+// Flow notes:
+// - This trusted-device layer only syncs content-key material for local nsec
+//   accounts. Local NostrDB sync lives in a sibling module with separate codes.
+// - announce is public metadata over the private channel: "these content-key
+//   pubkeys exist for this owner." It never includes secret keys.
+// - ask is sent only for announced pubkeys this device does not already hold.
+// - reply sends only the requested content-key secrets, encrypted to the trusted
+//   peer through the account-scoped private channel.
+// - Imported secrets may trigger another public-metadata announce. That is not
+//   an echo of secret material; peers that already hold the pubkey will not ask
+//   for the secret back.
 
-// The current trusted-device sync payload is intentionally narrow:
-// announce advertises held content-key pubkeys, ask requests missing ones,
-// and reply sends those requested content-key secrets over the private channel.
-// It does not sync trusted-signer configuration or the local NostrDB yet.
+// payload: { ownerPubkey, keys: [{ pubkey, createdAt }] }
+export const CONTENT_KEYS_ANNOUNCE_CODE = 'contentKeys_announce_t7y8'
+// payload: { ownerPubkey, pubkeys: [pubkey] }
+export const CONTENT_KEYS_ASK_CODE = 'contentKeys_ask_t7y8'
+// payload: { ownerPubkey, keys: [{ pubkey, seckey, createdAt }] }
+export const CONTENT_KEYS_REPLY_CODE = 'contentKeys_reply_t7y8'
 
 const HEX32 = /^[0-9a-f]{64}$/i
 
