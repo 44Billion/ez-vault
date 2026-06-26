@@ -20,6 +20,10 @@ export const NOSTRDB_SYNC_ADVERTISE_CODE = 'nostrDbSync_advertise_kpkr'
 // payload: { requestId, sinceScore, untilScore, excludeIds, limit }
 export const NOSTRDB_SYNC_ASK_CODE = 'nostrDbSync_ask_kpkr'
 // payload: { requestId, sinceScore, untilScore, hasMore, index, isLast, jsonl }
+// `isLast` closes the chunked private-message reply: no more JSONL chunks are
+// expected for this specific response. `hasMore` describes the requested score
+// window itself: true means the responder hit its page cap, so the requester
+// should re-ask the same window after rebuilding its local excludeIds.
 export const NOSTRDB_SYNC_REPLY_CODE = 'nostrDbSync_reply_kpkr'
 // payload: { index, isLast, jsonl }
 export const NOSTRDB_SYNC_PUSH_CODE = 'nostrDbSync_push_kpkr'

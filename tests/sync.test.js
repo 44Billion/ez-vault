@@ -659,7 +659,7 @@ test('content-key announce ignores untrusted and non-nsec channels, then request
     channelPubkey: owner.pubkey,
     senderPubkey: '3'.repeat(64),
     code: CONTENT_KEYS_ANNOUNCE_CODE,
-    payload: { ownerPubkey: owner.pubkey, keys: [{ pubkey: absentPubkey, createdAt: 20 }] }
+    payload: { keys: [{ pubkey: absentPubkey, createdAt: 20 }] }
   }), context)
   assert.equal(messenger.sent.length, 0)
 
@@ -667,7 +667,7 @@ test('content-key announce ignores untrusted and non-nsec channels, then request
     channelPubkey: '2'.repeat(64),
     senderPubkey: trusted,
     code: CONTENT_KEYS_ANNOUNCE_CODE,
-    payload: { ownerPubkey: '2'.repeat(64), keys: [{ pubkey: absentPubkey, createdAt: 20 }] }
+    payload: { keys: [{ pubkey: absentPubkey, createdAt: 20 }] }
   }), context)
   assert.equal(messenger.sent.length, 0)
 
@@ -676,7 +676,6 @@ test('content-key announce ignores untrusted and non-nsec channels, then request
     senderPubkey: trusted,
     code: CONTENT_KEYS_ANNOUNCE_CODE,
     payload: {
-      ownerPubkey: owner.pubkey,
       keys: [
         { pubkey: held.pubkey, createdAt: held.createdAt },
         { pubkey: missing.pubkey, createdAt: missing.createdAt },
@@ -711,7 +710,6 @@ test('content-key announce does not request keys already restored from localStor
     senderPubkey: trusted,
     code: CONTENT_KEYS_ANNOUNCE_CODE,
     payload: {
-      ownerPubkey: owner.pubkey,
       keys: [{ pubkey: content.pubkey, createdAt: content.createdAt }]
     }
   }), {
@@ -738,7 +736,7 @@ test('content-key announce routes asks over derived sync channels', async () => 
     channelPubkey,
     senderPubkey: trusted,
     code: CONTENT_KEYS_ANNOUNCE_CODE,
-    payload: { ownerPubkey: owner.pubkey, keys: [{ pubkey: absentPubkey, createdAt: 20 }] }
+    payload: { keys: [{ pubkey: absentPubkey, createdAt: 20 }] }
   }), {
     messenger,
     trustedByPubkey: new Map([[trusted, { pubkey: trusted, platform: 'Phone' }]]),
@@ -749,7 +747,6 @@ test('content-key announce routes asks over derived sync channels', async () => 
   assert.equal(messenger.sent[0].method, 'ask')
   assert.equal(messenger.sent[0].options.channelPubkey, channelPubkey)
   assert.deepEqual(messenger.sent[0].options.payload, {
-    ownerPubkey: owner.pubkey,
     pubkeys: [absentPubkey]
   })
 })
@@ -769,9 +766,9 @@ test('content-key announce contains only public key metadata', async () => {
   assert.equal(messenger.sent[0].method, 'yell')
   assert.equal(messenger.sent[0].options.code, CONTENT_KEYS_ANNOUNCE_CODE)
   assert.deepEqual(messenger.sent[0].options.payload, {
-    ownerPubkey: owner.pubkey,
     keys: [{ pubkey: content.pubkey, createdAt: 30 }]
   })
+  assert.equal(Object.hasOwn(messenger.sent[0].options.payload, 'ownerPubkey'), false)
   assert.equal(Object.hasOwn(messenger.sent[0].options.payload.keys[0], 'seckey'), false)
 })
 
@@ -787,7 +784,7 @@ test('content-key requests reply with only locally held requested secrets', asyn
     channelPubkey: owner.pubkey,
     senderPubkey: trusted,
     code: CONTENT_KEYS_ASK_CODE,
-    payload: { ownerPubkey: owner.pubkey, pubkeys: [content.pubkey, absent] }
+    payload: { pubkeys: [content.pubkey, absent] }
   }), {
     messenger,
     trustedByPubkey: new Map([[trusted, { pubkey: trusted }]])
@@ -823,7 +820,6 @@ test('content-key replies import valid keys, keep older keys, and notify the syn
       senderPubkey: trusted,
       code: CONTENT_KEYS_REPLY_CODE,
       payload: {
-        ownerPubkey: owner.pubkey,
         keys: [
           { pubkey: syncedPubkey, seckey: syncedSecret, createdAt: syncedCreatedAt },
           { pubkey: '7'.repeat(64), seckey: invalidSecret, createdAt: freshCreatedAt(5) }
@@ -866,7 +862,6 @@ test('content-key replies keep a stale key only until a newer key exists', async
       senderPubkey: trusted,
       code: CONTENT_KEYS_REPLY_CODE,
       payload: {
-        ownerPubkey: owner.pubkey,
         keys: [{ pubkey: stalePubkey, seckey: staleSecret, createdAt: staleCreatedAt(5) }]
       }
     }), {
@@ -894,7 +889,6 @@ test('content-key replies can import a stale key when it is the only key', async
     senderPubkey: trusted,
     code: CONTENT_KEYS_REPLY_CODE,
     payload: {
-      ownerPubkey: owner.pubkey,
       keys: [{ pubkey: stalePubkey, seckey: staleSecret, createdAt: staleCreatedAt(5) }]
     }
   }), {

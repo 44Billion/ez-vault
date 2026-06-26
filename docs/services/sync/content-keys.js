@@ -8,6 +8,7 @@ import { bytesToHex, hexToBytes } from '../../helpers/nostr/index.js'
 // Flow notes:
 // - This trusted-device layer only syncs content-key material for local nsec
 //   accounts. Local NostrDB sync lives in a sibling module with separate codes.
+// - The account owner is inferred from the account-scoped sync channel.
 // - announce is public metadata over the private channel: "these content-key
 //   pubkeys exist for this owner." It never includes secret keys.
 // - ask is sent only for announced pubkeys this device does not already hold.
@@ -17,11 +18,11 @@ import { bytesToHex, hexToBytes } from '../../helpers/nostr/index.js'
 //   an echo of secret material; peers that already hold the pubkey will not ask
 //   for the secret back.
 
-// payload: { ownerPubkey, keys: [{ pubkey, createdAt }] }
+// payload: { keys: [{ pubkey, createdAt }] }
 export const CONTENT_KEYS_ANNOUNCE_CODE = 'contentKeys_announce_t7y8'
-// payload: { ownerPubkey, pubkeys: [pubkey] }
+// payload: { pubkeys: [pubkey] }
 export const CONTENT_KEYS_ASK_CODE = 'contentKeys_ask_t7y8'
-// payload: { ownerPubkey, keys: [{ pubkey, seckey, createdAt }] }
+// payload: { keys: [{ pubkey, seckey, createdAt }] }
 export const CONTENT_KEYS_REPLY_CODE = 'contentKeys_reply_t7y8'
 
 const HEX32 = /^[0-9a-f]{64}$/i
@@ -139,11 +140,6 @@ function localOwnerForChannel (channelPubkey, context = {}) {
   return store.get(ownerPubkey)?.type === 'nsec' ? ownerPubkey : ''
 }
 
-function channelOwnerPayload (message, context = {}) {
-  const ownerPubkey = normalizePubkey(messageBody(message).ownerPubkey)
-  return ownerPubkey && ownerPubkey === localOwnerForChannel(message.channelPubkey, context) ? ownerPubkey : ''
-}
-
 function contentKeyDiff (ownerPubkey, announcedKeys) {
   const knownPubkeys = contentKeysForOwner(ownerPubkey).map(key => key.pubkey)
   const held = new Set(knownPubkeys)
@@ -206,7 +202,7 @@ export async function announceContentKeys ({ messenger, ownerPubkey, channelPubk
     channelPubkey,
     receiverPubkeys: receivers,
     code: CONTENT_KEYS_ANNOUNCE_CODE,
-    payload: { ownerPubkey, keys }
+    payload: { keys }
   })
 }
 
@@ -254,7 +250,7 @@ export async function generateAndPublishContentKey ({
 }
 
 async function handleAnnounce (message, context) {
-  const ownerPubkey = channelOwnerPayload(message, context)
+  const ownerPubkey = localOwnerForChannel(message.channelPubkey, context)
   if (!ownerPubkey) return false
   const channelPubkey = message.channelPubkey || ownerPubkey
   const keys = (Array.isArray(messageBody(message).keys) ? messageBody(message).keys : [])
@@ -278,13 +274,13 @@ async function handleAnnounce (message, context) {
     channelPubkey,
     receiverPubkey: message.event.pubkey,
     code: CONTENT_KEYS_ASK_CODE,
-    payload: { ownerPubkey, pubkeys }
+    payload: { pubkeys }
   })
   return true
 }
 
 async function handleRequest (message, context) {
-  const ownerPubkey = channelOwnerPayload(message, context)
+  const ownerPubkey = localOwnerForChannel(message.channelPubkey, context)
   if (!ownerPubkey || !message.event?.id) return false
   const channelPubkey = message.channelPubkey || ownerPubkey
   const pubkeys = normalizePubkeyList(messageBody(message).pubkeys)
@@ -317,7 +313,7 @@ async function handleRequest (message, context) {
 }
 
 async function handleReply (message, context) {
-  const ownerPubkey = channelOwnerPayload(message, context)
+  const ownerPubkey = localOwnerForChannel(message.channelPubkey, context)
   if (!ownerPubkey) return false
   const channelPubkey = message.channelPubkey || ownerPubkey
   const label = trustedLabel(message.event.pubkey, context.trustedByPubkey)
