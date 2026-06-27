@@ -14,12 +14,14 @@ import {
   handleMessage,
   resetDebugSources
 } from '../docs/services/sync/content-keys.js'
+import { TRUSTED_SIGNERS_STATE_CODE } from '../docs/services/sync/trusted-signers.js'
 import * as store from '../docs/services/accounts-store.js'
 import * as secrets from '../docs/services/secrets.js'
 import { bytesToHex, hexToBytes } from '../docs/helpers/nostr/index.js'
 
 const data = new Map()
 const SYNC_INFO = 'trusted-signer-sync-v1'
+const SIGNER_LIST_SYNC_INFO = 'trusted-signer-list-sync-v1'
 globalThis.localStorage = {
   clear: () => data.clear(),
   getItem: key => data.has(String(key)) ? data.get(String(key)) : null,
@@ -138,7 +140,7 @@ function syncMessage ({ channelPubkey, senderPubkey, code, payload, id = 'messag
   }
 }
 
-async function flushMicrotasks (turns = 6) {
+async function flushMicrotasks (turns = 14) {
   for (let i = 0; i < turns; i++) await Promise.resolve()
 }
 
@@ -214,14 +216,19 @@ test('sync orchestration watches nsec channels with identity-only sync options',
   assert.equal(instances[0].initOptions.mode, 'seeder')
   assert.deepEqual(instances[0].initOptions.relays, [])
   assert.deepEqual(instances[0].initOptions.channels.map(channel => channel.pubkey), [
-    `nsec1:shared:nsec1:${SYNC_INFO}`
+    `nsec1:shared:nsec1:${SYNC_INFO}`,
+    `device:shared:trusted1:${SIGNER_LIST_SYNC_INFO}`
   ])
   assert.deepEqual(accountSigners.nsec1.sharedCalls, [{ peerPubkey: 'nsec1', info: SYNC_INFO }])
+  assert.deepEqual(deviceSigner.sharedCalls, [{ peerPubkey: 'trusted1', info: SIGNER_LIST_SYNC_INFO }])
   assert.deepEqual(accountSigners.bunker1.sharedCalls, [])
-  assert.deepEqual(instances[0].initOptions.channels.map(channel => channel.mode), ['seeder'])
+  assert.deepEqual(instances[0].initOptions.channels.map(channel => channel.mode), ['seeder', 'seeder'])
   assert.deepEqual(instances[0].initOptions.channels[0].relays, ['wss://nsec-one.example', 'wss://nsec-two.example', 'wss://nsec-three.example'])
   assert.deepEqual(instances[0].initOptions.channels[0].sendRelays, ['wss://nsec-one.example', 'wss://nsec-two.example'])
   assert.deepEqual(instances[0].initOptions.channels[0].seeders, ['trusted1'])
+  assert.deepEqual(instances[0].initOptions.channels[1].relays, ['wss://relay.44billion.net', 'wss://nos.lol'])
+  assert.deepEqual(instances[0].initOptions.channels[1].sendRelays, ['wss://relay.44billion.net', 'wss://nos.lol'])
+  assert.deepEqual(instances[0].initOptions.channels[1].seeders, ['trusted1'])
   assert.ok(debugEvents.some(event => event.action === 'watch' && event.mode === 'seeder'))
   assert.equal(timers[0].ms, 1000)
 
@@ -240,7 +247,8 @@ test('sync orchestration watches nsec channels with identity-only sync options',
   assert.equal(instances[0].updates.length, 1)
   assert.deepEqual(instances[0].updates[0].channels.map(channel => channel.pubkey), [
     `nsec1:shared:nsec1:${SYNC_INFO}`,
-    `nsec2:shared:nsec2:${SYNC_INFO}`
+    `nsec2:shared:nsec2:${SYNC_INFO}`,
+    `device:shared:trusted1:${SIGNER_LIST_SYNC_INFO}`
   ])
 
   await trustedStub.emit()
@@ -336,6 +344,168 @@ test('sync refreshes messenger channels when watched account read relays change'
   controller.close()
 
   assert.equal(relayUpdates.subscriptions[0].closed, true)
+})
+
+test('sync announces trusted-signer state over one-to-one device channels', async () => {
+  const trusted = '1'.repeat(64)
+  const actor = '2'.repeat(64)
+  const other = '3'.repeat(64)
+  const deviceSigner = signer('device')
+  const storeStub = createSubscribable({
+    list: () => []
+  })
+  const secretsStub = createSubscribable({
+    isUnlocked: () => true,
+    getDeviceSigner: async () => deviceSigner
+  })
+  const trustedStub = createSubscribable({
+    list: () => [
+      { pubkey: trusted, platform: 'Phone' },
+      { pubkey: other, platform: 'Tablet' }
+    ],
+    listRecords: () => [
+      { pubkey: trusted, platform: 'Phone', status: 'trusted', updatedAt: 10, actorPubkey: actor },
+      { pubkey: other, platform: 'Tablet', status: 'trusted', updatedAt: 11, actorPubkey: actor }
+    ]
+  })
+  const timers = []
+  const tells = []
+
+  class FakeMessenger {
+    async init (options) {
+      this.options = options
+      return this
+    }
+
+    async tell (options) {
+      tells.push(options)
+    }
+
+    nextMessage () { return null }
+    close () {}
+  }
+
+  const controller = createSyncController({
+    MessengerClass: FakeMessenger,
+    _store: storeStub,
+    _secrets: secretsStub,
+    _trustedSigners: trustedStub,
+    _contentKeys: {
+      resetDebugSources: () => {},
+      handleMessage: async () => false,
+      announceContentKeys: async () => {}
+    },
+    _createNostrDbSyncController: () => ({
+      ensureSubscriptions: () => {},
+      announceRange: async () => {},
+      handleMessage: async () => false,
+      stop: () => {}
+    }),
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: () => {},
+    _setInterval: () => ({}),
+    _clearInterval: () => {}
+  })
+
+  await controller.init()
+  await timers.find(timer => timer.ms === 1000).fn()
+
+  assert.deepEqual(controller.messenger.options.channels.map(channel => channel.pubkey), [
+    `device:shared:${trusted}:${SIGNER_LIST_SYNC_INFO}`,
+    `device:shared:${other}:${SIGNER_LIST_SYNC_INFO}`
+  ])
+  assert.equal(tells.length, 2)
+  const trustedTell = tells.find(call => call.receiverPubkey === trusted)
+  const otherTell = tells.find(call => call.receiverPubkey === other)
+  assert.equal(trustedTell.channelPubkey, `device:shared:${trusted}:${SIGNER_LIST_SYNC_INFO}`)
+  assert.equal(trustedTell.code, TRUSTED_SIGNERS_STATE_CODE)
+  assert.equal(Object.hasOwn(trustedTell.payload, 'generatedAt'), false)
+  assert.deepEqual(trustedTell.payload.entries, [
+    { pubkey: other, platform: 'Tablet', status: 'trusted', updatedAt: 11, actorPubkey: actor }
+  ])
+  assert.equal(otherTell.channelPubkey, `device:shared:${other}:${SIGNER_LIST_SYNC_INFO}`)
+  assert.equal(otherTell.code, TRUSTED_SIGNERS_STATE_CODE)
+  assert.equal(Object.hasOwn(otherTell.payload, 'generatedAt'), false)
+  assert.deepEqual(otherTell.payload.entries, [
+    { pubkey: trusted, platform: 'Phone', status: 'trusted', updatedAt: 10, actorPubkey: actor }
+  ])
+
+  controller.close()
+})
+
+test('sync forgets the local device from trusted signer records on refresh', async () => {
+  const deviceSigner = signer('device')
+  let trustedRecords = [
+    { pubkey: 'device', platform: 'This device', status: 'trusted', updatedAt: 10, actorPubkey: 'actor' },
+    { pubkey: 'peer', platform: 'Peer device', status: 'trusted', updatedAt: 11, actorPubkey: 'actor' }
+  ]
+  let forgotten = ''
+  const storeStub = createSubscribable({
+    list: () => []
+  })
+  const secretsStub = createSubscribable({
+    isUnlocked: () => true,
+    getDeviceSigner: async () => deviceSigner
+  })
+  const trustedStub = createSubscribable({
+    list: () => trustedRecords
+      .filter(record => record.status === 'trusted')
+      .map(record => ({ pubkey: record.pubkey, platform: record.platform })),
+    listRecords: () => trustedRecords,
+    listRemovedForReminder: () => [],
+    forgetLocal: pubkey => {
+      forgotten = pubkey
+      trustedRecords = trustedRecords.filter(record => record.pubkey !== pubkey)
+    }
+  })
+  const instances = []
+
+  class FakeMessenger {
+    async init (options) {
+      this.options = options
+      instances.push(this)
+      return this
+    }
+
+    nextMessage () { return null }
+    close () {}
+  }
+
+  const controller = createSyncController({
+    MessengerClass: FakeMessenger,
+    _store: storeStub,
+    _secrets: secretsStub,
+    _trustedSigners: trustedStub,
+    _contentKeys: {
+      resetDebugSources: () => {},
+      handleMessage: async () => false,
+      announceContentKeys: async () => {}
+    },
+    _createNostrDbSyncController: () => ({
+      ensureSubscriptions: () => {},
+      announceRange: async () => {},
+      handleMessage: async () => false,
+      stop: () => {}
+    }),
+    _setTimeout: () => ({}),
+    _clearTimeout: () => {},
+    _setInterval: () => ({}),
+    _clearInterval: () => {}
+  })
+
+  await controller.init()
+
+  assert.equal(forgotten, 'device')
+  assert.deepEqual([...controller.trustedByPubkey.keys()], ['peer'])
+  assert.deepEqual(instances[0].options.channels.map(channel => channel.pubkey), [
+    `device:shared:peer:${SIGNER_LIST_SYNC_INFO}`
+  ])
+
+  controller.close()
 })
 
 test('sync drains messages enqueued while another message is being handled', async () => {

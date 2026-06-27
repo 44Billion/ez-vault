@@ -1,48 +1,158 @@
 import * as secrets from './secrets.js'
 
 const KEY = 'ez-vault:trusted-signers'
+// Plaintext UI hint: tombstones remain sealed for sync/reminders, but a
+// tombstone-only blob should not ask the user to unlock an empty panel.
+const ACTIVE_HINT_KEY = `${KEY}:active`
+export const TOMBSTONE_CAP = 100
+export const REMOVAL_REMINDER_SECONDS = 30 * 24 * 60 * 60
 
-// Flat device-level trust list, encrypted in localStorage with the vault
-// key. Each entry is one peer device's signer pubkey — the device-local
-// keypair the peer derived from its own passkey PRF. Plaintext shape:
-//
-//   [{ pubkey, platform, addedAt }, ...]
-//
-// `pubkey` is the peer's device signer pubkey, `platform` is the short
-// "OS / browser" label the peer announced over the pair channel, and
-// `addedAt` is unix seconds for ordering / future UI.
-//
-// Unlike messenger-log, the entire payload is sealed; we don't leave any
-// plaintext envelope because pubkeys leak relationship structure and we
-// have no filtering need that requires reading them while locked.
-
+const HEX32 = /^[0-9a-f]{64}$/i
 const listeners = new Set()
 
-function notify () {
+function nowSeconds () {
+  return Math.floor(Date.now() / 1000)
+}
+
+function normalizePubkey (value) {
+  const pubkey = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  return HEX32.test(pubkey) ? pubkey : ''
+}
+
+function cleanString (value) {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function normalizeTimestamp (value) {
+  const timestamp = Math.floor(Number(value) || 0)
+  return Number.isSafeInteger(timestamp) && timestamp > 0 ? timestamp : 0
+}
+
+function notify (detail = {}) {
   for (const fn of listeners) {
-    try { fn() } catch (err) { console.warn('trusted-signers listener threw', err) }
+    try { fn(detail) } catch (err) { console.warn('trusted-signers listener threw', err) }
   }
 }
 
-function readList () {
+function normalizeRecord (entry) {
+  const pubkey = normalizePubkey(entry?.pubkey)
+  if (!pubkey) return null
+  const status = entry.status === 'removed' ? 'removed' : 'trusted'
+  const updatedAt = normalizeTimestamp(entry.updatedAt ?? entry.addedAt) || nowSeconds()
+  const actorPubkey = normalizePubkey(entry.actorPubkey) || ''
+  const addedAt = normalizeTimestamp(entry.addedAt) || updatedAt
+  return {
+    pubkey,
+    platform: cleanString(entry.platform),
+    status,
+    updatedAt,
+    actorPubkey,
+    addedAt
+  }
+}
+
+function compareRecords (left, right) {
+  if (!left) return -1
+  if (!right) return 1
+  if ((left.updatedAt || 0) !== (right.updatedAt || 0)) return (left.updatedAt || 0) - (right.updatedAt || 0)
+  const leftActor = left.actorPubkey || ''
+  const rightActor = right.actorPubkey || ''
+  if (leftActor !== rightActor) return leftActor < rightActor ? -1 : 1
+  if (left.status !== right.status) return left.status === 'removed' ? 1 : -1
+  return 0
+}
+
+function mergeRecordMaps (records, entries) {
+  const byPubkey = new Map()
+  for (const record of records) byPubkey.set(record.pubkey, record)
+
+  const changedRecords = []
+  for (const entry of entries || []) {
+    const normalized = normalizeRecord(entry)
+    if (!normalized) continue
+    const current = byPubkey.get(normalized.pubkey)
+    if (compareRecords(current, normalized) >= 0) continue
+    byPubkey.set(normalized.pubkey, normalized)
+    changedRecords.push(normalized)
+  }
+
+  return {
+    records: [...byPubkey.values()],
+    changedRecords
+  }
+}
+
+function pruneTombstones (records, now = nowSeconds()) {
+  const active = []
+  const tombstones = []
+  for (const record of records) {
+    if (record.status === 'removed') tombstones.push(record)
+    else active.push(record)
+  }
+  if (tombstones.length <= TOMBSTONE_CAP) return records
+
+  const reminderCutoff = now - REMOVAL_REMINDER_SECONDS
+  const old = tombstones
+    .filter(record => (record.updatedAt || 0) < reminderCutoff)
+    .sort((a, b) => (a.updatedAt || 0) - (b.updatedAt || 0))
+  const drop = new Set()
+  for (const record of old) {
+    if (tombstones.length - drop.size <= TOMBSTONE_CAP) break
+    drop.add(record.pubkey)
+  }
+  if (tombstones.length - drop.size > TOMBSTONE_CAP) {
+    for (const record of [...tombstones].sort((a, b) => (a.updatedAt || 0) - (b.updatedAt || 0))) {
+      if (tombstones.length - drop.size <= TOMBSTONE_CAP) break
+      drop.add(record.pubkey)
+    }
+  }
+  return active.concat(tombstones.filter(record => !drop.has(record.pubkey)))
+}
+
+function hasActiveRecord (records) {
+  return records.some(record => record.status === 'trusted')
+}
+
+function writeActiveHint (records) {
+  if (hasActiveRecord(records)) localStorage.setItem(ACTIVE_HINT_KEY, '1')
+  else localStorage.setItem(ACTIVE_HINT_KEY, '0')
+}
+
+function readRecords () {
   const raw = localStorage.getItem(KEY)
   if (!raw) return []
   if (!secrets.isUnlocked()) return []
   try {
     const plain = secrets.vaultDecrypt(raw)
     const parsed = JSON.parse(plain)
-    return Array.isArray(parsed) ? parsed : []
+    if (!Array.isArray(parsed)) return []
+    const byPubkey = new Map()
+    for (const entry of parsed) {
+      const record = normalizeRecord(entry)
+      if (!record) continue
+      const current = byPubkey.get(record.pubkey)
+      if (compareRecords(current, record) < 0) byPubkey.set(record.pubkey, record)
+    }
+    return [...byPubkey.values()]
   } catch (err) {
     console.warn('trusted-signers decrypt failed', err?.message ?? err)
     return []
   }
 }
 
-function writeList (list) {
+function writeRecords (records, detail = {}) {
   if (!secrets.isUnlocked()) throw new Error('VAULT_LOCKED')
-  const sealed = secrets.vaultEncrypt(JSON.stringify(list))
+  const pruned = pruneTombstones(records)
+  if (!pruned.length) {
+    localStorage.removeItem(KEY)
+    localStorage.removeItem(ACTIVE_HINT_KEY)
+    notify(detail)
+    return
+  }
+  const sealed = secrets.vaultEncrypt(JSON.stringify(pruned))
   localStorage.setItem(KEY, sealed)
-  notify()
+  writeActiveHint(pruned)
+  notify(detail)
 }
 
 export function subscribe (fn) {
@@ -50,46 +160,143 @@ export function subscribe (fn) {
   return () => listeners.delete(fn)
 }
 
-// Append one trusted signer. No-op when a signer with the same pubkey is
-// already present so re-pairing the same device doesn't duplicate entries.
-export function add ({ pubkey, platform }) {
-  if (!pubkey) return
-  const list = readList()
-  if (list.some(e => e.pubkey === pubkey)) return
-  list.push({ pubkey, platform: platform || '', addedAt: Math.floor(Date.now() / 1000) })
-  writeList(list)
+export function hasStored () {
+  return Boolean(localStorage.getItem(KEY))
 }
 
-// Bulk append — single write for a batch. Skips duplicates the same way
-// `add` does. The batch parameter is mostly there for parity with the
-// commit path; today the pair flow only ever adds one peer at a time.
-export function addMany (entries) {
-  if (!entries?.length) return
-  const list = readList()
-  let dirty = false
-  for (const e of entries) {
-    if (!e?.pubkey) continue
-    if (list.some(x => x.pubkey === e.pubkey)) continue
-    list.push({ pubkey: e.pubkey, platform: e.platform || '', addedAt: Math.floor(Date.now() / 1000) })
-    dirty = true
-  }
-  if (dirty) writeList(list)
+export function hasStoredActive () {
+  return localStorage.getItem(ACTIVE_HINT_KEY) === '1'
+}
+
+export function forgetLocal (pubkey, detail = {}) {
+  const normalizedPubkey = normalizePubkey(pubkey)
+  if (!normalizedPubkey) return null
+  const records = readRecords()
+  const record = records.find(entry => entry.pubkey === normalizedPubkey)
+  if (!record) return null
+  writeRecords(records.filter(entry => entry.pubkey !== normalizedPubkey), {
+    action: 'forget-local',
+    records: [record],
+    ...detail
+  })
+  return record
+}
+
+export function listRecords () {
+  return readRecords()
+}
+
+export function listRemovedForReminder (now = nowSeconds()) {
+  const cutoff = now - REMOVAL_REMINDER_SECONDS
+  return readRecords().filter(record => record.status === 'removed' && (record.updatedAt || 0) >= cutoff)
 }
 
 export function list () {
-  return readList()
+  return readRecords()
+    .filter(record => record.status === 'trusted')
+    .map(record => ({
+      pubkey: record.pubkey,
+      platform: record.platform || '',
+      addedAt: record.addedAt || record.updatedAt || 0,
+      updatedAt: record.updatedAt || record.addedAt || 0,
+      actorPubkey: record.actorPubkey || ''
+    }))
 }
 
-// Read the raw ciphertext as it currently sits on disk. Used by the import
-// commit path to bracket the trusted-signers write with the rest of the
-// commit so a rollback (e.g. writeSecretsBlob throws) can put the byte-for-
-// byte prior state back.
+export function add ({ pubkey, platform, actorPubkey = '', updatedAt = nowSeconds() }) {
+  const record = normalizeRecord({
+    pubkey,
+    platform,
+    status: 'trusted',
+    updatedAt,
+    actorPubkey,
+    addedAt: updatedAt
+  })
+  if (!record) return null
+  const current = readRecords().find(entry => entry.pubkey === record.pubkey)
+  if (current?.status === 'trusted' && compareRecords(current, record) >= 0) return null
+  const { records, changedRecords } = mergeRecordMaps(readRecords(), [record])
+  if (!changedRecords.length) return null
+  writeRecords(records, { action: 'add', records: changedRecords, trustedRecords: changedRecords })
+  return changedRecords[0]
+}
+
+export function addMany (entries, options = {}) {
+  if (!entries?.length) return []
+  const timestamp = normalizeTimestamp(options.updatedAt) || nowSeconds()
+  const recordsToMerge = entries.map(entry => ({
+    ...entry,
+    status: 'trusted',
+    updatedAt: entry.updatedAt ?? timestamp,
+    actorPubkey: entry.actorPubkey ?? options.actorPubkey ?? ''
+  }))
+  const { records, changedRecords } = mergeRecordMaps(readRecords(), recordsToMerge)
+  if (!changedRecords.length) return []
+  writeRecords(records, { action: 'add-many', records: changedRecords, trustedRecords: changedRecords })
+  return changedRecords
+}
+
+export function remove (pubkey, { actorPubkey = '', updatedAt = nowSeconds() } = {}) {
+  const normalizedPubkey = normalizePubkey(pubkey)
+  if (!normalizedPubkey) return null
+  const current = readRecords().find(record => record.pubkey === normalizedPubkey)
+  const record = normalizeRecord({
+    pubkey: normalizedPubkey,
+    platform: current?.platform || '',
+    status: 'removed',
+    updatedAt,
+    actorPubkey,
+    addedAt: current?.addedAt || updatedAt
+  })
+  const { records, changedRecords } = mergeRecordMaps(readRecords(), [record])
+  if (!changedRecords.length) return null
+  writeRecords(records, { action: 'remove', records: changedRecords, removedRecords: changedRecords })
+  return changedRecords[0]
+}
+
+export function clearActive ({ actorPubkey = '', updatedAt = nowSeconds(), tombstone = true } = {}) {
+  const active = readRecords().filter(record => record.status === 'trusted')
+  if (!active.length) return []
+  if (!tombstone) {
+    writeRecords(readRecords().filter(record => record.status !== 'trusted'), { action: 'clear-active', records: [] })
+    return active
+  }
+  const removed = active.map(record => ({
+    ...record,
+    status: 'removed',
+    updatedAt,
+    actorPubkey: actorPubkey || record.actorPubkey || ''
+  }))
+  const { records, changedRecords } = mergeRecordMaps(readRecords(), removed)
+  if (!changedRecords.length) return []
+  writeRecords(records, { action: 'clear-active', records: changedRecords, removedRecords: changedRecords })
+  return changedRecords
+}
+
+export function mergeRecords (entries, { action = 'merge' } = {}) {
+  const { records, changedRecords } = mergeRecordMaps(readRecords(), entries)
+  if (!changedRecords.length) return []
+  writeRecords(records, {
+    action,
+    records: changedRecords,
+    trustedRecords: changedRecords.filter(record => record.status === 'trusted'),
+    removedRecords: changedRecords.filter(record => record.status === 'removed')
+  })
+  return changedRecords
+}
+
 export function snapshot () {
   return localStorage.getItem(KEY)
 }
 
 export function restore (priorCiphertext) {
-  if (priorCiphertext === null) localStorage.removeItem(KEY)
-  else localStorage.setItem(KEY, priorCiphertext)
-  notify()
+  if (priorCiphertext === null) {
+    localStorage.removeItem(KEY)
+    localStorage.removeItem(ACTIVE_HINT_KEY)
+  } else {
+    localStorage.setItem(KEY, priorCiphertext)
+    if (secrets.isUnlocked()) writeActiveHint(readRecords())
+    else localStorage.removeItem(ACTIVE_HINT_KEY)
+  }
+  notify({ action: 'restore' })
 }

@@ -332,7 +332,7 @@ export class SyncJoiner extends HTMLElement {
     requestAnimationFrame(() => this.#input?.focus())
   }
 
-  close () {
+  close ({ completed = false } = {}) {
     this.removeAttribute('open')
     this.#input.value = ''
     this.#clearErrorFlash()
@@ -340,7 +340,7 @@ export class SyncJoiner extends HTMLElement {
     this.#tearDownPair()
     this.list?.exitSelectionMode()
     this.#setToolbarDisabled(false)
-    this.onClosed?.()
+    this.onClosed?.({ completed })
   }
 
   #setToolbarDisabled (disabled) {
@@ -559,7 +559,7 @@ export class SyncJoiner extends HTMLElement {
       else toast.success(summary)
 
       this.#setStatus('Done.', 'success')
-      setTimeout(() => this.close(), 1200)
+      setTimeout(() => this.close({ completed: true }), 1200)
     } catch (err) {
       if (err?.message !== 'IMPORT_CANCELLED') {
         console.error('joiner exchange failed', err?.message ?? err)

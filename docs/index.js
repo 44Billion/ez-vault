@@ -1,6 +1,7 @@
 import './components/account-list.js'
 import './components/account-add.js'
 import './components/sync/sync-panel.js'
+import './components/trusted-signers-panel.js'
 import './components/shared/accordion-panel.js'
 import './components/shared/toast.js'
 import './components/activity-log.js'
@@ -13,6 +14,8 @@ import { recoverPendingMutation } from './services/account-mutations.js'
 import { initMessenger } from './services/messenger.js'
 import * as sync from './services/sync/index.js'
 import { startContentKeyEventRefresh } from './services/content-key/index.js'
+import { startDeviceRelayListRefresh } from './services/device-relays.js'
+import { startRevocationRotation } from './services/sync/revocation-rotation.js'
 
 cleanupTemporaryStorage()
 
@@ -83,6 +86,8 @@ recoverThenRehydrate()
 initMessenger()
 sync.init()
 startContentKeyEventRefresh()
+startDeviceRelayListRefresh()
+startRevocationRotation()
 
 if (window === window.top) {
   document.body.classList.add('dev')

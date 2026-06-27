@@ -186,10 +186,10 @@ export class SyncPanel extends HTMLElement {
         this.#openFlow('joiner')
       }
     })
-    // When an inner flow closes itself (cancel / success), drop back to
-    // the picker so the user can pick the other device or close the panel.
-    this.#host.onClosed = () => this.#onFlowClosed('host')
-    this.#joiner.onClosed = () => this.#onFlowClosed('joiner')
+    // When an inner flow closes itself, either drop back to the picker
+    // (cancel) or close this whole panel (successful sync).
+    this.#host.onClosed = detail => this.#onFlowClosed('host', detail)
+    this.#joiner.onClosed = detail => this.#onFlowClosed('joiner', detail)
   }
 
   open () {
@@ -243,11 +243,15 @@ export class SyncPanel extends HTMLElement {
     }
   }
 
-  #onFlowClosed (which) {
+  #onFlowClosed (which, detail = {}) {
     // Only revert to the picker if the flow that just closed is the one
     // we have recorded — avoids racing with an explicit close() that
     // already cleared `dataset.flow`.
     if (this.dataset.flow === which) {
+      if (detail.completed) {
+        this.close()
+        return
+      }
       this.dataset.flow = ''
       this.#applyDeviceButtonState(null)
     }

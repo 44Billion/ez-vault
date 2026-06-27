@@ -271,7 +271,7 @@ export class SyncHost extends HTMLElement {
     this.#prepareAndStartSession()
   }
 
-  close () {
+  close ({ completed = false } = {}) {
     const wasOpen = this.hasAttribute('open')
     const wasPreparing = Boolean(this.#openToken)
     if (!wasOpen && !wasPreparing && !this.#session && !this.#intakeToken) return
@@ -293,7 +293,7 @@ export class SyncHost extends HTMLElement {
       this.#session = null
       try { s.cancel() } catch { /* noop */ }
     }
-    this.onClosed?.()
+    this.onClosed?.({ completed })
   }
 
   #setToolbarDisabled (disabled) {
@@ -449,7 +449,7 @@ export class SyncHost extends HTMLElement {
       else toast.success(summary)
 
       this.#setStatus('Done.', 'success')
-      setTimeout(() => this.close(), 1200)
+      setTimeout(() => this.close({ completed: true }), 1200)
       return outgoing
     } catch (err) {
       this.#setStatus('Sync failed', 'error') // User sees toast for details

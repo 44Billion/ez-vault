@@ -271,6 +271,7 @@ export async function commitPrepared (prepared, options = {}) {
   // ensureRegistered if EITHER we'll write secrets (largeBlob) OR encrypt
   // the trusted-signers list (vault-key encryption).
   if (needsSecretsPersist || peerSigner) await passkey.ensureRegistered()
+  const peerSignerActorPubkey = peerSigner ? await secrets.getDeviceSignerPubkey().catch(() => '') : ''
 
   // Store/trusted-signer snapshots are taken AFTER ensureRegistered so a
   // first-time registration is the baseline we'd revert to.
@@ -301,7 +302,7 @@ export async function commitPrepared (prepared, options = {}) {
     // inside this try/catch means the rollback can put the prior
     // ciphertext back if writeSecretsBlob below throws.
     if (peerSigner) {
-      trustedSigners.add(peerSigner)
+      trustedSigners.add({ ...peerSigner, actorPubkey: peerSignerActorPubkey })
       trustedSignerWritten = true
     }
   }

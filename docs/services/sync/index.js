@@ -4,7 +4,10 @@ import { subscribeRelayListUpdates } from '../../helpers/nostr/queries.js'
 import * as store from '../accounts-store.js'
 import * as secrets from '../secrets.js'
 import * as trustedSigners from '../trusted-signers.js'
+import * as deviceRelays from '../device-relays.js'
 import * as contentKeys from './content-keys.js'
+import * as trustedSignerSync from './trusted-signers.js'
+import * as revocationRotation from './revocation-rotation.js'
 import { createNostrDbSyncController } from './nostrdb.js'
 import { filterVisibleAccounts } from '../account-mutations.js'
 
@@ -12,11 +15,13 @@ const ANNOUNCE_INTERVAL_MS = 4 * 60 * 60 * 1000
 const ANNOUNCE_DEBOUNCE_MS = 1000
 const ANNOUNCE_ALL = '*'
 const TRUSTED_SIGNER_SYNC_INFO = 'trusted-signer-sync-v1'
+const HEX32 = /^[0-9a-f]{64}$/i
 
-// Trusted-signer sync derives one private channel per unlocked nsec account and
+// Account data sync derives one private channel per unlocked nsec account and
 // talks only to configured trusted signer pubkeys. Content-key sync exchanges
 // key metadata/secrets, while NostrDB sync uses the same account-scoped channel
-// context to exchange local database inventory and event rows.
+// context to exchange local database inventory and event rows. Trusted-signer
+// list sync is device-scoped instead: one shared-key channel per peer signer.
 
 function defaultOnError (err) {
   console.warn('sync failed', err?.message ?? err)
@@ -74,6 +79,10 @@ function nsecOwnerPubkeys (_store = store) {
     .map(account => account.pubkey)
 }
 
+function nostrDbOwnerPubkeys (_store = store) {
+  return nsecOwnerPubkeys(_store).filter(pubkey => HEX32.test(pubkey))
+}
+
 function syncAccountIdentityKey (_store = store) {
   return filterVisibleAccounts(_store.list())
     .filter(account => account.type === 'nsec')
@@ -102,7 +111,10 @@ export function createSyncController ({
   _store = store,
   _secrets = secrets,
   _trustedSigners = trustedSigners,
+  _deviceRelays = deviceRelays,
   _contentKeys = contentKeys,
+  _trustedSignerSync = trustedSignerSync,
+  _revocationRotation = revocationRotation,
   _createNostrDbSyncController = createNostrDbSyncController,
   _claimSigner = claimSigner,
   _subscribeRelayListUpdates = subscribeRelayListUpdates,
@@ -131,7 +143,9 @@ export function createSyncController ({
   const unsubscribers = []
   const channelPubkeyByOwnerPubkey = new Map()
   const ownerPubkeyByChannelPubkey = new Map()
+  const signerChannelPubkeyByPeerPubkey = new Map()
   const readRelaysByOwnerPubkey = new Map()
+  let devicePubkey = ''
   const debug = _debug === undefined ? defaultDebugSink() : _debug
   const nostrDbSync = _createNostrDbSyncController({
     _setTimeout,
@@ -165,6 +179,18 @@ export function createSyncController ({
     return [...trustedByPubkey.keys()]
   }
 
+  function trustedRecords () {
+    return typeof _trustedSigners.listRecords === 'function'
+      ? _trustedSigners.listRecords()
+      : _trustedSigners.list()
+  }
+
+  function removedReminderRecords () {
+    return typeof _trustedSigners.listRemovedForReminder === 'function'
+      ? _trustedSigners.listRemovedForReminder()
+      : []
+  }
+
   function channelPubkeyForOwner (ownerPubkey) {
     return channelPubkeyByOwnerPubkey.get(ownerPubkey) || ownerPubkey
   }
@@ -173,11 +199,30 @@ export function createSyncController ({
     return ownerPubkeyByChannelPubkey.get(channelPubkey) || ''
   }
 
-  async function buildChannels () {
+  async function resolveDeviceSyncRelays (pubkey) {
+    if (typeof window === 'undefined' && _deviceRelays === deviceRelays) {
+      return _deviceRelays.relaysFromEventOrFallback(null)
+    }
+    return _deviceRelays.resolveDeviceRelays(pubkey)
+  }
+
+  function signerSyncPeers () {
+    const byPubkey = new Map()
+    for (const signer of _trustedSigners.list()) {
+      if (signer.pubkey) byPubkey.set(signer.pubkey, signer)
+    }
+    for (const record of removedReminderRecords()) {
+      if (record.pubkey && !byPubkey.has(record.pubkey)) byPubkey.set(record.pubkey, record)
+    }
+    return [...byPubkey.values()]
+  }
+
+  async function buildChannels (deviceSigner) {
     const seeders = trustedPubkeys()
     const channels = []
     const nextChannelPubkeyByOwnerPubkey = new Map()
     const nextOwnerPubkeyByChannelPubkey = new Map()
+    const nextSignerChannelPubkeyByPeerPubkey = new Map()
     const nextOwnerPubkeys = new Set()
     for (const account of filterVisibleAccounts(_store.list())) {
       if (account.type !== 'nsec') continue
@@ -201,16 +246,41 @@ export function createSyncController ({
         onError(err)
       }
     }
+    try {
+      devicePubkey = await deviceSigner.getPublicKey()
+      const localDeviceRelays = await resolveDeviceSyncRelays(devicePubkey)
+      for (const peer of signerSyncPeers()) {
+        if (!peer.pubkey || peer.pubkey === devicePubkey) continue
+        const channelSigner = deviceSigner.withSharedKey(peer.pubkey, _trustedSignerSync.TRUSTED_SIGNER_SYNC_INFO)
+        const channelPubkey = await channelSigner.getPublicKey()
+        const peerRelays = await resolveDeviceSyncRelays(peer.pubkey)
+        nextSignerChannelPubkeyByPeerPubkey.set(peer.pubkey, channelPubkey)
+        channels.push({
+          pubkey: channelPubkey,
+          signer: channelSigner,
+          relays: syncWatchRelays(localDeviceRelays),
+          sendRelays: syncRelays(peerRelays),
+          mode: 'seeder',
+          seeders: [peer.pubkey]
+        })
+      }
+    } catch (err) {
+      onError(err)
+    }
     for (const ownerPubkey of [...readRelaysByOwnerPubkey.keys()]) {
       if (!nextOwnerPubkeys.has(ownerPubkey)) readRelaysByOwnerPubkey.delete(ownerPubkey)
     }
     channelPubkeyByOwnerPubkey.clear()
     ownerPubkeyByChannelPubkey.clear()
+    signerChannelPubkeyByPeerPubkey.clear()
     for (const [ownerPubkey, channelPubkey] of nextChannelPubkeyByOwnerPubkey) {
       channelPubkeyByOwnerPubkey.set(ownerPubkey, channelPubkey)
     }
     for (const [channelPubkey, ownerPubkey] of nextOwnerPubkeyByChannelPubkey) {
       ownerPubkeyByChannelPubkey.set(channelPubkey, ownerPubkey)
+    }
+    for (const [peerPubkey, channelPubkey] of nextSignerChannelPubkeyByPeerPubkey) {
+      signerChannelPubkeyByPeerPubkey.set(peerPubkey, channelPubkey)
     }
     return channels
   }
@@ -296,14 +366,23 @@ export function createSyncController ({
               debug
             })
             if (!handled) {
-              await nostrDbSync.handleMessage(message, {
+              const handledTrustedSigners = await _trustedSignerSync.handleMessage(message, {
                 messenger,
                 trustedByPubkey,
-                ownerPubkeyForChannel,
-                channelPubkeyForOwner,
-                ownerPubkeys: new Set(nsecOwnerPubkeys(_store)),
+                devicePubkey,
+                trustedSigners: _trustedSigners,
                 debug
               })
+              if (!handledTrustedSigners) {
+                await nostrDbSync.handleMessage(message, {
+                  messenger,
+                  trustedByPubkey,
+                  ownerPubkeyForChannel,
+                  channelPubkeyForOwner,
+                  ownerPubkeys: new Set(nostrDbOwnerPubkeys(_store)),
+                  debug
+                })
+              }
             }
           } catch (err) {
             onError(err)
@@ -355,7 +434,8 @@ export function createSyncController ({
       return
     }
     const receivers = trustedPubkeys()
-    if (!receivers.length) {
+    const hasSignerSyncTargets = signerChannelPubkeyByPeerPubkey.size > 0
+    if (!receivers.length && !hasSignerSyncTargets) {
       pendingAnnounceOwners.clear()
       return
     }
@@ -365,26 +445,42 @@ export function createSyncController ({
       : [...pendingAnnounceOwners]
     pendingAnnounceOwners.clear()
 
-    for (const ownerPubkey of owners) {
-      if (!isCurrentLifecycle(id)) return
-      try {
-        await _contentKeys.announceContentKeys({
-          messenger,
-          channelPubkey: channelPubkeyForOwner(ownerPubkey),
-          ownerPubkey,
-          receiverPubkeys: receivers,
-          debug
-        })
-        await nostrDbSync.announceRange({
-          messenger,
-          channelPubkey: channelPubkeyForOwner(ownerPubkey),
-          ownerPubkey,
-          receiverPubkeys: receivers,
-          debug
-        })
-      } catch (err) {
-        onError(err)
+    if (receivers.length) {
+      for (const ownerPubkey of owners) {
+        if (!isCurrentLifecycle(id)) return
+        try {
+          await _contentKeys.announceContentKeys({
+            messenger,
+            channelPubkey: channelPubkeyForOwner(ownerPubkey),
+            ownerPubkey,
+            receiverPubkeys: receivers,
+            debug
+          })
+          if (HEX32.test(ownerPubkey)) {
+            await nostrDbSync.announceRange({
+              messenger,
+              channelPubkey: channelPubkeyForOwner(ownerPubkey),
+              ownerPubkey,
+              receiverPubkeys: receivers,
+              debug
+            })
+          }
+        } catch (err) {
+          onError(err)
+        }
       }
+    }
+    try {
+      await _trustedSignerSync.announceTrustedSignerState({
+        messenger,
+        peerChannels: signerChannelPubkeyByPeerPubkey,
+        records: trustedRecords(),
+        activePeerPubkeys: receivers,
+        reminderRecords: removedReminderRecords(),
+        debug
+      })
+    } catch (err) {
+      onError(err)
     }
     if (resetInterval && isCurrentLifecycle(id)) resetAnnouncementInterval()
   }
@@ -411,6 +507,40 @@ export function createSyncController ({
     scheduleAnnounce(ownerPubkey, { immediate: true, resetInterval: true })
   }
 
+  async function scheduleRotationsForRemovedRecords (records = []) {
+    if (!records.length || !_secrets.isUnlocked()) return
+    let localActorPubkey = devicePubkey
+    if (!localActorPubkey && typeof _secrets.getDeviceSignerPubkey === 'function') {
+      localActorPubkey = await _secrets.getDeviceSignerPubkey().catch(() => '')
+    }
+    for (const record of records) {
+      if (!record?.pubkey || record.pubkey === localActorPubkey) continue
+      await _revocationRotation.scheduleRevocationRotationsForRemovedSigner({
+        removedSignerPubkey: record.pubkey,
+        removalUpdatedAt: record.updatedAt,
+        actorPubkey: record.actorPubkey,
+        localActorPubkey
+      })
+    }
+    await _revocationRotation.runDueRevocationRotations?.()
+    _revocationRotation.startRevocationRotation?.()
+  }
+
+  function onTrustedSignerChange (detail = {}) {
+    if (detail.action !== 'clear-active') {
+      Promise.resolve(scheduleRotationsForRemovedRecords(detail.removedRecords || []))
+        .catch(onError)
+    }
+    const promise = refresh()
+      .then(() => {
+        if (initialized && _secrets.isUnlocked()) {
+          scheduleAnnounceAll({ immediate: true, resetInterval: true })
+        }
+      })
+    scheduleAnnounceAll({ immediate: true, resetInterval: true })
+    return promise
+  }
+
   function stop () {
     messenger?.close?.()
     messenger = null
@@ -419,7 +549,9 @@ export function createSyncController ({
     clearRelayListWatcher()
     channelPubkeyByOwnerPubkey.clear()
     ownerPubkeyByChannelPubkey.clear()
+    signerChannelPubkeyByPeerPubkey.clear()
     readRelaysByOwnerPubkey.clear()
+    devicePubkey = ''
     clearAnnouncementTimers()
     nostrDbSync.stop()
     _contentKeys.resetDebugSources?.()
@@ -432,16 +564,18 @@ export function createSyncController ({
       return null
     }
 
+    const userSigner = await _secrets.getDeviceSigner()
+    if (!isCurrentLifecycle(id)) return null
+    devicePubkey = await userSigner.getPublicKey()
+    _trustedSigners.forgetLocal?.(devicePubkey)
     trustedByPubkey = trustedMap(_trustedSigners.list())
-    const channels = await buildChannels()
+    const channels = await buildChannels(userSigner)
     if (!isCurrentLifecycle(id)) return null
     if (!channels.length) {
       stop()
       return null
     }
 
-    const userSigner = await _secrets.getDeviceSigner()
-    if (!isCurrentLifecycle(id)) return null
     const options = {
       userSigner,
       contentKeySigner: null,
@@ -473,7 +607,7 @@ export function createSyncController ({
       trustedByPubkey,
       channelPubkeyForOwner,
       ownerPubkeyForChannel,
-      ownerPubkeys: new Set(nsecOwnerPubkeys(_store)),
+      ownerPubkeys: new Set(nostrDbOwnerPubkeys(_store)),
       debug
     })
     ensureAnnouncementInterval()
@@ -514,7 +648,7 @@ export function createSyncController ({
     unsubscribers.push(_secrets.subscribe(refresh))
     if (_secrets.subscribeContentKeys) unsubscribers.push(_secrets.subscribeContentKeys(onContentKeyChange))
     unsubscribers.push(_store.subscribe(refreshOnStoreIdentityChange))
-    unsubscribers.push(_trustedSigners.subscribe(refresh))
+    unsubscribers.push(_trustedSigners.subscribe(onTrustedSignerChange))
     return refresh()
   }
 

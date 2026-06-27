@@ -1,4 +1,6 @@
+import { generateSecretKey } from 'nostr-tools'
 import { getIykcProofs } from '../../helpers/nostr/queries.js'
+import { bytesToHex } from '../../helpers/nostr/index.js'
 import { isOnline, onOnline } from '../../helpers/network.js'
 import { makeContentKeyEvent, makeContentKeyEventForPubkey, parseContentKeyEvent, CONTENT_KEY_KIND } from './event.js'
 import * as store from '../accounts-store.js'
@@ -252,6 +254,82 @@ export async function upsertContentKeyEvent ({ userSigner, contentKeySigner, rel
   const event = await makeContentKeyEvent({ userSigner, contentKeySigner })
   const result = await _publish(event, writeRelays)
   return { event, result }
+}
+
+export async function rotateContentKeyIfStillCanonical ({
+  ownerPubkey,
+  removedKnownContentPubkey,
+  _fetchRelayListEvent = fetchRelayListEvent,
+  _fetchEvents = fetchEvents,
+  _publish = publish,
+  _nowSeconds = nowSeconds
+} = {}) {
+  const account = store.get(ownerPubkey)
+  if (!account || account.type !== 'nsec') return { status: 'cleared', reason: 'missing-owner' }
+  if (!removedKnownContentPubkey) return { status: 'cleared', reason: 'missing-removed-key' }
+
+  const userSigner = secrets.getNsecSigner(ownerPubkey)
+  if (!userSigner) return { status: 'retry', reason: 'locked' }
+
+  const relayList = await resolveContentKeyWriteRelays({
+    account,
+    userSigner,
+    _fetchRelayListEvent,
+    _publish,
+    _nowSeconds
+  })
+  const writeRelays = unique(relayList.writeRelays)
+  if (!writeRelays.length) return { status: 'retry', reason: 'no-write-relays', relayList }
+
+  const relayResults = await Promise.all(writeRelays.map(relay =>
+    fetchLatestContentKeyEventFromRelay({ ownerPubkey, relay, _fetchEvents })
+  ))
+  const checkedResults = relayResults.filter(result => !result.error)
+  if (!checkedResults.length) return { status: 'retry', reason: 'relay-check-failed', relayList, relayResults }
+
+  let canonical = null
+  for (const result of checkedResults.map(result => result.latest).filter(Boolean)) {
+    if (!canonical || result.event.created_at > canonical.event.created_at) canonical = result
+  }
+  if (!canonical) return { status: 'retry', reason: 'missing-canonical', relayList, relayResults }
+  if (canonical.parsed.iykcPubkey !== removedKnownContentPubkey) {
+    return {
+      status: 'cleared',
+      reason: 'already-rotated',
+      canonicalPubkey: canonical.parsed.iykcPubkey,
+      relayList,
+      relayResults
+    }
+  }
+
+  let contentKeySigner = secrets.getLatestContentKeySigner(ownerPubkey)
+  if (!contentKeySigner) return { status: 'retry', reason: 'missing-local-content-key', relayList, relayResults }
+
+  let contentPubkey = await contentKeySigner.getPublicKey()
+  let rotated = false
+  if (contentPubkey === removedKnownContentPubkey) {
+    const seckey = bytesToHex(generateSecretKey())
+    contentKeySigner = secrets.replaceContentKeySecret(ownerPubkey, seckey, _nowSeconds())
+    contentPubkey = await contentKeySigner.getPublicKey()
+    rotated = true
+  }
+
+  const event = await makeContentKeyEvent({
+    userSigner,
+    contentKeySigner,
+    createdAt: _nowSeconds()
+  })
+  const result = await _publish(event, writeRelays)
+  return {
+    status: result?.success ? 'rotated' : 'retry',
+    reason: result?.success ? '' : 'publish-failed',
+    rotated,
+    contentPubkey,
+    event,
+    result,
+    relayList,
+    relayResults
+  }
 }
 
 export async function doubleSignEvent ({ userSigner, contentKeySigner, event }) {
