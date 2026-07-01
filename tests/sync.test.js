@@ -346,6 +346,77 @@ test('sync refreshes messenger channels when watched account read relays change'
   assert.equal(relayUpdates.subscriptions[0].closed, true)
 })
 
+test('sync app backfill accepts valid unlocked requests even when no trusted peers exist', () => {
+  const ownerPubkey = '1'.repeat(64)
+  const calls = []
+  const controller = createSyncController({
+    _store: {
+      list: () => [{ type: 'nsec', pubkey: ownerPubkey }]
+    },
+    _secrets: {
+      isUnlocked: () => true
+    },
+    _trustedSigners: {
+      list: () => []
+    },
+    _createNostrDbSyncController: () => ({
+      requestAppBackfill: (payload, context) => {
+        calls.push({ payload, context })
+        return false
+      },
+      ensureSubscriptions: () => {},
+      stop: () => {}
+    }),
+    _setTimeout: () => ({}),
+    _clearTimeout: () => {},
+    _setInterval: () => ({}),
+    _clearInterval: () => {}
+  })
+
+  assert.equal(controller.requestNostrDbAppBackfill({ ownerPubkey, appId: 'app-1' }), true)
+  assert.equal(controller.requestNostrDbAppBackfill({ ownerPubkey, appId: '' }), false)
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0].payload, { ownerPubkey, appId: 'app-1' })
+  assert.equal(calls[0].context.deferAppBackfillPeerResolution, false)
+  assert.equal(calls[0].context.trustedByPubkey.size, 0)
+
+  controller.close()
+})
+
+test('sync app backfill accepts valid locked requests as deferred intents', () => {
+  const ownerPubkey = '2'.repeat(64)
+  const calls = []
+  const controller = createSyncController({
+    _store: {
+      list: () => [{ type: 'nsec', pubkey: ownerPubkey }]
+    },
+    _secrets: {
+      isUnlocked: () => false
+    },
+    _trustedSigners: {
+      list: () => []
+    },
+    _createNostrDbSyncController: () => ({
+      requestAppBackfill: (payload, context) => {
+        calls.push({ payload, context })
+        return true
+      },
+      ensureSubscriptions: () => {},
+      stop: () => {}
+    }),
+    _setTimeout: () => ({}),
+    _clearTimeout: () => {},
+    _setInterval: () => ({}),
+    _clearInterval: () => {}
+  })
+
+  assert.equal(controller.requestNostrDbAppBackfill({ ownerPubkey, appId: 'app-1' }), true)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].context.deferAppBackfillPeerResolution, true)
+
+  controller.close()
+})
+
 test('sync announces trusted-signer state over one-to-one device channels', async () => {
   const trusted = '1'.repeat(64)
   const actor = '2'.repeat(64)

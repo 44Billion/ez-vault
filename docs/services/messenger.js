@@ -7,6 +7,7 @@ import * as signer from './signer.js'
 import * as log from './messenger-log/index.js'
 import * as secrets from './secrets.js'
 import * as nostrdb from './nostrdb.js'
+import * as sync from './sync/index.js'
 import { npubFromPubkey, parseProfileEvent } from '../helpers/nostr/index.js'
 import { parseRelayListEvent } from './relays.js'
 
@@ -246,6 +247,7 @@ function onPortMessage (e) {
   if (code === 'REPLY') return
   if (!handshakeComplete) return
   if (code === 'UPDATE_ACCOUNT_EVENTS') return handleUpdateAccountEvents(e)
+  if (code === 'NOSTRDB_APP_BACKFILL') return handleNostrDbAppBackfill(e)
   if (code === 'NIP07') return handleNip07(e)
 }
 
@@ -256,6 +258,17 @@ function handleUpdateAccountEvents (e) {
   } catch (err) {
     console.warn('UPDATE_ACCOUNT_EVENTS failed', err?.message ?? err)
   }
+}
+
+function handleNostrDbAppBackfill (e) {
+  const { ownerPubkey, appId } = e.data.payload ?? {}
+  let accepted = false
+  try {
+    accepted = sync.requestNostrDbAppBackfill({ ownerPubkey, appId }) === true
+  } catch (err) {
+    console.warn('NOSTRDB_APP_BACKFILL failed', err?.message ?? err)
+  }
+  if (e.data.reqId) reply(e, { payload: { accepted } }, { to: launcherPort })
 }
 
 async function handleSignerRequest (e, { code, run }) {

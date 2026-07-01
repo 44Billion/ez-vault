@@ -5,7 +5,9 @@ import {
   NOSTRDB_SYNC_ADVERTISE_CODE,
   NOSTRDB_SYNC_ASK_CODE,
   NOSTRDB_SYNC_REPLY_CODE,
-  NOSTRDB_SYNC_PUSH_CODE
+  NOSTRDB_SYNC_PUSH_CODE,
+  NOSTRDB_SYNC_APP_ASK_CODE,
+  NOSTRDB_SYNC_APP_REPLY_CODE
 } from '../docs/services/sync/nostrdb.js'
 
 const data = new Map()
@@ -18,6 +20,7 @@ globalThis.localStorage = {
 
 const OWNER = 'a'.repeat(64)
 const PEER = 'b'.repeat(64)
+const PEER2 = 'e'.repeat(64)
 const EVENT_ID = 'c'.repeat(64)
 
 afterEach(() => {
@@ -231,6 +234,227 @@ test('nostrdb sync replies with hasMore when responder cap is hit', async () => 
     msg.sent[0].options.payload.jsonl.trim().split('\n').map(line => JSON.parse(line).id),
     [eventId(1), eventId(2)]
   )
+})
+
+test('nostrdb app backfill stores install intent and asks trusted peers', async () => {
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({ subscribe: emptySubscription })
+  })
+  controller.ensureSubscriptions(context(msg))
+
+  assert.equal(controller.requestAppBackfill({ ownerPubkey: OWNER, appId: 'app-1' }, context(msg)), true)
+  await Promise.resolve()
+  await Promise.resolve()
+
+  assert.equal(msg.sent.length, 1)
+  assert.equal(msg.sent[0].method, 'ask')
+  assert.equal(msg.sent[0].options.code, NOSTRDB_SYNC_APP_ASK_CODE)
+  assert.equal(msg.sent[0].options.channelPubkey, 'channel')
+  assert.equal(msg.sent[0].options.receiverPubkey, PEER)
+  assert.equal(msg.sent[0].options.payload.appId, 'app-1')
+  assert.equal(msg.sent[0].options.payload.after, '')
+  assert.equal(msg.sent[0].options.payload.batchSize, 200)
+
+  const apps = controller._getState().appBackfills[OWNER]
+  const appState = Object.values(apps)[0]
+  assert.equal(appState.appId, 'app-1')
+  assert.equal(appState.peers[PEER].pending.requestId, msg.sent[0].options.payload.requestId)
+})
+
+test('nostrdb app backfill drops unlocked requests when no trusted peers exist', () => {
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    getDb: () => ({ subscribe: emptySubscription })
+  })
+
+  assert.equal(controller.requestAppBackfill({
+    ownerPubkey: OWNER,
+    appId: 'app-1'
+  }, context(msg, { trustedByPubkey: new Map() })), false)
+
+  assert.deepEqual(Object.keys(controller._getState().appBackfills || {}), [])
+  assert.deepEqual(msg.sent, [])
+})
+
+test('nostrdb app backfill resolves locked intents once and freezes target peers', async () => {
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({ subscribe: emptySubscription })
+  })
+
+  assert.equal(controller.requestAppBackfill({
+    ownerPubkey: OWNER,
+    appId: 'app-1'
+  }, context(msg, {
+    messenger: null,
+    trustedByPubkey: new Map(),
+    deferAppBackfillPeerResolution: true
+  })), true)
+  assert.deepEqual(msg.sent, [])
+
+  controller.ensureSubscriptions(context(msg))
+  await Promise.resolve()
+  await Promise.resolve()
+
+  assert.equal(msg.sent.length, 1)
+  assert.equal(msg.sent[0].options.receiverPubkey, PEER)
+  assert.equal(msg.sent[0].options.code, NOSTRDB_SYNC_APP_ASK_CODE)
+
+  controller.ensureSubscriptions(context(msg, {
+    trustedByPubkey: new Map([
+      [PEER, { pubkey: PEER }],
+      [PEER2, { pubkey: PEER2 }]
+    ])
+  }))
+  await Promise.resolve()
+  await Promise.resolve()
+
+  assert.equal(msg.sent.length, 1)
+  const appState = Object.values(controller._getState().appBackfills[OWNER])[0]
+  assert.deepEqual(Object.keys(appState.peers), [PEER])
+})
+
+test('nostrdb app backfill drops locked intents if unlock finds no trusted peers', async () => {
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    getDb: () => ({ subscribe: emptySubscription })
+  })
+
+  assert.equal(controller.requestAppBackfill({
+    ownerPubkey: OWNER,
+    appId: 'app-1'
+  }, context(msg, {
+    messenger: null,
+    trustedByPubkey: new Map(),
+    deferAppBackfillPeerResolution: true
+  })), true)
+
+  controller.ensureSubscriptions(context(msg, { trustedByPubkey: new Map() }))
+  await Promise.resolve()
+
+  assert.deepEqual(Object.keys(controller._getState().appBackfills || {}), [])
+  assert.deepEqual(msg.sent, [])
+})
+
+test('nostrdb app backfill ask exports one app page', async () => {
+  const msg = messenger()
+  const events = [event(1), event(2)]
+  let seenAppId
+  let seenOptions
+  const controller = createNostrDbSyncController({
+    getDb: () => ({
+      async exportEventsByAppPage (appId, options) {
+        seenAppId = appId
+        seenOptions = options
+        return { events, nextAfter: events[1].id, hasMore: true }
+      }
+    })
+  })
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_APP_ASK_CODE,
+    payload: {
+      requestId: 'app-req-1',
+      appId: 'app-1',
+      after: EVENT_ID,
+      batchSize: 2
+    }
+  }), context(msg))
+
+  assert.equal(seenAppId, 'app-1')
+  assert.deepEqual(seenOptions, { after: EVENT_ID, batchSize: 2 })
+  assert.equal(msg.sent.length, 1)
+  assert.equal(msg.sent[0].method, 'reply')
+  assert.equal(msg.sent[0].options.code, NOSTRDB_SYNC_APP_REPLY_CODE)
+  assert.equal(msg.sent[0].options.payload.requestId, 'app-req-1')
+  assert.equal(msg.sent[0].options.payload.appId, 'app-1')
+  assert.equal(msg.sent[0].options.payload.after, EVENT_ID)
+  assert.equal(msg.sent[0].options.payload.nextAfter, events[1].id)
+  assert.equal(msg.sent[0].options.payload.hasMore, true)
+  assert.deepEqual(
+    msg.sent[0].options.payload.jsonl.trim().split('\n').map(line => JSON.parse(line).id),
+    [eventId(1), eventId(2)]
+  )
+})
+
+test('nostrdb app backfill reply imports for app and pages when hasMore', async () => {
+  const msg = messenger()
+  const imported = event(10)
+  const addCalls = []
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async addEventsForApp (appId, events) {
+        addCalls.push({ appId, events })
+        return { added: events.length, skipped: 0 }
+      }
+    })
+  })
+  controller.ensureSubscriptions(context(msg))
+  controller.requestAppBackfill({ ownerPubkey: OWNER, appId: 'app-1' }, context(msg))
+  await Promise.resolve()
+  await Promise.resolve()
+  const firstAsk = msg.sent[0].options.payload
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_APP_REPLY_CODE,
+    payload: {
+      requestId: firstAsk.requestId,
+      appId: 'app-1',
+      after: firstAsk.after,
+      nextAfter: imported.id,
+      hasMore: true,
+      index: 0,
+      isLast: true,
+      jsonl: `${JSON.stringify(imported)}\n`
+    }
+  }), context(msg))
+
+  assert.equal(addCalls.length, 1)
+  assert.equal(addCalls[0].appId, 'app-1')
+  assert.deepEqual(addCalls[0].events.map(event => event.id), [imported.id])
+  assert.equal(msg.sent.length, 2)
+  assert.equal(msg.sent[1].options.code, NOSTRDB_SYNC_APP_ASK_CODE)
+  assert.equal(msg.sent[1].options.payload.after, imported.id)
+})
+
+test('nostrdb app backfill ignores unsolicited replies without creating state', async () => {
+  const msg = messenger()
+  const addCalls = []
+  const controller = createNostrDbSyncController({
+    getDb: () => ({
+      async addEventsForApp (appId, events) {
+        addCalls.push({ appId, events })
+        return { added: events.length, skipped: 0 }
+      }
+    })
+  })
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_APP_REPLY_CODE,
+    payload: {
+      requestId: 'unknown',
+      appId: 'app-1',
+      index: 0,
+      isLast: true,
+      jsonl: `${JSON.stringify(event(1))}\n`
+    }
+  }), context(msg))
+
+  assert.deepEqual(addCalls, [])
+  assert.equal(controller._getState().appBackfills, undefined)
 })
 
 test('nostrdb sync re-asks same start when final reply hasMore is true', async () => {

@@ -13,6 +13,8 @@ import { createEventReplyPacker } from '../private-messenger/recovery.js'
 //   stale payloads. Retry sweeps also walk owners/peers in series.
 // - Pushes are per owner: leading-edge immediate, then trailing-batched every
 //   1.5 seconds for bursts.
+// - App-install backfills use the same account channel, but page by app export
+//   cursor (`after` event id) instead of sync-anchor score windows.
 // - Sync windows use NostrDB `sa` millisecond scores, not Nostr created_at.
 
 // payload: { generatedAt, minScore, maxScore }
@@ -27,9 +29,14 @@ export const NOSTRDB_SYNC_ASK_CODE = 'nostrDbSync_ask_kpkr'
 export const NOSTRDB_SYNC_REPLY_CODE = 'nostrDbSync_reply_kpkr'
 // payload: { index, isLast, jsonl }
 export const NOSTRDB_SYNC_PUSH_CODE = 'nostrDbSync_push_kpkr'
+// payload: { requestId, appId, after, batchSize }
+export const NOSTRDB_SYNC_APP_ASK_CODE = 'nostrDbSync_appAsk_7c93'
+// payload: { requestId, appId, after, nextAfter, hasMore, index, isLast, jsonl }
+export const NOSTRDB_SYNC_APP_REPLY_CODE = 'nostrDbSync_appReply_7c93'
 
 const STATE_KEY = 'ez-vault:trusted-signer-sync:nostrdb:v1'
 const HEX32 = /^[0-9a-f]{64}$/i
+const APP_ID_MAX_LENGTH = 512
 const DEFAULT_WINDOW_MS = 15 * 60 * 1000
 const MIN_WINDOW_MS = 60 * 1000
 const MAX_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
@@ -49,7 +56,9 @@ const SYNC_CODES = new Set([
   NOSTRDB_SYNC_ADVERTISE_CODE,
   NOSTRDB_SYNC_ASK_CODE,
   NOSTRDB_SYNC_REPLY_CODE,
-  NOSTRDB_SYNC_PUSH_CODE
+  NOSTRDB_SYNC_PUSH_CODE,
+  NOSTRDB_SYNC_APP_ASK_CODE,
+  NOSTRDB_SYNC_APP_REPLY_CODE
 ])
 
 function nowMs () {
@@ -63,6 +72,28 @@ function isPlainObject (value) {
 function normalizePubkey (value) {
   const pubkey = typeof value === 'string' ? value.toLowerCase() : ''
   return HEX32.test(pubkey) ? pubkey : ''
+}
+
+function normalizeAppId (value) {
+  const appId = typeof value === 'string' ? value : ''
+  return appId && appId.length <= APP_ID_MAX_LENGTH ? appId : ''
+}
+
+function appStateKey (appId) {
+  return JSON.stringify(appId)
+}
+
+function appIdFromStateKey (key) {
+  try {
+    return normalizeAppId(JSON.parse(key))
+  } catch {
+    return ''
+  }
+}
+
+function normalizeOptionalEventId (value) {
+  if (value == null || value === '') return ''
+  return normalizePubkey(value)
 }
 
 function messageCode (message) {
@@ -148,6 +179,20 @@ function normalizeAsk (payload) {
   }
 }
 
+function normalizeAppAsk (payload) {
+  if (!isPlainObject(payload)) return null
+  const requestId = typeof payload.requestId === 'string' && payload.requestId ? payload.requestId : ''
+  const appId = normalizeAppId(payload.appId)
+  const after = normalizeOptionalEventId(payload.after)
+  if (!requestId || !appId || (payload.after && !after)) return null
+  return {
+    requestId,
+    appId,
+    after,
+    batchSize: normalizePositiveInteger(payload.batchSize, REQUEST_LIMIT, REQUEST_LIMIT)
+  }
+}
+
 function normalizeEventBatchPayload (payload) {
   if (!isPlainObject(payload)) return null
   const index = Math.floor(Number(payload.index))
@@ -161,6 +206,21 @@ function normalizeEventBatchPayload (payload) {
     isLast: payload.isLast === true,
     hasMore: typeof payload.hasMore === 'boolean' ? payload.hasMore : null,
     jsonl: payload.jsonl
+  }
+}
+
+function normalizeAppEventBatchPayload (payload) {
+  const normalized = normalizeEventBatchPayload(payload)
+  if (!normalized) return null
+  const appId = normalizeAppId(payload.appId)
+  const after = normalizeOptionalEventId(payload.after)
+  const nextAfter = normalizeOptionalEventId(payload.nextAfter)
+  if (!appId || (payload.after && !after) || (payload.nextAfter && !nextAfter)) return null
+  return {
+    ...normalized,
+    appId,
+    after,
+    nextAfter
   }
 }
 
@@ -207,6 +267,47 @@ function peerState (state, ownerPubkey, peerPubkey) {
   const owner = ownerState(state, ownerPubkey)
   if (!isPlainObject(owner[peerPubkey])) owner[peerPubkey] = {}
   return owner[peerPubkey]
+}
+
+function appBackfillsState (state) {
+  if (!isPlainObject(state.appBackfills)) state.appBackfills = {}
+  return state.appBackfills
+}
+
+function ownerAppBackfillsState (state, ownerPubkey) {
+  const backfills = appBackfillsState(state)
+  if (!isPlainObject(backfills[ownerPubkey])) backfills[ownerPubkey] = {}
+  return backfills[ownerPubkey]
+}
+
+function appBackfillState (state, ownerPubkey, appId) {
+  const owner = ownerAppBackfillsState(state, ownerPubkey)
+  const key = appStateKey(appId)
+  if (!isPlainObject(owner[key])) owner[key] = { appId, peers: {} }
+  if (!isPlainObject(owner[key].peers)) owner[key].peers = {}
+  owner[key].appId = appId
+  return owner[key]
+}
+
+function appBackfillPeerState (state, ownerPubkey, appId, peerPubkey) {
+  const app = appBackfillState(state, ownerPubkey, appId)
+  if (!isPlainObject(app.peers[peerPubkey])) app.peers[peerPubkey] = {}
+  return app.peers[peerPubkey]
+}
+
+function existingAppBackfillPeerState (state, ownerPubkey, appId, peerPubkey) {
+  const app = state.appBackfills?.[ownerPubkey]?.[appStateKey(appId)]
+  const entry = app?.peers?.[peerPubkey]
+  return isPlainObject(app) && isPlainObject(entry) ? { app, entry } : {}
+}
+
+function appBackfillPeerKeys (app) {
+  return Object.keys(isPlainObject(app?.peers) ? app.peers : {})
+}
+
+function setAppBackfillTargetPeers (app, peerPubkeys) {
+  app.peers = {}
+  for (const peerPubkey of peerPubkeys) app.peers[peerPubkey] = {}
 }
 
 function compareAdvert (next, current) {
@@ -459,6 +560,153 @@ export function createNostrDbSyncController ({
     return payload
   }
 
+  async function maybeAskAppBackfill (ownerPubkey, appId, peerPubkey, context = runtime, { onlineHint = false, force = false } = {}) {
+    if (!context.messenger?.ask) return null
+    if (!normalizeAppId(appId) || !normalizePubkey(peerPubkey)) return null
+    if (context.ownerPubkeys instanceof Set && !context.ownerPubkeys.has(ownerPubkey)) return null
+    if (!context.trustedByPubkey?.has?.(peerPubkey)) return null
+
+    const state = getState()
+    const appKey = appStateKey(appId)
+    const existingApp = state.appBackfills?.[ownerPubkey]?.[appKey]
+    if (!isPlainObject(existingApp?.peers) || !Object.hasOwn(existingApp.peers, peerPubkey)) return null
+    const app = appBackfillState(state, ownerPubkey, appId)
+    const entry = appBackfillPeerState(state, ownerPubkey, appId, peerPubkey)
+    if (entry.completed && !force) return null
+
+    const now = _nowMs()
+    if (entry.pending && !force) {
+      const retryAt = onlineHint
+        ? Math.min(entry.pending.nextRetryAt || Infinity, entry.pending.onlineRetryAt || Infinity)
+        : entry.pending.nextRetryAt
+      if (!Number.isFinite(retryAt) || now < retryAt) {
+        scheduleRetrySweep(context)
+        return null
+      }
+    }
+
+    const id = requestId(_random)
+    const attempt = force && entry.pending ? (entry.pending.attempt || 0) + 1 : 0
+    const onlineDelay = Math.min(ONLINE_RETRY_MAX_MS, ONLINE_RETRY_MIN_MS * (2 ** attempt))
+    const payload = {
+      requestId: id,
+      appId,
+      after: entry.after || '',
+      batchSize: REQUEST_LIMIT
+    }
+
+    entry.completed = false
+    entry.pending = {
+      requestId: id,
+      appId,
+      after: payload.after,
+      batchSize: REQUEST_LIMIT,
+      replyCount: 0,
+      attempt,
+      sentAt: now,
+      nextRetryAt: now + NO_REPLY_RETRY_MS,
+      onlineRetryAt: now + onlineDelay
+    }
+    entry.updatedAt = now
+    app.updatedAt = now
+    setState(state)
+
+    try {
+      await context.messenger.ask({
+        channelPubkey: ownerChannelPubkey(ownerPubkey, context),
+        receiverPubkey: peerPubkey,
+        code: NOSTRDB_SYNC_APP_ASK_CODE,
+        payload
+      })
+    } catch (err) {
+      const nextState = getState()
+      const { app: nextApp, entry: nextEntry } = existingAppBackfillPeerState(nextState, ownerPubkey, appId, peerPubkey)
+      if (nextEntry?.pending?.requestId === id) {
+        nextEntry.pending = null
+        nextEntry.updatedAt = _nowMs()
+        nextApp.updatedAt = nextEntry.updatedAt
+        setState(nextState)
+      }
+      report(err)
+      return null
+    }
+
+    scheduleRetrySweep(context)
+    emitDebug(context.debug, 'app-ask', {
+      ownerPubkey,
+      appId,
+      receiverPubkey: peerPubkey,
+      after: payload.after
+    })
+    return payload
+  }
+
+  async function processAppBackfills (context = runtime, { ownerPubkey = '', peerPubkey = '', onlineHint = false } = {}) {
+    const state = getState()
+    const owners = state.appBackfills || {}
+    const contextOwners = context.ownerPubkeys instanceof Set ? context.ownerPubkeys : new Set(context.ownerPubkeys || [])
+    const contextPeers = trustedPubkeys(context)
+    let changed = false
+    for (const [owner, apps] of Object.entries(owners)) {
+      if (ownerPubkey && owner !== ownerPubkey) continue
+      if (contextOwners.size && !contextOwners.has(owner)) continue
+      for (const [key, appState] of Object.entries(apps || {})) {
+        const appId = normalizeAppId(appState?.appId) || appIdFromStateKey(key)
+        if (!appId) continue
+        if (appState.unresolvedPeers) {
+          if (!context.deferAppBackfillPeerResolution && !contextPeers.length) {
+            delete apps[key]
+            changed = true
+            continue
+          }
+          if (!contextPeers.length) continue
+          setAppBackfillTargetPeers(appState, contextPeers)
+          appState.unresolvedPeers = false
+          appState.updatedAt = _nowMs()
+          changed = true
+        }
+        const peers = peerPubkey
+          ? (Object.hasOwn(appState.peers || {}, peerPubkey) ? [peerPubkey] : [])
+          : appBackfillPeerKeys(appState)
+        if (changed) {
+          setState(state)
+          changed = false
+        }
+        for (const peer of peers) {
+          await maybeAskAppBackfill(owner, appId, peer, context, { onlineHint })
+        }
+      }
+      if (Object.keys(apps || {}).length === 0) {
+        delete owners[owner]
+        changed = true
+      }
+    }
+    if (changed) setState(state)
+  }
+
+  function requestAppBackfill ({ ownerPubkey, appId } = {}, context = runtime) {
+    const owner = normalizePubkey(ownerPubkey)
+    const app = normalizeAppId(appId)
+    if (!owner || !app) return false
+    const peers = trustedPubkeys(context)
+    if (!peers.length && !context.deferAppBackfillPeerResolution) return false
+    const state = getState()
+    const entry = appBackfillState(state, owner, app)
+    const now = _nowMs()
+    // A reinstall wants a complete replay for this app, so old per-peer
+    // cursors are intentionally discarded. The peer set is frozen at request
+    // time; peers discovered later will get the regular owner DB sync instead.
+    setAppBackfillTargetPeers(entry, peers)
+    entry.unresolvedPeers = peers.length === 0
+    entry.requestedAt = now
+    entry.updatedAt = now
+    setState(state)
+    processAppBackfills(context, { ownerPubkey: owner }).catch(report)
+    scheduleRetrySweep(context)
+    emitDebug(context.debug, 'app-backfill-requested', { ownerPubkey: owner, appId: app })
+    return true
+  }
+
   async function handleAdvertise (ownerPubkey, message, context) {
     const advert = normalizeAdvert(messageBody(message))
     const peerPubkey = normalizePubkey(message?.event?.pubkey)
@@ -482,6 +730,7 @@ export function createNostrDbSyncController ({
       maxScore: advert.maxScore
     })
     await maybeAsk(ownerPubkey, peerPubkey, context, { onlineHint: true })
+    await processAppBackfills(context, { ownerPubkey, peerPubkey, onlineHint: true })
     return true
   }
 
@@ -539,6 +788,64 @@ export function createNostrDbSyncController ({
     return true
   }
 
+  async function handleAppAsk (ownerPubkey, message, context) {
+    const ask = normalizeAppAsk(messageBody(message))
+    if (!ask) return true
+
+    let results = []
+    let hasMore = false
+    let nextAfter = ask.after
+    try {
+      const db = getDb(ownerPubkey)
+      if (typeof db.exportEventsByAppPage === 'function') {
+        const page = await db.exportEventsByAppPage(ask.appId, {
+          after: ask.after,
+          batchSize: ask.batchSize
+        })
+        results = Array.isArray(page?.events) ? page.events.slice(0, ask.batchSize) : []
+        hasMore = page?.hasMore === true
+        nextAfter = normalizeOptionalEventId(page?.nextAfter) || results.at(-1)?.id || ask.after
+      }
+    } catch (err) {
+      report(err)
+      return true
+    }
+
+    const options = {
+      channelPubkey: message.channelPubkey,
+      question: message.event,
+      receiverPubkey: message.event?.pubkey,
+      code: NOSTRDB_SYNC_APP_REPLY_CODE,
+      payload: {
+        requestId: ask.requestId,
+        appId: ask.appId,
+        after: ask.after,
+        nextAfter,
+        hasMore
+      },
+      sendEmptyReply: true
+    }
+    const packer = typeof context.messenger?.createEventReplyPacker === 'function'
+      ? context.messenger.createEventReplyPacker(options)
+      : createEventReplyPacker({ messenger: context.messenger, ...options })
+
+    try {
+      for (const event of results) await packer.update(event)
+      await packer.finalize()
+    } catch (err) {
+      report(err)
+    }
+    emitDebug(context.debug, 'app-reply', {
+      ownerPubkey,
+      appId: ask.appId,
+      receiverPubkey: message.event?.pubkey || '',
+      requestId: ask.requestId,
+      hasMore,
+      count: results.length
+    })
+    return true
+  }
+
   async function ingestEvents (ownerPubkey, events) {
     if (!events.length) return 0
     let imported = 0
@@ -563,6 +870,27 @@ export function createNostrDbSyncController ({
     return imported
   }
 
+  async function ingestAppEvents (ownerPubkey, appId, events) {
+    if (!events.length) return 0
+    for (const event of events) markRecentSyncEvent(event)
+    try {
+      const db = getDb(ownerPubkey)
+      if (typeof db.addEventsForApp === 'function') {
+        const result = await db.addEventsForApp(appId, events)
+        return normalizePositiveInteger(result?.added, 0)
+      }
+      let imported = 0
+      for (const event of events) {
+        const result = await db.add(event, { appId, mergeSource: 'sync' })
+        if (result?.ok !== false) imported++
+      }
+      return imported
+    } catch (err) {
+      report(err)
+      return 0
+    }
+  }
+
   async function handleReply (ownerPubkey, message, context) {
     const payload = normalizeEventBatchPayload(messageBody(message))
     const peerPubkey = normalizePubkey(message?.event?.pubkey)
@@ -573,7 +901,7 @@ export function createNostrDbSyncController ({
 
     const state = getState()
     const entry = peerState(state, ownerPubkey, peerPubkey)
-    const pending = entry.pending
+    const pending = entry?.pending
     if (pending && payload.requestId && pending.requestId === payload.requestId) {
       pending.replyCount = (pending.replyCount || 0) + events.length
       if (payload.isLast) {
@@ -605,6 +933,50 @@ export function createNostrDbSyncController ({
     return true
   }
 
+  async function handleAppReply (ownerPubkey, message, context) {
+    const payload = normalizeAppEventBatchPayload(messageBody(message))
+    const peerPubkey = normalizePubkey(message?.event?.pubkey)
+    if (!payload || !peerPubkey) return true
+
+    const state = getState()
+    const { app, entry } = existingAppBackfillPeerState(state, ownerPubkey, payload.appId, peerPubkey)
+    const pending = entry?.pending
+    if (!pending || !payload.requestId || pending.requestId !== payload.requestId) return true
+
+    const events = parseJsonlEvents(payload.jsonl)
+    await ingestAppEvents(ownerPubkey, payload.appId, events)
+    pending.replyCount = (pending.replyCount || 0) + events.length
+    if (events.length) pending.lastEventId = events.at(-1).id
+
+    if (payload.isLast) {
+      const replyCount = pending.replyCount || 0
+      const nextAfter = payload.nextAfter || pending.lastEventId || pending.after || ''
+      const hasMore = payload.hasMore ?? replyCount >= (pending.batchSize || REQUEST_LIMIT)
+      entry.after = nextAfter
+      entry.completed = !hasMore
+      entry.pending = null
+      entry.updatedAt = _nowMs()
+      app.updatedAt = entry.updatedAt
+      setState(state)
+      emitDebug(context.debug, 'app-reply-received', {
+        ownerPubkey,
+        appId: payload.appId,
+        senderPubkey: peerPubkey,
+        requestId: payload.requestId,
+        count: replyCount,
+        hasMore,
+        nextAfter
+      })
+      if (hasMore) await maybeAskAppBackfill(ownerPubkey, payload.appId, peerPubkey, context, { force: true })
+      return true
+    }
+
+    entry.updatedAt = _nowMs()
+    app.updatedAt = entry.updatedAt
+    setState(state)
+    return true
+  }
+
   async function handlePush (ownerPubkey, message, context) {
     const payload = normalizeEventBatchPayload(messageBody(message))
     if (!payload) return true
@@ -615,6 +987,7 @@ export function createNostrDbSyncController ({
       senderPubkey: message.event?.pubkey || '',
       count: imported
     })
+    await processAppBackfills(context, { ownerPubkey, peerPubkey: message.event?.pubkey || '', onlineHint: true })
     return true
   }
 
@@ -627,7 +1000,9 @@ export function createNostrDbSyncController ({
     if (code === NOSTRDB_SYNC_ADVERTISE_CODE) return handleAdvertise(ownerPubkey, message, context)
     if (code === NOSTRDB_SYNC_ASK_CODE) return handleAsk(ownerPubkey, message, context)
     if (code === NOSTRDB_SYNC_REPLY_CODE) return handleReply(ownerPubkey, message, context)
-    return handlePush(ownerPubkey, message, context)
+    if (code === NOSTRDB_SYNC_PUSH_CODE) return handlePush(ownerPubkey, message, context)
+    if (code === NOSTRDB_SYNC_APP_ASK_CODE) return handleAppAsk(ownerPubkey, message, context)
+    return handleAppReply(ownerPubkey, message, context)
   }
 
   function pushRuntime (ownerPubkey) {
@@ -743,18 +1118,43 @@ export function createNostrDbSyncController ({
     const peers = new Set(trustedByPubkey?.keys?.() || [])
     const cutoff = _nowMs() - STATE_PRUNE_MS
     const state = getState()
-    if (!isPlainObject(state.owners)) return
-    for (const ownerPubkey of Object.keys(state.owners)) {
-      if (!owners.has(ownerPubkey)) {
-        delete state.owners[ownerPubkey]
-        continue
+    if (isPlainObject(state.owners)) {
+      for (const ownerPubkey of Object.keys(state.owners)) {
+        if (!owners.has(ownerPubkey)) {
+          delete state.owners[ownerPubkey]
+          continue
+        }
+        const owner = state.owners[ownerPubkey]
+        for (const peerPubkey of Object.keys(owner)) {
+          const entry = owner[peerPubkey]
+          if (!peers.has(peerPubkey) || (entry.updatedAt || 0) < cutoff) delete owner[peerPubkey]
+        }
+        if (Object.keys(owner).length === 0) delete state.owners[ownerPubkey]
       }
-      const owner = state.owners[ownerPubkey]
-      for (const peerPubkey of Object.keys(owner)) {
-        const entry = owner[peerPubkey]
-        if (!peers.has(peerPubkey) || (entry.updatedAt || 0) < cutoff) delete owner[peerPubkey]
+    }
+    if (isPlainObject(state.appBackfills)) {
+      for (const ownerPubkey of Object.keys(state.appBackfills)) {
+        if (!owners.has(ownerPubkey)) {
+          delete state.appBackfills[ownerPubkey]
+          continue
+        }
+        const apps = state.appBackfills[ownerPubkey]
+        for (const [key, app] of Object.entries(apps)) {
+          if (!normalizeAppId(app?.appId) && !appIdFromStateKey(key)) {
+            delete apps[key]
+            continue
+          }
+          const appPeers = isPlainObject(app.peers) ? app.peers : {}
+          for (const peerPubkey of Object.keys(appPeers)) {
+            const entry = appPeers[peerPubkey]
+            if (!peers.has(peerPubkey) || (entry.updatedAt || 0) < cutoff) delete appPeers[peerPubkey]
+          }
+          const hasFreshRequest = (app.updatedAt || app.requestedAt || 0) >= cutoff
+          if (!hasFreshRequest && Object.keys(appPeers).length === 0) delete apps[key]
+          else app.peers = appPeers
+        }
+        if (Object.keys(apps).length === 0) delete state.appBackfills[ownerPubkey]
       }
-      if (Object.keys(owner).length === 0) delete state.owners[ownerPubkey]
     }
     setState(state)
   }
@@ -767,6 +1167,15 @@ export function createNostrDbSyncController ({
         const pending = entry?.pending
         if (!pending) continue
         next = Math.min(next, pending.nextRetryAt || Infinity)
+      }
+    }
+    for (const apps of Object.values(state.appBackfills || {})) {
+      for (const app of Object.values(apps || {})) {
+        for (const entry of Object.values(app?.peers || {})) {
+          const pending = entry?.pending
+          if (!pending) continue
+          next = Math.min(next, pending.nextRetryAt || Infinity)
+        }
       }
     }
     return Number.isFinite(next) ? next : 0
@@ -794,6 +1203,17 @@ export function createNostrDbSyncController ({
         await maybeAsk(ownerPubkey, peerPubkey, context, { force: true })
       }
     }
+    for (const [ownerPubkey, apps] of Object.entries(state.appBackfills || {})) {
+      if (context.ownerPubkeys instanceof Set && !context.ownerPubkeys.has(ownerPubkey)) continue
+      for (const [key, app] of Object.entries(apps || {})) {
+        const appId = normalizeAppId(app?.appId) || appIdFromStateKey(key)
+        if (!appId) continue
+        for (const [peerPubkey, entry] of Object.entries(app?.peers || {})) {
+          if (!entry?.pending || (entry.pending.nextRetryAt || Infinity) > now) continue
+          await maybeAskAppBackfill(ownerPubkey, appId, peerPubkey, context, { force: true })
+        }
+      }
+    }
     scheduleRetrySweep(context)
   }
 
@@ -805,6 +1225,7 @@ export function createNostrDbSyncController ({
     }
     for (const ownerPubkey of owners) startSubscription(ownerPubkey)
     pruneState({ ownerPubkeys: owners, trustedByPubkey: runtime.trustedByPubkey })
+    processAppBackfills(runtime).catch(report)
     scheduleRetrySweep(runtime)
   }
 
@@ -823,6 +1244,8 @@ export function createNostrDbSyncController ({
     announceRange,
     handleMessage,
     ensureSubscriptions,
+    requestAppBackfill,
+    processAppBackfills,
     queuePush,
     stop,
     _getState: getState

@@ -16,6 +16,7 @@ const ANNOUNCE_DEBOUNCE_MS = 1000
 const ANNOUNCE_ALL = '*'
 const TRUSTED_SIGNER_SYNC_INFO = 'trusted-signer-sync-v1'
 const HEX32 = /^[0-9a-f]{64}$/i
+const APP_ID_MAX_LENGTH = 512
 
 // Account data sync derives one private channel per unlocked nsec account and
 // talks only to configured trusted signer pubkeys. Content-key sync exchanges
@@ -507,6 +508,33 @@ export function createSyncController ({
     scheduleAnnounce(ownerPubkey, { immediate: true, resetInterval: true })
   }
 
+  function nostrDbRuntimeContext () {
+    return {
+      messenger,
+      trustedByPubkey,
+      channelPubkeyForOwner,
+      ownerPubkeyForChannel,
+      ownerPubkeys: new Set(nostrDbOwnerPubkeys(_store)),
+      debug
+    }
+  }
+
+  function requestNostrDbAppBackfill ({ ownerPubkey, appId } = {}) {
+    const owner = typeof ownerPubkey === 'string' ? ownerPubkey.toLowerCase() : ''
+    const app = typeof appId === 'string' ? appId : ''
+    if (!HEX32.test(owner) || !app || app.length > APP_ID_MAX_LENGTH || !nostrDbOwnerPubkeys(_store).includes(owner)) return false
+    const context = nostrDbRuntimeContext()
+    if (_secrets.isUnlocked() && !context.trustedByPubkey.size) {
+      context.trustedByPubkey = trustedMap(_trustedSigners.list())
+    }
+    context.deferAppBackfillPeerResolution = !_secrets.isUnlocked()
+    const accepted = nostrDbSync.requestAppBackfill({ ownerPubkey: owner, appId: app }, context)
+    if (accepted && initialized && _secrets.isUnlocked()) {
+      refresh().catch(onError)
+    }
+    return accepted || _secrets.isUnlocked()
+  }
+
   async function scheduleRotationsForRemovedRecords (records = []) {
     if (!records.length || !_secrets.isUnlocked()) return
     let localActorPubkey = devicePubkey
@@ -602,14 +630,7 @@ export function createSyncController ({
     }
 
     ensureRelayListWatcher()
-    nostrDbSync.ensureSubscriptions({
-      messenger,
-      trustedByPubkey,
-      channelPubkeyForOwner,
-      ownerPubkeyForChannel,
-      ownerPubkeys: new Set(nostrDbOwnerPubkeys(_store)),
-      debug
-    })
+    nostrDbSync.ensureSubscriptions(nostrDbRuntimeContext())
     ensureAnnouncementInterval()
     scheduleAnnounceAll()
     scheduleDrain()
@@ -675,7 +696,8 @@ export function createSyncController ({
     generateAndPublishContentKey: (ownerPubkey, options = {}) => _contentKeys.generateAndPublishContentKey({
       ownerPubkey,
       ...options
-    })
+    }),
+    requestNostrDbAppBackfill
   }
 }
 
@@ -690,3 +712,4 @@ export const scheduleAnnounceAll = controller.scheduleAnnounceAll
 export const getDebugSnapshot = controller.getDebugSnapshot
 export const subscribeDebug = controller.subscribeDebug
 export const generateAndPublishContentKey = controller.generateAndPublishContentKey
+export const requestNostrDbAppBackfill = controller.requestNostrDbAppBackfill

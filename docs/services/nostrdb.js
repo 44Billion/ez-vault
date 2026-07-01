@@ -1,7 +1,14 @@
 import { ask, askStream, tell } from '../helpers/window-message.js'
 import * as store from './accounts-store.js'
 
-const NOSTRDB_ONE_SHOT_METHODS = ['add', 'query', 'count', 'supports']
+const NOSTRDB_ONE_SHOT_METHODS = [
+  'add',
+  'query',
+  'count',
+  'supports',
+  'exportEventsByAppPage',
+  'addEventsForApp'
+]
 const NOSTRDB_STREAM_DONE = 'nostrdb:done'
 const DEFAULT_TIMEOUT = 5 * 60 * 1000
 const HEX32 = /^[0-9a-f]{64}$/i

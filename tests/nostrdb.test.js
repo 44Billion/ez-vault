@@ -144,7 +144,15 @@ describe('vault nostrdb launcher bridge', () => {
       () => service.forAccount('0'.repeat(64)),
       /NOSTRDB_OWNER_NOT_CONTROLLED/
     )
-    assert.deepEqual(Object.keys(service.forAccount('f'.repeat(64))).sort(), ['add', 'count', 'query', 'subscribe', 'supports'])
+    assert.deepEqual(Object.keys(service.forAccount('f'.repeat(64))).sort(), [
+      'add',
+      'addEventsForApp',
+      'count',
+      'exportEventsByAppPage',
+      'query',
+      'subscribe',
+      'supports'
+    ])
   })
 
   it('exports a singleton connection for app code', async () => {
@@ -152,7 +160,15 @@ describe('vault nostrdb launcher bridge', () => {
     store.add({ type: 'nsec', pubkey: 'e'.repeat(64) })
     connect(port1)
     assert.equal(isConnected(), true)
-    assert.deepEqual(Object.keys(forAccount('e'.repeat(64))).sort(), ['add', 'count', 'query', 'subscribe', 'supports'])
+    assert.deepEqual(Object.keys(forAccount('e'.repeat(64))).sort(), [
+      'add',
+      'addEventsForApp',
+      'count',
+      'exportEventsByAppPage',
+      'query',
+      'subscribe',
+      'supports'
+    ])
     disconnect(port1)
     assert.equal(isConnected(), false)
     port1.close()
