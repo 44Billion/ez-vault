@@ -915,7 +915,7 @@ test('seeder channels store router seeds separately, consume messages, and answe
     channelPubkey: 'channel',
     outer: { id: 'outer-id', kind: 3560, pubkey: 'channel', created_at: now },
     router: {
-      kind: 263,
+      kind: 26300,
       pubkey: 'router',
       created_at: now,
       tags: [['f', 'alice'], ['c', '0', '1']],
@@ -926,7 +926,7 @@ test('seeder channels store router seeds separately, consume messages, and answe
     channelPubkey: 'channel',
     outer: { id: 'outer-duplicate-id', kind: 3560, pubkey: 'channel', created_at: now + 100 },
     router: {
-      kind: 263,
+      kind: 26300,
       pubkey: 'router-duplicate',
       created_at: now + 100,
       tags: [['f', 'alice'], ['c', '0', '1']],
@@ -975,7 +975,7 @@ test('seeder channels store router seeds separately, consume messages, and answe
   const records = reply.options.payload.jsonl.trim().split('\n').map(line => JSON.parse(line))
   assert.equal(records.length, 1)
   assert.equal(records[0].recordType, ROUTER_SEED_RECORD_TYPE)
-  assert.equal(records[0].router.kind, 263)
+  assert.equal(records[0].router.kind, 26300)
   assert.equal(Buffer.from(records[0].router.content, 'base64').toString(), `${payloadRow()}\n${userRow}\n`)
   assert.deepEqual(records[0].router.tags, [['f', 'alice'], ['c', '0', '1']])
   assert.equal(messenger.nextMessage(), null)
@@ -995,7 +995,7 @@ test('router seed rows dedupe by proven inner id without content-key pubkey', as
     channelPubkey: 'channel',
     outer: { id: 'outer-id', kind: 3560, pubkey: 'channel', created_at: now },
     router: {
-      kind: 263,
+      kind: 26300,
       pubkey: 'router',
       created_at: now,
       tags: [['f', 'alice'], ['c', '0', '1']],
@@ -1029,7 +1029,7 @@ test('watchtower channels store router seeds without consuming normal messages',
     channelPubkey: 'channel',
     outer: { id: 'outer-id', kind: 3560, pubkey: 'channel', created_at: now },
     router: {
-      kind: 263,
+      kind: 26300,
       pubkey: 'router',
       created_at: now,
       tags: [['f', 'alice'], ['c', '0', '1']],
@@ -1241,7 +1241,7 @@ test('missing-message replies can recover router-only seed records', async () =>
   const jsonl = `${JSON.stringify({
     recordType: ROUTER_SEED_RECORD_TYPE,
     router: {
-      kind: 263,
+      kind: 26300,
       pubkey: 'router',
       created_at: 1,
       tags: [['f', 'alice'], ['c', '0', '1']],
@@ -1274,7 +1274,7 @@ test('nym carrier seeds are replied to and recovered as nym queue items', async 
   const carriers = [
     {
       id: 'carrier-id',
-      kind: 264,
+      kind: 26400,
       pubkey: 'nym',
       created_at: now,
       tags: [['id', 'inner-id'], ['c', '0', '1']],
@@ -1374,7 +1374,7 @@ test('missing-message reply packer streams compact seed routers only', async () 
     recordType: ROUTER_SEED_RECORD_TYPE,
     channelPubkey: 'channel',
     router: {
-      kind: 263,
+      kind: 26300,
       pubkey: 'router',
       created_at: 10,
       tags: [['f', 'sender'], ['c', '0', '1']],
@@ -1399,7 +1399,7 @@ test('missing-message reply packer streams compact seed routers only', async () 
   assert.equal(lines.length, 1)
   const record = JSON.parse(lines[0])
   assert.equal(record.recordType, ROUTER_SEED_RECORD_TYPE)
-  assert.equal(record.router.kind, 263)
+  assert.equal(record.router.kind, 26300)
   assert.equal(Buffer.from(record.router.content, 'base64').toString(), `${payloadRow()}\n${userRow}\n`)
   assert.deepEqual(record.router.tags, [['f', 'sender'], ['c', '0', '1']])
 })

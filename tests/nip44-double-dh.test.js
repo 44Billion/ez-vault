@@ -10,7 +10,7 @@ import { bytesToHex, hexToBytes } from '../docs/helpers/nostr/index.js'
 import { encodeSecretEntries } from '../docs/services/secret-blob.js'
 
 const CONTENT_KEYS_STORAGE_KEY = 'ez-vault:content-keys'
-const DOUBLE_DH_KIND = 263
+const DOUBLE_DH_KIND = 26300
 const DOUBLE_DH_SCOPE = ''
 
 if (!globalThis.localStorage) {
@@ -115,8 +115,8 @@ test('signer.run delegates bunker extended signer methods to the handle', async 
     close: async () => {}
   }
   const bunker = addBunkerAccount(fakeHandle)
-  const doubleEncryptParams = ['peer', 263, '', 'plain-b64', 'peer-content']
-  const doubleDecryptParams = ['peer', 263, '', 'cipher', 'peer-content', 'own-content']
+  const doubleEncryptParams = ['peer', DOUBLE_DH_KIND, '', 'plain-b64', 'peer-content']
+  const doubleDecryptParams = ['peer', DOUBLE_DH_KIND, '', 'cipher', 'peer-content', 'own-content']
   const event = { kind: 1, tags: [], content: 'x' }
 
   assert.equal(await run({ pubkey: bunker.pubkey, method: 'nip44v3_encrypt', params: ['peer', 3560, '', 'plain-b64'] }), 'v3-ciphertext')

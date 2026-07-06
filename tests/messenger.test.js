@@ -23,16 +23,16 @@ afterEach(() => {
 
 test('signerRequestContext extracts NIP-44 v3 kind and scope', () => {
   assert.deepEqual(
-    signerRequestContext('nip44v3_encrypt', ['peer', '263', 'channel-pubkey', 'plain-b64']),
-    { eventKind: 263, eventScope: 'channel-pubkey' }
+    signerRequestContext('nip44v3_encrypt', ['peer', '26300', 'channel-pubkey', 'plain-b64']),
+    { eventKind: 26300, eventScope: 'channel-pubkey' }
   )
   assert.deepEqual(
     signerRequestContext('nip44v3_decrypt', ['peer', 3560, '', 'ciphertext']),
     { eventKind: 3560, eventScope: '' }
   )
   assert.deepEqual(
-    signerRequestContext('nip44v3_encrypt_double_dh', ['peer', 263, 'channel-pubkey', 'plain-b64', 'content-pubkey']),
-    { eventKind: 263, eventScope: 'channel-pubkey' }
+    signerRequestContext('nip44v3_encrypt_double_dh', ['peer', 26300, 'channel-pubkey', 'plain-b64', 'content-pubkey']),
+    { eventKind: 26300, eventScope: 'channel-pubkey' }
   )
   assert.deepEqual(
     signerRequestContext('nip44v3_decrypt_double_dh', ['peer', '3560', '', 'ciphertext', 'peer-content', 'own-content']),

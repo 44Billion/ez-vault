@@ -218,7 +218,7 @@ test('double-DH conversation key matches the fixed salt vector', () => {
   })
 
   assert.equal(mode, 'both-content')
-  assert.equal(bytesToHex(conversationKey), '125d46227df5f910c2bc82edb186ebb9c4897417edc2536f95118d7431d6ea96')
+  assert.equal(bytesToHex(conversationKey), '86254e8779426a5859b9cd9460122c92cd68b96bcf377609861d1f567872a90e')
 })
 
 test('double-DH conversation key is pair-oriented, not direction-oriented', () => {
@@ -468,7 +468,7 @@ test('publishNymEvent mirrors carrier chunks to recovery relays', async () => {
 })
 
 test('received chunk default cap is proportional to private-channel chunk size', () => {
-  assert.equal(getJsonlChunkByteSize(), 30162)
+  assert.equal(getJsonlChunkByteSize(), 30159)
   assert.equal(DEFAULT_RECEIVED_CHUNK_MAX_BYTES, Math.min(getJsonlChunkByteSize() * 64, 3 * 1024 * 1024))
 })
 
