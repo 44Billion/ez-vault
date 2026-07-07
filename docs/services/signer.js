@@ -16,6 +16,7 @@ const SUPPORTED_METHODS = new Set([
   'nip44Decrypt',
   'nip44v3Encrypt',
   'nip44v3Decrypt',
+  'obfuscate',
   'nip44EncryptDoubleDH',
   'nip44DecryptDoubleDH',
   'doubleSignEvent'

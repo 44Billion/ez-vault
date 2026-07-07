@@ -1,4 +1,8 @@
 import { getPublicKey, finalizeEvent, nip04, nip44 } from 'nostr-tools'
+import { extract as hkdfExtract } from '@noble/hashes/hkdf.js'
+import { hmac } from '@noble/hashes/hmac.js'
+import { sha256 } from '@noble/hashes/sha2.js'
+import { concatBytes, utf8ToBytes } from '@noble/hashes/utils.js'
 import { bytesToHex, hexToBytes } from '../helpers/nostr/index.js'
 import { deriveSharedKey } from '../helpers/crypto.js'
 import { deriveDoubleDhConversationKey } from '../helpers/nostr/double-dh.js'
@@ -17,6 +21,7 @@ const nip44Encrypt = nip44.encrypt.bind(nip44)
 const nip44Decrypt = nip44.decrypt.bind(nip44)
 const nip04Encrypt = nip04.encrypt.bind(nip04)
 const nip04Decrypt = nip04.decrypt.bind(nip04)
+const OBFUSCATE_SALT = utf8ToBytes('nostr-obfuscate-v1')
 
 // Keep raw secret-key bytes off the instance itself so signer.leak = () => this.#secretKey
 // and similar prototype-poking tricks can't reach the key.
@@ -52,6 +57,7 @@ class SharedKeySigner {
   async nip44Decrypt (peerPubkey, ciphertext) { return (await this.#sharedSigner()).nip44Decrypt(peerPubkey, ciphertext) }
   async nip44v3Encrypt (peerPubkey, kind, scope, plaintextB64) { return (await this.#sharedSigner()).nip44v3Encrypt(peerPubkey, kind, scope, plaintextB64) }
   async nip44v3Decrypt (peerPubkey, kind, scope, ciphertext) { return (await this.#sharedSigner()).nip44v3Decrypt(peerPubkey, kind, scope, ciphertext) }
+  async obfuscate (value, kind, scope) { return this.#signer.obfuscate(value, kind, scope) }
   async nip44EncryptDoubleDH (...params) { return (await this.#sharedSigner()).nip44EncryptDoubleDH(...params) }
   async nip44DecryptDoubleDH (...params) { return (await this.#sharedSigner()).nip44DecryptDoubleDH(...params) }
   withSharedKey (peerPubkey, info = this.#info) { return new SharedKeySigner(this.#signer, peerPubkey, info) }
@@ -174,6 +180,14 @@ export default class NsecSigner {
     return nip44v3.nip07Decrypt(this.#secretKey, peerPubkey, kind, scope, ciphertext)
   }
 
+  obfuscate (value, kind, scope) {
+    if (typeof value !== 'string') throw new Error('INVALID_OBFUSCATE_VALUE')
+    if (typeof scope !== 'string') throw new Error('INVALID_OBFUSCATE_SCOPE')
+    const normalizedKind = nip44v3.normalizeKind(kind)
+    const key = hkdfExtract(sha256, this.#secretKey, OBFUSCATE_SALT)
+    return bytesToHex(hmac(sha256, key, frameObfuscateMessage({ value, kind: normalizedKind, scope })))
+  }
+
   async #contentKeyMaterial (contentSigner, requestedContentPubkey = '') {
     if (!contentSigner && requestedContentPubkey) {
       contentSigner = NsecSigner.#contentSignersByOwnerSigner.get(this)?.get(requestedContentPubkey) || null
@@ -246,6 +260,26 @@ export default class NsecSigner {
   withSharedKey (peerPubkey, info) {
     return new SharedKeySigner(this, peerPubkey, info)
   }
+}
+
+function u32be (n) {
+  const bytes = new Uint8Array(4)
+  new DataView(bytes.buffer).setUint32(0, n >>> 0, false)
+  return bytes
+}
+
+function frameObfuscateMessage ({ value, kind, scope }) {
+  const scopeBytes = utf8ToBytes(scope)
+  const valueBytes = utf8ToBytes(value)
+  // Fixed-width kind, length-prefixed scope,
+  // then the final value bytes. The final field needs no length prefix because
+  // all remaining bytes belong to it; future shapes should use a new salt label.
+  return concatBytes(
+    u32be(kind),
+    u32be(scopeBytes.length),
+    scopeBytes,
+    valueBytes
+  )
 }
 
 // Prevent prototype/constructor tampering and method injection.

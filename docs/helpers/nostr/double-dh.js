@@ -8,7 +8,7 @@ const textEncoder = new TextEncoder()
 // HKDF extract salt naming this generic double-DH key schedule. It has no NUL
 // suffix because this fixed label is not concatenated with variable bytes
 // (unlike NIP-44 v3's "nip44-v3\x00" || nonce salt).
-const DOUBLE_DH_SALT = textEncoder.encode('nip44-double-dh-v1')
+const DOUBLE_DH_SALT = textEncoder.encode('nostr-double-dh-v1')
 
 /*
 Considering the following nomenclature, where a/b are lexicographically

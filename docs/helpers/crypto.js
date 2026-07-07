@@ -2,7 +2,7 @@ import { sharedXOnlySecret } from './ecdh.js'
 
 const textEncoder = new TextEncoder()
 const SECP256K1_N = BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141')
-const SHARED_KEY_SALT = textEncoder.encode('sharedkey-v1')
+const SHARED_KEY_SALT = textEncoder.encode('nostr-shared-key-v1')
 
 function bytesToBigInt (bytes) {
   return BigInt('0x' + Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(''))

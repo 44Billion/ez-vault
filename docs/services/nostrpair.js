@@ -24,7 +24,7 @@ export const pairingRelay = freeRelays[0]
 // user are independent from the key material NIP-44 itself derives chacha and
 // MAC keys from. Without this separation, leaking the pairing code would leak
 // prefix bytes of the same input that future message keys are expanded from.
-const PAIRING_CODE_DOMAIN_TAG = 'ez-vault:nostrpair:pairing-code:v1' // Or 'nostr-pair-sas-v1' from https://github.com/nostr-protocol/nips/pull/2328
+const PAIRING_CODE_DOMAIN_TAG = 'nostr-pair-sas-v1'
 
 const SECRET_BYTES = 16
 const CONNECT_TIMEOUT_MS = 30_000

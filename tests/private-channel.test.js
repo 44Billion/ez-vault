@@ -145,7 +145,7 @@ test('shared-key derivation matches the 48-byte reduction vector', async () => {
   const aliceShared = await deriveSharedKey(aliceSecret, bobPubkey, 'trusted-signer-sync-v1')
   const bobShared = await deriveSharedKey(bobSecret, alicePubkey, 'trusted-signer-sync-v1')
 
-  assert.equal(bytesToHex(aliceShared), 'f68f218e9fbfac374dbfbb5772d0a7f65c1d03ad3897b50c517970d89334eb3b')
+  assert.equal(bytesToHex(aliceShared), '10228022a480c7db02f2d68796e30f029dd77853dca392174e623ea9fc275de0')
   assert.equal(bytesToHex(bobShared), bytesToHex(aliceShared))
 })
 
@@ -218,7 +218,7 @@ test('double-DH conversation key matches the fixed salt vector', () => {
   })
 
   assert.equal(mode, 'both-content')
-  assert.equal(bytesToHex(conversationKey), '86254e8779426a5859b9cd9460122c92cd68b96bcf377609861d1f567872a90e')
+  assert.equal(bytesToHex(conversationKey), '995fec3e81d662f029fc4218bb3cf52305957c849c7b8356bd5d71852f4629b0')
 })
 
 test('double-DH conversation key is pair-oriented, not direction-oriented', () => {

@@ -2,7 +2,10 @@ import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { generateSecretKey, getPublicKey } from 'nostr-tools'
+import { extract as hkdfExtract } from '@noble/hashes/hkdf.js'
+import { hmac } from '@noble/hashes/hmac.js'
 import { sha256 } from '@noble/hashes/sha2.js'
+import { concatBytes, utf8ToBytes } from '@noble/hashes/utils.js'
 import * as nip44v3 from '../docs/services/nip44-v3.js'
 import NsecSigner from '../docs/services/nsec-signer.js'
 import { run } from '../docs/services/signer.js'
@@ -47,6 +50,26 @@ function addNsecAccount () {
   store.add({ type: 'nsec', pubkey, name: '', picture: '' })
   secrets.setNsecSecret(pubkey, secret)
   return { pubkey, secret }
+}
+
+function u32be (n) {
+  const bytes = new Uint8Array(4)
+  new DataView(bytes.buffer).setUint32(0, n >>> 0, false)
+  return bytes
+}
+
+function expectedObfuscate (secret, value, kind, scope) {
+  const normalizedKind = nip44v3.normalizeKind(kind)
+  const scopeBytes = utf8ToBytes(scope)
+  const valueBytes = utf8ToBytes(value)
+  const key = hkdfExtract(sha256, hexToBytes(secret), utf8ToBytes('nostr-obfuscate-v1'))
+  const message = concatBytes(
+    u32be(normalizedKind),
+    u32be(scopeBytes.length),
+    scopeBytes,
+    valueBytes
+  )
+  return bytesToHex(hmac(sha256, key, message))
 }
 
 // https://github.com/greenart7c3/Nip46Lab/blob/de046f8b6f2078a21835f11f87b1dc11fbca1afc/index.html#L2111
@@ -137,6 +160,22 @@ test('NsecSigner exposes NIP-44 v3 byte payload methods', async () => {
   )
 })
 
+test('NsecSigner obfuscates strings with kind and scope separation', async () => {
+  const secret = seckey()
+  const alice = NsecSigner.getOrCreate(secret)
+
+  const first = await alice.obfuscate('topicexample', 1006, '#t')
+  assert.equal(first, expectedObfuscate(secret, 'topicexample', 1006, '#t'))
+  assert.match(first, /^[0-9a-f]{64}$/)
+  assert.equal(await alice.obfuscate('topicexample', '1006', '#t'), first)
+  assert.notEqual(await alice.obfuscate('topicexample', 1, '#t'), first)
+  assert.notEqual(await alice.obfuscate('topicexample', 1006, '.id'), first)
+  assert.notEqual(await alice.obfuscate('other', 1006, '#t'), first)
+  assert.notEqual(await alice.obfuscate('c', 1006, 'ab'), await alice.obfuscate('bc', 1006, 'a'))
+  assert.throws(() => alice.obfuscate('topicexample', 1006), /INVALID_OBFUSCATE_SCOPE/)
+  assert.throws(() => alice.obfuscate(123, 1006, '#t'), /INVALID_OBFUSCATE_VALUE/)
+})
+
 test('signer.run normalizes snake_case NIP-44 v3 wire methods', async () => {
   secrets.unlock(generateSecretKey(), null)
   const alice = addNsecAccount()
@@ -153,4 +192,22 @@ test('signer.run normalizes snake_case NIP-44 v3 wire methods', async () => {
     method: 'nip44v3_decrypt',
     params: [alice.pubkey, 1, '', ciphertext]
   }), plaintextB64)
+})
+
+test('signer.run exposes obfuscate', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const alice = addNsecAccount()
+
+  const result = await run({
+    pubkey: alice.pubkey,
+    method: 'obfuscate',
+    params: ['dm:alice', '1006', '']
+  })
+
+  assert.match(result, /^[0-9a-f]{64}$/)
+  assert.equal(await run({
+    pubkey: alice.pubkey,
+    method: 'obfuscate',
+    params: ['dm:alice', 1006, '']
+  }), result)
 })

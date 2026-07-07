@@ -156,6 +156,7 @@ export class BunkerHandle {
   async nip44Decrypt (pk, ct) { return this.#request(s => s.nip44Decrypt(pk, ct)) }
   async nip44v3Encrypt (pk, kind, scope = '', pt) { return this.#sendRequest('nip44v3_encrypt', [pk, String(kind), scope || '', pt]) }
   async nip44v3Decrypt (pk, kind, scope = '', ct) { return this.#sendRequest('nip44v3_decrypt', [pk, String(kind), scope || '', ct]) }
+  async obfuscate (value, kind, scope) { return this.#sendRequest('obfuscate', [value, String(kind), scope]) }
   async nip44EncryptDoubleDH (pk, kind, scope = '', pt, peerContentPubkey = '') {
     return parseJsonResult(await this.#sendRequest('nip44v3_encrypt_double_dh', [pk, String(kind), scope || '', pt, peerContentPubkey || '']))
   }
@@ -360,6 +361,7 @@ class BunkerSharedKeyHandle {
   nip44Decrypt (pk, ct) { return this.#request('nip44Decrypt', [pk, ct]) }
   nip44v3Encrypt (pk, kind, scope = '', pt) { return this.#sendRequest('nip44v3_encrypt', [pk, String(kind), scope || '', pt]) }
   nip44v3Decrypt (pk, kind, scope = '', ct) { return this.#sendRequest('nip44v3_decrypt', [pk, String(kind), scope || '', ct]) }
+  obfuscate (value, kind, scope) { return this.#sendRequest('obfuscate', [value, String(kind), scope]) }
   async nip44EncryptDoubleDH (pk, kind, scope = '', pt, peerContentPubkey = '') {
     return parseJsonResult(await this.#sendRequest('nip44v3_encrypt_double_dh', [pk, String(kind), scope || '', pt, peerContentPubkey || '']))
   }

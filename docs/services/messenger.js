@@ -15,7 +15,8 @@ import { parseRelayListEvent } from './relays.js'
 // would just be noise in the audit trail. Match both wire and JS spellings.
 const UNLOGGED_METHODS = new Set([
   'getPublicKey', 'get_public_key',
-  'getRelays', 'get_relays'
+  'getRelays', 'get_relays',
+  'obfuscate'
 ])
 
 const NIP44_V3_CONTEXT_METHODS = new Set([
