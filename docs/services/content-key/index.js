@@ -1,12 +1,12 @@
 import { generateSecretKey } from 'nostr-tools'
-import { getIykcProofs } from '../../helpers/nostr/queries.js'
-import { bytesToHex } from '../../helpers/nostr/index.js'
-import { isOnline, onOnline } from '../../helpers/network.js'
-import { makeContentKeyEvent, makeContentKeyEventForPubkey, parseContentKeyEvent, CONTENT_KEY_KIND } from './event.js'
+import { getIykcProofs } from 'libp2r2p/content-key'
+import { bytesToHex } from 'libp2r2p/base16'
+import { isOnline, onOnline } from 'libp2r2p/network'
+import { makeContentKeyEvent, makeContentKeyEventForPubkey, parseContentKeyEvent, CONTENT_KEY_KIND } from 'libp2r2p/content-key/event'
 import * as store from '../accounts-store.js'
 import * as secrets from '../secrets.js'
 import { filterVisibleAccounts } from '../account-mutations.js'
-import { fetchEvents, fetchRelayListEvent, freeRelays, parseRelayListEvent, publish, resolveWriteRelays, seedRelays } from '../relays.js'
+import { fetchEvents, fetchRelayListEvent, freeRelays, parseRelayListEvent, publish, resolveWriteRelays, seedRelays } from '../relay.js'
 
 export { CONTENT_KEY_KIND, getIykcProofs }
 

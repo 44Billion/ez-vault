@@ -1,4 +1,4 @@
-import { bytesToHex } from './nostr/index.js'
+import { bytesToHex } from 'libp2r2p/base16'
 import { deriveSecretKey } from './crypto.js'
 
 // Deterministic device signer seckey derivation. Inputs:

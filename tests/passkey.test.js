@@ -5,7 +5,7 @@ import { generateSecretKey, getPublicKey } from 'nostr-tools'
 import * as passkey from '../docs/services/passkey.js'
 import * as secrets from '../docs/services/secrets.js'
 import * as store from '../docs/services/accounts-store.js'
-import { bytesToHex, hexToBytes } from '../docs/helpers/nostr/index.js'
+import { bytesToHex, hexToBytes } from 'libp2r2p/base16'
 
 const data = new Map()
 

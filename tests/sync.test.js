@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { generateSecretKey, getPublicKey } from 'nostr-tools'
 import NsecSigner from '../docs/services/nsec-signer.js'
 import { createSyncController } from '../docs/services/sync/index.js'
-import { DEFAULT_STALE_CHANNEL_SECONDS } from '../docs/services/private-messenger/index.js'
+import { DEFAULT_STALE_CHANNEL_SECONDS } from 'libp2r2p/private-messenger'
 import {
   announceContentKeys,
   CONTENT_KEYS_ANNOUNCE_CODE,
@@ -17,9 +17,11 @@ import {
 import { TRUSTED_SIGNERS_STATE_CODE } from '../docs/services/sync/trusted-signers.js'
 import * as store from '../docs/services/accounts-store.js'
 import * as secrets from '../docs/services/secrets.js'
-import { bytesToHex, hexToBytes } from '../docs/helpers/nostr/index.js'
+import { bytesToHex, hexToBytes } from 'libp2r2p/base16'
+import { TEMPORARY_STORAGE_KEYS_KEY } from 'libp2r2p/temporary-storage'
 
 const data = new Map()
+const sessionData = new Map()
 const SYNC_INFO = 'trusted-signer-sync-v1'
 const SIGNER_LIST_SYNC_INFO = 'trusted-signer-list-sync-v1'
 globalThis.localStorage = {
@@ -27,6 +29,12 @@ globalThis.localStorage = {
   getItem: key => data.has(String(key)) ? data.get(String(key)) : null,
   removeItem: key => { data.delete(String(key)) },
   setItem: (key, value) => { data.set(String(key), String(value)) }
+}
+globalThis.sessionStorage = {
+  clear: () => sessionData.clear(),
+  getItem: key => sessionData.has(String(key)) ? sessionData.get(String(key)) : null,
+  removeItem: key => { sessionData.delete(String(key)) },
+  setItem: (key, value) => { sessionData.set(String(key), String(value)) }
 }
 
 if (!globalThis.crypto) globalThis.crypto = crypto
@@ -38,6 +46,7 @@ afterEach(() => {
   resetDebugSources()
   NsecSigner.releaseAll()
   globalThis.localStorage.clear()
+  globalThis.sessionStorage.clear()
 })
 
 function seckey () {
@@ -143,6 +152,36 @@ function syncMessage ({ channelPubkey, senderPubkey, code, payload, id = 'messag
 async function flushMicrotasks (turns = 14) {
   for (let i = 0; i < turns; i++) await Promise.resolve()
 }
+
+test('sync initialization clears private messenger temporary storage before unlock', async () => {
+  globalThis.sessionStorage.setItem('tmp.session', 'encrypted')
+  globalThis.sessionStorage.setItem(TEMPORARY_STORAGE_KEYS_KEY, JSON.stringify(['tmp.session']))
+  globalThis.localStorage.setItem('tmp.local', 'keep')
+
+  const controller = createSyncController({
+    _store: {
+      list: () => [],
+      subscribe: () => () => {}
+    },
+    _secrets: {
+      isUnlocked: () => false,
+      subscribe: () => () => {}
+    },
+    _trustedSigners: {
+      list: () => [],
+      subscribe: () => () => {}
+    }
+  })
+
+  await controller.init()
+
+  assert.equal(globalThis.sessionStorage.getItem('tmp.session'), null)
+  assert.equal(globalThis.sessionStorage.getItem(TEMPORARY_STORAGE_KEYS_KEY), null)
+  assert.equal(globalThis.localStorage.getItem('tmp.local'), 'keep')
+  assert.equal(controller.messenger, null)
+
+  controller.close()
+})
 
 test('sync orchestration watches nsec channels with identity-only sync options', async () => {
   const deviceSigner = signer('device')
@@ -606,7 +645,7 @@ test('sync drains messages enqueued while another message is being handled', asy
       return this
     }
 
-    nextMessage () {
+    async nextMessage () {
       return this.queue.shift() || null
     }
 
@@ -642,7 +681,7 @@ test('sync drains messages enqueued while another message is being handled', asy
   await flushMicrotasks()
 
   assert.deepEqual(handled, ['a', 'b'])
-  assert.equal(messenger.nextMessage(), null)
+  assert.equal(await messenger.nextMessage(), null)
   assert.deepEqual(
     debugEvents
       .filter(event => event.action === 'drain' && event.phase === 'end')

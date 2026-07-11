@@ -6,12 +6,12 @@ import { extract as hkdfExtract } from '@noble/hashes/hkdf.js'
 import { hmac } from '@noble/hashes/hmac.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { concatBytes, utf8ToBytes } from '@noble/hashes/utils.js'
-import * as nip44v3 from '../docs/services/nip44-v3.js'
+import * as nip44v3 from 'libp2r2p/nip44-v3'
 import NsecSigner from '../docs/services/nsec-signer.js'
 import { run } from '../docs/services/signer.js'
 import * as store from '../docs/services/accounts-store.js'
 import * as secrets from '../docs/services/secrets.js'
-import { bytesToHex, hexToBytes } from '../docs/helpers/nostr/index.js'
+import { bytesToHex, hexToBytes } from 'libp2r2p/base16'
 
 if (!globalThis.localStorage) {
   const data = new Map()

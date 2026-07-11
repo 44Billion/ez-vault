@@ -8,8 +8,8 @@ import * as log from './messenger-log/index.js'
 import * as secrets from './secrets.js'
 import * as nostrdb from './nostrdb.js'
 import * as sync from './sync/index.js'
-import { npubFromPubkey, parseProfileEvent } from '../helpers/nostr/index.js'
-import { parseRelayListEvent } from './relays.js'
+import { npubFromPubkey, parseProfileEvent } from 'libp2r2p/key'
+import { parseRelayListEvent } from './relay.js'
 
 // Read-only disclosures — the result is publicly derivable, so logging them
 // would just be noise in the audit trail. Match both wire and JS spellings.

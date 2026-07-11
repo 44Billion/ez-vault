@@ -1,9 +1,9 @@
 import { generateSecretKey } from 'nostr-tools'
-import { isOnline } from '../helpers/network.js'
-import { bytesToHex } from '../helpers/nostr/index.js'
+import { isOnline } from 'libp2r2p/network'
+import { bytesToHex } from 'libp2r2p/base16'
 import { getIykcProofs, upsertContentKeyEvent } from './content-key/index.js'
 import * as secrets from './secrets.js'
-import { normalizeKind } from './nip44-v3.js'
+import { normalizeKind } from 'libp2r2p/nip44-v3'
 
 function warning (warnings, code, message = '') {
   warnings.push(message ? { code, message } : { code })

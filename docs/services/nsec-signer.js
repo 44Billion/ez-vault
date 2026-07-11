@@ -3,15 +3,15 @@ import { extract as hkdfExtract } from '@noble/hashes/hkdf.js'
 import { hmac } from '@noble/hashes/hmac.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { concatBytes, utf8ToBytes } from '@noble/hashes/utils.js'
-import { bytesToHex, hexToBytes } from '../helpers/nostr/index.js'
+import { bytesToHex, hexToBytes } from 'libp2r2p/base16'
 import { deriveSharedKey } from '../helpers/crypto.js'
-import { deriveDoubleDhConversationKey } from '../helpers/nostr/double-dh.js'
-import * as nip44v3 from './nip44-v3.js'
+import { deriveDoubleDhConversationKey } from 'libp2r2p/double-dh'
+import * as nip44v3 from 'libp2r2p/nip44-v3'
 import {
   fetchRelayListEvent,
   parseRelayListEvent,
   freeRelays
-} from './relays.js'
+} from './relay.js'
 
 // Capture stable references up front so post-load monkey-patching of the
 // nostr-tools module (e.g. a malicious dependency swap) can't redirect our

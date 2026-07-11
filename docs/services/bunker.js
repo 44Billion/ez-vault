@@ -1,6 +1,6 @@
 import { BunkerSigner, parseBunkerInput } from 'nostr-tools/nip46'
 import { generateSecretKey } from 'nostr-tools'
-import { bytesToHex, hexToBytes } from '../helpers/nostr/index.js'
+import { bytesToHex, hexToBytes } from 'libp2r2p/base16'
 import * as store from './accounts-store.js'
 import * as secrets from './secrets.js'
 import {
@@ -8,7 +8,7 @@ import {
   freeRelays,
   parseRelayListEvent,
   pool
-} from './relays.js'
+} from './relay.js'
 
 const PING_INTERVAL_MS = 60_000
 const PING_TIMEOUT_MS = 10_000

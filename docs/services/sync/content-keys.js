@@ -3,7 +3,7 @@ import * as store from '../accounts-store.js'
 import * as secrets from '../secrets.js'
 import { filterVisibleAccounts } from '../account-mutations.js'
 import { upsertContentKeyEvent } from '../content-key/index.js'
-import { bytesToHex, hexToBytes } from '../../helpers/nostr/index.js'
+import { bytesToHex, hexToBytes } from 'libp2r2p/base16'
 
 // Flow notes:
 // - This trusted-device layer only syncs content-key material for local nsec

@@ -4,7 +4,7 @@ import { accountForLauncher, applyAccountEvents, signerRequestApp, signerRequest
 import * as store from '../docs/services/accounts-store.js'
 import * as secrets from '../docs/services/secrets.js'
 import * as journal from '../docs/services/account-mutation-journal.js'
-import { npubFromPubkey } from '../docs/helpers/nostr/index.js'
+import { npubFromPubkey } from 'libp2r2p/key'
 
 if (!globalThis.localStorage) {
   const data = new Map()

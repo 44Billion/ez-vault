@@ -5,7 +5,7 @@ import {
   ACCOUNT_NAME_NATURE,
   randomAccountName
 } from '../docs/services/account-names.js'
-import { profileEventTemplate } from '../docs/helpers/nostr/index.js'
+import { profileEventTemplate } from 'libp2r2p/key'
 
 test('randomAccountName returns a color and nature combination', () => {
   const name = randomAccountName()

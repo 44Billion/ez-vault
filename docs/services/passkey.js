@@ -1,11 +1,11 @@
 import { getPublicKey } from 'nostr-tools'
-import { hexToBytes, bytesToHex } from '../helpers/nostr/index.js'
+import { hexToBytes, bytesToHex } from 'libp2r2p/base16'
 import { decodeSecretEntries } from './secret-blob.js'
-import { base64ToBytes } from '../helpers/base64.js'
+import { base64ToBytes, base64UrlToBytes, bytesToBase64Url } from 'libp2r2p/base64'
 import { detectPlatform } from '../helpers/platform.js'
 import { fetchFaviconBase64 } from '../helpers/favicon.js'
-import { sharedXOnlySecret } from '../helpers/ecdh.js'
-import * as nip44v3 from './nip44-v3.js'
+import { sharedXOnlySecret } from 'libp2r2p/ecdh'
+import * as nip44v3 from 'libp2r2p/nip44-v3'
 import * as secrets from './secrets.js'
 
 // EZ Vault's passkey integration. One passkey custodies the encryption key
@@ -65,20 +65,6 @@ function bufferToUint8 (value) {
   return null
 }
 
-function base64UrlEncode (bytes) {
-  let s = ''
-  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i])
-  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
-}
-
-function base64UrlDecode (str) {
-  const pad = str.length % 4 === 0 ? '' : '='.repeat(4 - (str.length % 4))
-  const bin = atob(str.replace(/-/g, '+').replace(/_/g, '/') + pad)
-  const out = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
-  return out
-}
-
 function extractExtensions (credential) {
   return credential?.getClientExtensionResults?.() ?? {}
 }
@@ -96,7 +82,7 @@ function extractLargeBlobBytes (extensions) {
 function descriptorFromCredentialId (credentialId) {
   if (!credentialId) return null
   return {
-    id: base64UrlDecode(credentialId),
+    id: base64UrlToBytes(credentialId),
     type: 'public-key',
     transports: GET_TRANSPORTS
   }
@@ -111,7 +97,7 @@ function readStoredUserId () {
   const stored = localStorage.getItem(USER_ID_KEY)
   if (!stored) return null
   try {
-    return { bytes: base64UrlDecode(stored), base64url: stored }
+    return { bytes: base64UrlToBytes(stored), base64url: stored }
   } catch {
     return null
   }
@@ -125,7 +111,7 @@ function buildUserName (userId) {
   const platform = detectPlatform()
   const known = !/unknown OS|unknown browser/.test(platform)
   const base = known ? platform : RP_NAME
-  const suffix = base64UrlEncode(userId).slice(0, 6)
+  const suffix = bytesToBase64Url(userId).slice(0, 6)
   return `${base} (${suffix})`
 }
 
@@ -168,7 +154,7 @@ async function discardCredential (rawId) {
   try {
     await signalFn({
       rpId: window.location.hostname,
-      credentialId: base64UrlEncode(new Uint8Array(rawId))
+      credentialId: bytesToBase64Url(new Uint8Array(rawId))
     })
   } catch (err) {
     console.warn('signalUnknownCredential failed', err?.message ?? err)
@@ -256,9 +242,9 @@ export async function register () {
     throw new Error('PASSKEY_PRF_REQUIRED')
   }
 
-  const credentialId = base64UrlEncode(new Uint8Array(credential.rawId))
+  const credentialId = bytesToBase64Url(new Uint8Array(credential.rawId))
   localStorage.setItem(CRED_ID_KEY, credentialId)
-  localStorage.setItem(USER_ID_KEY, base64UrlEncode(userId))
+  localStorage.setItem(USER_ID_KEY, bytesToBase64Url(userId))
   if (iconURL) localStorage.setItem(ICON_KEY, iconURL)
   // Persist PRF eagerly. If a later get() returns PRF, we'll clear it then.
   // Authenticators that only expose PRF on create rely on this backup.

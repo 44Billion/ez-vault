@@ -1,5 +1,5 @@
 import * as store from './accounts-store.js'
-import * as nostr from '../helpers/nostr/index.js'
+import * as nostr from 'libp2r2p/key'
 import * as secrets from './secrets.js'
 import * as passkey from './passkey.js'
 import * as trustedSigners from './trusted-signers.js'
@@ -9,7 +9,7 @@ import {
   fetchRelayListEvent,
   parseRelayListEvent,
   freeRelays
-} from './relays.js'
+} from './relay.js'
 import { fetchBunkerUserPubkey } from './bunker.js'
 import { seededAvatarDataUrl } from './avatar.js'
 import { extractBunkerClientKey } from '../helpers/nostrpair-url.js'

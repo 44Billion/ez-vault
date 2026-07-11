@@ -1,7 +1,7 @@
 import { generateSecretKey, getPublicKey, finalizeEvent } from 'nostr-tools'
 import { getConversationKey, encrypt as nip44Encrypt, decrypt as nip44Decrypt } from 'nostr-tools/nip44'
-import { pool, freeRelays } from './relays.js'
-import { bytesToHex } from '../helpers/nostr/index.js'
+import { pool, freeRelays } from './relay.js'
+import { bytesToHex } from 'libp2r2p/base16'
 import {
   buildNostrpairUrl,
   parseNostrpairInput,

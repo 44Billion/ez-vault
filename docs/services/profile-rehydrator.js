@@ -1,11 +1,11 @@
 import * as store from './accounts-store.js'
-import { fetchLatestProfile, fetchRelayListEvent, parseRelayListEvent, freeRelays } from './relays.js'
-import { parseProfileEvent } from '../helpers/nostr/index.js'
+import { fetchLatestProfile, fetchRelayListEvent, parseRelayListEvent, freeRelays } from './relay.js'
+import { parseProfileEvent } from 'libp2r2p/key'
 import * as status from './account-status.js'
 import * as secrets from './secrets.js'
 import { filterVisibleAccounts, runSecretAccountMutation } from './account-mutations.js'
 import { seededAvatarDataUrl } from './avatar.js'
-import { isOnline, onOnline } from '../helpers/network.js'
+import { isOnline, onOnline } from 'libp2r2p/network'
 
 let stopOnlineWatcher = null
 let retryTimer = null

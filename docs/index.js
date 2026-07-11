@@ -6,7 +6,6 @@ import './components/shared/accordion-panel.js'
 import './components/shared/toast.js'
 import './components/activity-log.js'
 import './components/lock-overlay.js'
-import { cleanupTemporaryStorage } from './services/temporary-storage.js'
 import * as secrets from './services/secrets.js'
 import * as passkey from './services/passkey.js'
 import { rehydrateAll } from './services/profile-rehydrator.js'
@@ -16,8 +15,6 @@ import * as sync from './services/sync/index.js'
 import { startContentKeyEventRefresh } from './services/content-key/index.js'
 import { startDeviceRelayListRefresh } from './services/device-relays.js'
 import { startRevocationRotation } from './services/sync/revocation-rotation.js'
-
-cleanupTemporaryStorage()
 
 const list = document.querySelector('account-list')
 const addPanel = document.querySelector('account-add')

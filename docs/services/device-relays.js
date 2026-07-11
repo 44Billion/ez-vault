@@ -1,6 +1,6 @@
-import { pool, freeRelays, seedRelays, fetchRelayListEvent, parseRelayListEvent, publish } from './relays.js'
+import { pool, freeRelays, seedRelays, fetchRelayListEvent, parseRelayListEvent, publish } from './relay.js'
 import * as secrets from './secrets.js'
-import { isOnline, onOnline } from '../helpers/network.js'
+import { isOnline, onOnline } from 'libp2r2p/network'
 
 export const DEVICE_RELAY_LIST_REFRESH_INTERVAL_MS = 4 * 60 * 60 * 1000
 

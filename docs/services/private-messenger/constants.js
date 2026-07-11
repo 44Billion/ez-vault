@@ -1,1 +1,0 @@
-export const DEFAULT_STALE_CHANNEL_SECONDS = 45 * 24 * 60 * 60

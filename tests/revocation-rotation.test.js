@@ -9,7 +9,7 @@ import {
   runDueRevocationRotations,
   scheduleRevocationRotationsForRemovedSigner
 } from '../docs/services/sync/revocation-rotation.js'
-import { bytesToHex, hexToBytes } from '../docs/helpers/nostr/index.js'
+import { bytesToHex, hexToBytes } from 'libp2r2p/base16'
 
 const data = new Map()
 

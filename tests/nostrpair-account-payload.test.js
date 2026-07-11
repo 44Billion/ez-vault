@@ -5,10 +5,10 @@ import {
   buildSyncAccountPayload
 } from '../docs/services/nostrpair.js'
 import {
-  bytesToHex,
   nsecFromHex,
   npubFromPubkey
-} from '../docs/helpers/nostr/index.js'
+} from 'libp2r2p/key'
+import { bytesToHex } from 'libp2r2p/base16'
 
 function nsecAccount () {
   const secretKey = generateSecretKey()

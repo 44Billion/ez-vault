@@ -1,4 +1,4 @@
-import { sharedXOnlySecret } from './ecdh.js'
+import { sharedXOnlySecret } from 'libp2r2p/ecdh'
 
 const textEncoder = new TextEncoder()
 const SECP256K1_N = BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141')

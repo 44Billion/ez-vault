@@ -9,7 +9,7 @@ import {
   pendingMutationNeedsUnlock,
   recoverPendingMutation
 } from '../docs/services/account-mutations.js'
-import { bytesToHex, hexToBytes } from '../docs/helpers/nostr/index.js'
+import { bytesToHex, hexToBytes } from 'libp2r2p/base16'
 
 const data = new Map()
 

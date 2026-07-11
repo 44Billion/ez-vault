@@ -1,28 +1,12 @@
 import { SimplePool } from 'nostr-tools/pool'
+import { freeRelays, seedRelays } from 'libp2r2p/relay'
 
-// Used only to discover users' NIP-65 relay lists (kind:10002).
-export const seedRelays = [
-  'wss://relay.44billion.net',
-  'wss://purplepag.es',
-  'wss://user.kindpag.es',
-  'wss://relay.nos.social',
-  'wss://nostr.land',
-  'wss://indexer.coracle.social'
-]
-
-// Fallback write-accepting relays. Used as the initial write/read-relay set for
-// new accounts and as a fallback when we cannot resolve a user's own relays.
-export const freeRelays = [
-  'wss://relay.44billion.net',
-  'wss://nos.lol',
-  'wss://relay.primal.net',
-  'wss://relay.damus.io'
-]
+export { freeRelays, seedRelays } from 'libp2r2p/relay'
 
 const POST_EOSE_GRACE_MS = 500
 const HARD_TIMEOUT_MS = 5000
-const PUBLISH_FIRST_FULFILLMENT_TIMEOUT_MS = 3000
-const PUBLISH_SETTLEMENT_TIMEOUT_MS = 30000
+const PUBLISH_TIMEOUT_UNTIL_FIRST_FULFILLMENT_MS = 3000
+const PUBLISH_TIMEOUT_MS = 30000
 
 export const pool = new SimplePool()
 
@@ -35,17 +19,18 @@ function publishTimeoutError () {
   return new Error('PUBLISH_TIMEOUT')
 }
 
-function firstFulfillment (promises, timeoutMs) {
+function firstFulfillment (promises, timeout, { fallback } = {}) {
   return new Promise((resolve) => {
     let settled = false
     let rejected = 0
+    let timer = null
     const finish = (success) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
       resolve(success)
     }
-    const timer = maybeUnref(setTimeout(() => finish(false), timeoutMs))
+    if (timeout !== null) timer = maybeUnref(setTimeout(() => finish(false), timeout))
     for (const promise of promises) {
       Promise.resolve(promise).then(
         () => finish(true),
@@ -55,19 +40,53 @@ function firstFulfillment (promises, timeoutMs) {
         }
       )
     }
+    if (fallback) Promise.resolve(fallback).then(finish, () => finish(false))
   })
 }
 
-function settlePublishPromise (promise, timeoutMs) {
+// Produces one ordered result per relay under one operation-wide deadline.
+// timeout() lets an unsuccessful early return close every pending report at once.
+function createPublishSettlements (promises, timeout) {
+  const settlements = new Array(promises.length)
+  let remaining = promises.length
   let timer = null
-  const publishPromise = Promise.resolve(promise).then(
-    () => ({ status: 'fulfilled' }),
-    reason => ({ status: 'rejected', reason })
-  ).finally(() => clearTimeout(timer))
-  const timeoutPromise = new Promise(resolve => {
-    timer = maybeUnref(setTimeout(() => resolve({ status: 'rejected', reason: publishTimeoutError() }), timeoutMs))
-  })
-  return Promise.race([publishPromise, timeoutPromise])
+  let isFinished = false
+  let resolve
+
+  const promise = new Promise(nextResolve => { resolve = nextResolve })
+  const finish = () => {
+    if (isFinished) return
+    isFinished = true
+    clearTimeout(timer)
+    resolve(settlements)
+  }
+
+  const settle = (index, settlement) => {
+    if (settlements[index]) return
+    settlements[index] = settlement
+    remaining--
+    if (remaining === 0) finish()
+  }
+
+  const timeoutPending = () => {
+    if (isFinished) return
+    for (let index = 0; index < settlements.length; index++) {
+      settle(index, { status: 'rejected', reason: publishTimeoutError() })
+    }
+  }
+
+  if (remaining === 0) finish()
+  else {
+    if (timeout !== null) timer = maybeUnref(setTimeout(timeoutPending, timeout))
+    promises.forEach((promise, index) => {
+      Promise.resolve(promise).then(
+        () => settle(index, { status: 'fulfilled' }),
+        reason => settle(index, { status: 'rejected', reason })
+      )
+    })
+  }
+
+  return { promise, timeout: timeoutPending }
 }
 
 function publishSummary (settlements, relays) {
@@ -83,15 +102,18 @@ function publishSummary (settlements, relays) {
 }
 
 export async function publish (event, relays, {
-  firstFulfillmentTimeoutMs = PUBLISH_FIRST_FULFILLMENT_TIMEOUT_MS,
-  settlementTimeoutMs = PUBLISH_SETTLEMENT_TIMEOUT_MS
+  timeout = PUBLISH_TIMEOUT_MS,
+  timeoutUntilFirstFulfillment = PUBLISH_TIMEOUT_UNTIL_FIRST_FULFILLMENT_MS
 } = {}) {
   if (!relays?.length) throw new Error('NO_RELAYS')
   const publishPromises = pool.publish(relays, event)
-  const promise = Promise
-    .all(publishPromises.map(promise => settlePublishPromise(promise, settlementTimeoutMs)))
+  const settlement = createPublishSettlements(publishPromises, timeout)
+  const promise = settlement.promise
     .then(settlements => publishSummary(settlements, relays))
-  const success = await firstFulfillment(publishPromises, firstFulfillmentTimeoutMs)
+  const success = await firstFulfillment(publishPromises, timeoutUntilFirstFulfillment, {
+    fallback: promise.then(report => report.success)
+  })
+  if (!success) settlement.timeout()
 
   return {
     total: relays.length,
@@ -100,8 +122,6 @@ export async function publish (event, relays, {
   }
 }
 
-// Subscribe to a filter across multiple relays and return the newest matching
-// event. Closes early 500ms after the first EOSE (or after a hard timeout).
 export function fetchEvents (filter, relays, {
   graceMs = POST_EOSE_GRACE_MS,
   hardTimeoutMs = HARD_TIMEOUT_MS
@@ -133,8 +153,7 @@ export function fetchEvents (filter, relays, {
         graceTimer = maybeUnref(setTimeout(finish, graceMs))
       },
       onclose () {
-        // A single relay closing is not enough to finish — only give up when
-        // EOSE-grace or the hard timeout fires.
+        // A single relay closing is not enough to finish; the timers decide.
       }
     })
 
@@ -142,8 +161,6 @@ export function fetchEvents (filter, relays, {
   })
 }
 
-// Subscribe to a filter across multiple relays and return the newest matching
-// event. Closes early 500ms after the first EOSE (or after a hard timeout).
 export async function fetchLatestEvent (filter, relays, options = {}) {
   const events = await fetchEvents(filter, relays, options)
   let latest = null
@@ -153,13 +170,10 @@ export async function fetchLatestEvent (filter, relays, options = {}) {
   return latest
 }
 
-// NIP-65: fetch the user's latest relay-list event (kind:10002) from seed relays.
 export async function fetchRelayListEvent (pubkey) {
   return fetchLatestEvent({ kinds: [10002], authors: [pubkey], limit: 1 }, seedRelays)
 }
 
-// Returns { read, write }. `write` is the caller's best bet for publishing the
-// user's events; `read` is where the user expects to receive events addressed to them.
 export function parseRelayListEvent (event) {
   const out = { read: [], write: [] }
   if (!event || event.kind !== 10002) return out
@@ -175,7 +189,6 @@ export function parseRelayListEvent (event) {
   return out
 }
 
-// Resolves a user's write relays via NIP-65, falling back to freeRelays.
 export async function resolveWriteRelays (pubkey) {
   try {
     const event = await fetchRelayListEvent(pubkey)

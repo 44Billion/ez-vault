@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { generateSecretKey, getPublicKey } from 'nostr-tools'
 import { resolveMetadata } from '../docs/services/account-intake.js'
-import { freeRelays } from '../docs/services/relays.js'
+import { freeRelays } from 'libp2r2p/relay'
 
 function pubkey () {
   return getPublicKey(generateSecretKey())

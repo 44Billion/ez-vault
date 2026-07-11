@@ -1,6 +1,6 @@
 import * as store from '../services/accounts-store.js'
-import * as nostr from '../helpers/nostr/index.js'
-import * as relays from '../services/relays.js'
+import * as nostr from 'libp2r2p/key'
+import * as relays from '../services/relay.js'
 import * as accountStatus from '../services/account-status.js'
 import * as messengerLog from '../services/messenger-log/index.js'
 import * as secrets from '../services/secrets.js'

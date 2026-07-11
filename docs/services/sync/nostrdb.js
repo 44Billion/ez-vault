@@ -1,5 +1,5 @@
 import * as nostrdb from '../nostrdb.js'
-import { createEventReplyPacker } from '../private-messenger/recovery.js'
+import { createEventReplyPacker } from 'libp2r2p/private-messenger/recovery'
 
 // Flow notes:
 // - Adverts ride the trusted-device announce cadence: debounced after startup

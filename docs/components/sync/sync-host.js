@@ -1,5 +1,5 @@
 import * as store from '../../services/accounts-store.js'
-import * as nostr from '../../helpers/nostr/index.js'
+import * as nostr from 'libp2r2p/key'
 import * as passkey from '../../services/passkey.js'
 import * as secrets from '../../services/secrets.js'
 import {

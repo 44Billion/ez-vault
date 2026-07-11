@@ -3,12 +3,12 @@ import NsecSigner from './nsec-signer.js'
 import { BunkerHandle, persistHandleState } from './bunker.js'
 import * as store from './accounts-store.js'
 import { encodeSecretEntries, decodeSecretEntries } from './secret-blob.js'
-import { DEFAULT_STALE_CHANNEL_SECONDS } from './private-messenger/constants.js'
-import { bytesToBase64, base64ToBytes } from '../helpers/base64.js'
-import { hexToBytes } from '../helpers/nostr/index.js'
+import { DEFAULT_STALE_CHANNEL_SECONDS } from 'libp2r2p/private-messenger'
+import { bytesToBase64, base64ToBytes } from 'libp2r2p/base64'
+import { hexToBytes } from 'libp2r2p/base16'
 import { deriveSignerSeckey } from '../helpers/signer-key.js'
-import { sharedXOnlySecret } from '../helpers/ecdh.js'
-import * as nip44v3 from './nip44-v3.js'
+import { sharedXOnlySecret } from 'libp2r2p/ecdh'
+import * as nip44v3 from 'libp2r2p/nip44-v3'
 
 // In-memory home for every account's secret material plus the deterministic
 // vault key derived from the passkey PRF extension. Account secrets live in

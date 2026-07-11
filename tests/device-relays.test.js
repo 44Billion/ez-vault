@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { generateSecretKey } from 'nostr-tools'
 import NsecSigner from '../docs/services/nsec-signer.js'
 import * as secrets from '../docs/services/secrets.js'
-import { freeRelays, seedRelays } from '../docs/services/relays.js'
+import { freeRelays, seedRelays } from 'libp2r2p/relay'
 import {
   refreshDeviceRelayList,
   refreshDeviceRelayListIfDue,

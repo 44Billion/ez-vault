@@ -1,6 +1,6 @@
-import { PrivateMessenger } from '../private-messenger/index.js'
+import { PrivateMessenger } from 'libp2r2p/private-messenger'
 import { claimSigner } from '../signer.js'
-import { subscribeRelayListUpdates } from '../../helpers/nostr/queries.js'
+import { subscribeRelayListUpdates } from 'libp2r2p/relay'
 import * as store from '../accounts-store.js'
 import * as secrets from '../secrets.js'
 import * as trustedSigners from '../trusted-signers.js'
@@ -352,7 +352,7 @@ export function createSyncController ({
         let reachedEmptyQueue = false
         // eslint-disable-next-line no-unmodified-loop-condition
         while (isCurrentLifecycle(id) && messenger && _secrets.isUnlocked()) {
-          const message = messenger.nextMessage?.()
+          const message = await messenger.nextMessage?.()
           if (!message) {
             reachedEmptyQueue = true
             break
@@ -663,6 +663,7 @@ export function createSyncController ({
 
   function init () {
     if (initialized) return refresh()
+    PrivateMessenger.cleanupTemporaryStorage()
     initialized = true
     lifecycleId += 1
     lastStoreIdentityKey = syncAccountIdentityKey(_store)
