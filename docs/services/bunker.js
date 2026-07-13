@@ -1,13 +1,13 @@
-import { BunkerSigner, parseBunkerInput } from 'nostr-tools/nip46'
 import { generateSecretKey } from 'nostr-tools'
 import { bytesToHex, hexToBytes } from 'libp2r2p/base16'
+import { BunkerSigner, parseBunkerUrl, toBunkerUrl } from 'libp2r2p/nip46'
+import { relayPool } from 'libp2r2p/relay'
 import * as store from './accounts-store.js'
 import * as secrets from './secrets.js'
 import {
   fetchRelayListEvent,
   freeRelays,
-  parseRelayListEvent,
-  pool
+  parseRelayListEvent
 } from './relay.js'
 
 const PING_INTERVAL_MS = 60_000
@@ -49,10 +49,11 @@ export function stripBunkerSecret (bunkerUrl) {
   }
 }
 
-function buildBunkerUrl (remoteSignerPubkey, relays) {
-  const u = new URL(`bunker://${remoteSignerPubkey}`)
-  for (const r of relays) u.searchParams.append('relay', r)
-  return u.toString()
+function vaultClientMetadata () {
+  const metadata = { name: 'ez-vault' }
+  const origin = globalThis.location?.origin
+  if (typeof origin === 'string' && origin && origin !== 'null') metadata.url = origin
+  return metadata
 }
 
 async function fetchRelaysForPubkey (pubkey) {
@@ -66,11 +67,11 @@ async function fetchRelaysForPubkey (pubkey) {
 }
 
 async function openSigner (bunkerUrl, clientSecretKey) {
-  const pointer = await parseBunkerInput(bunkerUrl)
+  const pointer = parseBunkerUrl(bunkerUrl)
   if (!pointer) throw new Error('INVALID_BUNKER_URL')
-  const signer = BunkerSigner.fromBunker(clientSecretKey, pointer, { pool })
+  const signer = BunkerSigner.fromBunker(clientSecretKey, pointer, { relayPool })
   try {
-    await signer.connect()
+    await signer.connect({ clientMetadata: vaultClientMetadata() })
   } catch (err) {
     const msg = typeof err === 'string' ? err : (err?.message ?? '')
     // Some bunkers track prior sessions server-side and reply "already
@@ -223,33 +224,15 @@ export class BunkerHandle {
   }
 
   async tweakedSendRequest (tweak, method, params = []) {
-    return this.#withTweakedSendRequest(tweak, signer => signer.sendRequest(method, params))
+    return this.#withTweakedSendRequest(tweak, (signer, options) => signer.sendRequest(method, params, options))
   }
 
   async tweakedRequest (tweak, method, params = []) {
-    return this.#withTweakedSendRequest(tweak, signer => signer[method](...params))
+    return this.#withTweakedSendRequest(tweak, (signer, options) => signer[method](...params, options))
   }
 
   async #withTweakedSendRequest (tweak, fn) {
-    return this.#request(signer => {
-      const original = signer.sendRequest.bind(signer)
-      signer.sendRequest = function (sentMethod, sentParams) {
-        const saved = JSON.stringify
-        JSON.stringify = function (value, replacer, space) {
-          if (value && value.id && value.method === sentMethod && value.params === sentParams) {
-            return saved({ id: value.id, method: sentMethod, params: sentParams, tweak }, replacer, space)
-          }
-          return saved(value, replacer, space)
-        }
-        try {
-          return original(sentMethod, sentParams)
-        } finally {
-          JSON.stringify = saved
-          signer.sendRequest = original
-        }
-      }
-      return fn(signer)
-    })
+    return this.#request(signer => fn(signer, { extension: { tweak } }))
   }
 
   #getSigner () {
@@ -281,7 +264,7 @@ export class BunkerHandle {
     try {
       const switched = await signer.switchRelays()
       if (switched) {
-        this.#state.bunkerUrl = buildBunkerUrl(signer.bp.pubkey, signer.bp.relays)
+        this.#state.bunkerUrl = toBunkerUrl({ ...signer.pointer, secret: null })
         urlChanged = true
       }
     } catch (err) {
