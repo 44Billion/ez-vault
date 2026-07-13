@@ -1,4 +1,5 @@
-import { pool, freeRelays, seedRelays, fetchRelayListEvent, parseRelayListEvent, publish } from './relay.js'
+import { freeRelays, relayPool, seedRelays } from 'libp2r2p/relay'
+import { fetchRelayListEvent, parseRelayListEvent } from './relay.js'
 import * as secrets from './secrets.js'
 import { isOnline, onOnline } from 'libp2r2p/network'
 
@@ -51,11 +52,13 @@ export function relaysFromEventOrFallback (event) {
   return relays.length ? relays : fallbackRelays()
 }
 
-export async function canConnectRelay (relay, { _pool = pool } = {}) {
-  if (!_pool?.ensureRelay) return true
+export async function canConnectRelay (relay, { _relayPool = relayPool } = {}) {
   try {
-    await _pool.ensureRelay(relay, { connectionTimeout: RELAY_CONNECT_TIMEOUT_MS })
-    return true
+    const result = await _relayPool.getEvents({ limit: 0 }, [relay], {
+      timeout: RELAY_CONNECT_TIMEOUT_MS,
+      timeoutAfterFirstEose: null
+    })
+    return result.success
   } catch {
     return false
   }
@@ -81,7 +84,7 @@ export async function resolveDeviceRelays (pubkey, { _fetchRelayListEvent = fetc
 
 export async function refreshDeviceRelayList ({
   _fetchRelayListEvent = fetchRelayListEvent,
-  _publish = publish,
+  _relayPool = relayPool,
   _canConnectRelay = canConnectRelay,
   _isOnline = isOnline,
   _nowSeconds = nowSeconds
@@ -118,7 +121,7 @@ export async function refreshDeviceRelayList ({
     relays: nextRelays,
     createdAt: _nowSeconds()
   }))
-  const result = await _publish(event, seedRelays)
+  const result = await _relayPool.sendEvent(event, seedRelays)
   return {
     pubkey: devicePubkey,
     relays: nextRelays,

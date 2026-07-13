@@ -5,6 +5,7 @@ import NsecSigner from '../docs/services/nsec-signer.js'
 import * as secrets from '../docs/services/secrets.js'
 import { freeRelays, seedRelays } from 'libp2r2p/relay'
 import {
+  canConnectRelay,
   refreshDeviceRelayList,
   refreshDeviceRelayListIfDue,
   resolveDeviceRelays
@@ -18,6 +19,27 @@ globalThis.localStorage = {
   removeItem: key => { data.delete(String(key)) },
   setItem: (key, value) => { data.set(String(key), String(value)) }
 }
+
+test('device relay health uses a bounded one-relay EOSE probe', async () => {
+  const calls = []
+  assert.equal(await canConnectRelay('wss://relay.example', {
+    _relayPool: {
+      async getEvents (filter, relays, options) {
+        calls.push({ filter, relays, options })
+        return { result: [], errors: [], success: true }
+      }
+    }
+  }), true)
+  assert.deepEqual(calls, [{
+    filter: { limit: 0 },
+    relays: ['wss://relay.example'],
+    options: { timeout: 5000, timeoutAfterFirstEose: null }
+  }])
+
+  assert.equal(await canConnectRelay('wss://offline.example', {
+    _relayPool: { getEvents: async () => ({ result: [], errors: [new Error('offline')], success: false }) }
+  }), false)
+})
 
 if (!globalThis.crypto) globalThis.crypto = crypto
 if (!globalThis.btoa) globalThis.btoa = s => Buffer.from(s, 'binary').toString('base64')
@@ -47,9 +69,11 @@ test('device relay refresh publishes a two-relay NIP-65 list when missing', asyn
     _isOnline: async () => true,
     _nowSeconds: () => 30,
     _fetchRelayListEvent: async () => null,
-    _publish: async (event, relays) => {
-      published.push({ event, relays })
-      return { success: true }
+    _relayPool: {
+      sendEvent: async (event, relays) => {
+        published.push({ event, relays })
+        return { success: true }
+      }
     }
   })
 
@@ -74,9 +98,11 @@ test('device relay refresh replaces only one offline relay per run', async () =>
       checked.push(relay)
       return relay !== 'wss://old-one.example'
     },
-    _publish: async (event, relays) => {
-      published.push({ event, relays })
-      return { success: true }
+    _relayPool: {
+      sendEvent: async (event, relays) => {
+        published.push({ event, relays })
+        return { success: true }
+      }
     }
   })
 
@@ -102,7 +128,7 @@ test('device relay due refresh persists cadence', async () => {
     _nowMs: () => 1000,
     _isOnline: async () => true,
     _fetchRelayListEvent: async () => null,
-    _publish: async () => ({ success: true })
+    _relayPool: { sendEvent: async () => ({ success: true }) }
   })
   const second = await refreshDeviceRelayListIfDue({ _nowMs: () => 2000 })
 

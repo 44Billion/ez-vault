@@ -82,6 +82,7 @@ async function openSigner (bunkerUrl, clientSecretKey) {
       try { await signer.close() } catch { /* noop */ }
       throw err
     }
+    await signer.switchRelays({ timeout: 1000 }).catch(() => false)
   }
   return signer
 }
@@ -250,27 +251,13 @@ export class BunkerHandle {
   async #connect () {
     const clientKey = clientKeysByHandle.get(this)
     const signer = await openSigner(this.#state.bunkerUrl, hexToBytes(clientKey))
-    let urlChanged = false
-    // The URL's `secret` is one-use; now that we've burned it, strip it from
-    // our in-memory copy so any future reconnect can't replay it.
-    const stripped = stripBunkerSecret(this.#state.bunkerUrl)
-    if (stripped !== this.#state.bunkerUrl) {
-      this.#state.bunkerUrl = stripped
-      urlChanged = true
+    // connect() consumes the secret and applies the signer's preferred relay
+    // set. Persist that final pointer once instead of issuing a second switch.
+    const connectedUrl = toBunkerUrl({ ...signer.pointer, secret: null })
+    if (connectedUrl !== this.#state.bunkerUrl) {
+      this.#state.bunkerUrl = connectedUrl
+      this.#notifyStateChange()
     }
-    // NIP-46: call switch_relays right after connect. If the bunker returns
-    // a different relay set, BunkerSigner updates its subscription in-memory;
-    // we mirror the new set into our cached bunkerUrl so it survives reload.
-    try {
-      const switched = await signer.switchRelays()
-      if (switched) {
-        this.#state.bunkerUrl = toBunkerUrl({ ...signer.pointer, secret: null })
-        urlChanged = true
-      }
-    } catch (err) {
-      console.warn('switch_relays failed', err?.message ?? err)
-    }
-    if (urlChanged) this.#notifyStateChange()
     this.#scheduleTick()
     return signer
   }

@@ -1,6 +1,7 @@
 import * as store from '../services/accounts-store.js'
 import * as nostr from 'libp2r2p/key'
 import * as relays from '../services/relay.js'
+import { relayPool } from 'libp2r2p/relay'
 import * as accountStatus from '../services/account-status.js'
 import * as messengerLog from '../services/messenger-log/index.js'
 import * as secrets from '../services/secrets.js'
@@ -467,7 +468,7 @@ export class AccountAvatar extends HTMLElement {
       const writeRelays = account.writeRelays?.length
         ? account.writeRelays
         : await relays.resolveWriteRelays(account.pubkey)
-      const profilePublish = await relays.publish(profileEvent, writeRelays)
+      const profilePublish = await relayPool.sendEvent(profileEvent, writeRelays)
       if (!profilePublish.success) throw new Error('PROFILE_PUBLISH_FAILED')
 
       const patch = { name, profileEvent, writeRelays }
@@ -625,10 +626,10 @@ export class AccountAvatar extends HTMLElement {
         picture: this.#draft.picture
       })
 
-      const relayListPublish = await relays.publish(relayListEvent, relays.seedRelays)
+      const relayListPublish = await relayPool.sendEvent(relayListEvent, relays.seedRelays)
       if (!relayListPublish.success) throw new Error('RELAY_LIST_PUBLISH_FAILED')
 
-      const profilePublish = await relays.publish(profileEvent, writeRelays)
+      const profilePublish = await relayPool.sendEvent(profileEvent, writeRelays)
       if (!profilePublish.success) throw new Error('PROFILE_PUBLISH_FAILED')
 
       // Register the vault's passkey on the first non-npub account; no-op

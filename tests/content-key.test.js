@@ -70,6 +70,18 @@ function relayListEvent (pubkey, createdAt, tags) {
   }
 }
 
+function relayPoolStub ({
+  events = async () => [],
+  send = async () => ({ success: true })
+} = {}) {
+  return {
+    async getEvents (filter, relays) {
+      return { result: await events(filter, relays), errors: [], success: true }
+    },
+    sendEvent: send
+  }
+}
+
 test('makeContentKeyEvent publishes a signed content pubkey', async () => {
   const user = signer()
   const contentKey = signer()
@@ -125,10 +137,12 @@ test('upsertContentKeyEvent signs and publishes to user write relays', async () 
       assert.equal(pubkey, userPubkey)
       return ['wss://write.example']
     },
-    _publish: async (event, relays) => {
-      published = { event, relays }
-      return { success: true }
-    }
+    _relayPool: relayPoolStub({
+      send: async (event, relays) => {
+        published = { event, relays }
+        return { success: true }
+      }
+    })
   })
 
   assert.deepEqual(published.relays, ['wss://write.example'])
@@ -199,17 +213,19 @@ test('refreshStoredContentKeyEvents republishes newest remote key only where abs
     _isOnline: async () => true,
     _nowSeconds: () => 200,
     _fetchRelayListEvent: async () => relayList,
-    _fetchEvents: async (_filter, relays) => {
-      const relay = relays[0]
-      if (relay === 'wss://newest.example') return [newest]
-      if (relay === 'wss://same.example') return [olderSame]
-      if (relay === 'wss://older.example') return [olderOther]
-      return []
-    },
-    _publish: async (event, relays) => {
-      published.push({ event, relays })
-      return { success: true }
-    }
+    _relayPool: relayPoolStub({
+      events: async (_filter, relays) => {
+        const relay = relays[0]
+        if (relay === 'wss://newest.example') return [newest]
+        if (relay === 'wss://same.example') return [olderSame]
+        if (relay === 'wss://older.example') return [olderOther]
+        return []
+      },
+      send: async (event, relays) => {
+        published.push({ event, relays })
+        return { success: true }
+      }
+    })
   })
 
   assert.equal(result.checked, 1)
@@ -237,11 +253,12 @@ test('refreshStoredContentKeyEvents publishes local key only when no valid event
     _isOnline: async () => true,
     _nowSeconds: () => 200,
     _fetchRelayListEvent: async () => relayList,
-    _fetchEvents: async () => [],
-    _publish: async (event, relays) => {
-      published.push({ event, relays })
-      return { success: true }
-    }
+    _relayPool: relayPoolStub({
+      send: async (event, relays) => {
+        published.push({ event, relays })
+        return { success: true }
+      }
+    })
   })
 
   assert.equal(published.length, 1)
@@ -259,8 +276,10 @@ test('refreshStoredContentKeyEvents skips offline instead of treating missing re
   const result = await refreshStoredContentKeyEvents({
     _isOnline: async () => false,
     _fetchRelayListEvent: async () => { fetched = true; return null },
-    _fetchEvents: async () => { fetched = true; return [] },
-    _publish: async () => { published = true }
+    _relayPool: relayPoolStub({
+      events: async () => { fetched = true; return [] },
+      send: async () => { published = true }
+    })
   })
 
   assert.deepEqual(result, { skipped: 'offline', accounts: [account.pubkey] })
@@ -278,11 +297,12 @@ test('refreshStoredContentKeyEvents publishes a fallback relay list when none ex
     _isOnline: async () => true,
     _nowSeconds: () => 200,
     _fetchRelayListEvent: async () => null,
-    _fetchEvents: async () => [],
-    _publish: async (event, relays) => {
-      published.push({ event, relays })
-      return { success: true }
-    }
+    _relayPool: relayPoolStub({
+      send: async (event, relays) => {
+        published.push({ event, relays })
+        return { success: true }
+      }
+    })
   })
 
   assert.equal(published.length, 2)
@@ -313,11 +333,12 @@ test('refreshStoredContentKeyEvents adds fallback write relays without duplicate
     _isOnline: async () => true,
     _nowSeconds: () => 200,
     _fetchRelayListEvent: async () => relayList,
-    _fetchEvents: async () => [],
-    _publish: async (event, relays) => {
-      published.push({ event, relays })
-      return { success: true }
-    }
+    _relayPool: relayPoolStub({
+      send: async (event, relays) => {
+        published.push({ event, relays })
+        return { success: true }
+      }
+    })
   })
 
   assert.equal(published[0].event.kind, 10002)
@@ -351,11 +372,13 @@ test('rotateContentKeyIfStillCanonical rotates when relays still advertise remov
     removedKnownContentPubkey: oldContent.pubkey,
     _nowSeconds: () => 100,
     _fetchRelayListEvent: async () => relayList,
-    _fetchEvents: async () => [oldEvent],
-    _publish: async (event, relays) => {
-      published.push({ event, relays })
-      return { success: true }
-    }
+    _relayPool: relayPoolStub({
+      events: async () => [oldEvent],
+      send: async (event, relays) => {
+        published.push({ event, relays })
+        return { success: true }
+      }
+    })
   })
 
   assert.equal(result.status, 'rotated')
@@ -389,8 +412,10 @@ test('rotateContentKeyIfStillCanonical clears when relays already advertise anot
     ownerPubkey: account.pubkey,
     removedKnownContentPubkey: oldContent.pubkey,
     _fetchRelayListEvent: async () => relayList,
-    _fetchEvents: async () => [newerEvent],
-    _publish: async () => { published = true }
+    _relayPool: relayPoolStub({
+      events: async () => [newerEvent],
+      send: async () => { published = true }
+    })
   })
 
   assert.equal(result.status, 'cleared')

@@ -1,79 +1,77 @@
-import { afterEach, test } from 'node:test'
+import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { pool, publish } from '../docs/services/relay.js'
+import {
+  fetchLatestProfile,
+  fetchRelayListEvent,
+  freeRelays,
+  parseRelayListEvent,
+  resolveWriteRelays,
+  seedRelays
+} from '../docs/services/relay.js'
 
-const originalPublish = pool.publish
-
-afterEach(() => {
-  pool.publish = originalPublish
-})
-
-function deferred () {
-  let resolve
-  let reject
-  const promise = new Promise((res, rej) => {
-    resolve = res
-    reject = rej
-  })
-  return { promise, resolve, reject }
+function event (overrides = {}) {
+  return {
+    id: 'a'.repeat(64),
+    kind: 10002,
+    pubkey: 'b'.repeat(64),
+    created_at: 10,
+    tags: [],
+    content: '',
+    ...overrides
+  }
 }
 
-test('relay publish uses the renamed early and overall timeout options', async () => {
-  const first = deferred()
-  const second = deferred()
-  pool.publish = () => [first.promise, second.promise]
-
-  const pending = publish({ id: 'event' }, ['wss://a.example', 'wss://b.example'], {
-    timeoutUntilFirstFulfillment: null,
-    timeout: 20
+test('relay-list lookup uses RelayPool timing and selects the newest event', async () => {
+  const calls = []
+  const older = event({ created_at: 10 })
+  const newer = event({ id: 'c'.repeat(64), created_at: 20 })
+  const result = await fetchRelayListEvent(older.pubkey, {
+    _relayPool: {
+      async getEvents (filter, relays, options) {
+        calls.push({ filter, relays, options })
+        return { result: [older, newer], errors: [], success: true }
+      }
+    }
   })
-  let returned = false
-  pending.then(() => { returned = true })
 
-  await new Promise(resolve => setTimeout(resolve, 10))
-  assert.ok(!returned, 'null must disable only the early fulfillment timer')
-
-  const early = await pending
-  const full = await early.promise
-  assert.equal(early.success, false)
-  assert.deepEqual(full.errors.map(({ relay, reason }) => [relay, reason.message]), [
-    ['wss://a.example', 'PUBLISH_TIMEOUT'],
-    ['wss://b.example', 'PUBLISH_TIMEOUT']
-  ])
-
-  first.resolve()
-  second.reject(new Error('late failure'))
+  assert.equal(result, newer)
+  assert.deepEqual(calls, [{
+    filter: { kinds: [10002], authors: [older.pubkey], limit: 1 },
+    relays: seedRelays,
+    options: { timeout: 5000, timeoutAfterFirstEose: 500 }
+  }])
 })
 
-test('relay publish can disable both timers until a relay fulfills', async () => {
-  const result = deferred()
-  pool.publish = () => [result.promise]
-
-  const pending = publish({ id: 'event' }, ['wss://a.example'], {
-    timeout: null,
-    timeoutUntilFirstFulfillment: null
+test('relay-list parsing preserves NIP-65 read/write markers without duplicates', () => {
+  assert.deepEqual(parseRelayListEvent(event({
+    tags: [
+      ['r', 'wss://both.example'],
+      ['r', 'wss://read.example', 'read'],
+      ['r', 'wss://write.example', 'write'],
+      ['r', 'wss://both.example']
+    ]
+  })), {
+    read: ['wss://both.example', 'wss://read.example'],
+    write: ['wss://both.example', 'wss://write.example']
   })
-  await Promise.resolve()
-  result.resolve()
-
-  const early = await pending
-  assert.equal(early.success, true)
-  assert.equal((await early.promise).success, true)
 })
 
-test('an unsuccessful early fulfillment window closes the local publish report', async () => {
-  const result = deferred()
-  pool.publish = () => [result.promise]
+test('write-relay resolution falls back and profile reads use resolved relays', async () => {
+  assert.deepEqual(await resolveWriteRelays('d'.repeat(64), {
+    _fetchRelayListEvent: async () => null
+  }), freeRelays.slice(0, 2))
 
-  const early = await publish({ id: 'event' }, ['wss://a.example'], {
-    timeout: 1000,
-    timeoutUntilFirstFulfillment: 10
+  const profile = event({ kind: 0, created_at: 30 })
+  let requestedRelays
+  const result = await fetchLatestProfile(profile.pubkey, {
+    _resolveWriteRelays: async () => ['wss://write.example'],
+    _relayPool: {
+      async getEvents (_filter, relays) {
+        requestedRelays = relays
+        return { result: [profile], errors: [], success: true }
+      }
+    }
   })
-  const full = await early.promise
-
-  assert.equal(early.success, false)
-  assert.equal(full.success, false)
-  assert.equal(full.errors[0].reason.message, 'PUBLISH_TIMEOUT')
-
-  result.resolve()
+  assert.equal(result, profile)
+  assert.deepEqual(requestedRelays, ['wss://write.example'])
 })
