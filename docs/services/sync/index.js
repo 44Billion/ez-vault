@@ -9,7 +9,11 @@ import * as contentKeys from './content-keys.js'
 import * as trustedSignerSync from './trusted-signers.js'
 import * as revocationRotation from './revocation-rotation.js'
 import { createNostrDbSyncController } from './nostrdb.js'
-import { filterVisibleAccounts } from '../account-mutations.js'
+import {
+  filterVisibleAccounts,
+  hasPendingMutation,
+  subscribePendingMutations
+} from '../account-mutations.js'
 
 const ANNOUNCE_INTERVAL_MS = 4 * 60 * 60 * 1000
 const ANNOUNCE_DEBOUNCE_MS = 1000
@@ -119,6 +123,8 @@ export function createSyncController ({
   _createNostrDbSyncController = createNostrDbSyncController,
   _claimSigner = claimSigner,
   _subscribeRelayListUpdates = subscribeRelayListUpdates,
+  _hasPendingMutation = hasPendingMutation,
+  _subscribePendingMutations = subscribePendingMutations,
   _setTimeout = globalThis.setTimeout.bind(globalThis),
   _clearTimeout = globalThis.clearTimeout.bind(globalThis),
   _setInterval = globalThis.setInterval.bind(globalThis),
@@ -661,6 +667,17 @@ export function createSyncController ({
     return refresh()
   }
 
+  function refreshAfterAccountMutation () {
+    if (!initialized || _hasPendingMutation()) return null
+    if (refreshPromise) {
+      return refreshPromise.then(() => {
+        if (!initialized || _hasPendingMutation()) return null
+        return refreshOnStoreIdentityChange()
+      })
+    }
+    return refreshOnStoreIdentityChange()
+  }
+
   function init () {
     if (initialized) return refresh()
     PrivateMessenger.cleanupTemporaryStorage()
@@ -670,6 +687,7 @@ export function createSyncController ({
     unsubscribers.push(_secrets.subscribe(refresh))
     if (_secrets.subscribeContentKeys) unsubscribers.push(_secrets.subscribeContentKeys(onContentKeyChange))
     unsubscribers.push(_store.subscribe(refreshOnStoreIdentityChange))
+    unsubscribers.push(_subscribePendingMutations(refreshAfterAccountMutation))
     unsubscribers.push(_trustedSigners.subscribe(onTrustedSignerChange))
     return refresh()
   }

@@ -88,6 +88,7 @@ function createSubscribable (state) {
   const listeners = new Set()
   return {
     ...state,
+    get subscriberCount () { return listeners.size },
     subscribe: fn => {
       listeners.add(fn)
       return () => listeners.delete(fn)
@@ -205,6 +206,8 @@ test('sync orchestration watches nsec channels with identity-only sync options',
   const trustedStub = createSubscribable({
     list: () => [{ pubkey: 'trusted1', platform: 'Laptop' }]
   })
+  let accountMutationPending = false
+  const accountMutationsStub = createSubscribable({})
   const instances = []
   const debugEvents = []
   class FakeMessenger {
@@ -238,6 +241,8 @@ test('sync orchestration watches nsec channels with identity-only sync options',
     _store: storeStub,
     _secrets: secretsStub,
     _trustedSigners: trustedStub,
+    _hasPendingMutation: () => accountMutationPending,
+    _subscribePendingMutations: accountMutationsStub.subscribe,
     _claimSigner: account => accountSigners[account.pubkey],
     _setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers[timers.length - 1] },
     _clearTimeout: () => {},
@@ -296,12 +301,26 @@ test('sync orchestration watches nsec channels with identity-only sync options',
   await secretsStub.emit()
   assert.equal(instances[0].updates.length, 3)
 
+  accountMutationPending = true
+  await accountMutationsStub.emit()
+  accountSigners.nsec3 = signer('nsec3')
+  accounts = [...accounts, { type: 'nsec', pubkey: 'nsec3' }]
+  await accountMutationsStub.emit()
+  assert.equal(instances[0].updates.length, 3)
+
+  accountMutationPending = false
+  await accountMutationsStub.emit()
+  assert.equal(instances[0].updates.length, 4)
+  assert.ok(instances[0].updates[3].channels.some(channel => channel.pubkey === `nsec3:shared:nsec3:${SYNC_INFO}`))
+  assert.equal(accountMutationsStub.subscriberCount, 1)
+
   unlocked = false
   await secretsStub.emit()
   assert.equal(instances[0].closed, true)
   assert.equal(controller.messenger, null)
 
   controller.close()
+  assert.equal(accountMutationsStub.subscriberCount, 0)
 })
 
 test('sync refreshes messenger channels when watched account read relays change', async () => {

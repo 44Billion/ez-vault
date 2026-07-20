@@ -3,6 +3,7 @@ import './shared/accordion-panel.js'
 import * as sync from '../services/sync/index.js'
 import * as secrets from '../services/secrets.js'
 import * as store from '../services/accounts-store.js'
+import { hasPendingMutation, subscribePendingMutations } from '../services/account-mutations.js'
 import { seededAvatarDataUrl } from '../services/avatar.js'
 
 const ICON_PLUS = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5l0 14" /><path d="M5 12l14 0" /></svg>'
@@ -201,6 +202,7 @@ export class DevPanel extends HTMLElement {
   #unsubscribeSecrets = null
   #unsubscribeContentKeys = null
   #unsubscribeStore = null
+  #unsubscribePendingMutations = null
   #errors = new Map()
 
   connectedCallback () {
@@ -209,6 +211,9 @@ export class DevPanel extends HTMLElement {
     this.#unsubscribeSecrets = secrets.subscribe(() => this.render())
     this.#unsubscribeContentKeys = secrets.subscribeContentKeys?.(() => this.render()) || null
     this.#unsubscribeStore = store.subscribe(() => this.render())
+    this.#unsubscribePendingMutations = subscribePendingMutations(() => {
+      if (!hasPendingMutation()) this.render()
+    })
     this.addEventListener('click', this.#onClick)
     this.render()
   }
@@ -219,6 +224,7 @@ export class DevPanel extends HTMLElement {
     this.#unsubscribeSecrets?.()
     this.#unsubscribeContentKeys?.()
     this.#unsubscribeStore?.()
+    this.#unsubscribePendingMutations?.()
   }
 
   render () {
