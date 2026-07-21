@@ -3,12 +3,37 @@ import * as accountsStore from '../services/accounts-store.js'
 import * as secrets from '../services/secrets.js'
 import { seededAvatarDataUrl } from '../services/avatar.js'
 import { injectComponentStyles } from '../helpers/dom.js'
+import { defineLocales, getLocale, getT, subscribeLocaleChanged } from '../i18n/index.js'
 import './shared/table-saw.js'
 
 // Manual override. When true, fixtures.json (next to messenger-log) is
 // merged into the displayed list so we can eyeball every method/kind
 // shape without driving each one through the real signer pipeline.
 const DEV_MODE = window === window.top // true
+
+export const activityLogLocales = defineLocales({
+  'Unknown app': ['Application inconnue', 'App sconosciuta', 'Unbekannte App', 'Aplicación desconocida', 'App desconhecido', 'Неизвестное приложение', '未知应用', '未知應用程式', '不明なアプリ', '알 수 없는 앱'],
+  Unknown: ['Inconnu', 'Sconosciuto', 'Unbekannt', 'Desconocido', 'Desconhecido', 'Неизвестно', '未知', '未知', '不明', '알 수 없음'],
+  'NostrDB merge': ['Fusion NostrDB', 'Unione NostrDB', 'NostrDB-Zusammenführung', 'Fusión de NostrDB', 'Mesclagem do NostrDB', 'Слияние NostrDB', 'NostrDB 合并', 'NostrDB 合併', 'NostrDB マージ', 'NostrDB 병합'],
+  'NostrDB maintenance': ['Maintenance NostrDB', 'Manutenzione NostrDB', 'NostrDB-Wartung', 'Mantenimiento de NostrDB', 'Manutenção do NostrDB', 'Обслуживание NostrDB', 'NostrDB 维护', 'NostrDB 維護', 'NostrDB メンテナンス', 'NostrDB 유지관리'],
+  'Sign event': ['Signer l’événement', 'Firma evento', 'Event signieren', 'Firmar evento', 'Assinar evento', 'Подписать событие', '签名事件', '簽署事件', 'イベントに署名', '이벤트 서명'],
+  'Sign event (kind {{kind}})': ['Signer l’événement (kind {{kind}})', 'Firma evento (kind {{kind}})', 'Event signieren (Kind {{kind}})', 'Firmar evento (kind {{kind}})', 'Assinar evento (kind {{kind}})', 'Подписать событие (kind {{kind}})', '签名事件（kind {{kind}}）', '簽署事件（kind {{kind}}）', 'イベントに署名（kind {{kind}}）', '이벤트 서명(kind {{kind}})'],
+  'Double-sign event': ['Signer deux fois l’événement', 'Firma doppia evento', 'Event doppelt signieren', 'Firmar dos veces el evento', 'Assinar evento duas vezes', 'Двойная подпись события', '双重签名事件', '雙重簽署事件', 'イベントに二重署名', '이벤트 이중 서명'],
+  'Double-sign event (kind {{kind}})': ['Signer deux fois l’événement (kind {{kind}})', 'Firma doppia evento (kind {{kind}})', 'Event doppelt signieren (Kind {{kind}})', 'Firmar dos veces el evento (kind {{kind}})', 'Assinar evento duas vezes (kind {{kind}})', 'Двойная подпись события (kind {{kind}})', '双重签名事件（kind {{kind}}）', '雙重簽署事件（kind {{kind}}）', 'イベントに二重署名（kind {{kind}}）', '이벤트 이중 서명(kind {{kind}})'],
+  Encrypt: ['Chiffrer', 'Cifra', 'Verschlüsseln', 'Cifrar', 'Criptografar', 'Зашифровать', '加密', '加密', '暗号化', '암호화'],
+  Decrypt: ['Déchiffrer', 'Decifra', 'Entschlüsseln', 'Descifrar', 'Descriptografar', 'Расшифровать', '解密', '解密', '復号', '복호화'],
+  'No activity yet.': ['Aucune activité.', 'Nessuna attività.', 'Noch keine Aktivität.', 'Aún no hay actividad.', 'Ainda não há atividade.', 'Активности пока нет.', '暂无活动。', '尚無活動。', 'アクティビティはまだありません。', '아직 활동이 없습니다.'],
+  App: ['Application', 'App', 'App', 'Aplicación', 'App', 'Приложение', '应用', '應用程式', 'アプリ', '앱'],
+  Operation: ['Opération', 'Operazione', 'Vorgang', 'Operación', 'Operação', 'Операция', '操作', '操作', '操作', '작업'],
+  Data: ['Données', 'Dati', 'Daten', 'Datos', 'Dados', 'Данные', '数据', '資料', 'データ', '데이터'],
+  Time: ['Heure', 'Ora', 'Zeit', 'Hora', 'Hora', 'Время', '时间', '時間', '時刻', '시간'],
+  failed: ['échec', 'non riuscito', 'fehlgeschlagen', 'fallido', 'falhou', 'ошибка', '失败', '失敗', '失敗', '실패'],
+  '(failed)': ['(échec)', '(non riuscito)', '(fehlgeschlagen)', '(fallido)', '(falhou)', '(ошибка)', '（失败）', '（失敗）', '（失敗）', '(실패)'],
+  '(no payload)': ['(aucun contenu)', '(nessun payload)', '(keine Nutzdaten)', '(sin contenido)', '(sem conteúdo)', '(нет данных)', '（无内容）', '（無內容）', '（ペイロードなし）', '(페이로드 없음)'],
+  Copy: ['Copier', 'Copia', 'Kopieren', 'Copiar', 'Copiar', 'Копировать', '复制', '複製', 'コピー', '복사']
+})
+
+const t = getT(activityLogLocales)
 
 const FIXTURES_URL = new URL('../services/messenger-log/fixtures.json', import.meta.url)
 
@@ -330,18 +355,19 @@ function appDisplayName (app) {
   const name = app?.name?.trim()
   if (name) return name
   const id = (app?.id ?? '').replace(/^\+{1,3}/, '').trim()
-  return id || 'Unknown app'
+  return id || t('Unknown app')
 }
 
 function nip44v3Label (action, suffix, eventKind) {
+  const translatedAction = t(action)
   return eventKind != null
-    ? `${action} (NIP-44 v3${suffix}, kind ${eventKind})`
-    : `${action} (NIP-44 v3${suffix})`
+    ? `${translatedAction} (NIP-44 v3${suffix}, kind ${eventKind})`
+    : `${translatedAction} (NIP-44 v3${suffix})`
 }
 
 function contextLabel (context) {
-  if (context === 'nostrdb_merge') return 'NostrDB merge'
-  if (context === 'nostrdb_maintenance') return 'NostrDB maintenance'
+  if (context === 'nostrdb_merge') return t('NostrDB merge')
+  if (context === 'nostrdb_maintenance') return t('NostrDB maintenance')
   return ''
 }
 
@@ -349,22 +375,22 @@ function methodLabel (method, eventKind, _code, context) {
   let label
   switch (method) {
     case 'sign_event':
-      label = eventKind != null ? `Sign event (kind ${eventKind})` : 'Sign event'
+      label = eventKind != null ? t('Sign event (kind {{kind}})', { kind: eventKind }) : t('Sign event')
       break
     case 'double_sign_event':
-      label = eventKind != null ? `Double-sign event (kind ${eventKind})` : 'Double-sign event'
+      label = eventKind != null ? t('Double-sign event (kind {{kind}})', { kind: eventKind }) : t('Double-sign event')
       break
     case 'nip04_encrypt':
-      label = 'Encrypt (NIP-04)'
+      label = `${t('Encrypt')} (NIP-04)`
       break
     case 'nip04_decrypt':
-      label = 'Decrypt (NIP-04)'
+      label = `${t('Decrypt')} (NIP-04)`
       break
     case 'nip44_encrypt':
-      label = 'Encrypt (NIP-44)'
+      label = `${t('Encrypt')} (NIP-44)`
       break
     case 'nip44_decrypt':
-      label = 'Decrypt (NIP-44)'
+      label = `${t('Decrypt')} (NIP-44)`
       break
     case 'nip44v3_encrypt':
       label = nip44v3Label('Encrypt', '', eventKind)
@@ -379,7 +405,7 @@ function methodLabel (method, eventKind, _code, context) {
       label = nip44v3Label('Decrypt', ' Double-DH', eventKind)
       break
     default:
-      label = method ?? 'Unknown'
+      label = method ?? t('Unknown')
   }
   const suffix = contextLabel(context)
   return suffix ? `${label} · ${suffix}` : label
@@ -388,7 +414,7 @@ function methodLabel (method, eventKind, _code, context) {
 // Pick the most user-relevant single field per method for the collapsed row
 // preview. The expanded `<details>` body shows the whole entry as JSON.
 function previewFor (entry) {
-  if (entry.status === 'failure') return entry.error?.message ?? '(failed)'
+  if (entry.status === 'failure') return entry.error?.message ?? t('(failed)')
   switch (entry.method) {
     case 'sign_event':
     case 'double_sign_event':
@@ -416,16 +442,18 @@ function relativeTime (tsSeconds) {
   if (!tsSeconds) return ''
   const now = Math.floor(Date.now() / 1000)
   const diff = Math.max(0, now - tsSeconds)
-  if (diff < 60) return 'just now'
-  if (diff < 3600) return `${Math.floor(diff / 60)} min ago`
-  if (diff < 86400) return `${Math.floor(diff / 3600)} h ago`
-  if (diff < 86400 * 7) return `${Math.floor(diff / 86400)} d ago`
-  return new Date(tsSeconds * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+  const relative = new Intl.RelativeTimeFormat(getLocale(), { numeric: 'auto' })
+  if (diff < 60) return relative.format(-diff, 'second')
+  if (diff < 3600) return relative.format(-Math.floor(diff / 60), 'minute')
+  if (diff < 86400) return relative.format(-Math.floor(diff / 3600), 'hour')
+  if (diff < 86400 * 7) return relative.format(-Math.floor(diff / 86400), 'day')
+  return new Date(tsSeconds * 1000).toLocaleDateString(getLocale(), { month: 'short', day: 'numeric' })
 }
 
 export class ActivityLog extends HTMLElement {
   #unsub = null
   #unsubSecrets = null
+  #unsubLocale = null
   #renderId = 0
 
   connectedCallback () {
@@ -435,6 +463,7 @@ export class ActivityLog extends HTMLElement {
     // Sealed entries inflate to their decrypted shape only while the vault
     // is unlocked; re-render on lock state changes so previews refresh.
     this.#unsubSecrets = secrets.subscribe(() => this.#render())
+    this.#unsubLocale = subscribeLocaleChanged(() => this.#render())
     this.#render()
   }
 
@@ -444,6 +473,8 @@ export class ActivityLog extends HTMLElement {
     this.#unsub = null
     this.#unsubSecrets?.()
     this.#unsubSecrets = null
+    this.#unsubLocale?.()
+    this.#unsubLocale = null
   }
 
   async #render () {
@@ -464,7 +495,7 @@ export class ActivityLog extends HTMLElement {
       this.toggleAttribute('data-empty', true)
       this.replaceChildren(Object.assign(document.createElement('div'), {
         className: 'empty',
-        textContent: 'No activity yet.'
+        textContent: t('No activity yet.')
       }))
       return
     }
@@ -482,7 +513,7 @@ export class ActivityLog extends HTMLElement {
           <col class="col-time" />
         </colgroup>
         <thead>
-          <tr><th>App</th><th>Operation</th><th>Data</th><th>Time</th></tr>
+          <tr><th>${t('App')}</th><th>${t('Operation')}</th><th>${t('Data')}</th><th>${t('Time')}</th></tr>
         </thead>
         <tbody>
           ${entries.map((e, i) => this.#rowHtml(e, i)).join('')}
@@ -504,10 +535,10 @@ export class ActivityLog extends HTMLElement {
     const ts = entry.ts ?? 0
     const rel = relativeTime(ts)
     const iso = ts ? new Date(ts * 1000).toISOString() : ''
-    const abs = ts ? new Date(ts * 1000).toLocaleString() : ''
+    const abs = ts ? new Date(ts * 1000).toLocaleString(getLocale()) : ''
     const summaryInner = preview
       ? escapeHtml(preview)
-      : '<span class="empty-data">(no payload)</span>'
+      : `<span class="empty-data">${t('(no payload)')}</span>`
 
     return `
       <tr data-row="${idx}">
@@ -525,7 +556,7 @@ export class ActivityLog extends HTMLElement {
         </td>
         <td>
           <span class="op-method">${escapeHtml(op)}</span>
-          <span class="op-status" data-status="${escapeHtml(status)}">failed</span>
+          <span class="op-status" data-status="${escapeHtml(status)}">${t('failed')}</span>
         </td>
         <td class="data-cell">
           <details>
@@ -537,7 +568,7 @@ export class ActivityLog extends HTMLElement {
             <div class="data-actions">
               <button type="button" class="copy-btn" data-action="copy">
                 <span class="copy-btn-icon">${ICON_COPY}</span>
-                <span>Copy</span>
+                <span>${t('Copy')}</span>
               </button>
             </div>
           </details>

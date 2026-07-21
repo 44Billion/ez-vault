@@ -15,17 +15,17 @@
           <div class="accounts-actions">
             <button id="create-account-btn" type="button" class="primary-action">
               <span class="glyph"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5l0 14" /><path d="M5 12l14 0" /></svg></span>
-              <span>New Account</span>
+              <span data-i18n="new-account">New Account</span>
             </button>
             <button id="add-account-btn" type="button" class="primary-action">
               <span class="glyph"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5l0 14" /><path d="M16 15l-4 4" /><path d="M8 15l4 4" /></svg></span>
-              <span class="text-full">Add Account</span>
-              <span class="text-short">Add</span>
+              <span class="text-full" data-i18n="add-account">Add Account</span>
+              <span class="text-short" data-i18n="add">Add</span>
             </button>
             <button id="sync-devices-btn" type="button" class="primary-action">
               <span class="glyph"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 9a1 1 0 0 1 1 -1h6a1 1 0 0 1 1 1v10a1 1 0 0 1 -1 1h-6a1 1 0 0 1 -1 -1v-10z" /><path d="M18 8v-3a1 1 0 0 0 -1 -1h-13a1 1 0 0 0 -1 1v12a1 1 0 0 0 1 1h9" /><path d="M16 9h2" /></svg></span>
-              <span class="text-full">Sync Devices</span>
-              <span class="text-short">Sync</span>
+              <span class="text-full" data-i18n="sync-devices">Sync Devices</span>
+              <span class="text-short" data-i18n="sync">Sync</span>
             </button>
           </div>
           <account-add></account-add>
@@ -34,10 +34,10 @@
         <account-list class="accounts-list"></account-list>
       </section>
       <section class="diagnostics-section">
-        <accordion-panel header="Trusted devices" icon="devices">
+        <accordion-panel header="Trusted devices" data-i18n-header="trusted-devices" icon="devices">
           <trusted-signers-panel></trusted-signers-panel>
         </accordion-panel>
-        <accordion-panel header="Activity log" icon="activity">
+        <accordion-panel header="Activity log" data-i18n-header="activity-log" icon="activity">
           <activity-log></activity-log>
         </accordion-panel>
       </section>
@@ -54,8 +54,8 @@
       "@noble/hashes/hmac.js": "https://esm.sh/@noble/hashes@2.2.0/hmac.js",
       "@noble/hashes/sha2.js": "https://esm.sh/@noble/hashes@2.2.0/sha2.js",
       "@noble/hashes/utils.js": "https://esm.sh/@noble/hashes@2.2.0/utils.js",
-      "libp2r2p": "https://esm.sh/libp2r2p@0.0.1",
-      "libp2r2p/": "https://esm.sh/libp2r2p@0.0.1/",
+      "libp2r2p": "https://esm.sh/libp2r2p@0.4.0",
+      "libp2r2p/": "https://esm.sh/libp2r2p@0.4.0/",
       "nostr-tools": "https://esm.sh/nostr-tools@2.23.5",
       "nostr-tools/": "https://esm.sh/nostr-tools@2.23.5/",
       "qrcode-generator": "https://esm.sh/qrcode-generator@1.4.4"

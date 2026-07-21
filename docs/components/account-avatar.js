@@ -12,9 +12,31 @@ import { seededAvatarDataUrl } from '../services/avatar.js'
 import { randomAccountName } from '../services/account-names.js'
 import * as toast from './shared/toast.js'
 import { injectComponentStyles, waitForFocus } from '../helpers/dom.js'
+import { defineLocales, getT, subscribeLocaleChanged } from '../i18n/index.js'
 
 const MODE = { CREATING: 'creating', NORMAL: 'normal', EDITING: 'editing' }
 const FLASH_MS = 1200
+
+export const accountAvatarLocales = defineLocales({
+  Cancel: ['Annuler', 'Annulla', 'Abbrechen', 'Cancelar', 'Cancelar', 'Отмена', '取消', '取消', 'キャンセル', '취소'],
+  'Remove account': ['Supprimer le compte', 'Rimuovi account', 'Konto entfernen', 'Eliminar cuenta', 'Remover conta', 'Удалить учётную запись', '移除账户', '移除帳戶', 'アカウントを削除', '계정 삭제'],
+  'Change image and name': ['Changer l’image et le nom', 'Cambia immagine e nome', 'Bild und Namen ändern', 'Cambiar imagen y nombre', 'Alterar imagem e nome', 'Изменить изображение и имя', '更改图片和名称', '變更圖片和名稱', '画像と名前を変更', '이미지와 이름 변경'],
+  Edit: ['Modifier', 'Modifica', 'Bearbeiten', 'Editar', 'Editar', 'Изменить', '编辑', '編輯', '編集', '편집'],
+  'Read-only account': ['Compte en lecture seule', 'Account di sola lettura', 'Schreibgeschütztes Konto', 'Cuenta de solo lectura', 'Conta somente leitura', 'Учётная запись только для чтения', '只读账户', '唯讀帳戶', '読み取り専用アカウント', '읽기 전용 계정'],
+  'read-only': ['lecture seule', 'sola lettura', 'schreibgeschützt', 'solo lectura', 'somente leitura', 'только чтение', '只读', '唯讀', '読み取り専用', '읽기 전용'],
+  Close: ['Fermer', 'Chiudi', 'Schließen', 'Cerrar', 'Fechar', 'Закрыть', '关闭', '關閉', '閉じる', '닫기'],
+  'Copy nsec': ['Copier le nsec', 'Copia nsec', 'nsec kopieren', 'Copiar nsec', 'Copiar nsec', 'Копировать nsec', '复制 nsec', '複製 nsec', 'nsec をコピー', 'nsec 복사'],
+  'Copy bunker URL': ['Copier l’URL bunker', 'Copia URL bunker', 'Bunker-URL kopieren', 'Copiar URL bunker', 'Copiar URL bunker', 'Копировать URL bunker', '复制 bunker URL', '複製 bunker URL', 'bunker URL をコピー', 'bunker URL 복사'],
+  Save: ['Enregistrer', 'Salva', 'Speichern', 'Guardar', 'Salvar', 'Сохранить', '保存', '儲存', '保存', '저장'],
+  'Copy npub': ['Copier le npub', 'Copia npub', 'npub kopieren', 'Copiar npub', 'Copiar npub', 'Копировать npub', '复制 npub', '複製 npub', 'npub をコピー', 'npub 복사'],
+  'Account name': ['Nom du compte', 'Nome account', 'Kontoname', 'Nombre de la cuenta', 'Nome da conta', 'Имя учётной записи', '账户名称', '帳戶名稱', 'アカウント名', '계정 이름'],
+  unnamed: ['sans nom', 'senza nome', 'unbenannt', 'sin nombre', 'sem nome', 'без имени', '未命名', '未命名', '名前なし', '이름 없음'],
+  'Name update failed': ['Échec de la mise à jour du nom', 'Aggiornamento del nome non riuscito', 'Namensänderung fehlgeschlagen', 'No se pudo actualizar el nombre', 'Falha ao atualizar o nome', 'Не удалось изменить имя', '名称更新失败', '名稱更新失敗', '名前の更新に失敗しました', '이름 업데이트 실패'],
+  'Authentication failed': ['Échec de l’authentification', 'Autenticazione non riuscita', 'Authentifizierung fehlgeschlagen', 'Error de autenticación', 'Falha na autenticação', 'Ошибка аутентификации', '身份验证失败', '驗證失敗', '認証に失敗しました', '인증 실패'],
+  'Delete failed': ['Échec de la suppression', 'Eliminazione non riuscita', 'Löschen fehlgeschlagen', 'No se pudo eliminar', 'Falha ao excluir', 'Не удалось удалить', '删除失败', '刪除失敗', '削除に失敗しました', '삭제 실패']
+})
+
+const t = getT(accountAvatarLocales)
 
 // Tabler outline icons inlined from icons/*.svg so they render with
 // `stroke="currentColor"` — `<img>` would isolate them from host CSS.
@@ -308,6 +330,7 @@ export class AccountAvatar extends HTMLElement {
   #flashTimers = new Map()
   #flashLabels = new Map()
   #unsubStatus = null
+  #unsubLocale = null
 
   connectedCallback () {
     injectComponentStyles('account-avatar', STYLES)
@@ -336,6 +359,8 @@ export class AccountAvatar extends HTMLElement {
     }
 
     this.#refreshStatus()
+    this.#translate()
+    this.#unsubLocale = subscribeLocaleChanged(() => this.#translate())
     this.#unsubStatus = accountStatus.subscribe((pubkey) => {
       if (pubkey === this.getAttribute('pubkey')) this.#refreshStatus()
     })
@@ -354,6 +379,8 @@ export class AccountAvatar extends HTMLElement {
     this.#nameField?.removeEventListener('keydown', this.#onNameKeydown)
     this.#unsubStatus?.()
     this.#unsubStatus = null
+    this.#unsubLocale?.()
+    this.#unsubLocale = null
     clearTimeout(this.#nameFlashTimer)
     this.#nameFlashTimer = null
     for (const id of this.#flashTimers.values()) clearTimeout(id)
@@ -387,7 +414,7 @@ export class AccountAvatar extends HTMLElement {
   #updateCopyKeyButton () {
     const btn = this.querySelector('button[data-action="copy-nsec"]')
     if (!btn) return
-    btn.title = this.#account?.type === 'bunker' ? 'Copy bunker URL' : 'Copy nsec'
+    btn.title = this.#account?.type === 'bunker' ? t('Copy bunker URL') : t('Copy nsec')
   }
 
   #currentName () {
@@ -480,7 +507,7 @@ export class AccountAvatar extends HTMLElement {
       console.error(err)
       this.#nameField.value = account.name || ''
       this.#flashNameStatus('is-error')
-      toast.error('Name update failed')
+      toast.error(t('Name update failed'))
     } finally {
       this.#savingName = false
       this.#nameField.classList.remove('pulsate')
@@ -517,7 +544,7 @@ export class AccountAvatar extends HTMLElement {
       return this.#copy(btn, nostr.nsecFromHex(entry.seckey))
     } catch (err) {
       console.warn('copy-nsec auth failed', err?.message ?? err)
-      toast.error('Authentication failed')
+      toast.error(t('Authentication failed'))
       this.#flashError(btn)
     } finally {
       btn.disabled = false
@@ -711,7 +738,7 @@ export class AccountAvatar extends HTMLElement {
       } catch (err) {
         if (err?.name !== 'NotAllowedError') {
           console.warn('failed to update vault blob after delete', err?.message ?? err)
-          toast.error('Delete failed')
+          toast.error(t('Delete failed'))
         }
         this.#flashError(btn)
         return
@@ -768,6 +795,33 @@ export class AccountAvatar extends HTMLElement {
     }
     btn.classList.remove('is-success', 'is-error')
     this.#flashTimers.delete(btn)
+  }
+
+  #translate () {
+    const titles = {
+      'cancel-create': 'Cancel',
+      delete: 'Remove account',
+      cycle: 'Change image and name',
+      edit: 'Edit',
+      'cancel-edit': 'Close',
+      save: 'Save',
+      'copy-npub': 'Copy npub'
+    }
+    for (const [action, key] of Object.entries(titles)) {
+      const button = this.querySelector(`button[data-action="${action}"]`)
+      if (button) button.title = t(key)
+    }
+    const readonly = this.querySelector('.avatar-readonly-label')
+    if (readonly) {
+      readonly.textContent = t('read-only')
+      readonly.setAttribute('aria-label', t('Read-only account'))
+    }
+    if (this.#nameField) {
+      this.#nameField.setAttribute('aria-label', t('Account name'))
+      this.#nameField.placeholder = t('unnamed')
+      this.#syncNameFieldWidth()
+    }
+    this.#updateCopyKeyButton()
   }
 }
 

@@ -10,6 +10,7 @@ import * as nostrdb from './nostrdb.js'
 import * as sync from './sync/index.js'
 import { npubFromPubkey, parseProfileEvent } from 'libp2r2p/key'
 import { parseRelayListEvent } from './relay.js'
+import { launcherLocale, setLocale } from '../i18n/index.js'
 
 // Read-only disclosures — the result is publicly derivable, so logging them
 // would just be noise in the audit trail. Match both wire and JS spellings.
@@ -172,6 +173,7 @@ let unsubscribeStore = null
 let unsubscribeSecrets = null
 let unsubscribeJournal = null
 let accountsStateQueued = false
+const pendingTranslateMessages = []
 
 export function setAccountsState () {
   if (!handshakeComplete || !launcherPort) return
@@ -236,6 +238,7 @@ export async function initMessenger () {
   }
   launcherOrigin ??= origin
   handshakeComplete = true
+  pendingTranslateMessages.splice(0).forEach(handleTranslate)
   nostrdb.connect(launcherPort)
   startAccountStateSubscriptions()
 }
@@ -246,10 +249,25 @@ function onPortMessage (e) {
   // REPLY frames belong to window-message's own listener when/if we make
   // port-side asks. We currently don't, but guard against stray ones.
   if (code === 'REPLY') return
+  if (code === 'TRANSLATE') {
+    if (!handshakeComplete) pendingTranslateMessages.push(e)
+    else handleTranslate(e)
+    return
+  }
   if (!handshakeComplete) return
   if (code === 'UPDATE_ACCOUNT_EVENTS') return handleUpdateAccountEvents(e)
   if (code === 'NOSTRDB_APP_BACKFILL') return handleNostrDbAppBackfill(e)
   if (code === 'NIP07') return handleNip07(e)
+}
+
+function handleTranslate (e) {
+  try {
+    const { locale, lang } = e.data.payload ?? {}
+    setLocale(launcherLocale(locale, lang))
+    if (e.data.reqId) reply(e, { payload: true }, { to: launcherPort })
+  } catch (err) {
+    if (e.data.reqId) reply(e, { error: serializeError(err) }, { to: launcherPort })
+  }
 }
 
 function handleUpdateAccountEvents (e) {

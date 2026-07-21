@@ -1,10 +1,20 @@
 import { injectComponentStyles } from '../../helpers/dom.js'
 
+import { defineLocales, getT, subscribeLocaleChanged } from '../../i18n/index.js'
+
 const SHORT_TIMER_MS = 4000
 const LONG_TIMER_MS = 8000
 const OPEN_ANIM_MS = 200
 const SWAP_FADE_MS = 120
 const TYPES = new Set(['success', 'error', 'warning', 'info'])
+export const toastLocales = defineLocales({
+  'Toggle details': ['Afficher les détails', 'Mostra dettagli', 'Details umschalten', 'Mostrar detalles', 'Alternar detalhes', 'Показать подробности', '切换详细信息', '切換詳細資料', '詳細を切り替え', '세부정보 전환'],
+  Close: ['Fermer', 'Chiudi', 'Schließen', 'Cerrar', 'Fechar', 'Закрыть', '关闭', '關閉', '閉じる', '닫기'],
+  Previous: ['Précédent', 'Precedente', 'Zurück', 'Anterior', 'Anterior', 'Предыдущее', '上一个', '上一個', '前へ', '이전'],
+  Next: ['Suivant', 'Successivo', 'Weiter', 'Siguiente', 'Próximo', 'Следующее', '下一个', '下一個', '次へ', '다음']
+})
+
+const t = getT(toastLocales)
 
 // Tabler outline icons inlined so stroke="currentColor" inherits the host
 // text color — `<img src>` would isolate them from CSS and break theming.
@@ -238,12 +248,15 @@ export class Toast extends HTMLElement {
   #timerStartedAt = 0
   #pressed = false
   #closing = false
+  #unsubscribeLocale = null
   #closeAnimId = null
   #swapId = null
 
   connectedCallback () {
     injectComponentStyles('toast-message', STYLES)
     this.innerHTML = TEMPLATE
+    this.#translate()
+    this.#unsubscribeLocale = subscribeLocaleChanged(() => this.#translate())
 
     this.addEventListener('click', this.#onClick)
     this.addEventListener('pointerdown', this.#onPointerDown)
@@ -260,9 +273,18 @@ export class Toast extends HTMLElement {
   }
 
   disconnectedCallback () {
+    this.#unsubscribeLocale?.()
+    this.#unsubscribeLocale = null
     this.#clearTimer()
     if (this.#closeAnimId) { clearTimeout(this.#closeAnimId); this.#closeAnimId = null }
     if (this.#swapId) { clearTimeout(this.#swapId); this.#swapId = null }
+  }
+
+  #translate () {
+    this.querySelector('[data-action="toggle-long"]')?.setAttribute('aria-label', t('Toggle details'))
+    this.querySelector('[data-action="close"]')?.setAttribute('aria-label', t('Close'))
+    this.querySelector('[data-action="prev"]')?.setAttribute('aria-label', t('Previous'))
+    this.querySelector('[data-action="next"]')?.setAttribute('aria-label', t('Next'))
   }
 
   get isClosing () { return this.#closing }

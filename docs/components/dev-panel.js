@@ -5,9 +5,26 @@ import * as secrets from '../services/secrets.js'
 import * as store from '../services/accounts-store.js'
 import { hasPendingMutation, subscribePendingMutations } from '../services/account-mutations.js'
 import { seededAvatarDataUrl } from '../services/avatar.js'
+import { defineLocales, getLocale, getT, subscribeLocaleChanged } from '../i18n/index.js'
 
 const ICON_PLUS = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5l0 14" /><path d="M5 12l14 0" /></svg>'
 const avatarCache = new Map()
+
+export const devPanelLocales = defineLocales({
+  none: ['aucun', 'nessuno', 'keine', 'ninguno', 'nenhum', 'нет', '无', '無', 'なし', '없음'],
+  status: ['état', 'stato', 'Status', 'estado', 'status', 'статус', '状态', '狀態', '状態', '상태'],
+  account: ['compte', 'account', 'Konto', 'cuenta', 'conta', 'учётная запись', '账户', '帳戶', 'アカウント', '계정'],
+  content: ['contenu', 'contenuto', 'Inhalt', 'contenido', 'conteúdo', 'содержимое', '内容', '內容', 'コンテンツ', '콘텐츠'],
+  created: ['créé', 'creato', 'erstellt', 'creado', 'criado', 'создано', '创建时间', '建立時間', '作成日時', '생성됨'],
+  source: ['source', 'origine', 'Quelle', 'origen', 'origem', 'источник', '来源', '來源', 'ソース', '출처'],
+  Upsert: ['Mettre à jour', 'Aggiorna', 'Aktualisieren', 'Actualizar', 'Atualizar', 'Обновить', '更新', '更新', '更新', '업데이트'],
+  Development: ['Développement', 'Sviluppo', 'Entwicklung', 'Desarrollo', 'Desenvolvimento', 'Разработка', '开发', '開發', '開発', '개발'],
+  'Top-level vault diagnostics.': ['Diagnostics du coffre de premier niveau.', 'Diagnostica del vault di primo livello.', 'Diagnose des Tresors auf oberster Ebene.', 'Diagnóstico de nivel superior de la bóveda.', 'Diagnóstico do cofre de nível superior.', 'Диагностика хранилища верхнего уровня.', '顶层保险库诊断。', '頂層保險庫診斷。', 'トップレベル保管庫の診断。', '최상위 볼트 진단.'],
+  'Content keys': ['Clés de contenu', 'Chiavi dei contenuti', 'Inhaltsschlüssel', 'Claves de contenido', 'Chaves de conteúdo', 'Ключи содержимого', '内容密钥', '內容金鑰', 'コンテンツ鍵', '콘텐츠 키'],
+  'No nsec accounts.': ['Aucun compte nsec.', 'Nessun account nsec.', 'Keine nsec-Konten.', 'No hay cuentas nsec.', 'Nenhuma conta nsec.', 'Нет учётных записей nsec.', '没有 nsec 账户。', '沒有 nsec 帳戶。', 'nsec アカウントはありません。', 'nsec 계정이 없습니다.']
+})
+
+const t = getT(devPanelLocales)
 
 const STYLES = /* css */`
   dev-panel {
@@ -134,9 +151,9 @@ function shortPubkey (pubkey) {
 }
 
 function formatDate (createdAt) {
-  if (!createdAt) return 'none'
+  if (!createdAt) return t('none')
   try {
-    return new Date(createdAt * 1000).toLocaleString()
+    return new Date(createdAt * 1000).toLocaleString(getLocale())
   } catch {
     return String(createdAt)
   }
@@ -156,7 +173,7 @@ function setAvatarImage (element, src) {
 
 function statusLine (status, fallbackError) {
   if (fallbackError) {
-    return `<div class="status-line is-error"><span class="line-label">status</span> ${escapeHtml(fallbackError)}</div>`
+    return `<div class="status-line is-error"><span class="line-label">${t('status')}</span> ${escapeHtml(fallbackError)}</div>`
   }
   if (!status) return ''
   const className = status.state === 'publish failed'
@@ -165,7 +182,7 @@ function statusLine (status, fallbackError) {
       ? 'status-line is-ok'
       : 'status-line'
   const message = status.message ? `: ${status.message}` : ''
-  return `<div class="${className}"><span class="line-label">status</span> ${escapeHtml(status.state + message)}</div>`
+  return `<div class="${className}"><span class="line-label">${t('status')}</span> ${escapeHtml(status.state + message)}</div>`
 }
 
 function accountRow (row, errors, unlocked) {
@@ -174,8 +191,8 @@ function accountRow (row, errors, unlocked) {
   const accountName = account.name || shortPubkey(account.pubkey)
   const owner = escapeHtml(account.pubkey)
   const pubkey = latest?.pubkey || ''
-  const source = latest ? row.source : 'none'
-  const createdAt = latest ? formatDate(latest.createdAt) : 'none'
+  const source = latest ? row.source : t('none')
+  const createdAt = latest ? formatDate(latest.createdAt) : t('none')
   return /* html */`
     <div class="content-key-row">
       <div class="row-top">
@@ -185,13 +202,13 @@ function accountRow (row, errors, unlocked) {
         </div>
         <button class="generate-btn" type="button" data-action="generate-content-key" data-owner="${owner}" ${unlocked ? '' : 'disabled'}>
           <span class="btn-icon">${ICON_PLUS}</span>
-          <span class="btn-label">Upsert</span>
+          <span class="btn-label">${t('Upsert')}</span>
         </button>
       </div>
-      <div class="pubkey-line"><span class="line-label">account</span> ${owner}</div>
-      <div class="pubkey-line"><span class="line-label">content</span> ${escapeHtml(pubkey || 'none')}</div>
-      <div class="meta-line"><span class="line-label">created</span> ${escapeHtml(createdAt)}</div>
-      <div class="meta-line"><span class="line-label">source</span> ${escapeHtml(source)}</div>
+      <div class="pubkey-line"><span class="line-label">${t('account')}</span> ${owner}</div>
+      <div class="pubkey-line"><span class="line-label">${t('content')}</span> ${escapeHtml(pubkey || t('none'))}</div>
+      <div class="meta-line"><span class="line-label">${t('created')}</span> ${escapeHtml(createdAt)}</div>
+      <div class="meta-line"><span class="line-label">${t('source')}</span> ${escapeHtml(source)}</div>
       ${statusLine(row.publishStatus, errors.get(account.pubkey))}
     </div>
   `
@@ -203,6 +220,7 @@ export class DevPanel extends HTMLElement {
   #unsubscribeContentKeys = null
   #unsubscribeStore = null
   #unsubscribePendingMutations = null
+  #unsubscribeLocale = null
   #errors = new Map()
 
   connectedCallback () {
@@ -214,6 +232,7 @@ export class DevPanel extends HTMLElement {
     this.#unsubscribePendingMutations = subscribePendingMutations(() => {
       if (!hasPendingMutation()) this.render()
     })
+    this.#unsubscribeLocale = subscribeLocaleChanged(() => this.render())
     this.addEventListener('click', this.#onClick)
     this.render()
   }
@@ -225,17 +244,18 @@ export class DevPanel extends HTMLElement {
     this.#unsubscribeContentKeys?.()
     this.#unsubscribeStore?.()
     this.#unsubscribePendingMutations?.()
+    this.#unsubscribeLocale?.()
   }
 
   render () {
     const snapshot = sync.getDebugSnapshot()
     const rows = snapshot.accounts.length
       ? snapshot.accounts.map(row => accountRow(row, this.#errors, snapshot.unlocked)).join('')
-      : '<div class="empty-state">No nsec accounts.</div>'
+      : `<div class="empty-state">${t('No nsec accounts.')}</div>`
     this.innerHTML = /* html */`
-      <accordion-panel header="Development" icon="development" open>
-        <div class="dev-note">Top-level vault diagnostics.</div>
-        <div class="dev-section-title">Content keys</div>
+      <accordion-panel header="${t('Development')}" icon="development" open>
+        <div class="dev-note">${t('Top-level vault diagnostics.')}</div>
+        <div class="dev-section-title">${t('Content keys')}</div>
         <div class="content-key-list">${rows}</div>
       </accordion-panel>
     `

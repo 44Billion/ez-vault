@@ -4,8 +4,18 @@ import * as passkey from '../services/passkey.js'
 import { filterVisibleAccounts, pendingMutationNeedsUnlock, subscribePendingMutations } from '../services/account-mutations.js'
 import * as toast from './shared/toast.js'
 import { injectComponentStyles } from '../helpers/dom.js'
+import { defineLocales, getT, subscribeLocaleChanged } from '../i18n/index.js'
 
 const ICON_LOCK = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13a2 2 0 0 1 2 -2h10a2 2 0 0 1 2 2v6a2 2 0 0 1 -2 2h-10a2 2 0 0 1 -2 -2v-6z" /><path d="M11 16a1 1 0 1 0 2 0a1 1 0 0 0 -2 0" /><path d="M8 11v-4a4 4 0 1 1 8 0v4" /></svg>'
+
+export const lockOverlayLocales = defineLocales({
+  'Vault locked': ['Coffre verrouillé', 'Vault bloccato', 'Tresor gesperrt', 'Bóveda bloqueada', 'Cofre bloqueado', 'Хранилище заблокировано', '保险库已锁定', '保險庫已鎖定', '保管庫はロックされています', '볼트 잠김'],
+  'Unlock with the passkey that holds your account secrets.': ['Déverrouillez avec la clé d’accès qui protège les secrets de vos comptes.', 'Sblocca con la passkey che protegge i segreti dei tuoi account.', 'Mit dem Passkey entsperren, der die Kontogeheimnisse enthält.', 'Desbloquea con la passkey que protege los secretos de tus cuentas.', 'Desbloqueie com a passkey que protege os segredos das suas contas.', 'Разблокируйте с помощью ключа доступа, защищающего секреты учётных записей.', '使用保存账户机密的通行密钥解锁。', '使用保存帳戶機密的通行金鑰解鎖。', 'アカウントの秘密情報を保持するパスキーでロックを解除してください。', '계정 비밀을 보관하는 패스키로 잠금을 해제하세요.'],
+  'Unlock with passkey': ['Déverrouiller avec la clé d’accès', 'Sblocca con passkey', 'Mit Passkey entsperren', 'Desbloquear con passkey', 'Desbloquear com passkey', 'Разблокировать ключом доступа', '使用通行密钥解锁', '使用通行金鑰解鎖', 'パスキーでロック解除', '패스키로 잠금 해제'],
+  'Could not unlock': ['Impossible de déverrouiller', 'Impossibile sbloccare', 'Entsperren nicht möglich', 'No se pudo desbloquear', 'Não foi possível desbloquear', 'Не удалось разблокировать', '无法解锁', '無法解鎖', 'ロックを解除できませんでした', '잠금을 해제하지 못했습니다']
+})
+
+const t = getT(lockOverlayLocales)
 
 const STYLES = /* css */`
   lock-overlay {
@@ -99,6 +109,7 @@ export class LockOverlay extends HTMLElement {
   #unsubPending = null
   #unlockBtn = null
   #unlockIcon = null
+  #unsubLocale = null
 
   connectedCallback () {
     injectComponentStyles('lock-overlay', STYLES)
@@ -114,6 +125,8 @@ export class LockOverlay extends HTMLElement {
     this.#unlockBtn = this.querySelector('.lock-unlock')
     this.#unlockIcon = this.querySelector('.lock-unlock-icon')
     this.#unlockBtn.addEventListener('click', this.#onUnlock)
+    this.#translate()
+    this.#unsubLocale = subscribeLocaleChanged(() => this.#translate())
 
     this.#applyVisibility()
     this.#unsubStore = store.subscribe(() => this.#applyVisibility())
@@ -129,6 +142,8 @@ export class LockOverlay extends HTMLElement {
     this.#unsubPending?.()
     this.#unsubPending = null
     this.#unlockBtn?.removeEventListener('click', this.#onUnlock)
+    this.#unsubLocale?.()
+    this.#unsubLocale = null
   }
 
   #applyVisibility () {
@@ -150,11 +165,17 @@ export class LockOverlay extends HTMLElement {
       })
     } catch (err) {
       console.error('passkey unlock failed', err?.message ?? err)
-      toast.error('Could not unlock', err?.message ?? '')
+      toast.error(t('Could not unlock'), err?.message ?? '')
     } finally {
       this.#unlockBtn.disabled = false
       this.#unlockIcon.classList.remove('pulsate')
     }
+  }
+
+  #translate () {
+    this.querySelector('.lock-title').textContent = t('Vault locked')
+    this.querySelector('.lock-hint').textContent = t('Unlock with the passkey that holds your account secrets.')
+    this.querySelector('.lock-unlock span:last-child').textContent = t('Unlock with passkey')
   }
 }
 

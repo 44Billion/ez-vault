@@ -1,9 +1,20 @@
 import { injectComponentStyles } from '../../helpers/dom.js'
 import './sync-host.js'
 import './sync-joiner.js'
+import { defineLocales, getT, subscribeLocaleChanged } from '../../i18n/index.js'
 
 const ICON_X = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6l-12 12" /><path d="M6 6l12 12" /></svg>'
 const ICON_BULB = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h1m8 -9v1m8 8h1m-15.4 -6.4l.7 .7m12.1 -.7l-.7 .7" /><path d="M9 16a5 5 0 1 1 6 0a3.5 3.5 0 0 0 -1 3a2 2 0 0 1 -4 0a3.5 3.5 0 0 0 -1 -3" /><path d="M9.7 17l4.6 0" /></svg>'
+
+export const syncPanelLocales = defineLocales({
+  Cancel: ['Annuler', 'Annulla', 'Abbrechen', 'Cancelar', 'Cancelar', 'Отмена', '取消', '取消', 'キャンセル', '취소'],
+  'Sync this device with another': ['Synchroniser cet appareil avec un autre', 'Sincronizza questo dispositivo con un altro', 'Dieses Gerät mit einem anderen synchronisieren', 'Sincronizar este dispositivo con otro', 'Sincronizar este dispositivo com outro', 'Синхронизировать это устройство с другим', '将此设备与另一台设备同步', '將此裝置與另一台裝置同步', 'このデバイスを別のデバイスと同期', '이 기기를 다른 기기와 동기화'],
+  'Click each button on a different device or browser.': ['Cliquez sur chaque bouton sur un appareil ou navigateur différent.', 'Fai clic su ciascun pulsante su un dispositivo o browser diverso.', 'Klicke jede Schaltfläche auf einem anderen Gerät oder Browser an.', 'Pulsa cada botón en un dispositivo o navegador diferente.', 'Clique em cada botão em um dispositivo ou navegador diferente.', 'Нажмите каждую кнопку на другом устройстве или в другом браузере.', '请在不同设备或浏览器上分别点击每个按钮。', '請在不同裝置或瀏覽器上分別點擊每個按鈕。', 'それぞれのボタンを別のデバイスまたはブラウザで押してください。', '각 버튼을 서로 다른 기기나 브라우저에서 누르세요.'],
+  'Device One': ['Appareil un', 'Dispositivo uno', 'Gerät eins', 'Dispositivo uno', 'Dispositivo um', 'Устройство один', '设备一', '裝置一', 'デバイス 1', '기기 1'],
+  'Device Two': ['Appareil deux', 'Dispositivo due', 'Gerät zwei', 'Dispositivo dos', 'Dispositivo dois', 'Устройство два', '设备二', '裝置二', 'デバイス 2', '기기 2']
+})
+
+const t = getT(syncPanelLocales)
 
 const STYLES = /* css */`
   sync-panel {
@@ -148,6 +159,7 @@ export class SyncPanel extends HTMLElement {
   #joinerBtn
   #host
   #joiner
+  #unsubscribeLocale = null
 
   // Wired by index.js. `toolbarButtons` are the *sibling* toolbar buttons
   // we grey out while sync is the active flow; `activeButton` is sync's
@@ -190,6 +202,13 @@ export class SyncPanel extends HTMLElement {
     // (cancel) or close this whole panel (successful sync).
     this.#host.onClosed = detail => this.#onFlowClosed('host', detail)
     this.#joiner.onClosed = detail => this.#onFlowClosed('joiner', detail)
+    this.#translate()
+    this.#unsubscribeLocale = subscribeLocaleChanged(() => this.#translate())
+  }
+
+  disconnectedCallback () {
+    this.#unsubscribeLocale?.()
+    this.#unsubscribeLocale = null
   }
 
   open () {
@@ -255,6 +274,15 @@ export class SyncPanel extends HTMLElement {
       this.dataset.flow = ''
       this.#applyDeviceButtonState(null)
     }
+  }
+
+  #translate () {
+    if (!this.#cancelBtn) return
+    this.#cancelBtn.title = t('Cancel')
+    this.querySelector('.panel-title').textContent = t('Sync this device with another')
+    this.querySelector('.panel-hint span:last-child').textContent = t('Click each button on a different device or browser.')
+    this.#hostBtn.textContent = t('Device One')
+    this.#joinerBtn.textContent = t('Device Two')
   }
 }
 

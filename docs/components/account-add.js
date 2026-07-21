@@ -9,6 +9,7 @@ import {
 import { QrScanner, isCameraSupported } from '../services/qr-scanner.js'
 import * as toast from './shared/toast.js'
 import { injectComponentStyles } from '../helpers/dom.js'
+import { defineLocales, getT, subscribeLocaleChanged } from '../i18n/index.js'
 
 const ICON_X = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6l-12 12" /><path d="M6 6l12 12" /></svg>'
 const ICON_CHECK = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5l10 -10" /></svg>'
@@ -16,6 +17,17 @@ const ICON_ALERT = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" 
 const ICON_CAMERA = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h2a2 2 0 0 0 2 -2a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1a2 2 0 0 0 2 2h2a2 2 0 0 1 2 2v9a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-9a2 2 0 0 1 2 -2" /><path d="M9 13a3 3 0 1 0 6 0a3 3 0 0 0 -6 0" /></svg>'
 
 const ERROR_FLASH_MS = 1500
+
+export const accountAddLocales = defineLocales({
+  Cancel: ['Annuler', 'Annulla', 'Abbrechen', 'Cancelar', 'Cancelar', 'Отмена', '取消', '取消', 'キャンセル', '취소'],
+  'Add a private key, public key, or bunker URL': ['Ajouter une clé privée, une clé publique ou une URL bunker', 'Aggiungi una chiave privata, pubblica o un URL bunker', 'Privaten Schlüssel, öffentlichen Schlüssel oder Bunker-URL hinzufügen', 'Añadir una clave privada, pública o una URL bunker', 'Adicionar uma chave privada, pública ou URL bunker', 'Добавить закрытый ключ, открытый ключ или URL bunker', '添加私钥、公钥或 bunker URL', '新增私鑰、公鑰或 bunker URL', '秘密鍵、公開鍵、または bunker URL を追加', '개인 키, 공개 키 또는 bunker URL 추가'],
+  'Scan QR': ['Scanner le QR', 'Scansiona QR', 'QR scannen', 'Escanear QR', 'Ler QR', 'Сканировать QR', '扫描二维码', '掃描 QR 碼', 'QR をスキャン', 'QR 스캔'],
+  Add: ['Ajouter', 'Aggiungi', 'Hinzufügen', 'Añadir', 'Adicionar', 'Добавить', '添加', '新增', '追加', '추가'],
+  'Stop scanning': ['Arrêter le scan', 'Interrompi scansione', 'Scannen beenden', 'Detener escaneo', 'Parar leitura', 'Остановить сканирование', '停止扫描', '停止掃描', 'スキャンを停止', '스캔 중지'],
+  'Use "Sync Devices" for nostrpair URLs.': ['Utilisez « Synchroniser les appareils » pour les URL nostrpair.', 'Usa "Sincronizza dispositivi" per gli URL nostrpair.', 'Verwende „Geräte synchronisieren“ für nostrpair-URLs.', 'Usa «Sincronizar dispositivos» para las URL nostrpair.', 'Use “Sincronizar dispositivos” para URLs nostrpair.', 'Для URL nostrpair используйте «Синхронизировать устройства».', '请使用“同步设备”处理 nostrpair URL。', '請使用「同步裝置」處理 nostrpair URL。', 'nostrpair URL には「デバイスを同期」を使用してください。', 'nostrpair URL에는 “기기 동기화”를 사용하세요.']
+})
+
+const t = getT(accountAddLocales)
 
 const STYLES = /* css */`
   account-add {
@@ -189,6 +201,7 @@ export class AccountAdd extends HTMLElement {
   #busy = false
   #scanner = null
   #activeIntake = null
+  #unsubscribeLocale = null
 
   // Wired by index.js. `toolbarButtons` are the sibling toolbar buttons
   // we grey out while the add panel owns the screen; `activeButton` is
@@ -214,12 +227,17 @@ export class AccountAdd extends HTMLElement {
     this.#scanBtn.addEventListener('click', this.#onStartScan)
     this.#scanStopBtn.addEventListener('click', () => this.#stopScan())
 
+    this.#translate()
+    this.#unsubscribeLocale = subscribeLocaleChanged(() => this.#translate())
+
     if (isCameraSupported()) this.dataset.camera = 'true'
   }
 
   disconnectedCallback () {
     if (this.#errorTimer) clearTimeout(this.#errorTimer)
     this.#stopScan()
+    this.#unsubscribeLocale?.()
+    this.#unsubscribeLocale = null
   }
 
   open () {
@@ -263,7 +281,7 @@ export class AccountAdd extends HTMLElement {
     // and redirect here, but auto-jumping panels would surprise the user
     // mid-flow — a toast tells them what to do instead.
     if (raw.startsWith('nostrpair://')) {
-      toast.info('Use "Sync Devices" for nostrpair URLs.')
+      toast.info(t('Use "Sync Devices" for nostrpair URLs.'))
       this.#flashError()
       return
     }
@@ -371,6 +389,15 @@ export class AccountAdd extends HTMLElement {
   #removeScanVideo () {
     const video = this.#scanWrap.querySelector('video')
     if (video) video.remove()
+  }
+
+  #translate () {
+    if (!this.#input) return
+    this.#cancelBtn.title = t('Cancel')
+    this.#input.placeholder = t('Add a private key, public key, or bunker URL')
+    this.#scanBtn.title = t('Scan QR')
+    this.#confirmBtn.title = t('Add')
+    this.#scanStopBtn.title = t('Stop scanning')
   }
 }
 

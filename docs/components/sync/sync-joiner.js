@@ -16,6 +16,8 @@ import { QrScanner, isCameraSupported } from '../../services/qr-scanner.js'
 import { injectComponentStyles, waitForFocus } from '../../helpers/dom.js'
 import { detectPlatform } from '../../helpers/platform.js'
 import * as toast from '../shared/toast.js'
+import { defineLocales, getT, subscribeLocaleChanged } from '../../i18n/index.js'
+import { syncHostLocales } from './sync-host.js'
 
 const ICON_X = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6l-12 12" /><path d="M6 6l12 12" /></svg>'
 const ICON_CHECK = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5l10 -10" /></svg>'
@@ -23,6 +25,44 @@ const ICON_ALERT = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" 
 const ICON_CAMERA = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h2a2 2 0 0 0 2 -2a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1a2 2 0 0 0 2 2h2a2 2 0 0 1 2 2v9a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-9a2 2 0 0 1 2 -2" /><path d="M9 13a3 3 0 1 0 6 0a3 3 0 0 0 -6 0" /></svg>'
 
 const ERROR_FLASH_MS = 1500
+
+export const syncJoinerLocales = {
+  ...syncHostLocales,
+  ...defineLocales({
+    Connect: ['Connecter', 'Connetti', 'Verbinden', 'Conectar', 'Conectar', 'Подключить', '连接', '連線', '接続', '연결'],
+    'Scan QR': ['Scanner le QR', 'Scansiona QR', 'QR scannen', 'Escanear QR', 'Ler QR', 'Сканировать QR', '扫描二维码', '掃描 QR 碼', 'QR をスキャン', 'QR 스캔'],
+    'Stop scanning': ['Arrêter le scan', 'Interrompi scansione', 'Scannen beenden', 'Detener escaneo', 'Parar leitura', 'Остановить сканирование', '停止扫描', '停止掃描', 'スキャンを停止', '스캔 중지'],
+    'Type the code shown on the other device:': ['Saisissez le code affiché sur l’autre appareil :', 'Digita il codice mostrato sull’altro dispositivo:', 'Den auf dem anderen Gerät angezeigten Code eingeben:', 'Escribe el código mostrado en el otro dispositivo:', 'Digite o código mostrado no outro dispositivo:', 'Введите код, показанный на другом устройстве:', '输入另一台设备上显示的代码：', '輸入另一台裝置上顯示的代碼：', '別のデバイスに表示されたコードを入力してください：', '다른 기기에 표시된 코드를 입력하세요:'],
+    'Digit {{number}}': ['Chiffre {{number}}', 'Cifra {{number}}', 'Ziffer {{number}}', 'Dígito {{number}}', 'Dígito {{number}}', 'Цифра {{number}}', '第 {{number}} 位', '第 {{number}} 位', '{{number}} 桁目', '{{number}}번째 숫자'],
+    'Paste a nostrpair:// URL or scan the QR shown by the other device.': ['Collez une URL nostrpair:// ou scannez le QR affiché par l’autre appareil.', 'Incolla un URL nostrpair:// o scansiona il QR mostrato dall’altro dispositivo.', 'Eine nostrpair://-URL einfügen oder den QR-Code des anderen Geräts scannen.', 'Pega una URL nostrpair:// o escanea el QR mostrado por el otro dispositivo.', 'Cole uma URL nostrpair:// ou leia o QR exibido pelo outro dispositivo.', 'Вставьте URL nostrpair:// или отсканируйте QR-код на другом устройстве.', '粘贴 nostrpair:// URL，或扫描另一台设备显示的二维码。', '貼上 nostrpair:// URL，或掃描另一台裝置顯示的 QR 碼。', 'nostrpair:// URL を貼り付けるか、別のデバイスの QR コードをスキャンしてください。', 'nostrpair:// URL을 붙여 넣거나 다른 기기의 QR 코드를 스캔하세요.'],
+    'Connecting…': ['Connexion…', 'Connessione…', 'Verbindung wird hergestellt…', 'Conectando…', 'Conectando…', 'Подключение…', '正在连接…', '正在連線…', '接続中…', '연결 중…'],
+    'Connected: exchanging trust…': ['Connecté : échange de confiance…', 'Connesso: scambio di fiducia…', 'Verbunden: Vertrauen wird ausgetauscht…', 'Conectado: intercambiando confianza…', 'Conectado: trocando confiança…', 'Подключено: обмен доверием…', '已连接：正在交换信任信息…', '已連線：正在交換信任資訊…', '接続済み：信頼情報を交換中…', '연결됨: 신뢰 정보 교환 중…'],
+    'Pairing channel error.': ['Erreur du canal d’association.', 'Errore del canale di associazione.', 'Fehler im Kopplungskanal.', 'Error del canal de emparejamiento.', 'Erro no canal de pareamento.', 'Ошибка канала сопряжения.', '配对通道出错。', '配對通道錯誤。', 'ペアリングチャネルエラー。', '페어링 채널 오류.'],
+    'Code matched: exchanging trust…': ['Code vérifié : échange de confiance…', 'Codice verificato: scambio di fiducia…', 'Code stimmt: Vertrauen wird ausgetauscht…', 'Código correcto: intercambiando confianza…', 'Código correto: trocando confiança…', 'Код совпал: обмен доверием…', '代码匹配：正在交换信任信息…', '代碼相符：正在交換信任資訊…', 'コード一致：信頼情報を交換中…', '코드 일치: 신뢰 정보 교환 중…'],
+    'Switch back to this tab to continue…': ['Revenez à cet onglet pour continuer…', 'Torna a questa scheda per continuare…', 'Zu diesem Tab zurückkehren, um fortzufahren…', 'Vuelve a esta pestaña para continuar…', 'Volte para esta aba para continuar…', 'Вернитесь на эту вкладку, чтобы продолжить…', '请返回此标签页以继续…', '請返回此分頁以繼續…', '続行するにはこのタブに戻ってください…', '계속하려면 이 탭으로 돌아오세요…'],
+    'Sending accounts…': ['Envoi des comptes…', 'Invio degli account…', 'Konten werden gesendet…', 'Enviando cuentas…', 'Enviando contas…', 'Отправка учётных записей…', '正在发送账户…', '正在傳送帳戶…', 'アカウントを送信中…', '계정 전송 중…'],
+    'Importing {{count}} accounts…': ['Importation de {{count}} comptes…', 'Importazione di {{count}} account…', '{{count}} Konten werden importiert…', 'Importando {{count}} cuentas…', 'Importando {{count}} contas…', 'Импорт учётных записей: {{count}}…', '正在导入 {{count}} 个账户…', '正在匯入 {{count}} 個帳戶…', '{{count}} 件のアカウントをインポート中…', '계정 {{count}}개 가져오는 중…'],
+    'Storing trust…': ['Enregistrement de la confiance…', 'Salvataggio della fiducia…', 'Vertrauen wird gespeichert…', 'Guardando confianza…', 'Salvando confiança…', 'Сохранение доверия…', '正在保存信任信息…', '正在儲存信任資訊…', '信頼情報を保存中…', '신뢰 정보 저장 중…'],
+    'Error. Try again.': ['Erreur. Réessayez.', 'Errore. Riprova.', 'Fehler. Erneut versuchen.', 'Error. Inténtalo de nuevo.', 'Erro. Tente novamente.', 'Ошибка. Попробуйте ещё раз.', '出错了，请重试。', '發生錯誤，請重試。', 'エラーです。もう一度お試しください。', '오류입니다. 다시 시도하세요.'],
+    'Code mismatch: check the digits on the other device.': ['Code incorrect : vérifiez les chiffres sur l’autre appareil.', 'Codice errato: controlla le cifre sull’altro dispositivo.', 'Code stimmt nicht: Ziffern auf dem anderen Gerät prüfen.', 'El código no coincide: comprueba los dígitos del otro dispositivo.', 'Código incorreto: confira os dígitos no outro dispositivo.', 'Код не совпадает: проверьте цифры на другом устройстве.', '代码不匹配：请检查另一台设备上的数字。', '代碼不符：請檢查另一台裝置上的數字。', 'コードが一致しません：別のデバイスの数字を確認してください。', '코드 불일치: 다른 기기의 숫자를 확인하세요.'],
+    'Pairing timed out': ['Délai d’association dépassé', 'Tempo di associazione scaduto', 'Zeitüberschreitung bei der Kopplung', 'Tiempo de emparejamiento agotado', 'Tempo de pareamento esgotado', 'Время сопряжения истекло', '配对超时', '配對逾時', 'ペアリングがタイムアウトしました', '페어링 시간 초과'],
+    'The other device did not respond in time.': ['L’autre appareil n’a pas répondu à temps.', 'L’altro dispositivo non ha risposto in tempo.', 'Das andere Gerät hat nicht rechtzeitig geantwortet.', 'El otro dispositivo no respondió a tiempo.', 'O outro dispositivo não respondeu a tempo.', 'Другое устройство не ответило вовремя.', '另一台设备未及时响应。', '另一台裝置未及時回應。', '別のデバイスが時間内に応答しませんでした。', '다른 기기가 제시간에 응답하지 않았습니다.'],
+    'Pairing rejected': ['Association refusée', 'Associazione rifiutata', 'Kopplung abgelehnt', 'Emparejamiento rechazado', 'Pareamento recusado', 'Сопряжение отклонено', '配对被拒绝', '配對遭拒', 'ペアリングが拒否されました', '페어링 거부됨'],
+    'The other device declined the request.': ['L’autre appareil a refusé la demande.', 'L’altro dispositivo ha rifiutato la richiesta.', 'Das andere Gerät hat die Anfrage abgelehnt.', 'El otro dispositivo rechazó la solicitud.', 'O outro dispositivo recusou a solicitação.', 'Другое устройство отклонило запрос.', '另一台设备拒绝了请求。', '另一台裝置拒絕了要求。', '別のデバイスがリクエストを拒否しました。', '다른 기기가 요청을 거부했습니다.'],
+    'Got an unexpected response from the other device.': ['Réponse inattendue de l’autre appareil.', 'Risposta imprevista dall’altro dispositivo.', 'Unerwartete Antwort vom anderen Gerät.', 'Se recibió una respuesta inesperada del otro dispositivo.', 'O outro dispositivo enviou uma resposta inesperada.', 'Получен неожиданный ответ от другого устройства.', '收到另一台设备的意外响应。', '收到另一台裝置的非預期回應。', '別のデバイスから予期しない応答がありました。', '다른 기기에서 예상치 못한 응답을 받았습니다.'],
+    'Pairing relay failed': ['Échec du relais d’association', 'Relay di associazione non riuscito', 'Kopplungs-Relay fehlgeschlagen', 'Falló el relay de emparejamiento', 'Falha no relay de pareamento', 'Ошибка ретранслятора сопряжения', '配对中继失败', '配對中繼失敗', 'ペアリングリレーに失敗しました', '페어링 릴레이 실패'],
+    'The relay did not accept the pairing message. Try again, or generate a fresh pairing URL.': ['Le relais n’a pas accepté le message d’association. Réessayez ou générez une nouvelle URL.', 'Il relay non ha accettato il messaggio di associazione. Riprova o genera un nuovo URL.', 'Das Relay hat die Kopplungsnachricht nicht akzeptiert. Erneut versuchen oder eine neue URL erzeugen.', 'El relay no aceptó el mensaje de emparejamiento. Inténtalo de nuevo o genera una URL nueva.', 'O relay não aceitou a mensagem de pareamento. Tente novamente ou gere uma nova URL.', 'Ретранслятор не принял сообщение сопряжения. Повторите попытку или создайте новый URL.', '中继未接受配对消息。请重试或生成新的配对 URL。', '中繼未接受配對訊息。請重試或產生新的配對 URL。', 'リレーがペアリングメッセージを受け付けませんでした。再試行するか、新しい URL を生成してください。', '릴레이가 페어링 메시지를 수락하지 않았습니다. 다시 시도하거나 새 URL을 생성하세요.'],
+    'Trust exchange failed': ['Échec de l’échange de confiance', 'Scambio di fiducia non riuscito', 'Vertrauensaustausch fehlgeschlagen', 'Falló el intercambio de confianza', 'Falha na troca de confiança', 'Ошибка обмена доверием', '信任交换失败', '信任交換失敗', '信頼情報の交換に失敗しました', '신뢰 정보 교환 실패'],
+    "The other device could not store this device's signer key.": ['L’autre appareil n’a pas pu enregistrer la clé de signature de cet appareil.', 'L’altro dispositivo non ha potuto salvare la chiave di firma di questo dispositivo.', 'Das andere Gerät konnte den Signaturschlüssel dieses Geräts nicht speichern.', 'El otro dispositivo no pudo guardar la clave de firma de este dispositivo.', 'O outro dispositivo não pôde salvar a chave de assinatura deste dispositivo.', 'Другое устройство не смогло сохранить ключ подписи этого устройства.', '另一台设备无法保存此设备的签名密钥。', '另一台裝置無法儲存此裝置的簽署金鑰。', '別のデバイスはこのデバイスの署名鍵を保存できませんでした。', '다른 기기가 이 기기의 서명 키를 저장하지 못했습니다.'],
+    'Pairing device locked': ['Appareil d’association verrouillé', 'Dispositivo di associazione bloccato', 'Kopplungsgerät gesperrt', 'Dispositivo de emparejamiento bloqueado', 'Dispositivo de pareamento bloqueado', 'Устройство сопряжения заблокировано', '配对设备已锁定', '配對裝置已鎖定', 'ペアリングするデバイスがロックされています', '페어링 기기 잠김'],
+    'Unlock or create the passkey on the other device, then try pairing again.': ['Déverrouillez ou créez la clé d’accès sur l’autre appareil, puis réessayez.', 'Sblocca o crea la passkey sull’altro dispositivo, poi riprova.', 'Passkey auf dem anderen Gerät entsperren oder erstellen und erneut versuchen.', 'Desbloquea o crea la passkey en el otro dispositivo y vuelve a intentarlo.', 'Desbloqueie ou crie a passkey no outro dispositivo e tente novamente.', 'Разблокируйте или создайте ключ доступа на другом устройстве и повторите попытку.', '请在另一台设备上解锁或创建通行密钥，然后重试。', '請在另一台裝置上解鎖或建立通行金鑰，然後重試。', '別のデバイスでパスキーを解除または作成してから、もう一度お試しください。', '다른 기기에서 패스키를 잠금 해제하거나 만든 뒤 다시 시도하세요.'],
+    'Code mismatch': ['Code incorrect', 'Codice errato', 'Code stimmt nicht', 'El código no coincide', 'Código incorreto', 'Код не совпадает', '代码不匹配', '代碼不符', 'コードが一致しません', '코드 불일치'],
+    'Double-check the digits shown on the other device.': ['Vérifiez les chiffres affichés sur l’autre appareil.', 'Ricontrolla le cifre mostrate sull’altro dispositivo.', 'Die Ziffern auf dem anderen Gerät erneut prüfen.', 'Comprueba los dígitos mostrados en el otro dispositivo.', 'Confira os dígitos exibidos no outro dispositivo.', 'Перепроверьте цифры на другом устройстве.', '请再次核对另一台设备上显示的数字。', '請再次核對另一台裝置上顯示的數字。', '別のデバイスに表示された数字をもう一度確認してください。', '다른 기기에 표시된 숫자를 다시 확인하세요.'],
+    'Invalid pairing URL': ['URL d’association invalide', 'URL di associazione non valido', 'Ungültige Kopplungs-URL', 'URL de emparejamiento no válida', 'URL de pareamento inválida', 'Недопустимый URL сопряжения', '配对 URL 无效', '配對 URL 無效', 'ペアリング URL が無効です', '잘못된 페어링 URL']
+  })
+}
+
+const t = getT(syncJoinerLocales)
 
 const STYLES = /* css */`
   sync-joiner {
@@ -279,6 +319,9 @@ export class SyncJoiner extends HTMLElement {
   #session = null
   #scanner = null
   #intakeToken = null
+  #unsubscribeLocale = null
+  #statusKey = ''
+  #statusValues
   // Joiner derives its own pair code locally so we can verify the user's
   // typed digits before sending — saves a round-trip on user typos and
   // makes the channel's authenticity check happen entirely on this device.
@@ -315,6 +358,9 @@ export class SyncJoiner extends HTMLElement {
       cell.addEventListener('focus', () => cell.select())
     }
 
+    this.#translate()
+    this.#unsubscribeLocale = subscribeLocaleChanged(() => this.#translate())
+
     if (isCameraSupported()) this.dataset.camera = 'true'
   }
 
@@ -323,6 +369,8 @@ export class SyncJoiner extends HTMLElement {
     if (this.#pinErrorTimer) clearTimeout(this.#pinErrorTimer)
     this.#stopScan()
     this.#session?.close()
+    this.#unsubscribeLocale?.()
+    this.#unsubscribeLocale = null
   }
 
   open () {
@@ -360,7 +408,7 @@ export class SyncJoiner extends HTMLElement {
     const raw = this.#input.value.trim()
     if (!raw) return
     if (!raw.startsWith('nostrpair://')) {
-      toast.info('Paste a nostrpair:// URL or scan the QR shown by the other device.')
+      toast.info(t('Paste a nostrpair:// URL or scan the QR shown by the other device.'))
       this.#flashError()
       return
     }
@@ -395,7 +443,7 @@ export class SyncJoiner extends HTMLElement {
       this.#setBusy(false)
       console.error('joiner connect failed', err?.message ?? err)
       const { message, longMessage } = pairErrorToToast(err)
-      toast.error(message, longMessage)
+      toast.error(t(message), longMessage ? t(longMessage) : '')
       this.#tearDownPair()
       this.list?.exitSelectionMode()
       return
@@ -531,8 +579,8 @@ export class SyncJoiner extends HTMLElement {
       // Prepare + commit inbound accounts from the host's envelope. Empty
       // is fine — we still commit the peer signer trust.
       this.#setStatus(reply.accounts.length
-        ? `Importing ${reply.accounts.length} account${reply.accounts.length === 1 ? '' : 's'}…`
-        : 'Storing trust…', null)
+        ? 'Importing {{count}} accounts…'
+        : 'Storing trust…', null, { count: reply.accounts.length })
       const prepared = []
       const errors = []
       for (let i = reply.accounts.length - 1; i >= 0; i--) {
@@ -553,9 +601,9 @@ export class SyncJoiner extends HTMLElement {
       })
 
       const summary = reply.accounts.length === 0
-        ? 'Devices synced'
-        : `Synced: imported ${prepared.length} account${prepared.length === 1 ? '' : 's'}`
-      if (errors.length) toast.warning(`${summary} (${errors.length} failed)`, errors.join('\n'))
+        ? t('Devices synced')
+        : t('Synced: imported {{count}} accounts', { count: prepared.length })
+      if (errors.length) toast.warning(t('{{summary}} ({{count}} failed)', { summary, count: errors.length }), errors.join('\n'))
       else toast.success(summary)
 
       this.#setStatus('Done.', 'success')
@@ -564,7 +612,7 @@ export class SyncJoiner extends HTMLElement {
       if (err?.message !== 'IMPORT_CANCELLED') {
         console.error('joiner exchange failed', err?.message ?? err)
         const { message, longMessage } = pairErrorToToast(err)
-        toast.error(message, longMessage)
+        toast.error(t(message), longMessage ? t(longMessage) : '')
         this.#setStatus('Error. Try again.', 'error')
         this.#setPinDisabled(false)
       }
@@ -623,10 +671,23 @@ export class SyncJoiner extends HTMLElement {
     if (!this.#busy) this.#connectBtn.disabled = false
   }
 
-  #setStatus (text, kind) {
-    this.#statusEl.textContent = text
+  #setStatus (key, kind, values) {
+    this.#statusKey = key
+    this.#statusValues = values
+    this.#statusEl.textContent = key ? t(key, values) : ''
     this.#statusEl.classList.toggle('is-error', kind === 'error')
     this.#statusEl.classList.toggle('is-success', kind === 'success')
+  }
+
+  #translate () {
+    if (!this.#cancelBtn) return
+    this.#cancelBtn.title = t('Cancel')
+    this.#scanBtn.title = t('Scan QR')
+    this.#connectBtn.title = t('Connect')
+    this.querySelector('.pair-label').textContent = t('Type the code shown on the other device:')
+    this.#pinCells.forEach((cell, index) => cell.setAttribute('aria-label', t('Digit {{number}}', { number: index + 1 })))
+    this.#scanStopBtn.title = t('Stop scanning')
+    if (this.#statusKey) this.#statusEl.textContent = t(this.#statusKey, this.#statusValues)
   }
 
   #onStartScan = async () => {

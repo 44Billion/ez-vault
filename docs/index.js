@@ -15,6 +15,7 @@ import * as sync from './services/sync/index.js'
 import { startContentKeyEventRefresh } from './services/content-key/index.js'
 import { startDeviceRelayListRefresh } from './services/device-relays.js'
 import { startRevocationRotation } from './services/sync/revocation-rotation.js'
+import { initShellI18n } from './i18n/shell.js'
 
 const list = document.querySelector('account-list')
 const addPanel = document.querySelector('account-add')
@@ -22,6 +23,8 @@ const syncPanel = document.querySelector('sync-panel')
 const createBtn = document.getElementById('create-account-btn')
 const addBtn = document.getElementById('add-account-btn')
 const syncBtn = document.getElementById('sync-devices-btn')
+
+initShellI18n()
 
 // Each toolbar button represents one mutually-exclusive feature. The
 // owning component disables the *other* two while its feature is open,
