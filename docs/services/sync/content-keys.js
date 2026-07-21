@@ -227,7 +227,7 @@ export async function generateAndPublishContentKey ({
 
   const seckey = bytesToHex(generateSecretKey())
   const createdAt = nowSeconds()
-  const contentKeySigner = secrets.setContentKeySecret(ownerPubkey, seckey, createdAt)
+  const contentKeySigner = await secrets.setContentKeySecret(ownerPubkey, seckey, createdAt)
   const pubkey = await contentKeySigner.getPublicKey()
 
   setDebugSource(ownerPubkey, pubkey, 'generated locally')
@@ -328,7 +328,7 @@ async function handleReply (message, context) {
     const existing = existingByPubkey.get(normalized.pubkey)
     if (existing && (existing.createdAt || 0) >= normalized.createdAt) continue
 
-    const signer = secrets.setContentKeySecret(ownerPubkey, normalized.seckey, normalized.createdAt)
+    const signer = await secrets.setContentKeySecret(ownerPubkey, normalized.seckey, normalized.createdAt)
     if (!signer) continue
     existingByPubkey.set(normalized.pubkey, { pubkey: normalized.pubkey, createdAt: normalized.createdAt })
     debugSourceByKey.set(sourceKey(ownerPubkey, normalized.pubkey), `synced from ${label}`)

@@ -45,29 +45,19 @@ function pubkeyFromSecret (secret) {
   return getPublicKey(hexToBytes(secret))
 }
 
-function addNsecAccount () {
+async function addNsecAccount () {
   const secret = seckey()
   const pubkey = pubkeyFromSecret(secret)
-  store.add({ type: 'nsec', pubkey, name: '', picture: '' })
-  secrets.setNsecSecret(pubkey, secret)
+  await store.add({ type: 'nsec', pubkey, name: '', picture: '' })
+  await secrets.setNsecSecret(pubkey, secret)
   return { pubkey, secret }
 }
 
-function addContentKey (ownerPubkey, createdAt = 10) {
+async function addContentKey (ownerPubkey, createdAt = 10) {
   const secret = seckey()
   const pubkey = pubkeyFromSecret(secret)
-  secrets.setContentKeySecret(ownerPubkey, secret, createdAt)
+  await secrets.setContentKeySecret(ownerPubkey, secret, createdAt)
   return { pubkey, secret, createdAt }
-}
-
-function relayListEvent (pubkey, createdAt, tags) {
-  return {
-    kind: 10002,
-    pubkey,
-    created_at: createdAt,
-    tags,
-    content: ''
-  }
 }
 
 function relayPoolStub ({
@@ -188,8 +178,8 @@ test('doubleSignEvent signs event with per-event imkc proof', async () => {
 
 test('refreshStoredContentKeyEvents republishes newest remote key only where absent or older with another pubkey', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const account = addNsecAccount()
-  addContentKey(account.pubkey, 50)
+  const account = await addNsecAccount()
+  await addContentKey(account.pubkey, 50)
   const userSigner = secrets.getNsecSigner(account.pubkey)
   const remoteContentPubkey = pubkeyFixture(11)
   const staleContentPubkey = pubkeyFixture(12)
@@ -238,8 +228,8 @@ test('refreshStoredContentKeyEvents republishes newest remote key only where abs
 
 test('refreshStoredContentKeyEvents publishes local key only when no valid event is found', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const account = addNsecAccount()
-  const localContentKey = addContentKey(account.pubkey, 50)
+  const account = await addNsecAccount()
+  const localContentKey = await addContentKey(account.pubkey, 50)
   const userSigner = secrets.getNsecSigner(account.pubkey)
   const relayList = await userSigner.signEvent({
     kind: 10002,
@@ -268,8 +258,8 @@ test('refreshStoredContentKeyEvents publishes local key only when no valid event
 
 test('refreshStoredContentKeyEvents skips offline instead of treating missing relay results as absence', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const account = addNsecAccount()
-  addContentKey(account.pubkey, 50)
+  const account = await addNsecAccount()
+  await addContentKey(account.pubkey, 50)
   let fetched = false
   let published = false
 
@@ -289,8 +279,8 @@ test('refreshStoredContentKeyEvents skips offline instead of treating missing re
 
 test('refreshStoredContentKeyEvents publishes a fallback relay list when none exists', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const account = addNsecAccount()
-  const localContentKey = addContentKey(account.pubkey, 50)
+  const account = await addNsecAccount()
+  const localContentKey = await addContentKey(account.pubkey, 50)
   const published = []
 
   await refreshStoredContentKeyEvents({
@@ -315,8 +305,8 @@ test('refreshStoredContentKeyEvents publishes a fallback relay list when none ex
 
 test('refreshStoredContentKeyEvents adds fallback write relays without duplicate read tags', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const account = addNsecAccount()
-  addContentKey(account.pubkey, 50)
+  const account = await addNsecAccount()
+  await addContentKey(account.pubkey, 50)
   const userSigner = secrets.getNsecSigner(account.pubkey)
   const relayList = await userSigner.signEvent({
     kind: 10002,
@@ -351,8 +341,8 @@ test('refreshStoredContentKeyEvents adds fallback write relays without duplicate
 
 test('rotateContentKeyIfStillCanonical rotates when relays still advertise removed-known key', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const account = addNsecAccount()
-  const oldContent = addContentKey(account.pubkey, 50)
+  const account = await addNsecAccount()
+  const oldContent = await addContentKey(account.pubkey, 50)
   const userSigner = secrets.getNsecSigner(account.pubkey)
   const relayList = await userSigner.signEvent({
     kind: 10002,
@@ -391,8 +381,8 @@ test('rotateContentKeyIfStillCanonical rotates when relays still advertise remov
 
 test('rotateContentKeyIfStillCanonical clears when relays already advertise another key', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const account = addNsecAccount()
-  const oldContent = addContentKey(account.pubkey, 50)
+  const account = await addNsecAccount()
+  const oldContent = await addContentKey(account.pubkey, 50)
   const userSigner = secrets.getNsecSigner(account.pubkey)
   const newerPubkey = pubkeyFixture(999)
   const relayList = await userSigner.signEvent({

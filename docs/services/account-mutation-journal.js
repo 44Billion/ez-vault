@@ -1,4 +1,6 @@
-const KEY = 'ez-vault:account-mutation'
+import { getState, hasState, removeState, setState } from './storage/index.js'
+
+const KEY = 'account-mutation'
 const listeners = new Set()
 
 function cloneJson (value) {
@@ -40,9 +42,7 @@ function uniquePubkeys (...groups) {
 
 export function read () {
   try {
-    const raw = localStorage.getItem(KEY)
-    if (!raw) return null
-    const parsed = JSON.parse(raw)
+    const parsed = getState(KEY)
     if (!parsed || typeof parsed !== 'object') return null
     const beforeAccounts = normalizeAccountList(parsed.beforeAccounts)
     const afterAccounts = normalizeAccountList(parsed.afterAccounts)
@@ -70,7 +70,7 @@ export function read () {
   }
 }
 
-export function begin ({
+export async function begin ({
   operation,
   affectedPubkeys = [],
   beforeAccounts = [],
@@ -95,14 +95,14 @@ export function begin ({
     afterSecretRefs: normalizeSecretRefs(afterSecretRefs),
     createdAt: Math.floor(Date.now() / 1000)
   }
-  localStorage.setItem(KEY, JSON.stringify(tx))
+  await setState(KEY, tx)
   notify()
   return tx
 }
 
-export function clear () {
-  if (!localStorage.getItem(KEY)) return
-  localStorage.removeItem(KEY)
+export async function clear () {
+  if (!hasState(KEY)) return
+  await removeState(KEY)
   notify()
 }
 

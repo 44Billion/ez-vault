@@ -157,7 +157,7 @@ describe('vault nostrdb launcher bridge', () => {
 
   it('exports a singleton connection for app code', async () => {
     const { port1, port2 } = new MessageChannel()
-    store.add({ type: 'nsec', pubkey: 'e'.repeat(64) })
+    await store.add({ type: 'nsec', pubkey: 'e'.repeat(64) })
     connect(port1)
     assert.equal(isConnected(), true)
     assert.deepEqual(Object.keys(forAccount('e'.repeat(64))).sort(), [

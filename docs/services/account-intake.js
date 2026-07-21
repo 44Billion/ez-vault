@@ -281,19 +281,19 @@ export async function commitPrepared (prepared, options = {}) {
 
   let committedCount = 0
   let trustedSignerWritten = false
-  const applyPrepared = () => {
+  const applyPrepared = async () => {
     for (const p of prepared) {
       const prior = priorStoreRecords.get(p.pubkey)
-      if (prior) store.replace(p.pubkey, p.record)
-      else store.add(p.record)
+      if (prior) await store.replace(p.pubkey, p.record)
+      else await store.add(p.record)
       if (p.type === 'nsec') {
         // secrets.setNsecSecret also drops any prior bunker handle / nsec
         // signer cached for this pubkey, so no separate teardown call.
-        secrets.setNsecSecret(p.pubkey, p.seckey)
+        await secrets.setNsecSecret(p.pubkey, p.seckey)
       } else if (p.type === 'bunker') {
         // Adopts the live handle (with its WeakMap-protected clientKey)
         // into the secrets pool. The bytes never travel through this scope.
-        p.bunkerHandle.commit()
+        await p.bunkerHandle.commit()
         p.markCommitted()
       }
       committedCount++
@@ -302,21 +302,21 @@ export async function commitPrepared (prepared, options = {}) {
     // inside this try/catch means the rollback can put the prior
     // ciphertext back if writeSecretsBlob below throws.
     if (peerSigner) {
-      trustedSigners.add({ ...peerSigner, actorPubkey: peerSignerActorPubkey })
+      await trustedSigners.add({ ...peerSigner, actorPubkey: peerSignerActorPubkey })
       trustedSignerWritten = true
     }
   }
-  const rollbackPrepared = () => {
+  const rollbackPrepared = async () => {
     for (let i = 0; i < committedCount; i++) {
       const p = prepared[i]
       const prior = priorStoreRecords.get(p.pubkey)
       try {
-        if (prior) store.replace(p.pubkey, prior)
-        else store.remove(p.pubkey)
+        if (prior) await store.replace(p.pubkey, prior)
+        else await store.remove(p.pubkey)
       } catch { /* noop */ }
     }
     if (trustedSignerWritten) {
-      try { trustedSigners.restore(priorTrustedSignersBlob) } catch (e) {
+      try { await trustedSigners.restore(priorTrustedSignersBlob) } catch (e) {
         console.warn('trusted-signers rollback failed', e?.message ?? e)
       }
     }
@@ -333,17 +333,17 @@ export async function commitPrepared (prepared, options = {}) {
         writeOptions: {}
       })
     } else {
-      applyPrepared()
+      await applyPrepared()
     }
   } catch (err) {
     if (needsSecretsPersist) {
       if (trustedSignerWritten) {
-        try { trustedSigners.restore(priorTrustedSignersBlob) } catch (e) {
+        try { await trustedSigners.restore(priorTrustedSignersBlob) } catch (e) {
           console.warn('trusted-signers rollback failed', e?.message ?? e)
         }
       }
     } else {
-      rollbackPrepared()
+      await rollbackPrepared()
     }
     throw err
   }

@@ -479,7 +479,7 @@ export class ActivityLog extends HTMLElement {
 
   async #render () {
     const id = ++this.#renderId
-    let entries = log.list()
+    let entries = await log.list()
     if (DEV_MODE) {
       const fixtures = await loadFixtures()
       if (id !== this.#renderId) return

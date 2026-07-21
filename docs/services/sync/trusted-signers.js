@@ -116,7 +116,7 @@ export async function handleMessage (message, context = {}) {
     // Old direct-removal reminders may arrive after this peer was re-trusted.
     // Only a removal at least as fresh as the sender trust can clear us.
     if (selfRemoval.updatedAt < senderTrustUpdatedAt(context, senderPubkey)) return true
-    context.trustedSigners?.clearActive?.({
+    await context.trustedSigners?.clearActive?.({
       actorPubkey: devicePubkey,
       updatedAt: selfRemoval.updatedAt,
       tombstone: false
@@ -125,6 +125,6 @@ export async function handleMessage (message, context = {}) {
   }
 
   const mergeEntries = entriesExceptPubkey(entries, devicePubkey)
-  if (mergeEntries.length) context.trustedSigners?.mergeRecords?.(mergeEntries, { action: 'sync' })
+  if (mergeEntries.length) await context.trustedSigners?.mergeRecords?.(mergeEntries, { action: 'sync' })
   return true
 }

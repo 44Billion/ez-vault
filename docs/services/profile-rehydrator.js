@@ -69,14 +69,14 @@ async function rehydrateOne (account) {
           operation: 'bunker-drift',
           beforeAccounts: [account],
           afterAccounts: [afterAccount],
-          apply: () => {
+          apply: async () => {
             // Rewrite the store record first so transferBunkerSecret can read
             // the new bunker URL out of it when it reconstructs the moved
             // handle.
-            store.update(oldPubkey, reset)
+            await store.update(oldPubkey, reset)
             // The device signer key is account-independent so it stays put
             // across drift; trusted-signers are stored at device level too.
-            secrets.transferBunkerSecret(oldPubkey, liveBunkerPubkey)
+            await secrets.transferBunkerSecret(oldPubkey, liveBunkerPubkey)
           }
         })
         account = afterAccount
@@ -115,7 +115,7 @@ async function rehydrateOne (account) {
     patch.picture = await seededAvatarDataUrl(account.pubkey)
   }
 
-  if (Object.keys(patch).length) store.update(account.pubkey, patch)
+  if (Object.keys(patch).length) await store.update(account.pubkey, patch)
   return { updated: Object.keys(patch).length > 0 }
 }
 

@@ -116,18 +116,18 @@ function createRelayListUpdates () {
   }
 }
 
-function addNsecAccount () {
+async function addNsecAccount () {
   const secret = seckey()
   const pubkey = pubkeyFromSecret(secret)
-  store.add({ type: 'nsec', pubkey, name: '', picture: '' })
-  secrets.setNsecSecret(pubkey, secret)
+  await store.add({ type: 'nsec', pubkey, name: '', picture: '' })
+  await secrets.setNsecSecret(pubkey, secret)
   return { pubkey, secret }
 }
 
-function addContentKey (ownerPubkey, createdAt = freshCreatedAt()) {
+async function addContentKey (ownerPubkey, createdAt = freshCreatedAt()) {
   const secret = seckey()
   const pubkey = pubkeyFromSecret(secret)
-  secrets.setContentKeySecret(ownerPubkey, secret, createdAt)
+  await secrets.setContentKeySecret(ownerPubkey, secret, createdAt)
   return { pubkey, secret, createdAt }
 }
 
@@ -856,7 +856,7 @@ test('sync close cancels init work that resolves later', async () => {
 
 test('setContentKeySecret causes one immediate announce through the sync subscription', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const owner = addNsecAccount()
+  const owner = await addNsecAccount()
   const trusted = '8'.repeat(64)
   const yells = []
   const timers = []
@@ -920,7 +920,7 @@ test('setContentKeySecret causes one immediate announce through the sync subscri
   assert.equal(instances[0].updates.length, 0)
   const contentSecret = seckey()
   const contentPubkey = pubkeyFromSecret(contentSecret)
-  secrets.setContentKeySecret(owner.pubkey, contentSecret, 60)
+  await secrets.setContentKeySecret(owner.pubkey, contentSecret, 60)
   await flushMicrotasks()
   assert.equal(instances[0].updates.length, 0)
 
@@ -939,9 +939,9 @@ test('setContentKeySecret causes one immediate announce through the sync subscri
 
 test('content-key announce ignores untrusted and non-nsec channels, then requests only missing keys', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const owner = addNsecAccount()
-  const held = addContentKey(owner.pubkey)
-  const missing = addContentKey(owner.pubkey)
+  const owner = await addNsecAccount()
+  const held = await addContentKey(owner.pubkey)
+  const missing = await addContentKey(owner.pubkey)
   const absentSecret = seckey()
   const absentPubkey = pubkeyFromSecret(absentSecret)
   const trusted = '1'.repeat(64)
@@ -951,8 +951,8 @@ test('content-key announce ignores untrusted and non-nsec channels, then request
     trustedByPubkey: new Map([[trusted, { pubkey: trusted, platform: 'Phone' }]])
   }
 
-  secrets.setContentKeySecret(owner.pubkey, held.secret, held.createdAt)
-  store.add({ type: 'bunker', pubkey: '2'.repeat(64), name: '' })
+  await secrets.setContentKeySecret(owner.pubkey, held.secret, held.createdAt)
+  await store.add({ type: 'bunker', pubkey: '2'.repeat(64), name: '' })
 
   await handleMessage(syncMessage({
     channelPubkey: owner.pubkey,
@@ -989,11 +989,11 @@ test('content-key announce ignores untrusted and non-nsec channels, then request
   assert.deepEqual(messenger.sent[0].options.payload.pubkeys, [absentPubkey])
 })
 
-test('content-key announce does not request keys already restored from localStorage', async () => {
+test('content-key announce does not request keys already restored from IndexedDB', async () => {
   const vaultKey = generateSecretKey()
   secrets.unlock(vaultKey, null)
-  const owner = addNsecAccount()
-  const content = addContentKey(owner.pubkey, 70)
+  const owner = await addNsecAccount()
+  const content = await addContentKey(owner.pubkey, 70)
   const accountBlob = secrets.sealCurrentEntries()
 
   secrets.lock()
@@ -1024,7 +1024,7 @@ test('content-key announce does not request keys already restored from localStor
 
 test('content-key announce routes asks over derived sync channels', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const owner = addNsecAccount()
+  const owner = await addNsecAccount()
   const absentSecret = seckey()
   const absentPubkey = pubkeyFromSecret(absentSecret)
   const channelPubkey = 'derived-sync-channel'
@@ -1052,8 +1052,8 @@ test('content-key announce routes asks over derived sync channels', async () => 
 
 test('content-key announce contains only public key metadata', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const owner = addNsecAccount()
-  const content = addContentKey(owner.pubkey, 30)
+  const owner = await addNsecAccount()
+  const content = await addContentKey(owner.pubkey, 30)
   const messenger = fakeMessenger()
 
   await announceContentKeys({
@@ -1073,8 +1073,8 @@ test('content-key announce contains only public key metadata', async () => {
 
 test('content-key requests reply with only locally held requested secrets', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const owner = addNsecAccount()
-  const content = addContentKey(owner.pubkey, 40)
+  const owner = await addNsecAccount()
+  const content = await addContentKey(owner.pubkey, 40)
   const trusted = '5'.repeat(64)
   const absent = pubkeyFromSecret(seckey())
   const messenger = fakeMessenger()
@@ -1102,8 +1102,8 @@ test('content-key requests reply with only locally held requested secrets', asyn
 
 test('content-key replies import valid keys, keep older keys, and notify the sync subscription', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const owner = addNsecAccount()
-  const older = addContentKey(owner.pubkey, freshCreatedAt(20))
+  const owner = await addNsecAccount()
+  const older = await addContentKey(owner.pubkey, freshCreatedAt(20))
   const syncedSecret = seckey()
   const syncedPubkey = pubkeyFromSecret(syncedSecret)
   const syncedCreatedAt = freshCreatedAt(10)
@@ -1147,11 +1147,11 @@ test('content-key replies import valid keys, keep older keys, and notify the syn
 
 test('content-key replies keep a stale key only until a newer key exists', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const owner = addNsecAccount()
+  const owner = await addNsecAccount()
   const trusted = 'a'.repeat(64)
   const staleSecret = seckey()
   const stalePubkey = pubkeyFromSecret(staleSecret)
-  const newer = addContentKey(owner.pubkey, freshCreatedAt(10))
+  const newer = await addContentKey(owner.pubkey, freshCreatedAt(10))
   const notified = []
   const unsubscribe = secrets.subscribeContentKeys(ownerPubkey => notified.push(ownerPubkey))
 
@@ -1178,7 +1178,7 @@ test('content-key replies keep a stale key only until a newer key exists', async
 
 test('content-key replies can import a stale key when it is the only key', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const owner = addNsecAccount()
+  const owner = await addNsecAccount()
   const trusted = 'b'.repeat(64)
   const staleSecret = seckey()
   const stalePubkey = pubkeyFromSecret(staleSecret)
@@ -1201,7 +1201,7 @@ test('content-key replies can import a stale key when it is the only key', async
 
 test('dev content-key generation persists, publishes, updates debug source, and keeps key on publish failure', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const owner = addNsecAccount()
+  const owner = await addNsecAccount()
   // owner.pubkey = ''
   const scheduled = []
   const notified = []

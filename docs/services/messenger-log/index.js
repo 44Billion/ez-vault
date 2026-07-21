@@ -1,48 +1,21 @@
 import * as secrets from '../secrets.js'
+import {
+  appendMessengerLog,
+  clearMessengerLogs,
+  listMessengerLogs,
+  removeMessengerLogsForPubkey
+} from '../storage/index.js'
 
-const KEY = 'ez-vault:messenger-log'
-const MAX_ENTRIES = 500
+export const MAX_ENTRIES_PER_APP = 500
+export const MAX_LOG_BYTES = 64 * 1024 * 1024
+export const PAGE_SIZE = 100
 
-// Bounded FIFO in localStorage of messenger activity, newest first. Acts as
-// the user's audit trail: each entry stores the call metadata plus the
-// signed/decrypted payload so the user can review what an app actually did
-// with their key.
-//
-// Sensitive fields (`params` and `result`) are sealed together with the
-// vault key (the deterministic privkey derived from the passkey PRF) so
-// localStorage never holds plaintext. Metadata fields (ts, pubkey, app,
-// method, status, ...) stay in the clear so callers like `removeForPubkey`
-// can filter without having to decrypt every entry.
-//
-// Some methods are deliberately *not* logged at the call site (read-only
-// disclosures like getPublicKey/getRelays); see `messenger.js` for the
-// exclusion list.
+// The activity log is advisory, but its sensitive fields remain sealed with
+// the vault key. IndexedDB gives each app its own 500-entry FIFO allowance;
+// entries without an app id share the launcher bucket, while an explicit
+// `ez-vault` id remains a separate app like any other.
 
 const listeners = new Set()
-
-function readRaw () {
-  try {
-    const raw = localStorage.getItem(KEY)
-    if (!raw) return []
-    const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed : []
-  } catch {
-    return []
-  }
-}
-
-function write (all) {
-  try {
-    localStorage.setItem(KEY, JSON.stringify(all))
-  } catch (err) {
-    // QuotaExceededError or similar — drop the oldest half and retry once,
-    // then give up quietly. The log is advisory; losing entries is fine.
-    if (all.length <= 1) return
-    const trimmed = all.slice(0, Math.max(1, Math.floor(all.length / 2)))
-    try { localStorage.setItem(KEY, JSON.stringify(trimmed)) } catch { /* noop */ }
-    console.warn('messenger-log write failed, trimmed', err?.message ?? err)
-  }
-}
 
 function notify () {
   for (const fn of listeners) {
@@ -50,20 +23,24 @@ function notify () {
   }
 }
 
+function appKey (entry) {
+  const id = String(entry?.app?.id || '').trim()
+  return id ? `app:${id}` : 'launcher'
+}
+
 function inflate (entry) {
-  if (!entry.sealed) return entry
-  if (!secrets.isUnlocked()) {
-    // Locked: leave sealed-only — the UI is overlaid in this state anyway,
-    // and any background reader can still see the metadata it needs.
-    return entry
-  }
+  const publicEntry = { ...entry }
+  delete publicEntry.appKey
+  delete publicEntry.byteSize
+  if (!publicEntry.sealed) return publicEntry
+  if (!secrets.isUnlocked()) return publicEntry
   try {
-    const { sealed, ...rest } = entry
+    const { sealed, ...rest } = publicEntry
     const opened = JSON.parse(secrets.vaultDecrypt(sealed))
     return { ...rest, ...opened }
   } catch (err) {
     console.warn('messenger-log decrypt failed', err?.message ?? err)
-    return entry
+    return publicEntry
   }
 }
 
@@ -72,41 +49,50 @@ export function subscribe (fn) {
   return () => listeners.delete(fn)
 }
 
-export function append (entry) {
-  const { params, result, ...rest } = entry
-  const sealedFields = {}
-  if (params !== undefined) sealedFields.params = params
-  if (result !== undefined) sealedFields.result = result
+export async function append (entry) {
+  try {
+    const { params, result, ...rest } = entry
+    const sealedFields = {}
+    if (params !== undefined) sealedFields.params = params
+    if (result !== undefined) sealedFields.result = result
 
-  const stored = { ts: Math.floor(Date.now() / 1000), ...rest }
-  if (Object.keys(sealedFields).length && secrets.isUnlocked()) {
-    stored.sealed = secrets.vaultEncrypt(JSON.stringify(sealedFields))
+    const stored = {
+      ts: Math.floor(Date.now() / 1000),
+      ...rest,
+      appKey: appKey(entry)
+    }
+    if (Object.keys(sealedFields).length && secrets.isUnlocked()) {
+      stored.sealed = secrets.vaultEncrypt(JSON.stringify(sealedFields))
+    }
+
+    await appendMessengerLog(stored, {
+      maxEntriesPerApp: MAX_ENTRIES_PER_APP,
+      maxBytes: MAX_LOG_BYTES
+    })
+    notify()
+  } catch (err) {
+    // Audit history must never make a signing request fail.
+    console.warn('messenger-log write failed', err?.message ?? err)
   }
-  // While locked, sensitive fields are dropped on the floor — anything that
-  // produced them must have run unlocked, so this only happens for failure
-  // entries logged after a VAULT_LOCKED rejection.
-
-  const all = readRaw()
-  all.unshift(stored)
-  if (all.length > MAX_ENTRIES) all.length = MAX_ENTRIES
-  write(all)
-  notify()
 }
 
-export function list () {
-  return readRaw().map(inflate)
+export async function list (options = {}) {
+  return (await listMessengerLogs({ limit: PAGE_SIZE, ...options })).map(inflate)
 }
 
-export function removeForPubkey (pubkey) {
-  if (!pubkey) return
-  const all = readRaw()
-  const next = all.filter(e => e.pubkey !== pubkey)
-  if (next.length === all.length) return
-  write(next)
-  notify()
+export async function removeForPubkey (pubkey) {
+  try {
+    if (await removeMessengerLogsForPubkey(pubkey)) notify()
+  } catch (err) {
+    console.warn('messenger-log removal failed', err?.message ?? err)
+  }
 }
 
-export function clear () {
-  write([])
-  notify()
+export async function clear () {
+  try {
+    await clearMessengerLogs()
+    notify()
+  } catch (err) {
+    console.warn('messenger-log clear failed', err?.message ?? err)
+  }
 }

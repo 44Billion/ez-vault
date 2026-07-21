@@ -157,8 +157,7 @@ export function createSyncController ({
   const nostrDbSync = _createNostrDbSyncController({
     _setTimeout,
     _clearTimeout,
-    onError,
-    storage: globalThis.localStorage
+    onError
   })
 
   function emitDebug (action, detail = {}) {
@@ -557,7 +556,7 @@ export function createSyncController ({
       })
     }
     await _revocationRotation.runDueRevocationRotations?.()
-    _revocationRotation.startRevocationRotation?.()
+    await _revocationRotation.startRevocationRotation?.()
   }
 
   function onTrustedSignerChange (detail = {}) {
@@ -601,7 +600,7 @@ export function createSyncController ({
     const userSigner = await _secrets.getDeviceSigner()
     if (!isCurrentLifecycle(id)) return null
     devicePubkey = await userSigner.getPublicKey()
-    _trustedSigners.forgetLocal?.(devicePubkey)
+    await _trustedSigners.forgetLocal?.(devicePubkey)
     trustedByPubkey = trustedMap(_trustedSigners.list())
     const channels = await buildChannels(userSigner)
     if (!isCurrentLifecycle(id)) return null

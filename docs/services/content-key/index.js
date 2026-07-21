@@ -8,6 +8,7 @@ import * as store from '../accounts-store.js'
 import * as secrets from '../secrets.js'
 import { filterVisibleAccounts } from '../account-mutations.js'
 import { fetchRelayListEvent, parseRelayListEvent, resolveWriteRelays } from '../relay.js'
+import { getState, setState } from '../storage/index.js'
 
 export { CONTENT_KEY_KIND, getIykcProofs }
 
@@ -58,18 +59,14 @@ function latestKey (keys) {
   return latest
 }
 
-function refreshStorage () {
-  return globalThis.localStorage || null
-}
-
 function readLastContentKeyEventRefresh () {
-  const raw = refreshStorage()?.getItem(CONTENT_KEY_EVENT_REFRESH_KEY)
+  const raw = getState(CONTENT_KEY_EVENT_REFRESH_KEY, 0)
   const value = Math.floor(Number(raw) || 0)
   return Number.isSafeInteger(value) && value > 0 ? value : 0
 }
 
 function writeLastContentKeyEventRefresh (value = Date.now()) {
-  refreshStorage()?.setItem(CONTENT_KEY_EVENT_REFRESH_KEY, String(Math.max(0, Math.floor(Number(value) || 0))))
+  return setState(CONTENT_KEY_EVENT_REFRESH_KEY, Math.max(0, Math.floor(Number(value) || 0)))
 }
 
 function contentKeyAccounts () {
@@ -123,7 +120,7 @@ async function publishRelayListIfNeeded ({
   if (!reason) {
     const cachedAt = account.relayListEvent?.created_at ?? 0
     if (relayListEvent.created_at > cachedAt) {
-      store.update(account.pubkey, { relayListEvent, writeRelays })
+      await store.update(account.pubkey, { relayListEvent, writeRelays })
     }
     return { writeRelays, relayListEvent, published: false, reason: '' }
   }
@@ -134,7 +131,7 @@ async function publishRelayListIfNeeded ({
     createdAt: _nowSeconds()
   }))
   const result = await _relayPool.sendEvent(event, seedRelays)
-  store.update(account.pubkey, { relayListEvent: event, writeRelays })
+  await store.update(account.pubkey, { relayListEvent: event, writeRelays })
   return { writeRelays, relayListEvent: event, published: true, reason, result }
 }
 
@@ -312,7 +309,7 @@ export async function rotateContentKeyIfStillCanonical ({
   let rotated = false
   if (contentPubkey === removedKnownContentPubkey) {
     const seckey = bytesToHex(generateSecretKey())
-    contentKeySigner = secrets.replaceContentKeySecret(ownerPubkey, seckey, _nowSeconds())
+    contentKeySigner = await secrets.replaceContentKeySecret(ownerPubkey, seckey, _nowSeconds())
     contentPubkey = await contentKeySigner.getPublicKey()
     rotated = true
   }
@@ -390,7 +387,7 @@ export async function refreshStoredContentKeyEventsIfDue ({
   const last = readLastContentKeyEventRefresh()
   if (last && now - last < intervalMs) return { skipped: 'fresh', nextInMs: intervalMs - (now - last) }
   const result = await refreshStoredContentKeyEvents(options)
-  if (result.skipped !== 'offline' && result.skipped !== 'locked') writeLastContentKeyEventRefresh(now)
+  if (result.skipped !== 'offline' && result.skipped !== 'locked') await writeLastContentKeyEventRefresh(now)
   return result
 }
 

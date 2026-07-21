@@ -63,8 +63,8 @@ function affectedFromAccounts (beforeAccounts, afterAccounts) {
   )
 }
 
-function rollbackAccountState (affectedPubkeys, beforeAccounts, priorBlob, priorContentKeysBlob) {
-  try { store.applyRecords(affectedPubkeys, beforeAccounts) } catch (err) {
+async function rollbackAccountState (affectedPubkeys, beforeAccounts, priorBlob, priorContentKeysBlob) {
+  try { await store.applyRecords(affectedPubkeys, beforeAccounts) } catch (err) {
     console.warn('account rollback failed', err?.message ?? err)
   }
   if (priorBlob !== null) {
@@ -73,7 +73,7 @@ function rollbackAccountState (affectedPubkeys, beforeAccounts, priorBlob, prior
     }
   }
   if (priorContentKeysBlob !== null) {
-    try { secrets.restoreContentKeySecrets(priorContentKeysBlob) } catch (err) {
+    try { await secrets.restoreContentKeySecrets(priorContentKeysBlob) } catch (err) {
       console.warn('content-key rollback failed', err?.message ?? err)
     }
   }
@@ -95,7 +95,7 @@ export async function runSecretAccountMutation ({
   const priorBlob = secrets.sealCurrentEntries()
   const priorContentKeysBlob = secrets.snapshotContentKeySecrets()
 
-  journal.begin({
+  await journal.begin({
     operation,
     affectedPubkeys,
     beforeAccounts: cleanBefore,
@@ -108,10 +108,10 @@ export async function runSecretAccountMutation ({
     await apply()
     await passkey.writeSecretsBlob(writeOptions)
     await finalize?.()
-    journal.clear()
+    await journal.clear()
   } catch (err) {
-    rollbackAccountState(affectedPubkeys, cleanBefore, priorBlob, priorContentKeysBlob)
-    journal.clear()
+    await rollbackAccountState(affectedPubkeys, cleanBefore, priorBlob, priorContentKeysBlob)
+    await journal.clear()
     throw err
   }
 }
@@ -125,7 +125,7 @@ function accountMatchesRef (account, ref) {
   return Boolean(accountRef && ref && accountRef.type === ref.type && accountRef.pubkey === ref.pubkey)
 }
 
-function reconcileMixedState (tx, actualRefs) {
+async function reconcileMixedState (tx, actualRefs) {
   const before = accountsByPubkey(tx.beforeAccounts)
   const after = accountsByPubkey(tx.afterAccounts)
   const actualByPubkey = new Map(actualRefs.map(ref => [ref.pubkey, ref]))
@@ -143,10 +143,10 @@ function reconcileMixedState (tx, actualRefs) {
     else if (ref) console.warn('dropping account record with mismatched secret ref', pubkey)
   }
 
-  store.applyRecords(tx.affectedPubkeys, records)
+  await store.applyRecords(tx.affectedPubkeys, records)
 }
 
-export function recoverPendingMutation () {
+export async function recoverPendingMutation () {
   const tx = journal.read()
   if (!tx) return { recovered: false, outcome: 'none' }
   if (journal.needsUnlock(tx) && !secrets.isUnlocked()) {
@@ -156,20 +156,20 @@ export function recoverPendingMutation () {
   const actualRefs = secretRefsForPubkeys(tx.affectedPubkeys)
   let outcome = 'mixed'
   if (refsEqual(actualRefs, tx.afterSecretRefs)) {
-    store.applyRecords(tx.affectedPubkeys, tx.afterAccounts)
+    await store.applyRecords(tx.affectedPubkeys, tx.afterAccounts)
     outcome = 'after'
   } else if (refsEqual(actualRefs, tx.beforeSecretRefs)) {
-    store.applyRecords(tx.affectedPubkeys, tx.beforeAccounts)
+    await store.applyRecords(tx.affectedPubkeys, tx.beforeAccounts)
     outcome = 'before'
   } else {
     console.warn('recovering mixed account mutation state', {
       operation: tx.operation,
       affectedPubkeys: tx.affectedPubkeys
     })
-    reconcileMixedState(tx, actualRefs)
+    await reconcileMixedState(tx, actualRefs)
   }
 
-  journal.clear()
+  await journal.clear()
   return { recovered: true, outcome }
 }
 

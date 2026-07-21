@@ -1,18 +1,17 @@
-const KEY = 'ez-vault:accounts'
+import { listAccounts, mutateAccounts } from './storage/index.js'
+
 const listeners = new Set()
 
-function read () {
-  try {
-    const raw = localStorage.getItem(KEY)
-    return raw ? JSON.parse(raw) : []
-  } catch {
-    return []
+function notify () {
+  for (const fn of listeners) {
+    try { fn() } catch (err) { console.warn('accounts-store listener threw', err) }
   }
 }
 
-function write (accounts) {
-  localStorage.setItem(KEY, JSON.stringify(accounts))
-  for (const fn of listeners) fn()
+async function mutate (fn) {
+  const result = await mutateAccounts(fn)
+  notify()
+  return result
 }
 
 export function subscribe (fn) {
@@ -21,66 +20,70 @@ export function subscribe (fn) {
 }
 
 export function list () {
-  return read()
+  return listAccounts()
 }
 
 export function get (pubkey) {
-  return read().find(a => a.pubkey === pubkey) || null
+  return list().find(account => account.pubkey === pubkey) || null
 }
 
-export function add (account) {
-  const all = read()
-  if (all.some(a => a.pubkey === account.pubkey)) throw new Error('ACCOUNT_EXISTS')
-  all.unshift(account)
-  write(all)
+export async function add (account) {
+  await mutate(all => {
+    if (all.some(existing => existing.pubkey === account.pubkey)) throw new Error('ACCOUNT_EXISTS')
+    all.unshift(account)
+    return { accounts: all }
+  })
 }
 
-export function replace (pubkey, account) {
-  const all = read()
-  const i = all.findIndex(a => a.pubkey === pubkey)
-  if (i === -1) throw new Error('ACCOUNT_NOT_FOUND')
-  all[i] = account
-  write(all)
+export async function replace (pubkey, account) {
+  await mutate(all => {
+    const index = all.findIndex(existing => existing.pubkey === pubkey)
+    if (index === -1) throw new Error('ACCOUNT_NOT_FOUND')
+    all[index] = account
+    return { accounts: all }
+  })
 }
 
-export function update (pubkey, patch) {
-  const all = read()
-  const i = all.findIndex(a => a.pubkey === pubkey)
-  if (i === -1) return
-  all[i] = { ...all[i], ...patch }
-  write(all)
+export async function update (pubkey, patch) {
+  return mutate(all => {
+    const index = all.findIndex(account => account.pubkey === pubkey)
+    if (index === -1) return { accounts: all, result: false }
+    all[index] = { ...all[index], ...patch }
+    return { accounts: all, result: true }
+  })
 }
 
-export function remove (pubkey) {
-  const next = read().filter(a => a.pubkey !== pubkey)
-  write(next)
+export async function remove (pubkey) {
+  return mutate(all => {
+    const next = all.filter(account => account.pubkey !== pubkey)
+    return { accounts: next, result: next.length !== all.length }
+  })
 }
 
-export function applyRecords (affectedPubkeys, records) {
+export async function applyRecords (affectedPubkeys, records) {
   const affected = new Set((affectedPubkeys || []).filter(Boolean))
   const nextRecords = Array.isArray(records) ? records : []
-  const byPubkey = new Map(nextRecords.filter(a => a?.pubkey).map(a => [a.pubkey, a]))
+  const byPubkey = new Map(nextRecords.filter(account => account?.pubkey).map(account => [account.pubkey, account]))
   const inserted = new Set()
-  const next = []
-
-  for (const account of read()) {
-    if (!affected.has(account.pubkey)) {
-      next.push(account)
-      continue
+  await mutate(all => {
+    const next = []
+    for (const account of all) {
+      if (!affected.has(account.pubkey)) {
+        next.push(account)
+        continue
+      }
+      const replacement = byPubkey.get(account.pubkey)
+      if (replacement) {
+        next.push(replacement)
+        inserted.add(account.pubkey)
+      }
     }
-    const replacement = byPubkey.get(account.pubkey)
-    if (replacement) {
-      next.push(replacement)
-      inserted.add(account.pubkey)
+    for (let index = nextRecords.length - 1; index >= 0; index--) {
+      const record = nextRecords[index]
+      if (!record?.pubkey || inserted.has(record.pubkey)) continue
+      next.unshift(record)
+      inserted.add(record.pubkey)
     }
-  }
-
-  for (let i = nextRecords.length - 1; i >= 0; i--) {
-    const record = nextRecords[i]
-    if (!record?.pubkey || inserted.has(record.pubkey)) continue
-    next.unshift(record)
-    inserted.add(record.pubkey)
-  }
-
-  write(next)
+    return { accounts: next }
+  })
 }

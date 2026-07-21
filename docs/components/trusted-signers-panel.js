@@ -221,7 +221,7 @@ export class TrustedSignersPanel extends HTMLElement {
     button.disabled = true
     try {
       const actorPubkey = await secrets.getDeviceSignerPubkey()
-      trustedSigners.remove(pubkey, { actorPubkey })
+      await trustedSigners.remove(pubkey, { actorPubkey })
       toast.success(t('Trusted device removed'))
     } catch (err) {
       button.disabled = false

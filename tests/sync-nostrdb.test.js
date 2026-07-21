@@ -1,7 +1,7 @@
 import { test, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  createNostrDbSyncController,
+  createNostrDbSyncController as createController,
   NOSTRDB_SYNC_ADVERTISE_CODE,
   NOSTRDB_SYNC_ASK_CODE,
   NOSTRDB_SYNC_REPLY_CODE,
@@ -22,6 +22,10 @@ const OWNER = 'a'.repeat(64)
 const PEER = 'b'.repeat(64)
 const PEER2 = 'e'.repeat(64)
 const EVENT_ID = 'c'.repeat(64)
+
+function createNostrDbSyncController (options = {}) {
+  return createController({ storage: globalThis.localStorage, ...options })
+}
 
 afterEach(() => {
   globalThis.localStorage.clear()

@@ -38,25 +38,25 @@ function seckey () {
   return bytesToHex(generateSecretKey())
 }
 
-function addNsecAccount () {
+async function addNsecAccount () {
   const secret = seckey()
   const pubkey = getPublicKey(hexToBytes(secret))
-  store.add({ type: 'nsec', pubkey, name: '', picture: '' })
-  secrets.setNsecSecret(pubkey, secret)
+  await store.add({ type: 'nsec', pubkey, name: '', picture: '' })
+  await secrets.setNsecSecret(pubkey, secret)
   return { pubkey, secret }
 }
 
-function addContentKey (ownerPubkey) {
+async function addContentKey (ownerPubkey) {
   const secret = seckey()
   const pubkey = getPublicKey(hexToBytes(secret))
-  secrets.setContentKeySecret(ownerPubkey, secret, 10)
+  await secrets.setContentKeySecret(ownerPubkey, secret, 10)
   return { pubkey, secret }
 }
 
 test('revocation rotation actor intents run immediately', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const account = addNsecAccount()
-  const content = addContentKey(account.pubkey)
+  const account = await addNsecAccount()
+  const content = await addContentKey(account.pubkey)
   const calls = []
 
   const created = await scheduleRevocationRotationsForRemovedSigner({
@@ -85,8 +85,8 @@ test('revocation rotation actor intents run immediately', async () => {
 
 test('revocation rotation peer intents wait thirty minutes', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const account = addNsecAccount()
-  addContentKey(account.pubkey)
+  const account = await addNsecAccount()
+  await addContentKey(account.pubkey)
   let calls = 0
 
   const created = await scheduleRevocationRotationsForRemovedSigner({
@@ -111,8 +111,8 @@ test('revocation rotation peer intents wait thirty minutes', async () => {
 
 test('revocation rotation retries failures and clears completed work', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const account = addNsecAccount()
-  addContentKey(account.pubkey)
+  const account = await addNsecAccount()
+  await addContentKey(account.pubkey)
   let calls = 0
 
   await scheduleRevocationRotationsForRemovedSigner({

@@ -143,7 +143,7 @@ function isNewerEvent (event, storedEvent) {
   return Number.isFinite(event?.created_at) && event.created_at > (storedEvent?.created_at ?? 0)
 }
 
-export function applyAccountEvents (pubkey, events) {
+export async function applyAccountEvents (pubkey, events) {
   const account = pubkey ? store.get(pubkey) : null
   if (!account || !Array.isArray(events) || !events.length) return false
 
@@ -162,7 +162,7 @@ export function applyAccountEvents (pubkey, events) {
   }
 
   if (!Object.keys(patch).length) return false
-  store.update(pubkey, patch)
+  await store.update(pubkey, patch)
   return true
 }
 
@@ -270,10 +270,10 @@ function handleTranslate (e) {
   }
 }
 
-function handleUpdateAccountEvents (e) {
+async function handleUpdateAccountEvents (e) {
   const { pubkey, events } = e.data.payload ?? {}
   try {
-    applyAccountEvents(pubkey, events)
+    await applyAccountEvents(pubkey, events)
   } catch (err) {
     console.warn('UPDATE_ACCOUNT_EVENTS failed', err?.message ?? err)
   }
@@ -314,13 +314,13 @@ async function handleSignerRequest (e, { code, run }) {
   try {
     const payload = await run({ pubkey, method, params, withSharedKey })
     if (shouldLog) {
-      log.append({ ...logBase, status: 'success', params, result: payload })
+      await log.append({ ...logBase, status: 'success', params, result: payload })
     }
     reply(e, { payload }, { to: launcherPort })
   } catch (err) {
     const serialized = serializeError(err, errorContext)
     if (shouldLog) {
-      log.append({
+      await log.append({
         ...logBase,
         status: 'failure',
         params,

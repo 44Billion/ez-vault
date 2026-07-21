@@ -44,11 +44,11 @@ function seckey () {
   return bytesToHex(generateSecretKey())
 }
 
-function addNsecAccount () {
+async function addNsecAccount () {
   const secret = seckey()
   const pubkey = pubOf(secret)
-  store.add({ type: 'nsec', pubkey, name: '', picture: '' })
-  secrets.setNsecSecret(pubkey, secret)
+  await store.add({ type: 'nsec', pubkey, name: '', picture: '' })
+  await secrets.setNsecSecret(pubkey, secret)
   return { pubkey, secret }
 }
 
@@ -73,7 +73,7 @@ function expectedObfuscate (secret, value, kind, scope) {
 }
 
 // https://github.com/greenart7c3/Nip46Lab/blob/de046f8b6f2078a21835f11f87b1dc11fbca1afc/index.html#L2111
-test('nip44-v3 service passes the vendored upstream self-test vectors', () => {
+test('nip44-v3 service passes the vendored upstream self-test vectors', async () => {
   const sections = {}
   const fails = []
   let total = 0
@@ -178,8 +178,8 @@ test('NsecSigner obfuscates strings with kind and scope separation', async () =>
 
 test('signer.run normalizes snake_case NIP-44 v3 wire methods', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const alice = addNsecAccount()
-  const bob = addNsecAccount()
+  const alice = await addNsecAccount()
+  const bob = await addNsecAccount()
   const plaintextB64 = nip44v3.b64encode(nip44v3.toBytes('hello v3'))
   const ciphertext = await run({
     pubkey: alice.pubkey,
@@ -196,7 +196,7 @@ test('signer.run normalizes snake_case NIP-44 v3 wire methods', async () => {
 
 test('signer.run exposes obfuscate', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const alice = addNsecAccount()
+  const alice = await addNsecAccount()
 
   const result = await run({
     pubkey: alice.pubkey,

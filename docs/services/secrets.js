@@ -9,6 +9,7 @@ import { hexToBytes } from 'libp2r2p/base16'
 import { deriveSignerSeckey } from '../helpers/signer-key.js'
 import { sharedXOnlySecret } from 'libp2r2p/ecdh'
 import * as nip44v3 from 'libp2r2p/nip44-v3'
+import { getState, removeState, setState } from './storage/index.js'
 
 // In-memory home for every account's secret material plus the deterministic
 // vault key derived from the passkey PRF extension. Account secrets live in
@@ -32,7 +33,7 @@ import * as nip44v3 from 'libp2r2p/nip44-v3'
 //   user for fresh verification and decrypts the largeBlob ad-hoc.
 //
 // The vault key doubles as a NIP-44 v3 self-encryption key; messenger-log and
-// content-key persistence use it to seal sensitive localStorage payloads
+// content-key persistence use it to seal sensitive IndexedDB payloads
 // while unlocked.
 
 const CONTENT_KEYS_KEY = 'ez-vault:content-keys'
@@ -40,7 +41,7 @@ const HEX32 = /^[0-9a-f]{64}$/i
 const VAULT_NIP44_KIND = 2
 const VAULT_SECRETS_SCOPE = 'vault-secrets-v1'
 const VAULT_CONTENT_KEYS_SCOPE = 'vault-content-keys-v1'
-const VAULT_LOCAL_STORAGE_SCOPE = 'vault-local-storage-v1'
+const VAULT_LOCAL_STATE_SCOPE = 'vault-local-state-v1'
 
 let vaultPrivkey = null
 let vaultConversationKey = null
@@ -278,7 +279,7 @@ export function isUnlocked () {
 
 // Bring the vault online. `vaultKeyBytes` is the 32-byte PRF output the
 // passkey just produced; `ciphertext` is the sealed payload from the
-// passkey's largeBlob (or its localStorage fallback), or null on a fresh
+// passkey's largeBlob (or its IndexedDB fallback), or null on a fresh
 // registration where there is nothing to load yet.
 export function unlock (vaultKeyBytes, ciphertext) {
   vaultPrivkey = vaultKeyBytes
@@ -335,7 +336,7 @@ function replaceContentKeyEntries (entries, { pruneStale = true } = {}) {
 }
 
 function readPersistedContentKeyEntries () {
-  const raw = localStorage.getItem(CONTENT_KEYS_KEY)
+  const raw = getState(CONTENT_KEYS_KEY)
   if (!raw) return []
   if (!vaultConversationKey) return []
   try {
@@ -349,28 +350,28 @@ function readPersistedContentKeyEntries () {
 
 function loadPersistedContentKeys () {
   if (replaceContentKeyEntries(readPersistedContentKeyEntries())) {
-    persistContentKeyEntries()
+    persistContentKeyEntries().catch(err => console.warn('content key pruning failed', err?.message ?? err))
   }
 }
 
-function persistContentKeyEntries ({ pruneStale = true } = {}) {
+async function persistContentKeyEntries ({ pruneStale = true } = {}) {
   if (!isUnlocked()) throw new Error('VAULT_LOCKED')
   if (pruneStale) pruneStaleContentKeys()
   const entries = listRawContentKeyEntriesInternal()
   if (!entries.length) {
-    localStorage.removeItem(CONTENT_KEYS_KEY)
+    await removeState(CONTENT_KEYS_KEY)
     return
   }
-  localStorage.setItem(CONTENT_KEYS_KEY, vaultEncryptWithScope(JSON.stringify(entries), VAULT_CONTENT_KEYS_SCOPE))
+  await setState(CONTENT_KEYS_KEY, vaultEncryptWithScope(JSON.stringify(entries), VAULT_CONTENT_KEYS_SCOPE))
 }
 
 export function snapshotContentKeySecrets () {
-  return localStorage.getItem(CONTENT_KEYS_KEY)
+  return getState(CONTENT_KEYS_KEY)
 }
 
-export function restoreContentKeySecrets (priorCiphertext) {
-  if (priorCiphertext === null) localStorage.removeItem(CONTENT_KEYS_KEY)
-  else localStorage.setItem(CONTENT_KEYS_KEY, priorCiphertext)
+export async function restoreContentKeySecrets (priorCiphertext) {
+  if (priorCiphertext === null) await removeState(CONTENT_KEYS_KEY)
+  else await setState(CONTENT_KEYS_KEY, priorCiphertext)
   if (isUnlocked()) loadPersistedContentKeys()
   notify()
 }
@@ -382,14 +383,14 @@ export function lock () {
   notify()
 }
 
-export function setNsecSecret (pubkey, seckey) {
+export async function setNsecSecret (pubkey, seckey) {
   if (!isUnlocked()) throw new Error('VAULT_LOCKED')
   const priorContentKeys = snapshotContentKeySecrets()
   const contentKeysChanged = adoptNsec(pubkey, seckey)
   try {
-    if (contentKeysChanged) persistContentKeyEntries()
+    if (contentKeysChanged) await persistContentKeyEntries()
   } catch (err) {
-    restoreContentKeySecrets(priorContentKeys)
+    await restoreContentKeySecrets(priorContentKeys)
     throw err
   }
   notify()
@@ -414,7 +415,7 @@ function adoptContentKey (ownerPubkey, seckey, createdAt = Math.floor(Date.now()
   return signer
 }
 
-export function setContentKeySecret (ownerPubkey, seckey, createdAt = Math.floor(Date.now() / 1000)) {
+export async function setContentKeySecret (ownerPubkey, seckey, createdAt = Math.floor(Date.now() / 1000)) {
   if (!isUnlocked()) throw new Error('VAULT_LOCKED')
   const prior = listRawContentKeyEntriesInternal()
   try {
@@ -422,9 +423,9 @@ export function setContentKeySecret (ownerPubkey, seckey, createdAt = Math.floor
     if (shouldSkipContentKeyStorage(ownerPubkey, normalizedCreatedAt)) return null
     const signer = adoptContentKey(ownerPubkey, seckey, normalizedCreatedAt)
     // Content keys can rotate during quiet background sync. Keep them in
-    // vault-key-encrypted localStorage so rotation never needs a largeBlob
+    // vault-key-encrypted IndexedDB so rotation never needs a largeBlob
     // WebAuthn prompt.
-    persistContentKeyEntries()
+    await persistContentKeyEntries()
     notifyContentKeys(ownerPubkey)
     return signer
   } catch (err) {
@@ -433,13 +434,13 @@ export function setContentKeySecret (ownerPubkey, seckey, createdAt = Math.floor
   }
 }
 
-export function replaceContentKeySecret (ownerPubkey, seckey, createdAt = Math.floor(Date.now() / 1000)) {
+export async function replaceContentKeySecret (ownerPubkey, seckey, createdAt = Math.floor(Date.now() / 1000)) {
   if (!isUnlocked()) throw new Error('VAULT_LOCKED')
   const prior = listRawContentKeyEntriesInternal()
   try {
     dropContentKeysForOwner(ownerPubkey)
     const signer = adoptContentKey(ownerPubkey, seckey, Math.max(0, Math.floor(Number(createdAt) || 0)))
-    persistContentKeyEntries({ pruneStale: false })
+    await persistContentKeyEntries({ pruneStale: false })
     notifyContentKeys(ownerPubkey)
     return signer
   } catch (err) {
@@ -506,14 +507,14 @@ export async function replyWithContentKeySecrets ({ ownerPubkey, pubkeys, send }
 // Adopt a freshly-imported, already-connected BunkerHandle into the pool.
 // Called by `BunkerHandle.commit()` from inside bunker.js, which extracts
 // the clientKey from its module-private WeakMap and threads it in here.
-export function adoptBunkerHandle (pubkey, handle, clientKey) {
+export async function adoptBunkerHandle (pubkey, handle, clientKey) {
   if (!isUnlocked()) throw new Error('VAULT_LOCKED')
   const priorContentKeys = snapshotContentKeySecrets()
   const contentKeysChanged = adoptBunkerWithHandle(pubkey, handle, clientKey)
   try {
-    if (contentKeysChanged) persistContentKeyEntries()
+    if (contentKeysChanged) await persistContentKeyEntries()
   } catch (err) {
-    restoreContentKeySecrets(priorContentKeys)
+    await restoreContentKeySecrets(priorContentKeys)
     throw err
   }
   notify()
@@ -552,15 +553,15 @@ export async function withDeviceSignerSeckey (fn) {
   return fn(hexToBytes(seckey))
 }
 
-export function deleteSecret (pubkey) {
+export async function deleteSecret (pubkey) {
   const priorContentKeys = snapshotContentKeySecrets()
   let contentKeysChanged = false
   if (!accountTypeByPubkey.has(pubkey)) {
     contentKeysChanged = dropContentKeysForOwner(pubkey)
     try {
-      if (contentKeysChanged) persistContentKeyEntries()
+      if (contentKeysChanged) await persistContentKeyEntries()
     } catch (err) {
-      restoreContentKeySecrets(priorContentKeys)
+      await restoreContentKeySecrets(priorContentKeys)
       throw err
     }
     notify()
@@ -568,9 +569,9 @@ export function deleteSecret (pubkey) {
   }
   contentKeysChanged = dropPriorEntry(pubkey)
   try {
-    if (contentKeysChanged) persistContentKeyEntries()
+    if (contentKeysChanged) await persistContentKeyEntries()
   } catch (err) {
-    restoreContentKeySecrets(priorContentKeys)
+    await restoreContentKeySecrets(priorContentKeys)
     throw err
   }
   notify()
@@ -581,18 +582,18 @@ export function deleteSecret (pubkey) {
 // raw clientKey through any public surface. The device signer key is
 // account-independent so it stays put across drift; trusted-signers are
 // stored at device level too, so no per-account cleanup is needed.
-export function transferBunkerSecret (oldPubkey, newPubkey) {
+export async function transferBunkerSecret (oldPubkey, newPubkey) {
   if (!isUnlocked()) throw new Error('VAULT_LOCKED')
   if (accountTypeByPubkey.get(oldPubkey) !== 'bunker') return
   const clientKey = rawClientKeyHexByPubkey.get(oldPubkey)
   if (!clientKey) {
-    deleteSecret(oldPubkey)
+    await deleteSecret(oldPubkey)
     return
   }
   // Drop the stale handle/secret first so adoptBunkerFromUnlock's read of
   // the store record (which the caller will have just rewritten under
   // `newPubkey`) finds a clean slate.
-  deleteSecret(oldPubkey)
+  await deleteSecret(oldPubkey)
   adoptBunkerFromUnlock(newPubkey, clientKey)
   notify()
 }
@@ -670,9 +671,9 @@ function listRawContentKeyEntriesInternal () {
 }
 
 export function vaultEncrypt (plaintext) {
-  return vaultEncryptWithScope(plaintext, VAULT_LOCAL_STORAGE_SCOPE)
+  return vaultEncryptWithScope(plaintext, VAULT_LOCAL_STATE_SCOPE)
 }
 
 export function vaultDecrypt (ciphertext) {
-  return vaultDecryptWithScope(ciphertext, VAULT_LOCAL_STORAGE_SCOPE)
+  return vaultDecryptWithScope(ciphertext, VAULT_LOCAL_STATE_SCOPE)
 }

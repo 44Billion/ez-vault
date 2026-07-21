@@ -81,11 +81,26 @@ When in doubt about a layout decision, ask: "does this still work as a tall vert
 
 ## Key Storage
 
-For now, `nsec` values are stored **in plain text in `localStorage`**. This is a deliberate, simple starting point — no passkeys, no WebAuthn PRF extension, no encryption-at-rest, and no IndexedDB. Keep this simple until we explicitly decide to upgrade it.
-
-- Do **not** introduce IndexedDB.
-- Do **not** introduce passkey / WebAuthn flows.
-- If you touch key storage, preserve the plain-text-localStorage model unless the user explicitly asks you to change it.
+- Account secrets are encrypted with a vault key obtained from the WebAuthn
+  PRF extension. The primary encrypted blob is the passkey `largeBlob`; an
+  authenticator that cannot store it uses the same ciphertext in IndexedDB.
+- Raw `nsec`, bunker client keys, content-key secret keys and decrypted
+  activity payloads must never be persisted in plaintext. The short-lived
+  create-time PRF compatibility backup is the sole exception: some
+  authenticators do not return PRF on assertions, so it is stored in IDB and
+  removed as soon as an assertion supplies PRF.
+- IndexedDB database `ez-vault` is the durable store for account records,
+  encrypted sidecars, passkey metadata/fallbacks, sync state and the bounded
+  activity log. Do not add new `localStorage` or `sessionStorage` persistence.
+- Use `libp2r2p/idb.run()` for IndexedDB requests. Attach transaction
+  completion/error handlers immediately, await `oncomplete`, and publish
+  cache updates or notifications only after commit.
+- Inside an active IndexedDB transaction, await only requests issued against
+  that same transaction. Perform crypto, hashing, network requests, WebAuthn,
+  timers and external callbacks before opening the transaction or after it
+  has committed; otherwise browsers may auto-commit the transaction early.
+- IndexedDB unavailability is fatal for bootstrap. Request persistent storage
+  best-effort after passkey registration and successful unlock.
 
 ## Folder Structure
 

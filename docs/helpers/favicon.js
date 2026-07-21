@@ -5,7 +5,7 @@
 // caller treats "no icon" as a graceful skip.
 
 const FAVICON_URL = '/favicon.ico'
-// Cap so a runaway image can't bloat localStorage. Real favicons are <10 KB.
+// Cap so a runaway image can't bloat local persistence. Real favicons are <10 KB.
 const MAX_BYTES = 100 * 1024 // 100 KB
 
 export async function fetchFaviconBase64 () {

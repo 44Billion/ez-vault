@@ -4,6 +4,7 @@ import { generateSecretKey } from 'nostr-tools'
 import * as secrets from '../docs/services/secrets.js'
 import * as trustedSigners from '../docs/services/trusted-signers.js'
 import { announceTrustedSignerState, handleMessage, TRUSTED_SIGNERS_STATE_CODE } from '../docs/services/sync/trusted-signers.js'
+import { setState } from '../docs/services/storage/index.js'
 
 const KEY = 'ez-vault:trusted-signers'
 const data = new Map()
@@ -28,9 +29,9 @@ function pk (n) {
   return n.toString(16).padStart(64, '0')
 }
 
-test('trusted signer records list active entries and read old active-only payloads', () => {
+test('trusted signer records list active entries and read old active-only payloads', async () => {
   secrets.unlock(generateSecretKey(), null)
-  localStorage.setItem(KEY, secrets.vaultEncrypt(JSON.stringify([
+  await setState(KEY, secrets.vaultEncrypt(JSON.stringify([
     { pubkey: pk(1), platform: 'Laptop', addedAt: 7 }
   ])))
 
@@ -42,18 +43,18 @@ test('trusted signer records list active entries and read old active-only payloa
     actorPubkey: ''
   }])
 
-  const added = trustedSigners.add({ pubkey: pk(2), platform: 'Phone', actorPubkey: pk(9), updatedAt: 10 })
+  const added = await trustedSigners.add({ pubkey: pk(2), platform: 'Phone', actorPubkey: pk(9), updatedAt: 10 })
   assert.equal(added.status, 'trusted')
   assert.deepEqual(trustedSigners.list().map(entry => entry.pubkey), [pk(1), pk(2)])
 })
 
-test('trusted signer storage advertises encrypted state and repopulates after unlock', () => {
+test('trusted signer storage advertises encrypted state and repopulates after unlock', async () => {
   const vaultKey = generateSecretKey()
   secrets.unlock(vaultKey, null)
 
   assert.equal(trustedSigners.hasStored(), false)
   assert.equal(trustedSigners.hasStoredActive(), false)
-  trustedSigners.add({ pubkey: pk(1), platform: 'Laptop', actorPubkey: pk(9), updatedAt: 10 })
+  await trustedSigners.add({ pubkey: pk(1), platform: 'Laptop', actorPubkey: pk(9), updatedAt: 10 })
   assert.equal(trustedSigners.hasStored(), true)
   assert.equal(trustedSigners.hasStoredActive(), true)
 
@@ -72,17 +73,17 @@ test('trusted signer storage advertises encrypted state and repopulates after un
   }])
 })
 
-test('trusted signer tombstone-only storage does not advertise visible devices', () => {
+test('trusted signer tombstone-only storage does not advertise visible devices', async () => {
   const vaultKey = generateSecretKey()
   const timestamp = Math.floor(Date.now() / 1000)
   secrets.unlock(vaultKey, null)
 
-  trustedSigners.add({ pubkey: pk(1), platform: 'Laptop', actorPubkey: pk(9), updatedAt: timestamp })
+  await trustedSigners.add({ pubkey: pk(1), platform: 'Laptop', actorPubkey: pk(9), updatedAt: timestamp })
   const activeSnapshot = trustedSigners.snapshot()
   assert.equal(trustedSigners.hasStored(), true)
   assert.equal(trustedSigners.hasStoredActive(), true)
 
-  trustedSigners.remove(pk(1), { actorPubkey: pk(9), updatedAt: timestamp + 1 })
+  await trustedSigners.remove(pk(1), { actorPubkey: pk(9), updatedAt: timestamp + 1 })
   assert.equal(trustedSigners.hasStored(), true)
   assert.equal(trustedSigners.hasStoredActive(), false)
   assert.deepEqual(trustedSigners.list(), [])
@@ -93,36 +94,36 @@ test('trusted signer tombstone-only storage does not advertise visible devices',
   assert.equal(trustedSigners.hasStoredActive(), false)
 
   secrets.unlock(vaultKey, null)
-  trustedSigners.restore(activeSnapshot)
+  await trustedSigners.restore(activeSnapshot)
   assert.equal(trustedSigners.hasStoredActive(), true)
 })
 
-test('trusted signer forgetLocal removes self records without tombstones', () => {
+test('trusted signer forgetLocal removes self records without tombstones', async () => {
   secrets.unlock(generateSecretKey(), null)
-  trustedSigners.add({ pubkey: pk(1), platform: 'Self', actorPubkey: pk(9), updatedAt: 10 })
-  trustedSigners.add({ pubkey: pk(2), platform: 'Peer', actorPubkey: pk(9), updatedAt: 11 })
+  await trustedSigners.add({ pubkey: pk(1), platform: 'Self', actorPubkey: pk(9), updatedAt: 10 })
+  await trustedSigners.add({ pubkey: pk(2), platform: 'Peer', actorPubkey: pk(9), updatedAt: 11 })
 
-  const removed = trustedSigners.forgetLocal(pk(1))
+  const removed = await trustedSigners.forgetLocal(pk(1))
 
   assert.equal(removed.pubkey, pk(1))
   assert.deepEqual(trustedSigners.list().map(entry => entry.pubkey), [pk(2)])
   assert.deepEqual(trustedSigners.listRecords().map(record => record.status), ['trusted'])
 })
 
-test('trusted signer merge uses updatedAt, actorPubkey, then removed as tie-breakers', () => {
+test('trusted signer merge uses updatedAt, actorPubkey, then removed as tie-breakers', async () => {
   secrets.unlock(generateSecretKey(), null)
 
-  trustedSigners.mergeRecords([
+  await trustedSigners.mergeRecords([
     { pubkey: pk(1), platform: 'Peer', status: 'trusted', updatedAt: 10, actorPubkey: pk(1) }
   ])
-  trustedSigners.mergeRecords([
+  await trustedSigners.mergeRecords([
     { pubkey: pk(1), platform: 'Peer', status: 'removed', updatedAt: 10, actorPubkey: pk(2) }
   ])
 
   assert.deepEqual(trustedSigners.list(), [])
   assert.equal(trustedSigners.listRecords()[0].status, 'removed')
 
-  trustedSigners.mergeRecords([
+  await trustedSigners.mergeRecords([
     { pubkey: pk(1), platform: 'Peer again', status: 'trusted', updatedAt: 11, actorPubkey: pk(1) }
   ])
 
@@ -130,26 +131,26 @@ test('trusted signer merge uses updatedAt, actorPubkey, then removed as tie-brea
   assert.equal(trustedSigners.listRecords()[0].status, 'trusted')
 })
 
-test('trusted signer tombstones are capped', () => {
+test('trusted signer tombstones are capped', async () => {
   secrets.unlock(generateSecretKey(), null)
   const records = []
   for (let i = 1; i <= 105; i++) {
     records.push({ pubkey: pk(i), status: 'removed', updatedAt: i, actorPubkey: pk(500) })
   }
 
-  trustedSigners.mergeRecords(records)
+  await trustedSigners.mergeRecords(records)
 
   const tombstones = trustedSigners.listRecords().filter(record => record.status === 'removed')
   assert.equal(tombstones.length, trustedSigners.TOMBSTONE_CAP)
   assert.equal(tombstones[0].pubkey, pk(6))
 })
 
-test('trusted signer clearActive turns active peers into removals', () => {
+test('trusted signer clearActive turns active peers into removals', async () => {
   secrets.unlock(generateSecretKey(), null)
-  trustedSigners.add({ pubkey: pk(1), platform: 'One', actorPubkey: pk(9), updatedAt: 10 })
-  trustedSigners.add({ pubkey: pk(2), platform: 'Two', actorPubkey: pk(9), updatedAt: 10 })
+  await trustedSigners.add({ pubkey: pk(1), platform: 'One', actorPubkey: pk(9), updatedAt: 10 })
+  await trustedSigners.add({ pubkey: pk(2), platform: 'Two', actorPubkey: pk(9), updatedAt: 10 })
 
-  const removed = trustedSigners.clearActive({ actorPubkey: pk(3), updatedAt: 20 })
+  const removed = await trustedSigners.clearActive({ actorPubkey: pk(3), updatedAt: 20 })
 
   assert.deepEqual(removed.map(record => record.pubkey), [pk(1), pk(2)])
   assert.deepEqual(trustedSigners.list(), [])
@@ -158,8 +159,8 @@ test('trusted signer clearActive turns active peers into removals', () => {
 
 test('trusted signer self-removal clears active peers without tombstone reminders', async () => {
   secrets.unlock(generateSecretKey(), null)
-  trustedSigners.add({ pubkey: pk(1), platform: 'One', actorPubkey: pk(9), updatedAt: 10 })
-  trustedSigners.add({ pubkey: pk(2), platform: 'Two', actorPubkey: pk(9), updatedAt: 10 })
+  await trustedSigners.add({ pubkey: pk(1), platform: 'One', actorPubkey: pk(9), updatedAt: 10 })
+  await trustedSigners.add({ pubkey: pk(2), platform: 'Two', actorPubkey: pk(9), updatedAt: 10 })
 
   await handleMessage({
     event: { pubkey: pk(1) },
@@ -181,7 +182,7 @@ test('trusted signer self-removal clears active peers without tombstone reminder
 
 test('trusted signer self-removal ignores stale reminders older than current sender trust', async () => {
   secrets.unlock(generateSecretKey(), null)
-  trustedSigners.add({ pubkey: pk(1), platform: 'One', actorPubkey: pk(9), updatedAt: 200 })
+  await trustedSigners.add({ pubkey: pk(1), platform: 'One', actorPubkey: pk(9), updatedAt: 200 })
 
   await handleMessage({
     event: { pubkey: pk(1) },

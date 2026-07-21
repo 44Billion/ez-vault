@@ -61,17 +61,17 @@ function nsecAccount (name) {
   }
 }
 
-afterEach(() => {
-  journal.clear()
+afterEach(async () => {
+  await journal.clear()
   secrets.lock()
   storage.clear()
 })
 
-test('dev panel includes a pending nsec account only after the mutation commits', () => {
+test('dev panel includes a pending nsec account only after the mutation commits', async () => {
   secrets.unlock(generateSecretKey(), null)
   const existing = nsecAccount('Existing account')
-  store.add(existing.record)
-  secrets.setNsecSecret(existing.record.pubkey, existing.seckey)
+  await store.add(existing.record)
+  await secrets.setNsecSecret(existing.record.pubkey, existing.seckey)
 
   const panel = new DevPanel()
   let renderCount = 0
@@ -84,7 +84,7 @@ test('dev panel includes a pending nsec account only after the mutation commits'
   assert.match(panel.innerHTML, /Existing account/)
 
   const added = nsecAccount('Synced account')
-  journal.begin({
+  await journal.begin({
     operation: 'commit-prepared',
     affectedPubkeys: [added.record.pubkey],
     beforeAccounts: [],
@@ -93,32 +93,32 @@ test('dev panel includes a pending nsec account only after the mutation commits'
     afterSecretRefs: [{ type: 'nsec', pubkey: added.record.pubkey }]
   })
   assert.equal(renderCount, 1)
-  store.add(added.record)
-  secrets.setNsecSecret(added.record.pubkey, added.seckey)
+  await store.add(added.record)
+  await secrets.setNsecSecret(added.record.pubkey, added.seckey)
 
   assert.match(panel.innerHTML, /Existing account/)
   assert.doesNotMatch(panel.innerHTML, /Synced account/)
 
-  journal.clear()
+  await journal.clear()
 
   assert.match(panel.innerHTML, /Existing account/)
   assert.match(panel.innerHTML, /Synced account/)
 
   panel.disconnectedCallback()
   panel.innerHTML = 'disconnected'
-  journal.begin({ operation: 'test' })
-  journal.clear()
+  await journal.begin({ operation: 'test' })
+  await journal.clear()
   assert.equal(panel.innerHTML, 'disconnected')
 })
 
-test('dev panel replaces its empty state with a new account after commit', () => {
+test('dev panel replaces its empty state with a new account after commit', async () => {
   secrets.unlock(generateSecretKey(), null)
   const panel = new DevPanel()
   panel.connectedCallback()
   assert.match(panel.innerHTML, /No nsec accounts/)
 
   const added = nsecAccount('First account')
-  journal.begin({
+  await journal.begin({
     operation: 'create-account',
     affectedPubkeys: [added.record.pubkey],
     beforeAccounts: [],
@@ -126,27 +126,27 @@ test('dev panel replaces its empty state with a new account after commit', () =>
     beforeSecretRefs: [],
     afterSecretRefs: [{ type: 'nsec', pubkey: added.record.pubkey }]
   })
-  store.add(added.record)
-  secrets.setNsecSecret(added.record.pubkey, added.seckey)
+  await store.add(added.record)
+  await secrets.setNsecSecret(added.record.pubkey, added.seckey)
 
   assert.match(panel.innerHTML, /No nsec accounts/)
   assert.doesNotMatch(panel.innerHTML, /First account/)
 
-  journal.clear()
+  await journal.clear()
 
   assert.doesNotMatch(panel.innerHTML, /No nsec accounts/)
   assert.match(panel.innerHTML, /First account/)
   panel.disconnectedCallback()
 })
 
-test('dev panel renders the restored state after a pending account rolls back', () => {
+test('dev panel renders the restored state after a pending account rolls back', async () => {
   secrets.unlock(generateSecretKey(), null)
   const panel = new DevPanel()
   panel.connectedCallback()
   assert.match(panel.innerHTML, /No nsec accounts/)
 
   const added = nsecAccount('Rolled back account')
-  journal.begin({
+  await journal.begin({
     operation: 'commit-prepared',
     affectedPubkeys: [added.record.pubkey],
     beforeAccounts: [],
@@ -154,11 +154,11 @@ test('dev panel renders the restored state after a pending account rolls back', 
     beforeSecretRefs: [],
     afterSecretRefs: [{ type: 'nsec', pubkey: added.record.pubkey }]
   })
-  store.add(added.record)
-  secrets.setNsecSecret(added.record.pubkey, added.seckey)
-  store.remove(added.record.pubkey)
-  secrets.deleteSecret(added.record.pubkey)
-  journal.clear()
+  await store.add(added.record)
+  await secrets.setNsecSecret(added.record.pubkey, added.seckey)
+  await store.remove(added.record.pubkey)
+  await secrets.deleteSecret(added.record.pubkey)
+  await journal.clear()
 
   assert.match(panel.innerHTML, /No nsec accounts/)
   assert.doesNotMatch(panel.innerHTML, /Rolled back account/)

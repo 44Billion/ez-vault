@@ -37,7 +37,7 @@ async function publishLocalContentKey ({ userSigner, contentKeySigner, warnings,
 
 async function createPersistedContentSigner ({ ownerPubkey, warnings }) {
   try {
-    return secrets.setContentKeySecret(ownerPubkey, bytesToHex(generateSecretKey()))
+    return await secrets.setContentKeySecret(ownerPubkey, bytesToHex(generateSecretKey()))
   } catch (err) {
     warning(warnings, 'CONTENT_KEY_PERSIST_FAILED', err?.message || '')
     return null

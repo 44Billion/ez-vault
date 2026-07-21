@@ -499,7 +499,7 @@ export class AccountAvatar extends HTMLElement {
       if (!profilePublish.success) throw new Error('PROFILE_PUBLISH_FAILED')
 
       const patch = { name, profileEvent, writeRelays }
-      store.update(account.pubkey, patch)
+      await store.update(account.pubkey, patch)
       this.#account = { ...account, ...patch }
       this.#nameField.value = name
       this.#flashNameStatus('is-success')
@@ -679,15 +679,15 @@ export class AccountAvatar extends HTMLElement {
         operation: 'create-account',
         beforeAccounts: [],
         afterAccounts: [record],
-        apply: () => {
+        apply: async () => {
           this.#draft = null
           this.#account = record
           this.setAttribute('pubkey', record.pubkey)
           this.#applyAccountType()
           this.#updateCopyKeyButton()
           this.#setMode(MODE.NORMAL)
-          store.add(record)
-          secrets.setNsecSecret(record.pubkey, newSeckey)
+          await store.add(record)
+          await secrets.setNsecSecret(record.pubkey, newSeckey)
         }
       })
     } catch (err) {
@@ -729,9 +729,9 @@ export class AccountAvatar extends HTMLElement {
           beforeAccounts: [account],
           afterAccounts: [],
           apply: () => secrets.deleteSecret(pubkey),
-          finalize: () => {
-            messengerLog.removeForPubkey(pubkey)
-            store.applyRecords([pubkey], [])
+          finalize: async () => {
+            await messengerLog.removeForPubkey(pubkey)
+            await store.applyRecords([pubkey], [])
           },
           writeOptions: { fallbackOnCancel: false }
         })
@@ -748,8 +748,8 @@ export class AccountAvatar extends HTMLElement {
       }
       return
     }
-    messengerLog.removeForPubkey(pubkey)
-    store.remove(pubkey)
+    await messengerLog.removeForPubkey(pubkey)
+    await store.remove(pubkey)
   }
 
   async #copy (btn, value) {

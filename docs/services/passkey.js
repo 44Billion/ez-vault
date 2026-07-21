@@ -7,18 +7,19 @@ import { fetchFaviconBase64 } from '../helpers/favicon.js'
 import { sharedXOnlySecret } from 'libp2r2p/ecdh'
 import * as nip44v3 from 'libp2r2p/nip44-v3'
 import * as secrets from './secrets.js'
+import { getState, hasState, removeState, requestPersistentStorage, updateState } from './storage/index.js'
 
 // EZ Vault's passkey integration. One passkey custodies the encryption key
 // (deterministic, derived from the WebAuthn PRF extension) for every
 // account secret. This module is intentionally byte-thin: it talks to the
-// authenticator and to localStorage, and hands the resulting ciphertext to
+// authenticator and to IndexedDB, and hands the resulting ciphertext to
 // `secrets` for sealing/unsealing. The TLV layout, the vault key, and the
 // raw secret material all live inside `secrets.js` and never travel
 // through this file.
 //
 // Syncing is intentionally discouraged — `residentKey: 'discouraged'` keeps
 // the credential non-discoverable and we always address it by the
-// credentialId persisted in localStorage. Some authenticators still promote
+// credentialId persisted in IndexedDB. Some authenticators still promote
 // the credential to discoverable and sync it across devices; to make sure a
 // fresh registration on a second device can't *overwrite* the first one (the
 // spec mandates overwrite when `(rpId, user.id)` collide for a discoverable
@@ -27,10 +28,10 @@ import * as secrets from './secrets.js'
 //
 // LargeBlob and PRF are best-effort across authenticators:
 // - largeBlob may refuse to write (legacy double-prompt cancellation, or
-//   unsupported authenticator). We fall back to a localStorage copy of the
+//   unsupported authenticator). We fall back to an IndexedDB copy of the
 //   same ciphertext — same security model, just a different at-rest home.
 // - PRF may only be exposed on credential creation, not on subsequent get().
-//   We persist the creation-time PRF in localStorage and clear it the moment
+//   We persist the creation-time PRF in IndexedDB and clear it the moment
 //   a get() starts returning PRF (newer browsers will).
 
 const PRF_SALT = 'ez-vault'
@@ -94,7 +95,7 @@ function generateUserId () {
 }
 
 function readStoredUserId () {
-  const stored = localStorage.getItem(USER_ID_KEY)
+  const stored = getState(USER_ID_KEY, '')
   if (!stored) return null
   try {
     return { bytes: base64UrlToBytes(stored), base64url: stored }
@@ -162,7 +163,7 @@ async function discardCredential (rawId) {
 }
 
 export function hasPasskey () {
-  return !!localStorage.getItem(CRED_ID_KEY)
+  return hasState(CRED_ID_KEY)
 }
 
 // Ensure there's a passkey backing the vault and the vault is unlocked.
@@ -243,20 +244,23 @@ export async function register () {
   }
 
   const credentialId = bytesToBase64Url(new Uint8Array(credential.rawId))
-  localStorage.setItem(CRED_ID_KEY, credentialId)
-  localStorage.setItem(USER_ID_KEY, bytesToBase64Url(userId))
-  if (iconURL) localStorage.setItem(ICON_KEY, iconURL)
-  // Persist PRF eagerly. If a later get() returns PRF, we'll clear it then.
-  // Authenticators that only expose PRF on create rely on this backup.
-  localStorage.setItem(PRF_BACKUP_KEY, bytesToHex(prfBytes))
+  await updateState({
+    set: {
+      [CRED_ID_KEY]: credentialId,
+      [USER_ID_KEY]: bytesToBase64Url(userId),
+      [PRF_BACKUP_KEY]: bytesToHex(prfBytes),
+      ...(iconURL ? { [ICON_KEY]: iconURL } : {})
+    }
+  })
 
   secrets.unlock(prfBytes, null)
+  await requestPersistentStorage()
 }
 
-// Read the passkey, fetch the largeBlob ciphertext (or its localStorage
+// Read the passkey, fetch the largeBlob ciphertext (or its IndexedDB
 // fallback), and hand them to `secrets.unlock` for decryption + adoption.
 export async function unlock () {
-  const credentialId = localStorage.getItem(CRED_ID_KEY)
+  const credentialId = getState(CRED_ID_KEY, '')
   if (!credentialId) throw new Error('PASSKEY_NOT_REGISTERED')
   const descriptor = descriptorFromCredentialId(credentialId)
 
@@ -281,9 +285,9 @@ export async function unlock () {
   if (prfBytes?.length) {
     // Platform exposed PRF on get — the create-time backup is no longer
     // needed.
-    localStorage.removeItem(PRF_BACKUP_KEY)
+    await removeState(PRF_BACKUP_KEY)
   } else {
-    const stored = localStorage.getItem(PRF_BACKUP_KEY)
+    const stored = getState(PRF_BACKUP_KEY, '')
     if (stored) prfBytes = hexToBytes(stored)
   }
   if (!prfBytes?.length) throw new Error('PASSKEY_PRF_MISSING')
@@ -292,24 +296,25 @@ export async function unlock () {
   const blobBytes = extractLargeBlobBytes(ext)
   if (blobBytes) {
     ciphertext = textDecoder.decode(blobBytes)
-    // largeBlob just yielded a payload — drop any stale localStorage copy.
-    localStorage.removeItem(BLOB_FALLBACK_KEY)
+    // largeBlob just yielded a payload — drop any stale IndexedDB copy.
+    await removeState(BLOB_FALLBACK_KEY)
   } else {
-    ciphertext = localStorage.getItem(BLOB_FALLBACK_KEY) || null
+    ciphertext = getState(BLOB_FALLBACK_KEY)
   }
 
   secrets.unlock(prfBytes, ciphertext)
+  await requestPersistentStorage()
 }
 
 // Re-seal the current secrets snapshot and push it into the passkey
 // largeBlob. The plaintext never enters this module — `secrets` returns
 // already-encrypted bytes via `sealCurrentEntries()`. Falls back to
-// localStorage if the authenticator declines the write. Most callers also
+// IndexedDB if the authenticator declines the write. Most callers also
 // allow fallback when the user cancels the secondary prompt; destructive
 // flows can opt out so a cancelled prompt aborts the mutation instead.
 export async function writeSecretsBlob ({ fallbackOnCancel = true } = {}) {
   if (!secrets.isUnlocked()) throw new Error('VAULT_LOCKED')
-  const credentialId = localStorage.getItem(CRED_ID_KEY)
+  const credentialId = getState(CRED_ID_KEY, '')
   if (!credentialId) throw new Error('PASSKEY_NOT_REGISTERED')
 
   const ciphertext = secrets.sealCurrentEntries()
@@ -330,7 +335,7 @@ export async function writeSecretsBlob ({ fallbackOnCancel = true } = {}) {
         largeBlob: { write: textEncoder.encode(ciphertext) },
         // Opportunistically re-eval PRF: when an authenticator starts
         // exposing PRF on get() this is where we'll first see it and prune
-        // the localStorage backup.
+        // the IndexedDB backup.
         prf: { eval: { first: PRF_SALT_BYTES } }
       }
     })
@@ -342,13 +347,13 @@ export async function writeSecretsBlob ({ fallbackOnCancel = true } = {}) {
 
   const ext = extractExtensions(credential)
   const prfBytes = extractPrfBytes(ext)
-  if (prfBytes?.length) localStorage.removeItem(PRF_BACKUP_KEY)
+  if (prfBytes?.length) await removeState(PRF_BACKUP_KEY)
 
   if (ext.largeBlob?.written) {
-    // largeBlob is now authoritative — drop any stale localStorage copy.
-    localStorage.removeItem(BLOB_FALLBACK_KEY)
+    // largeBlob is now authoritative — drop any stale IndexedDB copy.
+    await removeState(BLOB_FALLBACK_KEY)
   } else {
-    localStorage.setItem(BLOB_FALLBACK_KEY, ciphertext)
+    await updateState({ set: { [BLOB_FALLBACK_KEY]: ciphertext } })
   }
 }
 
@@ -371,7 +376,7 @@ function unsealEntries (prfBytes, ciphertext) {
 //
 // Throws if the user cancels the prompt or the authenticator declines.
 export async function openSecrets () {
-  const credentialId = localStorage.getItem(CRED_ID_KEY)
+  const credentialId = getState(CRED_ID_KEY, '')
   if (!credentialId) throw new Error('PASSKEY_NOT_REGISTERED')
   const descriptor = descriptorFromCredentialId(credentialId)
 
@@ -394,11 +399,11 @@ export async function openSecrets () {
   const ext = extractExtensions(credential)
   let prfBytes = extractPrfBytes(ext)
   if (prfBytes?.length) {
-    // get() now returns PRF — the create-time localStorage backup is no
+    // get() now returns PRF — the create-time IndexedDB backup is no
     // longer needed.
-    localStorage.removeItem(PRF_BACKUP_KEY)
+    await removeState(PRF_BACKUP_KEY)
   } else {
-    const stored = localStorage.getItem(PRF_BACKUP_KEY)
+    const stored = getState(PRF_BACKUP_KEY, '')
     if (stored) prfBytes = hexToBytes(stored)
   }
   if (!prfBytes?.length) throw new Error('PASSKEY_PRF_MISSING')
@@ -407,9 +412,9 @@ export async function openSecrets () {
   const blobBytes = extractLargeBlobBytes(ext)
   if (blobBytes) {
     ciphertext = textDecoder.decode(blobBytes)
-    localStorage.removeItem(BLOB_FALLBACK_KEY)
+    await removeState(BLOB_FALLBACK_KEY)
   } else {
-    ciphertext = localStorage.getItem(BLOB_FALLBACK_KEY) || null
+    ciphertext = getState(BLOB_FALLBACK_KEY)
   }
 
   if (!ciphertext) return []
@@ -425,7 +430,7 @@ export async function checkForIconUpdate () {
   if (!hasPasskey()) return
   const fresh = await fetchFaviconBase64()
   if (!fresh) return
-  if (fresh === localStorage.getItem(ICON_KEY)) return
+  if (fresh === getState(ICON_KEY, '')) return
   pendingIconUpdate = fresh
 }
 
@@ -455,5 +460,5 @@ export async function flushPendingIconUpdate () {
       console.warn('signalCurrentUserDetails failed', err?.message ?? err)
     }
   }
-  localStorage.setItem(ICON_KEY, iconURL)
+  await updateState({ set: { [ICON_KEY]: iconURL } })
 }

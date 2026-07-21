@@ -159,13 +159,12 @@ test('host and joiner complete positional trust and account RPCs then logout', a
   })
   await host.start()
 
-  let peerTrust
   const joiner = new JoinerSession(host.url, {
     _relayPool: relayPool,
     onPairingCode: code => { joinerCode = code }
   })
   await joiner.connect()
-  peerTrust = await joiner.exchangeTrust({ platform: 'Joiner OS', signerPubkey: joinerSignerPubkey })
+  const peerTrust = await joiner.exchangeTrust({ platform: 'Joiner OS', signerPubkey: joinerSignerPubkey })
   const reply = await joiner.exchangeAccounts({
     code: joinerCode,
     platform: 'Joiner OS',

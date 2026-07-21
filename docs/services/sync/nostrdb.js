@@ -1,5 +1,6 @@
 import * as nostrdb from '../nostrdb.js'
 import { createEventReplyPacker } from 'libp2r2p/private-messenger/recovery'
+import { NOSTRDB_SYNC, readRecords, replaceRecords } from '../storage/index.js'
 
 // Flow notes:
 // - Adverts ride the trusted-device announce cadence: debounced after startup
@@ -373,7 +374,7 @@ function emitDebug (debug, action, detail = {}) {
 
 export function createNostrDbSyncController ({
   getDb = nostrdb.forAccount,
-  storage = globalThis.localStorage,
+  storage,
   _setTimeout = globalThis.setTimeout?.bind(globalThis),
   _clearTimeout = globalThis.clearTimeout?.bind(globalThis),
   _nowMs = nowMs,
@@ -385,17 +386,26 @@ export function createNostrDbSyncController ({
   const recentSyncEventIds = new Map()
   let runtime = {}
   let retryTimer = null
+  let durableState = storage
+    ? readState(storage)
+    : (readRecords(NOSTRDB_SYNC).find(record => record.key === 'state')?.value || {})
+  let stateWriteTail = Promise.resolve()
 
   function report (err) {
     try { onError?.(err) } catch {}
   }
 
   function getState () {
-    return readState(storage)
+    return storage ? readState(storage) : structuredClone(durableState)
   }
 
   function setState (state) {
-    writeState(storage, state)
+    if (storage) return writeState(storage, state)
+    const snapshot = structuredClone(state)
+    durableState = snapshot
+    const write = stateWriteTail.then(() => replaceRecords(NOSTRDB_SYNC, [{ key: 'state', value: snapshot }]))
+    stateWriteTail = write.catch(report)
+    return write
   }
 
   function pruneRecentSyncEventIds () {

@@ -4,7 +4,13 @@ A minimal, auditable [Nostr](https://github.com/nostr-protocol/nostr) signer tha
 
 It is designed to be embedded as an iframe by a host app launcher and talks to clients over `window.postMessage` — so the launcher and client apps never touch your private keys directly.
 
-The project is intentionally simple: vanilla JavaScript, no bundler, and a single runtime dependency ([`nostr-tools`](https://github.com/nbd-wtf/nostr-tools)), so that anyone can read the source and verify what it does with their keys.
+The project is intentionally simple: vanilla JavaScript, no bundler, and a small set of explicit browser dependencies, so that anyone can read the source and verify what it does with their keys.
+
+Durable local state is stored in IndexedDB. Account secrets remain encrypted
+under the passkey-derived vault key in the authenticator `largeBlob`, with an
+encrypted IndexedDB fallback when the authenticator does not support it. The
+activity log keeps at most 500 entries per app and 64 MiB globally; sensitive
+request and result fields remain encrypted while at rest.
 
 ## Scripts
 

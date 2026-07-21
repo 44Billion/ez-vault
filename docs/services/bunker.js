@@ -90,11 +90,11 @@ async function openSigner (bunkerUrl, clientSecretKey) {
 // Persists bunker-URL changes (secret stripping, switch_relays result) back
 // to the store record. Safe to call with a null pubkey (e.g. during import
 // before the record exists) — the store lookup just misses.
-export function persistHandleState ({ pubkey, bunkerUrl }) {
+export async function persistHandleState ({ pubkey, bunkerUrl }) {
   if (!pubkey) return
   const rec = store.get(pubkey)
   if (!rec || rec.bunker === bunkerUrl) return
-  store.update(pubkey, { bunker: bunkerUrl })
+  await store.update(pubkey, { bunker: bunkerUrl })
 }
 
 // Shared, keep-warm handle for a bunker connection. Internally manages a
@@ -182,12 +182,12 @@ export class BunkerHandle {
   // import flow after `passkey.ensureRegistered()` succeeds. The clientKey
   // is read out of the WeakMap and threaded straight into secrets's
   // adopt-call without flowing through any return value.
-  commit () {
+  async commit () {
     const pubkey = this.#state.pubkey
     if (!pubkey) throw new Error('PUBKEY_NOT_READY')
     const clientKey = clientKeysByHandle.get(this)
     if (!clientKey) throw new Error('NO_CLIENT_KEY')
-    secrets.adoptBunkerHandle(pubkey, this, clientKey)
+    await secrets.adoptBunkerHandle(pubkey, this, clientKey)
   }
 
   async close () {
@@ -207,7 +207,12 @@ export class BunkerHandle {
   }
 
   #notifyStateChange () {
-    this.#onStateChange?.({ pubkey: this.#state.pubkey, bunkerUrl: this.#state.bunkerUrl })
+    try {
+      Promise.resolve(this.#onStateChange?.({ pubkey: this.#state.pubkey, bunkerUrl: this.#state.bunkerUrl }))
+        .catch(err => console.warn('bunker state persistence failed', err?.message ?? err))
+    } catch (err) {
+      console.warn('bunker state persistence failed', err?.message ?? err)
+    }
   }
 
   async #request (fn) {

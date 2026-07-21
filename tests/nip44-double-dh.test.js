@@ -8,6 +8,7 @@ import NsecSigner from '../docs/services/nsec-signer.js'
 import { DEFAULT_STALE_CHANNEL_SECONDS } from 'libp2r2p/private-messenger'
 import { bytesToHex, hexToBytes } from 'libp2r2p/base16'
 import { encodeSecretEntries } from '../docs/services/secret-blob.js'
+import { getState, removeState } from '../docs/services/storage/index.js'
 
 const CONTENT_KEYS_STORAGE_KEY = 'ez-vault:content-keys'
 const DOUBLE_DH_KIND = 26300
@@ -45,26 +46,26 @@ function staleCreatedAt (offset = 0) {
   return nowSeconds() - DEFAULT_STALE_CHANNEL_SECONDS - offset
 }
 
-function addNsecAccount () {
+async function addNsecAccount () {
   const secret = seckey()
   const pubkey = getPublicKey(hexToBytes(secret))
-  store.add({ type: 'nsec', pubkey, name: '', picture: '' })
-  secrets.setNsecSecret(pubkey, secret)
+  await store.add({ type: 'nsec', pubkey, name: '', picture: '' })
+  await secrets.setNsecSecret(pubkey, secret)
   return { pubkey, secret }
 }
 
-function addBunkerAccount (handle = null) {
+async function addBunkerAccount (handle = null) {
   const secret = seckey()
   const pubkey = getPublicKey(hexToBytes(secret))
-  store.add({ type: 'bunker', pubkey, name: '', picture: '', bunker: `bunker://${pubkey}` })
-  if (handle) secrets.adoptBunkerHandle(pubkey, handle, seckey())
+  await store.add({ type: 'bunker', pubkey, name: '', picture: '', bunker: `bunker://${pubkey}` })
+  if (handle) await secrets.adoptBunkerHandle(pubkey, handle, seckey())
   return { pubkey }
 }
 
-function addContentKey (ownerPubkey) {
+async function addContentKey (ownerPubkey) {
   const secret = seckey()
   const pubkey = getPublicKey(hexToBytes(secret))
-  secrets.setContentKeySecret(ownerPubkey, secret, nowSeconds())
+  await secrets.setContentKeySecret(ownerPubkey, secret, nowSeconds())
   return { pubkey, secret }
 }
 
@@ -114,7 +115,7 @@ test('signer.run delegates bunker extended signer methods to the handle', async 
     },
     close: async () => {}
   }
-  const bunker = addBunkerAccount(fakeHandle)
+  const bunker = await addBunkerAccount(fakeHandle)
   const doubleEncryptParams = ['peer', DOUBLE_DH_KIND, '', 'plain-b64', 'peer-content']
   const doubleDecryptParams = ['peer', DOUBLE_DH_KIND, '', 'cipher', 'peer-content', 'own-content']
   const event = { kind: 1, tags: [], content: 'x' }
@@ -138,10 +139,10 @@ test('signer.run delegates bunker extended signer methods to the handle', async 
 
 test('nip44-double-dh encrypt/decrypt uses advertised content keys', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const alice = addNsecAccount()
-  const bob = addNsecAccount()
-  const aliceContent = addContentKey(alice.pubkey)
-  const bobContent = addContentKey(bob.pubkey)
+  const alice = await addNsecAccount()
+  const bob = await addNsecAccount()
+  const aliceContent = await addContentKey(alice.pubkey)
+  const bobContent = await addContentKey(bob.pubkey)
   const _getIykcProofs = async pubkeys => Object.fromEntries(pubkeys.map(pubkey => [
     pubkey,
     { iykcPubkey: pubkey === alice.pubkey ? aliceContent.pubkey : bobContent.pubkey }
@@ -173,8 +174,8 @@ test('nip44-double-dh encrypt/decrypt uses advertised content keys', async () =>
 
 test('nip44-double-dh self-encryption with content keys round-trips', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const alice = addNsecAccount()
-  const aliceContent = addContentKey(alice.pubkey)
+  const alice = await addNsecAccount()
+  const aliceContent = await addContentKey(alice.pubkey)
   const _getIykcProofs = async () => ({ [alice.pubkey]: { iykcPubkey: aliceContent.pubkey } })
 
   const encrypted = await run({
@@ -195,15 +196,15 @@ test('nip44-double-dh self-encryption with content keys round-trips', async () =
 
 test('nip44-double-dh decrypt resolves older stored own content keys by pubkey', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const alice = addNsecAccount()
-  const bob = addNsecAccount()
+  const alice = await addNsecAccount()
+  const bob = await addNsecAccount()
   const olderSecret = seckey()
   const newerSecret = seckey()
   const olderPubkey = getPublicKey(hexToBytes(olderSecret))
   const newerPubkey = getPublicKey(hexToBytes(newerSecret))
   const now = nowSeconds()
-  secrets.setContentKeySecret(bob.pubkey, olderSecret, now - 10)
-  secrets.setContentKeySecret(bob.pubkey, newerSecret, now)
+  await secrets.setContentKeySecret(bob.pubkey, olderSecret, now - 10)
+  await secrets.setContentKeySecret(bob.pubkey, newerSecret, now)
 
   const aliceSigner = secrets.getNsecSigner(alice.pubkey)
   const bobSigner = secrets.getNsecSigner(bob.pubkey)
@@ -216,8 +217,8 @@ test('nip44-double-dh decrypt resolves older stored own content keys by pubkey',
 
 test('nip44-double-dh returns the sender content key when no peer content key is provided', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const alice = addNsecAccount()
-  const bob = addNsecAccount()
+  const alice = await addNsecAccount()
+  const bob = await addNsecAccount()
 
   const encrypted = await run({
     pubkey: alice.pubkey,
@@ -237,8 +238,8 @@ test('nip44-double-dh returns the sender content key when no peer content key is
 
 test('signer.run normalizes snake_case double-DH wire methods', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const alice = addNsecAccount()
-  const bob = addNsecAccount()
+  const alice = await addNsecAccount()
+  const bob = await addNsecAccount()
 
   const encrypted = await run({
     pubkey: alice.pubkey,
@@ -257,8 +258,8 @@ test('signer.run normalizes snake_case double-DH wire methods', async () => {
 
 test('signer.run doubleSignEvent signs with identity and local content key', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const alice = addNsecAccount()
-  const aliceContent = addContentKey(alice.pubkey)
+  const alice = await addNsecAccount()
+  const aliceContent = await addContentKey(alice.pubkey)
   let publishCalls = 0
   const event = {
     kind: 1,
@@ -303,7 +304,7 @@ test('signer.run doubleSignEvent signs with identity and local content key', asy
 
 test('signer.run doubleSignEvent creates and publishes a missing content key', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const alice = addNsecAccount()
+  const alice = await addNsecAccount()
   let publishedContentPubkey = ''
   const event = {
     kind: 1,
@@ -337,7 +338,7 @@ test('signer.run doubleSignEvent creates and publishes a missing content key', a
 
 test('signer.run doubleSignEvent rejects when a missing content key cannot be published', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const alice = addNsecAccount()
+  const alice = await addNsecAccount()
   const event = {
     kind: 1,
     pubkey: 'f'.repeat(64),
@@ -362,11 +363,11 @@ test('signer.run doubleSignEvent rejects when a missing content key cannot be pu
   )
 })
 
-test('nip44-double-dh creates own content keys in encrypted localStorage', async () => {
+test('nip44-double-dh creates own content keys in encrypted IndexedDB', async () => {
   const vaultKey = generateSecretKey()
   secrets.unlock(vaultKey, null)
-  const alice = addNsecAccount()
-  const bob = addNsecAccount()
+  const alice = await addNsecAccount()
+  const bob = await addNsecAccount()
   let publishedContentPubkey = ''
 
   const encrypted = await run({
@@ -384,18 +385,18 @@ test('nip44-double-dh creates own content keys in encrypted localStorage', async
   const accountBlob = secrets.sealCurrentEntries()
 
   assert.equal(encrypted[1], publishedContentPubkey)
-  assert.ok(globalThis.localStorage.getItem(CONTENT_KEYS_STORAGE_KEY))
+  assert.ok(getState(CONTENT_KEYS_STORAGE_KEY))
 
   secrets.lock()
   secrets.unlock(vaultKey, accountBlob)
   assert.ok(secrets.getContentKeySigner(alice.pubkey, publishedContentPubkey))
 })
 
-test('vault self-encryption stores account blobs as NIP-44 v3 and rejects old v2 blobs', () => {
+test('vault self-encryption stores account blobs as NIP-44 v3 and rejects old v2 blobs', async () => {
   const vaultKey = generateSecretKey()
   secrets.unlock(vaultKey, null)
-  const alice = addNsecAccount()
-  const bunker = addBunkerAccount({ close: async () => {} })
+  const alice = await addNsecAccount()
+  const bunker = await addBunkerAccount({ close: async () => {} })
   const accountBlob = secrets.sealCurrentEntries()
 
   assert.equal(Buffer.from(accountBlob, 'base64')[0], 3)
@@ -414,13 +415,13 @@ test('vault self-encryption stores account blobs as NIP-44 v3 and rejects old v2
   )
 })
 
-test('content keys persist in vault-key encrypted localStorage, not the largeBlob blob', async () => {
+test('content keys persist in vault-key encrypted IndexedDB, not the largeBlob blob', async () => {
   const vaultKey = generateSecretKey()
   secrets.unlock(vaultKey, null)
-  const alice = addNsecAccount()
-  const aliceContent = addContentKey(alice.pubkey)
+  const alice = await addNsecAccount()
+  const aliceContent = await addContentKey(alice.pubkey)
   const accountBlob = secrets.sealCurrentEntries()
-  const sealedContentKeys = globalThis.localStorage.getItem(CONTENT_KEYS_STORAGE_KEY)
+  const sealedContentKeys = getState(CONTENT_KEYS_STORAGE_KEY)
 
   assert.ok(sealedContentKeys)
   assert.equal(Buffer.from(sealedContentKeys, 'base64')[0], 3)
@@ -430,49 +431,49 @@ test('content keys persist in vault-key encrypted localStorage, not the largeBlo
   secrets.unlock(vaultKey, accountBlob)
   assert.ok(secrets.getContentKeySigner(alice.pubkey, aliceContent.pubkey))
 
-  globalThis.localStorage.removeItem(CONTENT_KEYS_STORAGE_KEY)
+  await removeState(CONTENT_KEYS_STORAGE_KEY)
   secrets.lock()
   secrets.unlock(vaultKey, accountBlob)
   assert.equal(secrets.getContentKeySigner(alice.pubkey, aliceContent.pubkey), null)
 })
 
-test('deleting an account purges its persisted content keys', () => {
+test('deleting an account purges its persisted content keys', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const alice = addNsecAccount()
-  addContentKey(alice.pubkey)
+  const alice = await addNsecAccount()
+  await addContentKey(alice.pubkey)
 
-  assert.ok(globalThis.localStorage.getItem(CONTENT_KEYS_STORAGE_KEY))
-  secrets.deleteSecret(alice.pubkey)
-  assert.equal(globalThis.localStorage.getItem(CONTENT_KEYS_STORAGE_KEY), null)
+  assert.ok(getState(CONTENT_KEYS_STORAGE_KEY))
+  await secrets.deleteSecret(alice.pubkey)
+  assert.equal(getState(CONTENT_KEYS_STORAGE_KEY), null)
 })
 
-test('stale content keys are pruned once a newer key is stored', () => {
+test('stale content keys are pruned once a newer key is stored', async () => {
   secrets.unlock(generateSecretKey(), null)
-  const alice = addNsecAccount()
+  const alice = await addNsecAccount()
   const staleSecret = seckey()
   const stalePubkey = getPublicKey(hexToBytes(staleSecret))
   const freshSecret = seckey()
   const freshPubkey = getPublicKey(hexToBytes(freshSecret))
 
-  assert.ok(secrets.setContentKeySecret(alice.pubkey, staleSecret, staleCreatedAt(5)))
+  assert.ok(await secrets.setContentKeySecret(alice.pubkey, staleSecret, staleCreatedAt(5)))
   assert.ok(secrets.getContentKeySigner(alice.pubkey, stalePubkey))
 
-  assert.ok(secrets.setContentKeySecret(alice.pubkey, freshSecret, nowSeconds()))
+  assert.ok(await secrets.setContentKeySecret(alice.pubkey, freshSecret, nowSeconds()))
 
   assert.equal(secrets.getContentKeySigner(alice.pubkey, stalePubkey), null)
   assert.ok(secrets.getContentKeySigner(alice.pubkey, freshPubkey))
   assert.deepEqual(secrets.listContentKeys(alice.pubkey).map(key => key.pubkey), [freshPubkey])
 })
 
-test('content key replacement rotates the owner to the new persisted key', () => {
+test('content key replacement rotates the owner to the new persisted key', async () => {
   const vaultKey = generateSecretKey()
   secrets.unlock(vaultKey, null)
-  const alice = addNsecAccount()
-  const oldContent = addContentKey(alice.pubkey)
+  const alice = await addNsecAccount()
+  const oldContent = await addContentKey(alice.pubkey)
   const newSecret = seckey()
   const newPubkey = getPublicKey(hexToBytes(newSecret))
 
-  secrets.replaceContentKeySecret(alice.pubkey, newSecret, 8)
+  await secrets.replaceContentKeySecret(alice.pubkey, newSecret, 8)
   const accountBlob = secrets.sealCurrentEntries()
 
   assert.equal(secrets.getContentKeySigner(alice.pubkey, oldContent.pubkey), null)

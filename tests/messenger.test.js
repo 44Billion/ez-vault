@@ -114,7 +114,7 @@ test('accountForLauncher returns the account shape expected by the launcher', ()
   })
 })
 
-test('applyAccountEvents updates stored profile and relay-list events only when newer', () => {
+test('applyAccountEvents updates stored profile and relay-list events only when newer', async () => {
   const pubkey = 'b'.repeat(64)
   const oldProfileEvent = {
     kind: 0,
@@ -151,7 +151,7 @@ test('applyAccountEvents updates stored profile and relay-list events only when 
     tags: [['r', 'wss://new.example', 'write']],
     content: ''
   }
-  store.add({
+  await store.add({
     type: 'nsec',
     pubkey,
     name: 'Old',
@@ -161,10 +161,10 @@ test('applyAccountEvents updates stored profile and relay-list events only when 
     writeRelays: ['wss://old.example']
   })
 
-  assert.equal(applyAccountEvents(pubkey, [staleProfileEvent]), false)
+  assert.equal(await applyAccountEvents(pubkey, [staleProfileEvent]), false)
   assert.equal(store.get(pubkey).name, 'Old')
 
-  assert.equal(applyAccountEvents(pubkey, [newProfileEvent, newRelayListEvent]), true)
+  assert.equal(await applyAccountEvents(pubkey, [newProfileEvent, newRelayListEvent]), true)
   const account = store.get(pubkey)
   assert.equal(account.name, 'New')
   assert.equal(account.picture, 'new.png')
@@ -173,14 +173,14 @@ test('applyAccountEvents updates stored profile and relay-list events only when 
   assert.deepEqual(account.writeRelays, ['wss://new.example'])
 })
 
-test('snapshotAccounts follows the account-mutation journal visibility window', () => {
+test('snapshotAccounts follows the account-mutation journal visibility window', async () => {
   const pubkey = 'c'.repeat(64)
   const account = { type: 'npub', pubkey, name: 'Carol', picture: '' }
-  store.add(account)
+  await store.add(account)
 
   assert.deepEqual(snapshotAccounts().map(a => a.pubkey), [pubkey])
 
-  journal.begin({
+  await journal.begin({
     operation: 'test',
     affectedPubkeys: [pubkey],
     beforeAccounts: [],
@@ -188,6 +188,6 @@ test('snapshotAccounts follows the account-mutation journal visibility window', 
   })
   assert.deepEqual(snapshotAccounts(), [])
 
-  journal.clear()
+  await journal.clear()
   assert.deepEqual(snapshotAccounts().map(a => a.pubkey), [pubkey])
 })

@@ -59,8 +59,8 @@ function bunkerRef (pubkey) {
   return { type: 'bunker', pubkey }
 }
 
-function beginMutation ({ operation = 'test', beforeAccounts, afterAccounts, beforeSecretRefs, afterSecretRefs }) {
-  journal.begin({
+async function beginMutation ({ operation = 'test', beforeAccounts, afterAccounts, beforeSecretRefs, afterSecretRefs }) {
+  await journal.begin({
     operation,
     affectedPubkeys: [
       ...beforeAccounts.map(a => a.pubkey),
@@ -73,17 +73,17 @@ function beginMutation ({ operation = 'test', beforeAccounts, afterAccounts, bef
   })
 }
 
-function setBunkerSecret (pubkey) {
-  secrets.adoptBunkerHandle(pubkey, { close () {} }, seckey())
+async function setBunkerSecret (pubkey) {
+  await secrets.adoptBunkerHandle(pubkey, { close () {} }, seckey())
 }
 
-test('recovery removes a created account when the secret blob stayed before-state', () => {
+test('recovery removes a created account when the secret blob stayed before-state', async () => {
   unlockVault()
   const secret = seckey()
   const pubkey = pubkeyFromSecret(secret)
   const record = nsecRecord(pubkey)
-  store.add(record)
-  beginMutation({
+  await store.add(record)
+  await beginMutation({
     operation: 'create-account',
     beforeAccounts: [],
     afterAccounts: [record],
@@ -91,20 +91,20 @@ test('recovery removes a created account when the secret blob stayed before-stat
     afterSecretRefs: [nsecRef(pubkey)]
   })
 
-  const result = recoverPendingMutation()
+  const result = await recoverPendingMutation()
 
   assert.deepEqual(result, { recovered: true, outcome: 'before' })
   assert.equal(store.get(pubkey), null)
   assert.equal(secrets.hasSecretRef(nsecRef(pubkey)), false)
 })
 
-test('recovery keeps a created account when the secret blob reached after-state', () => {
+test('recovery keeps a created account when the secret blob reached after-state', async () => {
   unlockVault()
   const secret = seckey()
   const pubkey = pubkeyFromSecret(secret)
   const record = nsecRecord(pubkey)
-  secrets.setNsecSecret(pubkey, secret)
-  beginMutation({
+  await secrets.setNsecSecret(pubkey, secret)
+  await beginMutation({
     operation: 'create-account',
     beforeAccounts: [],
     afterAccounts: [record],
@@ -112,21 +112,21 @@ test('recovery keeps a created account when the secret blob reached after-state'
     afterSecretRefs: [nsecRef(pubkey)]
   })
 
-  const result = recoverPendingMutation()
+  const result = await recoverPendingMutation()
 
   assert.deepEqual(result, { recovered: true, outcome: 'after' })
   assert.deepEqual(store.get(pubkey), record)
   assert.equal(secrets.hasSecretRef(nsecRef(pubkey)), true)
 })
 
-test('recovery keeps a deleted account when the secret blob stayed before-state', () => {
+test('recovery keeps a deleted account when the secret blob stayed before-state', async () => {
   unlockVault()
   const secret = seckey()
   const pubkey = pubkeyFromSecret(secret)
   const record = nsecRecord(pubkey)
-  store.add(record)
-  secrets.setNsecSecret(pubkey, secret)
-  beginMutation({
+  await store.add(record)
+  await secrets.setNsecSecret(pubkey, secret)
+  await beginMutation({
     operation: 'delete-account',
     beforeAccounts: [record],
     afterAccounts: [],
@@ -134,20 +134,20 @@ test('recovery keeps a deleted account when the secret blob stayed before-state'
     afterSecretRefs: []
   })
 
-  const result = recoverPendingMutation()
+  const result = await recoverPendingMutation()
 
   assert.deepEqual(result, { recovered: true, outcome: 'before' })
   assert.deepEqual(store.get(pubkey), record)
   assert.equal(secrets.hasSecretRef(nsecRef(pubkey)), true)
 })
 
-test('recovery removes a deleted account when the secret blob reached after-state', () => {
+test('recovery removes a deleted account when the secret blob reached after-state', async () => {
   unlockVault()
   const secret = seckey()
   const pubkey = pubkeyFromSecret(secret)
   const record = nsecRecord(pubkey)
-  store.add(record)
-  beginMutation({
+  await store.add(record)
+  await beginMutation({
     operation: 'delete-account',
     beforeAccounts: [record],
     afterAccounts: [],
@@ -155,21 +155,21 @@ test('recovery removes a deleted account when the secret blob reached after-stat
     afterSecretRefs: []
   })
 
-  const result = recoverPendingMutation()
+  const result = await recoverPendingMutation()
 
   assert.deepEqual(result, { recovered: true, outcome: 'after' })
   assert.equal(store.get(pubkey), null)
   assert.equal(secrets.hasSecretRef(nsecRef(pubkey)), false)
 })
 
-test('recovery restores an npub when upgrade to nsec did not reach the secret blob', () => {
+test('recovery restores an npub when upgrade to nsec did not reach the secret blob', async () => {
   unlockVault()
   const secret = seckey()
   const pubkey = pubkeyFromSecret(secret)
   const before = npubRecord(pubkey)
   const after = nsecRecord(pubkey)
-  store.add(after)
-  beginMutation({
+  await store.add(after)
+  await beginMutation({
     operation: 'commit-prepared',
     beforeAccounts: [before],
     afterAccounts: [after],
@@ -177,22 +177,22 @@ test('recovery restores an npub when upgrade to nsec did not reach the secret bl
     afterSecretRefs: [nsecRef(pubkey)]
   })
 
-  const result = recoverPendingMutation()
+  const result = await recoverPendingMutation()
 
   assert.deepEqual(result, { recovered: true, outcome: 'before' })
   assert.deepEqual(store.get(pubkey), before)
   assert.equal(secrets.hasSecretRef(nsecRef(pubkey)), false)
 })
 
-test('recovery finishes an npub to nsec upgrade when the secret blob reached after-state', () => {
+test('recovery finishes an npub to nsec upgrade when the secret blob reached after-state', async () => {
   unlockVault()
   const secret = seckey()
   const pubkey = pubkeyFromSecret(secret)
   const before = npubRecord(pubkey)
   const after = nsecRecord(pubkey)
-  store.add(before)
-  secrets.setNsecSecret(pubkey, secret)
-  beginMutation({
+  await store.add(before)
+  await secrets.setNsecSecret(pubkey, secret)
+  await beginMutation({
     operation: 'commit-prepared',
     beforeAccounts: [before],
     afterAccounts: [after],
@@ -200,22 +200,22 @@ test('recovery finishes an npub to nsec upgrade when the secret blob reached aft
     afterSecretRefs: [nsecRef(pubkey)]
   })
 
-  const result = recoverPendingMutation()
+  const result = await recoverPendingMutation()
 
   assert.deepEqual(result, { recovered: true, outcome: 'after' })
   assert.deepEqual(store.get(pubkey), after)
   assert.equal(secrets.hasSecretRef(nsecRef(pubkey)), true)
 })
 
-test('recovery restores old bunker record when drift did not reach the secret blob', () => {
+test('recovery restores old bunker record when drift did not reach the secret blob', async () => {
   unlockVault()
   const oldPubkey = '1'.repeat(64)
   const newPubkey = '2'.repeat(64)
   const before = bunkerRecord(oldPubkey)
   const after = bunkerRecord(newPubkey)
-  store.add(after)
+  await store.add(after)
   setBunkerSecret(oldPubkey)
-  beginMutation({
+  await beginMutation({
     operation: 'bunker-drift',
     beforeAccounts: [before],
     afterAccounts: [after],
@@ -223,7 +223,7 @@ test('recovery restores old bunker record when drift did not reach the secret bl
     afterSecretRefs: [bunkerRef(newPubkey)]
   })
 
-  const result = recoverPendingMutation()
+  const result = await recoverPendingMutation()
 
   assert.deepEqual(result, { recovered: true, outcome: 'before' })
   assert.deepEqual(store.get(oldPubkey), before)
@@ -231,15 +231,15 @@ test('recovery restores old bunker record when drift did not reach the secret bl
   assert.equal(secrets.hasSecretRef(bunkerRef(oldPubkey)), true)
 })
 
-test('recovery finishes bunker drift when the secret blob reached after-state', () => {
+test('recovery finishes bunker drift when the secret blob reached after-state', async () => {
   unlockVault()
   const oldPubkey = '1'.repeat(64)
   const newPubkey = '2'.repeat(64)
   const before = bunkerRecord(oldPubkey)
   const after = bunkerRecord(newPubkey)
-  store.add(before)
+  await store.add(before)
   setBunkerSecret(newPubkey)
-  beginMutation({
+  await beginMutation({
     operation: 'bunker-drift',
     beforeAccounts: [before],
     afterAccounts: [after],
@@ -247,7 +247,7 @@ test('recovery finishes bunker drift when the secret blob reached after-state', 
     afterSecretRefs: [bunkerRef(newPubkey)]
   })
 
-  const result = recoverPendingMutation()
+  const result = await recoverPendingMutation()
 
   assert.deepEqual(result, { recovered: true, outcome: 'after' })
   assert.equal(store.get(oldPubkey), null)
@@ -255,11 +255,11 @@ test('recovery finishes bunker drift when the secret blob reached after-state', 
   assert.equal(secrets.hasSecretRef(bunkerRef(newPubkey)), true)
 })
 
-test('pending accounts are hidden and keep locked recovery visible', () => {
+test('pending accounts are hidden and keep locked recovery visible', async () => {
   const pubkey = '3'.repeat(64)
   const record = nsecRecord(pubkey)
-  store.add(record)
-  beginMutation({
+  await store.add(record)
+  await beginMutation({
     operation: 'delete-account',
     beforeAccounts: [record],
     afterAccounts: [],
@@ -269,5 +269,5 @@ test('pending accounts are hidden and keep locked recovery visible', () => {
 
   assert.deepEqual(filterVisibleAccounts(store.list()), [])
   assert.equal(pendingMutationNeedsUnlock(), true)
-  assert.deepEqual(recoverPendingMutation(), { recovered: false, outcome: 'locked' })
+  assert.deepEqual(await recoverPendingMutation(), { recovered: false, outcome: 'locked' })
 })

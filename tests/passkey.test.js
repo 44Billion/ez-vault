@@ -6,6 +6,7 @@ import * as passkey from '../docs/services/passkey.js'
 import * as secrets from '../docs/services/secrets.js'
 import * as store from '../docs/services/accounts-store.js'
 import { bytesToHex, hexToBytes } from 'libp2r2p/base16'
+import { getState } from '../docs/services/storage/index.js'
 
 const data = new Map()
 
@@ -25,7 +26,7 @@ afterEach(() => {
   globalThis.localStorage.clear()
 })
 
-function installCredentialMocks ({ prfBytes, onCreate, onGet }) {
+function installCredentialMocks ({ prfBytes, onCreate, onGet, onPersist }) {
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
     value: {
@@ -37,6 +38,12 @@ function installCredentialMocks ({ prfBytes, onCreate, onGet }) {
     configurable: true,
     value: {
       userAgent: 'Node Test',
+      storage: {
+        persist: async () => {
+          onPersist?.()
+          return true
+        }
+      },
       credentials: {
         create: async options => {
           onCreate?.(options)
@@ -66,9 +73,11 @@ test('empty vault can register passkey and derive a device signer pubkey', async
   const prfBytes = new Uint8Array(32)
   prfBytes[0] = 1
   let createCalls = 0
+  let persistCalls = 0
 
   installCredentialMocks({
     prfBytes,
+    onPersist: () => { persistCalls++ },
     onCreate: options => {
       createCalls += 1
       assert.equal(options.publicKey.rp.id, 'localhost')
@@ -82,11 +91,17 @@ test('empty vault can register passkey and derive a device signer pubkey', async
   const pubkey = await secrets.getDeviceSignerPubkey()
 
   assert.equal(createCalls, 1)
+  assert.equal(persistCalls, 1)
   assert.equal(secrets.isUnlocked(), true)
   assert.match(pubkey, /^[0-9a-f]{64}$/)
+
+  secrets.lock()
+  await passkey.unlock()
+  assert.equal(persistCalls, 2)
+  assert.equal(data.size, 0)
 })
 
-test('writeSecretsBlob falls back to localStorage when secondary prompt is cancelled by default', async () => {
+test('writeSecretsBlob falls back to IndexedDB when secondary prompt is cancelled by default', async () => {
   const prfBytes = new Uint8Array(32)
   prfBytes[0] = 2
   const cancelled = Object.assign(new Error('User cancelled'), { name: 'NotAllowedError' })
@@ -99,7 +114,7 @@ test('writeSecretsBlob falls back to localStorage when secondary prompt is cance
   await passkey.ensureRegistered()
   await passkey.writeSecretsBlob()
 
-  assert.ok(globalThis.localStorage.getItem('ez-vault:passkey:blob'))
+  assert.ok(getState('ez-vault:passkey:blob'))
 })
 
 test('writeSecretsBlob can reject cancellation for destructive flows', async () => {
@@ -118,7 +133,7 @@ test('writeSecretsBlob can reject cancellation for destructive flows', async () 
     /User cancelled/
   )
 
-  assert.equal(globalThis.localStorage.getItem('ez-vault:passkey:blob'), null)
+  assert.equal(getState('ez-vault:passkey:blob'), null)
 })
 
 test('openSecrets decrypts NIP-44 v3 sealed largeBlob payloads', async () => {
@@ -130,8 +145,8 @@ test('openSecrets decrypts NIP-44 v3 sealed largeBlob payloads', async () => {
 
   const secret = bytesToHex(generateSecretKey())
   const pubkey = getPublicKey(hexToBytes(secret))
-  store.add({ type: 'nsec', pubkey, name: '', picture: '' })
-  secrets.setNsecSecret(pubkey, secret)
+  await store.add({ type: 'nsec', pubkey, name: '', picture: '' })
+  await secrets.setNsecSecret(pubkey, secret)
   await secrets.getDeviceSignerPubkey()
 
   const ciphertext = secrets.sealCurrentEntries()

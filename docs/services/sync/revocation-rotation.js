@@ -2,6 +2,7 @@ import * as store from '../accounts-store.js'
 import * as secrets from '../secrets.js'
 import { filterVisibleAccounts } from '../account-mutations.js'
 import { rotateContentKeyIfStillCanonical } from '../content-key/index.js'
+import { readRecords, replaceRecords, REVOCATION_ROTATIONS } from '../storage/index.js'
 
 const KEY = 'ez-vault:trusted-signer-sync:content-key-rotation:v1'
 const HEX32 = /^[0-9a-f]{64}$/i
@@ -26,7 +27,11 @@ function intentKey (intent) {
   return `${intent.ownerPubkey}:${intent.removedSignerPubkey}:${intent.removalUpdatedAt}`
 }
 
-function readIntents (storage = globalThis.localStorage) {
+async function readIntents (storage) {
+  if (!storage) {
+    const records = await readRecords(REVOCATION_ROTATIONS)
+    return records.map(record => normalizeIntent(record.value)).filter(Boolean)
+  }
   try {
     const parsed = JSON.parse(storage?.getItem(KEY) || '[]')
     if (!Array.isArray(parsed)) return []
@@ -41,8 +46,15 @@ function readIntents (storage = globalThis.localStorage) {
   }
 }
 
-function writeIntents (intents, storage = globalThis.localStorage) {
+async function writeIntents (intents, storage) {
   const normalized = intents.map(normalizeIntent).filter(Boolean)
+  if (!storage) {
+    await replaceRecords(REVOCATION_ROTATIONS, normalized.map(intent => ({
+      key: intentKey(intent),
+      value: intent
+    })))
+    return
+  }
   if (!normalized.length) {
     storage?.removeItem(KEY)
     return
@@ -81,7 +93,7 @@ export async function scheduleRevocationRotationsForRemovedSigner ({
   removalUpdatedAt,
   actorPubkey = '',
   localActorPubkey = '',
-  storage = globalThis.localStorage,
+  storage,
   nowMs = Date.now()
 } = {}) {
   const removed = normalizePubkey(removedSignerPubkey)
@@ -90,7 +102,7 @@ export async function scheduleRevocationRotationsForRemovedSigner ({
   const localActor = normalizePubkey(localActorPubkey)
   const delayMs = actor && localActor && actor === localActor ? 0 : FALLBACK_ROTATION_DELAY_MS
   const nextAttemptAt = nowMs + delayMs
-  const current = readIntents(storage)
+  const current = await readIntents(storage)
   const byKey = new Map(current.map(intent => [intentKey(intent), intent]))
   const created = []
 
@@ -114,18 +126,18 @@ export async function scheduleRevocationRotationsForRemovedSigner ({
     created.push(intent)
   }
 
-  writeIntents([...byKey.values()], storage)
+  await writeIntents([...byKey.values()], storage)
   return created
 }
 
 export async function runDueRevocationRotations ({
-  storage = globalThis.localStorage,
+  storage,
   nowMs = Date.now(),
   _rotateContentKeyIfStillCanonical = rotateContentKeyIfStillCanonical,
   onError = err => console.warn('revocation rotation failed', err?.message ?? err)
 } = {}) {
   if (!secrets.isUnlocked()) return { skipped: 'locked' }
-  const intents = readIntents(storage)
+  const intents = await readIntents(storage)
   if (!intents.length) return { checked: 0, remaining: 0 }
 
   const remaining = []
@@ -164,12 +176,12 @@ export async function runDueRevocationRotations ({
       })
     }
   }
-  writeIntents(remaining, storage)
+  await writeIntents(remaining, storage)
   return { checked, cleared, rotated, remaining: remaining.length }
 }
 
-export function nextRevocationRotationDelay (storage = globalThis.localStorage, nowMs = Date.now()) {
-  const due = readIntents(storage)
+export async function nextRevocationRotationDelay (storage, nowMs = Date.now()) {
+  const due = (await readIntents(storage))
     .map(intent => intent.nextAttemptAt || 0)
     .filter(Boolean)
     .sort((a, b) => a - b)[0]
@@ -177,8 +189,8 @@ export function nextRevocationRotationDelay (storage = globalThis.localStorage, 
   return Math.max(0, due - nowMs)
 }
 
-export function startRevocationRotation ({
-  storage = globalThis.localStorage,
+export async function startRevocationRotation ({
+  storage,
   _setTimeout = setTimeout,
   _clearTimeout = clearTimeout,
   ...options
@@ -192,11 +204,11 @@ export function startRevocationRotation ({
     if (timer) _clearTimeout(timer)
     timer = null
   }
-  const schedule = () => {
+  const schedule = async () => {
     if (stopped) return
     clearTimer()
     if (!secrets.isUnlocked()) return
-    const delay = nextRevocationRotationDelay(storage)
+    const delay = await nextRevocationRotationDelay(storage)
     if (delay == null) return
     timer = _setTimeout(tick, delay)
     timer?.unref?.()
@@ -207,7 +219,7 @@ export function startRevocationRotation ({
       running = runDueRevocationRotations({ storage, ...options })
         .finally(() => {
           running = null
-          schedule()
+          schedule().catch(err => console.warn('revocation rotation scheduling failed', err?.message ?? err))
         })
     }
     return running
@@ -222,6 +234,6 @@ export function startRevocationRotation ({
     unsubSecrets()
     stopRevocationRotation = null
   }
-  tick()
+  await tick()
   return stopRevocationRotation
 }

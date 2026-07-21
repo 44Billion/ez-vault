@@ -2,6 +2,7 @@ import { freeRelays, relayPool, seedRelays } from 'libp2r2p/relay'
 import { fetchRelayListEvent, parseRelayListEvent } from './relay.js'
 import * as secrets from './secrets.js'
 import { isOnline, onOnline } from 'libp2r2p/network'
+import { getState, setState } from './storage/index.js'
 
 export const DEVICE_RELAY_LIST_REFRESH_INTERVAL_MS = 4 * 60 * 60 * 1000
 
@@ -38,12 +39,12 @@ function relayListTemplate ({ relays, createdAt = nowSeconds() }) {
 }
 
 function readLastRefresh () {
-  const value = Math.floor(Number(globalThis.localStorage?.getItem(LAST_REFRESH_KEY)) || 0)
+  const value = Math.floor(Number(getState(LAST_REFRESH_KEY, 0)) || 0)
   return Number.isSafeInteger(value) && value > 0 ? value : 0
 }
 
 function writeLastRefresh (value = Date.now()) {
-  globalThis.localStorage?.setItem(LAST_REFRESH_KEY, String(Math.max(0, Math.floor(Number(value) || 0))))
+  return setState(LAST_REFRESH_KEY, Math.max(0, Math.floor(Number(value) || 0)))
 }
 
 export function relaysFromEventOrFallback (event) {
@@ -142,7 +143,7 @@ export async function refreshDeviceRelayListIfDue ({
   const last = readLastRefresh()
   if (last && now - last < intervalMs) return { skipped: 'fresh', nextInMs: intervalMs - (now - last) }
   const result = await refreshDeviceRelayList(options)
-  if (result.skipped !== 'offline' && result.skipped !== 'locked' && result.reason !== 'offline-no-replacement') writeLastRefresh(now)
+  if (result.skipped !== 'offline' && result.skipped !== 'locked' && result.reason !== 'offline-no-replacement') await writeLastRefresh(now)
   return result
 }
 

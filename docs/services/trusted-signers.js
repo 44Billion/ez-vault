@@ -1,4 +1,5 @@
 import * as secrets from './secrets.js'
+import { getState, hasState, updateState } from './storage/index.js'
 
 const KEY = 'ez-vault:trusted-signers'
 // Plaintext UI hint: tombstones remain sealed for sync/reminders, but a
@@ -113,13 +114,7 @@ function hasActiveRecord (records) {
   return records.some(record => record.status === 'trusted')
 }
 
-function writeActiveHint (records) {
-  if (hasActiveRecord(records)) localStorage.setItem(ACTIVE_HINT_KEY, '1')
-  else localStorage.setItem(ACTIVE_HINT_KEY, '0')
-}
-
-function readRecords () {
-  const raw = localStorage.getItem(KEY)
+function decodeRecords (raw) {
   if (!raw) return []
   if (!secrets.isUnlocked()) return []
   try {
@@ -140,18 +135,20 @@ function readRecords () {
   }
 }
 
-function writeRecords (records, detail = {}) {
+function readRecords () {
+  return decodeRecords(getState(KEY))
+}
+
+async function writeRecords (records, detail = {}) {
   if (!secrets.isUnlocked()) throw new Error('VAULT_LOCKED')
   const pruned = pruneTombstones(records)
   if (!pruned.length) {
-    localStorage.removeItem(KEY)
-    localStorage.removeItem(ACTIVE_HINT_KEY)
+    await updateState({ remove: [KEY, ACTIVE_HINT_KEY] })
     notify(detail)
     return
   }
   const sealed = secrets.vaultEncrypt(JSON.stringify(pruned))
-  localStorage.setItem(KEY, sealed)
-  writeActiveHint(pruned)
+  await updateState({ set: { [KEY]: sealed, [ACTIVE_HINT_KEY]: hasActiveRecord(pruned) } })
   notify(detail)
 }
 
@@ -161,20 +158,20 @@ export function subscribe (fn) {
 }
 
 export function hasStored () {
-  return Boolean(localStorage.getItem(KEY))
+  return hasState(KEY)
 }
 
 export function hasStoredActive () {
-  return localStorage.getItem(ACTIVE_HINT_KEY) === '1'
+  return getState(ACTIVE_HINT_KEY, false) === true
 }
 
-export function forgetLocal (pubkey, detail = {}) {
+export async function forgetLocal (pubkey, detail = {}) {
   const normalizedPubkey = normalizePubkey(pubkey)
   if (!normalizedPubkey) return null
   const records = readRecords()
   const record = records.find(entry => entry.pubkey === normalizedPubkey)
   if (!record) return null
-  writeRecords(records.filter(entry => entry.pubkey !== normalizedPubkey), {
+  await writeRecords(records.filter(entry => entry.pubkey !== normalizedPubkey), {
     action: 'forget-local',
     records: [record],
     ...detail
@@ -203,7 +200,7 @@ export function list () {
     }))
 }
 
-export function add ({ pubkey, platform, actorPubkey = '', updatedAt = nowSeconds() }) {
+export async function add ({ pubkey, platform, actorPubkey = '', updatedAt = nowSeconds() }) {
   const record = normalizeRecord({
     pubkey,
     platform,
@@ -217,11 +214,11 @@ export function add ({ pubkey, platform, actorPubkey = '', updatedAt = nowSecond
   if (current?.status === 'trusted' && compareRecords(current, record) >= 0) return null
   const { records, changedRecords } = mergeRecordMaps(readRecords(), [record])
   if (!changedRecords.length) return null
-  writeRecords(records, { action: 'add', records: changedRecords, trustedRecords: changedRecords })
+  await writeRecords(records, { action: 'add', records: changedRecords, trustedRecords: changedRecords })
   return changedRecords[0]
 }
 
-export function addMany (entries, options = {}) {
+export async function addMany (entries, options = {}) {
   if (!entries?.length) return []
   const timestamp = normalizeTimestamp(options.updatedAt) || nowSeconds()
   const recordsToMerge = entries.map(entry => ({
@@ -232,11 +229,11 @@ export function addMany (entries, options = {}) {
   }))
   const { records, changedRecords } = mergeRecordMaps(readRecords(), recordsToMerge)
   if (!changedRecords.length) return []
-  writeRecords(records, { action: 'add-many', records: changedRecords, trustedRecords: changedRecords })
+  await writeRecords(records, { action: 'add-many', records: changedRecords, trustedRecords: changedRecords })
   return changedRecords
 }
 
-export function remove (pubkey, { actorPubkey = '', updatedAt = nowSeconds() } = {}) {
+export async function remove (pubkey, { actorPubkey = '', updatedAt = nowSeconds() } = {}) {
   const normalizedPubkey = normalizePubkey(pubkey)
   if (!normalizedPubkey) return null
   const current = readRecords().find(record => record.pubkey === normalizedPubkey)
@@ -250,15 +247,15 @@ export function remove (pubkey, { actorPubkey = '', updatedAt = nowSeconds() } =
   })
   const { records, changedRecords } = mergeRecordMaps(readRecords(), [record])
   if (!changedRecords.length) return null
-  writeRecords(records, { action: 'remove', records: changedRecords, removedRecords: changedRecords })
+  await writeRecords(records, { action: 'remove', records: changedRecords, removedRecords: changedRecords })
   return changedRecords[0]
 }
 
-export function clearActive ({ actorPubkey = '', updatedAt = nowSeconds(), tombstone = true } = {}) {
+export async function clearActive ({ actorPubkey = '', updatedAt = nowSeconds(), tombstone = true } = {}) {
   const active = readRecords().filter(record => record.status === 'trusted')
   if (!active.length) return []
   if (!tombstone) {
-    writeRecords(readRecords().filter(record => record.status !== 'trusted'), { action: 'clear-active', records: [] })
+    await writeRecords(readRecords().filter(record => record.status !== 'trusted'), { action: 'clear-active', records: [] })
     return active
   }
   const removed = active.map(record => ({
@@ -269,14 +266,14 @@ export function clearActive ({ actorPubkey = '', updatedAt = nowSeconds(), tombs
   }))
   const { records, changedRecords } = mergeRecordMaps(readRecords(), removed)
   if (!changedRecords.length) return []
-  writeRecords(records, { action: 'clear-active', records: changedRecords, removedRecords: changedRecords })
+  await writeRecords(records, { action: 'clear-active', records: changedRecords, removedRecords: changedRecords })
   return changedRecords
 }
 
-export function mergeRecords (entries, { action = 'merge' } = {}) {
+export async function mergeRecords (entries, { action = 'merge' } = {}) {
   const { records, changedRecords } = mergeRecordMaps(readRecords(), entries)
   if (!changedRecords.length) return []
-  writeRecords(records, {
+  await writeRecords(records, {
     action,
     records: changedRecords,
     trustedRecords: changedRecords.filter(record => record.status === 'trusted'),
@@ -286,17 +283,15 @@ export function mergeRecords (entries, { action = 'merge' } = {}) {
 }
 
 export function snapshot () {
-  return localStorage.getItem(KEY)
+  return getState(KEY)
 }
 
-export function restore (priorCiphertext) {
+export async function restore (priorCiphertext) {
   if (priorCiphertext === null) {
-    localStorage.removeItem(KEY)
-    localStorage.removeItem(ACTIVE_HINT_KEY)
+    await updateState({ remove: [KEY, ACTIVE_HINT_KEY] })
   } else {
-    localStorage.setItem(KEY, priorCiphertext)
-    if (secrets.isUnlocked()) writeActiveHint(readRecords())
-    else localStorage.removeItem(ACTIVE_HINT_KEY)
+    const active = secrets.isUnlocked() && hasActiveRecord(decodeRecords(priorCiphertext))
+    await updateState({ set: { [KEY]: priorCiphertext, [ACTIVE_HINT_KEY]: active } })
   }
   notify({ action: 'restore' })
 }

@@ -1,11 +1,3 @@
-import './components/account-list.js'
-import './components/account-add.js'
-import './components/sync/sync-panel.js'
-import './components/trusted-signers-panel.js'
-import './components/shared/accordion-panel.js'
-import './components/shared/toast.js'
-import './components/activity-log.js'
-import './components/lock-overlay.js'
 import * as secrets from './services/secrets.js'
 import * as passkey from './services/passkey.js'
 import { rehydrateAll } from './services/profile-rehydrator.js'
@@ -16,6 +8,22 @@ import { startContentKeyEventRefresh } from './services/content-key/index.js'
 import { startDeviceRelayListRefresh } from './services/device-relays.js'
 import { startRevocationRotation } from './services/sync/revocation-rotation.js'
 import { initShellI18n } from './i18n/shell.js'
+import { initializeStorage } from './services/storage/index.js'
+
+// Storage is a hard prerequisite: no component may observe an empty cache
+// while IndexedDB is still opening. Initialization fails closed when IDB is
+// unavailable.
+await initializeStorage()
+await Promise.all([
+  import('./components/account-list.js'),
+  import('./components/account-add.js'),
+  import('./components/sync/sync-panel.js'),
+  import('./components/trusted-signers-panel.js'),
+  import('./components/shared/accordion-panel.js'),
+  import('./components/shared/toast.js'),
+  import('./components/activity-log.js'),
+  import('./components/lock-overlay.js')
+])
 
 const list = document.querySelector('account-list')
 const addPanel = document.querySelector('account-add')
@@ -72,7 +80,7 @@ syncBtn.addEventListener('click', () => {
 // moment the user unlocks so bunker connections come back without waiting
 // for the 60s backoff timer.
 async function recoverThenRehydrate () {
-  recoverPendingMutation()
+  await recoverPendingMutation()
   await rehydrateAll()
 }
 
@@ -87,7 +95,9 @@ initMessenger()
 sync.init()
 startContentKeyEventRefresh()
 startDeviceRelayListRefresh()
-startRevocationRotation()
+startRevocationRotation().catch(err => {
+  console.warn('revocation rotation startup failed', err?.message ?? err)
+})
 
 if (window === window.top) {
   document.body.classList.add('dev')
