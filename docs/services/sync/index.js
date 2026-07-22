@@ -575,7 +575,7 @@ export function createSyncController ({
   }
 
   function stop () {
-    messenger?.close?.()
+    const currentMessenger = messenger
     messenger = null
     drainQueued = false
     drainScheduled = false
@@ -588,12 +588,13 @@ export function createSyncController ({
     clearAnnouncementTimers()
     nostrDbSync.stop()
     _contentKeys.resetDebugSources?.()
+    return Promise.resolve(currentMessenger?.close?.()).catch(onError)
   }
 
   async function refreshNow (id = lifecycleId) {
     if (!isCurrentLifecycle(id)) return null
     if (!_secrets.isUnlocked()) {
-      stop()
+      await stop()
       return null
     }
 
@@ -605,7 +606,7 @@ export function createSyncController ({
     const channels = await buildChannels(userSigner)
     if (!isCurrentLifecycle(id)) return null
     if (!channels.length) {
-      stop()
+      await stop()
       return null
     }
 
@@ -623,8 +624,8 @@ export function createSyncController ({
       await nextMessenger.init(options)
       if (!isCurrentLifecycle(id)) {
         if (messenger === nextMessenger) {
-          nextMessenger.close?.()
           messenger = null
+          await nextMessenger.close?.()
         }
         return null
       }
@@ -679,7 +680,7 @@ export function createSyncController ({
 
   function init () {
     if (initialized) return refresh()
-    PrivateMessenger.cleanupTemporaryStorage()
+    PrivateMessenger.maintainStorage().catch(onError)
     initialized = true
     lifecycleId += 1
     lastStoreIdentityKey = syncAccountIdentityKey(_store)
@@ -696,7 +697,7 @@ export function createSyncController ({
     for (const unsubscribe of unsubscribers.splice(0)) unsubscribe()
     initialized = false
     refreshPromise = null
-    stop()
+    return stop()
   }
 
   return {
