@@ -12,7 +12,7 @@ Because the signer custodies private keys, the overriding design principle is **
 
 - **Vanilla JavaScript.** No framework, no TypeScript, no transpilation.
 - **No bundler, no build step.** The browser loads source files exactly as they appear in `docs/`.
-- **One runtime dependency: [`nostr-tools`](https://github.com/nbd-wtf/nostr-tools).** Everything else is standard Web APIs. Do not add new runtime dependencies without explicit approval.
+- **Nostr primitives come from the sibling [`libp2r2p`](../libp2r2p) package.** Everything else is standard Web APIs or an explicitly listed focused dependency. Do not add new runtime dependencies without explicit approval.
 - **Small, readable surface area.** Prefer straightforward code over clever abstractions — the code is the documentation for our security claims.
 
 ## Hosting & Entry Point
@@ -21,7 +21,7 @@ Because the signer custodies private keys, the overriding design principle is **
 - `docs/index.html` is the only HTML file. It loads `docs/index.js` as a module, which then imports everything else.
 - `docs/index.html` must stay minimal:
   - A `<link>` tag per CSS file (currently `styles/reset.css` and `styles/global.css` — there is no `icons.css` yet).
-  - An `importmap` that **only aliases `nostr-tools`** to `https://esm.sh/nostr-tools` (and its `nostr-tools/` subpath). We do **not** use the importmap to rename local modules — local imports use relative paths.
+  - An `importmap` for external dependencies such as `libp2r2p` and Noble. We do **not** use the importmap to rename local modules — local imports use relative paths.
   - A final `<script type="module">` that imports `./index.js`.
 
 ## Communication Model
@@ -188,7 +188,7 @@ Rules for component CSS:
 
 ## JavaScript Module Conventions
 
-- Import local modules with **relative paths** (`./`, `../`). The importmap is reserved for `nostr-tools` aliasing.
+- Import local modules with **relative paths** (`./`, `../`). The importmap is reserved for external package subpaths.
 - Keep `docs/index.js` as the single SPA entry. It wires up components and kicks off any needed service initialization.
 - Custom elements (Web Components) are the default UI primitive. Register them from their file in `docs/components/` and use them declaratively in markup.
 

@@ -1,4 +1,4 @@
-import { generateSecretKey, getPublicKey } from 'nostr-tools'
+import { generateSecretKey, getPublicKey } from 'libp2r2p/key'
 import * as store from '../accounts-store.js'
 import * as secrets from '../secrets.js'
 import { filterVisibleAccounts } from '../account-mutations.js'

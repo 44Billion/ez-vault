@@ -1,6 +1,6 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { generateSecretKey, getPublicKey } from 'nostr-tools'
+import { generateSecretKey, getPublicKey } from 'libp2r2p/key'
 import NsecSigner from '../docs/services/nsec-signer.js'
 import * as store from '../docs/services/accounts-store.js'
 import * as secrets from '../docs/services/secrets.js'

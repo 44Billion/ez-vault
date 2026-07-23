@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { generateSecretKey, getPublicKey } from 'nostr-tools'
+import { generateSecretKey, getPublicKey } from 'libp2r2p/key'
 import { HostSession, JoinerSession } from '../docs/services/nostrpair.js'
 
 const tick = () => new Promise(resolve => setImmediate(resolve))

@@ -1,6 +1,8 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { generateSecretKey, getEventHash, getPublicKey, nip44, verifyEvent } from 'nostr-tools'
+import { getEventHash, isValidEvent } from 'libp2r2p/event'
+import { generateSecretKey, getPublicKey } from 'libp2r2p/key'
+import * as nip44 from 'libp2r2p/nip44'
 import { run } from '../docs/services/signer.js'
 import * as store from '../docs/services/accounts-store.js'
 import * as secrets from '../docs/services/secrets.js'
@@ -297,8 +299,8 @@ test('signer.run doubleSignEvent signs with identity and local content key', asy
   assert.equal(signed.pubkey, alice.pubkey)
   assert.deepEqual(imkcTag.slice(0, 2), ['imkc', aliceContent.pubkey])
   assert.equal(event.tags[1][1], 'old')
-  assert.equal(verifyEvent(proofEvent), true)
-  assert.equal(verifyEvent(signed), true)
+  assert.equal(isValidEvent(proofEvent), true)
+  assert.equal(isValidEvent(signed), true)
   assert.equal(publishCalls, 0)
 })
 
@@ -333,7 +335,7 @@ test('signer.run doubleSignEvent creates and publishes a missing content key', a
   assert.ok(publishedContentPubkey)
   assert.deepEqual(imkcTag.slice(0, 2), ['imkc', publishedContentPubkey])
   assert.ok(secrets.getContentKeySigner(alice.pubkey, publishedContentPubkey))
-  assert.equal(verifyEvent(signed), true)
+  assert.equal(isValidEvent(signed), true)
 })
 
 test('signer.run doubleSignEvent rejects when a missing content key cannot be published', async () => {

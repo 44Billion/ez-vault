@@ -1,4 +1,4 @@
-import { generateSecretKey } from 'nostr-tools'
+import { generateSecretKey } from 'libp2r2p/key'
 import { isOnline } from 'libp2r2p/network'
 import { bytesToHex } from 'libp2r2p/base16'
 import { getIykcProofs, upsertContentKeyEvent } from './content-key/index.js'

@@ -1,4 +1,4 @@
-import { generateSecretKey } from 'nostr-tools'
+import { generateSecretKey } from 'libp2r2p/key'
 import { bytesToHex, hexToBytes } from 'libp2r2p/base16'
 import { BunkerSigner, parseBunkerUrl, toBunkerUrl } from 'libp2r2p/nip46'
 import { relayPool } from 'libp2r2p/relay'

@@ -1,6 +1,6 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { generateSecretKey } from 'nostr-tools'
+import { generateSecretKey } from 'libp2r2p/key'
 import NsecSigner from '../docs/services/nsec-signer.js'
 import * as secrets from '../docs/services/secrets.js'
 import { freeRelays, seedRelays } from 'libp2r2p/relay'

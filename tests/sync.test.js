@@ -1,6 +1,6 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { generateSecretKey, getPublicKey } from 'nostr-tools'
+import { generateSecretKey, getPublicKey } from 'libp2r2p/key'
 import NsecSigner from '../docs/services/nsec-signer.js'
 import { createSyncController } from '../docs/services/sync/index.js'
 import { DEFAULT_STALE_CHANNEL_SECONDS } from 'libp2r2p/private-messenger'

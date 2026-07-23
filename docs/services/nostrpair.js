@@ -1,5 +1,5 @@
-import { generateSecretKey, getPublicKey } from 'nostr-tools'
-import { getConversationKey } from 'nostr-tools/nip44'
+import { generateSecretKey, getPublicKey } from 'libp2r2p/key'
+import { getConversationKey } from 'libp2r2p/nip44'
 import { bytesToHex } from 'libp2r2p/base16'
 import { Nip46Client, Nip46ServerSession } from 'libp2r2p/nip46'
 import { freeRelays, relayPool } from 'libp2r2p/relay'

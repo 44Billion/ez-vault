@@ -1,4 +1,4 @@
-import { getPublicKey } from 'nostr-tools'
+import { getPublicKey } from 'libp2r2p/key'
 import NsecSigner from './nsec-signer.js'
 import { BunkerHandle, persistHandleState } from './bunker.js'
 import * as store from './accounts-store.js'

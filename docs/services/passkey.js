@@ -1,4 +1,4 @@
-import { getPublicKey } from 'nostr-tools'
+import { getPublicKey } from 'libp2r2p/key'
 import { hexToBytes, bytesToHex } from 'libp2r2p/base16'
 import { decodeSecretEntries } from './secret-blob.js'
 import { base64ToBytes, base64UrlToBytes, bytesToBase64Url } from 'libp2r2p/base64'

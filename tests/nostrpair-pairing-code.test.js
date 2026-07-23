@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { generateSecretKey, getPublicKey } from 'nostr-tools'
+import { generateSecretKey, getPublicKey } from 'libp2r2p/key'
 import { derivePairingCode } from '../docs/services/nostrpair.js'
 
 // Verifies the property the protocol leans on: each side feeds (its own

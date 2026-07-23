@@ -1,4 +1,7 @@
-import { getPublicKey, finalizeEvent, nip04, nip44 } from 'nostr-tools'
+import { finalizeEvent } from 'libp2r2p/event'
+import { getPublicKey } from 'libp2r2p/key'
+import * as nip04 from 'libp2r2p/nip04'
+import * as nip44 from 'libp2r2p/nip44'
 import { extract as hkdfExtract } from '@noble/hashes/hkdf.js'
 import { hmac } from '@noble/hashes/hmac.js'
 import { sha256 } from '@noble/hashes/sha2.js'
@@ -13,9 +16,8 @@ import {
   freeRelays
 } from './relay.js'
 
-// Capture stable references up front so post-load monkey-patching of the
-// nostr-tools module (e.g. a malicious dependency swap) can't redirect our
-// signing / crypto calls.
+// Capture stable references up front so post-load monkey-patching can't
+// redirect our signing or cryptographic calls.
 const nip44GetConversationKey = nip44.getConversationKey.bind(nip44)
 const nip44Encrypt = nip44.encrypt.bind(nip44)
 const nip44Decrypt = nip44.decrypt.bind(nip44)

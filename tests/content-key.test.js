@@ -1,9 +1,10 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { generateSecretKey, getEventHash, getPublicKey, verifyEvent } from 'nostr-tools'
+import { getEventHash, isValidEvent } from 'libp2r2p/event'
+import { generateSecretKey, getPublicKey } from 'libp2r2p/key'
 import NsecSigner from '../docs/services/nsec-signer.js'
 import { doubleSignEvent, refreshStoredContentKeyEvents, refreshStoredContentKeyEventsIfDue, rotateContentKeyIfStillCanonical, startContentKeyEventRefresh, upsertContentKeyEvent } from '../docs/services/content-key/index.js'
-import { makeContentKeyEvent, makeContentKeyEventForPubkey, parseContentKeyEvent, verifyContentKeyProof, verifyIykcProof, CONTENT_KEY_KIND } from 'libp2r2p/content-key/event'
+import { makeContentKeyEvent, makeContentKeyEventForPubkey, parseContentKeyEvent, isValidContentKeyProof, isValidIykcProof, CONTENT_KEY_KIND } from 'libp2r2p/content-key/event'
 import * as store from '../docs/services/accounts-store.js'
 import * as secrets from '../docs/services/secrets.js'
 import { freeRelays, seedRelays } from 'libp2r2p/relay'
@@ -85,9 +86,9 @@ test('makeContentKeyEvent publishes a signed content pubkey', async () => {
   assert.deepEqual(event.tags, [['cp', contentPubkey]])
   assert.equal(parsed.iykcPubkey, contentPubkey)
   assert.equal(parsed.iykcProof, `${event.created_at}:${event.sig}`)
-  assert.equal(verifyIykcProof({ receiverPubkey: userPubkey, iykcPubkey: contentPubkey, iykcProof: parsed.iykcProof }), true)
-  assert.equal(verifyContentKeyProof({ ownerPubkey: userPubkey, contentPubkey, proof: parsed.iykcProof }), true)
-  assert.equal(verifyEvent(event), true)
+  assert.equal(isValidIykcProof({ receiverPubkey: userPubkey, iykcPubkey: contentPubkey, iykcProof: parsed.iykcProof }), true)
+  assert.equal(isValidContentKeyProof({ ownerPubkey: userPubkey, contentPubkey, proof: parsed.iykcProof }), true)
+  assert.equal(isValidEvent(event), true)
 })
 
 test('parseContentKeyEvent rejects events with extra tags or bad signatures', async () => {
@@ -101,7 +102,7 @@ test('parseContentKeyEvent rejects events with extra tags or bad signatures', as
   assert.equal(parseContentKeyEvent({ ...event, tags: [['cp', 'f'.repeat(64)]] }), null)
 })
 
-test('verifyIykcProof rejects missing or mismatched proofs', async () => {
+test('isValidIykcProof rejects missing or mismatched proofs', async () => {
   const user = signer()
   const contentKey = signer()
   const otherContentKey = signer()
@@ -110,9 +111,9 @@ test('verifyIykcProof rejects missing or mismatched proofs', async () => {
   const event = await makeContentKeyEvent({ userSigner: user, contentKeySigner: contentKey, createdAt: 7 })
   const { iykcProof } = parseContentKeyEvent(event)
 
-  assert.equal(verifyIykcProof({ receiverPubkey: userPubkey, iykcPubkey: contentPubkey, iykcProof: '' }), false)
-  assert.equal(verifyIykcProof({ receiverPubkey: userPubkey, iykcPubkey: await otherContentKey.getPublicKey(), iykcProof }), false)
-  assert.equal(verifyIykcProof({ receiverPubkey: await signer().getPublicKey(), iykcPubkey: contentPubkey, iykcProof }), false)
+  assert.equal(isValidIykcProof({ receiverPubkey: userPubkey, iykcPubkey: contentPubkey, iykcProof: '' }), false)
+  assert.equal(isValidIykcProof({ receiverPubkey: userPubkey, iykcPubkey: await otherContentKey.getPublicKey(), iykcProof }), false)
+  assert.equal(isValidIykcProof({ receiverPubkey: await signer().getPublicKey(), iykcPubkey: contentPubkey, iykcProof }), false)
 })
 
 test('upsertContentKeyEvent signs and publishes to user write relays', async () => {
@@ -172,8 +173,8 @@ test('doubleSignEvent signs event with per-event imkc proof', async () => {
   assert.deepEqual(imkcTag.slice(0, 2), ['imkc', contentPubkey])
   assert.equal(signed.tags[1][0], 'imkc')
   assert.equal(event.tags[1][1], 'old')
-  assert.equal(verifyEvent(proofEvent), true)
-  assert.equal(verifyEvent(signed), true)
+  assert.equal(isValidEvent(proofEvent), true)
+  assert.equal(isValidEvent(signed), true)
 })
 
 test('refreshStoredContentKeyEvents republishes newest remote key only where absent or older with another pubkey', async () => {

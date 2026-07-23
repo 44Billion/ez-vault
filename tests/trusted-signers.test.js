@@ -1,6 +1,6 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { generateSecretKey } from 'nostr-tools'
+import { generateSecretKey } from 'libp2r2p/key'
 import * as secrets from '../docs/services/secrets.js'
 import * as trustedSigners from '../docs/services/trusted-signers.js'
 import { announceTrustedSignerState, handleMessage, TRUSTED_SIGNERS_STATE_CODE } from '../docs/services/sync/trusted-signers.js'
