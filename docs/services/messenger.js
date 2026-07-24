@@ -11,6 +11,7 @@ import * as sync from './sync/index.js'
 import { npubFromPubkey, parseProfileEvent } from 'libp2r2p/key'
 import { parseRelayListEvent } from './relay.js'
 import { launcherLocale, setLocale } from '../i18n/index.js'
+import { resetVaultView } from './view-state.js'
 
 // Read-only disclosures — the result is publicly derivable, so logging them
 // would just be noise in the audit trail. Match both wire and JS spellings.
@@ -64,10 +65,10 @@ export function signerRequestContext (method, params = []) {
 // the gate.
 const TRUSTED_ORIGIN_PATTERNS = [
   /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/,
-  'https://nostrapps.com'
+  'https://44billion.net'
 ]
 
-function isTrustedOrigin (origin) {
+export function isTrustedOrigin (origin) {
   if (!origin || typeof origin !== 'string') return false
   for (const rule of TRUSTED_ORIGIN_PATTERNS) {
     if (rule instanceof RegExp ? rule.test(origin) : rule === origin) return true
@@ -255,9 +256,41 @@ function onPortMessage (e) {
     return
   }
   if (!handshakeComplete) return
+  if (handleLegacyViewMessage(e)) return
   if (code === 'UPDATE_ACCOUNT_EVENTS') return handleUpdateAccountEvents(e)
   if (code === 'NOSTRDB_APP_BACKFILL') return handleNostrDbAppBackfill(e)
   if (code === 'NIP07') return handleNip07(e)
+}
+
+export function handleLegacyViewMessage (
+  e,
+  {
+    resetView = resetVaultView,
+    sendReply = message => reply(e, message, { to: launcherPort })
+  } = {}
+) {
+  const { code, reqId } = e?.data ?? {}
+  if (
+    code !== 'CLOSED_VAULT_VIEW' &&
+    code !== 'OPEN_VAULT_HOME' &&
+    code !== 'UNLOCK_ACCOUNT'
+  ) {
+    return false
+  }
+
+  try {
+    resetView()
+    if (reqId) {
+      sendReply({
+        payload: code === 'UNLOCK_ACCOUNT'
+          ? { isRouteReady: true }
+          : true
+      })
+    }
+  } catch (err) {
+    if (reqId) sendReply({ error: serializeError(err) })
+  }
+  return true
 }
 
 function handleTranslate (e) {

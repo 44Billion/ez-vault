@@ -1,6 +1,14 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { accountForLauncher, applyAccountEvents, signerRequestApp, signerRequestContext, snapshotAccounts } from '../docs/services/messenger.js'
+import {
+  accountForLauncher,
+  applyAccountEvents,
+  handleLegacyViewMessage,
+  isTrustedOrigin,
+  signerRequestApp,
+  signerRequestContext,
+  snapshotAccounts
+} from '../docs/services/messenger.js'
 import * as store from '../docs/services/accounts-store.js'
 import * as secrets from '../docs/services/secrets.js'
 import * as journal from '../docs/services/account-mutation-journal.js'
@@ -38,6 +46,43 @@ test('signerRequestContext extracts NIP-44 v3 kind and scope', () => {
     signerRequestContext('nip44v3_decrypt_double_dh', ['peer', '3560', '', 'ciphertext', 'peer-content', 'own-content']),
     { eventKind: 3560, eventScope: '' }
   )
+})
+
+test('launcher origin allowlist accepts local hosts and 44billion.net only', () => {
+  assert.equal(isTrustedOrigin('http://localhost:8080'), true)
+  assert.equal(isTrustedOrigin('https://127.0.0.1:4443'), true)
+  assert.equal(isTrustedOrigin('http://[::1]:4000'), true)
+  assert.equal(isTrustedOrigin('https://44billion.net'), true)
+  assert.equal(isTrustedOrigin('https://nostrapps.com'), false)
+  assert.equal(isTrustedOrigin('https://44billion.github.io'), false)
+})
+
+test('legacy view messages reset the route-less UI and UNLOCK_ACCOUNT replies ready', () => {
+  const resets = []
+  const replies = []
+  const dependencies = {
+    resetView: () => resets.push('reset'),
+    sendReply: message => replies.push(message)
+  }
+
+  assert.equal(handleLegacyViewMessage({
+    data: {
+      code: 'UNLOCK_ACCOUNT',
+      reqId: 'unlock-1',
+      payload: { route: '/unlock-account', pubkey: 'ignored' }
+    }
+  }, dependencies), true)
+  assert.deepEqual(resets, ['reset'])
+  assert.deepEqual(replies, [{ payload: { isRouteReady: true } }])
+
+  assert.equal(handleLegacyViewMessage({
+    data: { code: 'OPEN_VAULT_HOME' }
+  }, dependencies), true)
+  assert.deepEqual(resets, ['reset', 'reset'])
+
+  assert.equal(handleLegacyViewMessage({
+    data: { code: 'RENDER' }
+  }, dependencies), false)
 })
 
 test('signerRequestApp labels empty app metadata as the launcher', () => {

@@ -9,6 +9,7 @@ import { startDeviceRelayListRefresh } from './services/device-relays.js'
 import { startRevocationRotation } from './services/sync/revocation-rotation.js'
 import { initShellI18n } from './i18n/shell.js'
 import { initializeStorage } from './services/storage/index.js'
+import { setVaultViewShell } from './services/view-state.js'
 
 // Storage is a hard prerequisite: no component may observe an empty cache
 // while IndexedDB is still opening. Initialization fails closed when IDB is
@@ -47,6 +48,13 @@ addPanel.activeButton = addBtn
 syncPanel.list = list
 syncPanel.toolbarButtons = [createBtn, addBtn]
 syncPanel.activeButton = syncBtn
+
+setVaultViewShell({
+  list,
+  addPanel,
+  syncPanel,
+  toolbarButtons: [createBtn, addBtn, syncBtn]
+})
 
 // When the button is already active, route the click to the feature's own
 // cancel ("X") control instead of re-opening. Lets the toolbar button act
