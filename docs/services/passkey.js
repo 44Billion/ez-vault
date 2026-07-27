@@ -35,7 +35,7 @@ import { getState, hasState, removeState, requestPersistentStorage, updateState 
 //   a get() starts returning PRF (newer browsers will).
 
 const PRF_SALT = 'ez-vault'
-const RP_NAME = 'EZ Vault'
+const RP_NAME = '44billion · EZ Vault'
 const CREATE_HINTS = ['client-device']
 const GET_TRANSPORTS = ['internal']
 
@@ -107,11 +107,12 @@ function readStoredUserId () {
 // Some authenticators only surface `user.name` (not `displayName`), so we
 // pack a platform hint plus a short slice of the random user.id into it.
 // The suffix makes multiple synced entries distinguishable in the
-// authenticator UI ("macOS / Safari (a3f9c1)" vs "iOS / Safari (b7c204)").
+// authenticator UI ("44billion · EZ Vault · macOS / Safari (a3f9c1)" vs
+// "44billion · EZ Vault · iOS / Safari (b7c204)").
 function buildUserName (userId) {
   const platform = detectPlatform()
   const known = !/unknown OS|unknown browser/.test(platform)
-  const base = known ? platform : RP_NAME
+  const base = known ? `${RP_NAME} · ${platform}` : RP_NAME
   const suffix = bytesToBase64Url(userId).slice(0, 6)
   return `${base} (${suffix})`
 }

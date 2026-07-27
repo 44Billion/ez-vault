@@ -6,6 +6,7 @@ import * as passkey from '../docs/services/passkey.js'
 import * as secrets from '../docs/services/secrets.js'
 import * as store from '../docs/services/accounts-store.js'
 import { bytesToHex, hexToBytes } from 'libp2r2p/base16'
+import { bytesToBase64Url } from 'libp2r2p/base64'
 import { getState } from '../docs/services/storage/index.js'
 
 const data = new Map()
@@ -26,7 +27,7 @@ afterEach(() => {
   globalThis.localStorage.clear()
 })
 
-function installCredentialMocks ({ prfBytes, onCreate, onGet, onPersist }) {
+function installCredentialMocks ({ prfBytes, onCreate, onGet, onPersist, userAgent = 'Node Test' }) {
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
     value: {
@@ -37,7 +38,7 @@ function installCredentialMocks ({ prfBytes, onCreate, onGet, onPersist }) {
   Object.defineProperty(globalThis, 'navigator', {
     configurable: true,
     value: {
-      userAgent: 'Node Test',
+      userAgent,
       storage: {
         persist: async () => {
           onPersist?.()
@@ -80,7 +81,17 @@ test('empty vault can register passkey and derive a device signer pubkey', async
     onPersist: () => { persistCalls++ },
     onCreate: options => {
       createCalls += 1
-      assert.equal(options.publicKey.rp.id, 'localhost')
+      const { extensions, rp, user } = options.publicKey
+      const suffix = bytesToBase64Url(user.id).slice(0, 6)
+
+      assert.deepEqual(rp, {
+        id: 'localhost',
+        name: '44billion · EZ Vault'
+      })
+      assert.equal(user.displayName, '44billion · EZ Vault')
+      assert.equal(user.name, `44billion · EZ Vault (${suffix})`)
+      assert.equal(user.id.byteLength, 64)
+      assert.equal(new TextDecoder().decode(extensions.prf.eval.first), 'ez-vault')
     }
   })
 
@@ -94,11 +105,37 @@ test('empty vault can register passkey and derive a device signer pubkey', async
   assert.equal(persistCalls, 1)
   assert.equal(secrets.isUnlocked(), true)
   assert.match(pubkey, /^[0-9a-f]{64}$/)
+  assert.equal(getState('ez-vault:passkey:credential-id'), 'AQIDBA')
+  assert.match(getState('ez-vault:passkey:user-id'), /^[A-Za-z0-9_-]{86}$/)
+  assert.equal(getState('ez-vault:passkey:prf'), bytesToHex(prfBytes))
 
   secrets.lock()
   await passkey.unlock()
   assert.equal(persistCalls, 2)
   assert.equal(data.size, 0)
+})
+
+test('passkey user name prefixes a known platform with the persistent product label', async () => {
+  const prfBytes = new Uint8Array(32)
+  prfBytes[0] = 5
+  let createdUser
+
+  installCredentialMocks({
+    prfBytes,
+    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/17.0 Safari/605.1.15',
+    onCreate: options => {
+      createdUser = options.publicKey.user
+    }
+  })
+
+  await passkey.ensureRegistered()
+
+  const suffix = bytesToBase64Url(createdUser.id).slice(0, 6)
+  assert.equal(
+    createdUser.name,
+    `44billion · EZ Vault · macOS / Safari (${suffix})`
+  )
+  assert.equal(createdUser.displayName, '44billion · EZ Vault')
 })
 
 test('writeSecretsBlob falls back to IndexedDB when secondary prompt is cancelled by default', async () => {
