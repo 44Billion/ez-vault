@@ -4,6 +4,7 @@ import {
   defineLocales,
   getLocale,
   getT,
+  i18n,
   launcherLocale,
   resolveSupportedLocale,
   setLocale,
@@ -32,6 +33,7 @@ test('uses exact launcher locales and the legacy language fallback', () => {
 })
 
 test('updates translators and subscriptions without duplicate notifications', () => {
+  assert.equal('useT' in i18n, false)
   const t = getT(locales)
   const seen = []
   const unsubscribe = subscribeLocaleChanged(locale => seen.push(locale))

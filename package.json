@@ -17,12 +17,16 @@
   },
   "scripts": {
     "test": "node --import ./tests/setup.js --test 'tests/**/*.test.js'",
+    "// importmap": "Run update after import/dependency changes; run check to verify without writing (for tests/CI)",
+    "update:importmap": "node scripts/update-importmap.js",
+    "check:importmap": "node scripts/update-importmap.js --check",
     "start": "python3 server.py",
     "// start:peer": "Or open http://localhost:4000 and http://127.0.0.1:4000 for different origins",
     "start:peer": "PORT=4001 python3 server.py",
     "end": "pkill -f 'python3 server.py'"
   },
   "devDependencies": {
+    "@jspm/generator": "2.16.3",
     "@noble/ciphers": "2.2.0",
     "@noble/curves": "2.2.0",
     "@noble/hashes": "2.2.0",
@@ -30,8 +34,10 @@
     "eslint-plugin-html": "^8.1.4",
     "fake-indexeddb": "6.2.5",
     "globals": "^17.5.0",
-    "libp2r2p": "^0.9.0",
+    "jsqr": "1.4.0",
+    "libp2r2p": "0.10.0",
     "neostandard": "^0.13.0",
-    "qrcode-generator": "1.4.4"
+    "qrcode-generator": "1.4.4",
+    "thenameisf": "1.2.0"
   }
 }
