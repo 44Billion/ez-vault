@@ -6,10 +6,18 @@ import './account-avatar.js'
 const STYLES = /* css */`
   account-list {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
-    column-gap: 31px;
+    grid-template-columns: repeat(auto-fit, minmax(90px, 100px));
+    justify-content: start;
     row-gap: 27px;
     align-content: start;
+  }
+  /* A lone tile starts at the inline edge. With multiple visible tiles,
+     distribute the free space equally before, between, and after them. The
+     second selector includes a visible creating tile; the first deliberately
+     ignores creating tiles because selection mode hides them below. */
+  account-list:has(> account-avatar:not([mode="creating"]) ~ account-avatar:not([mode="creating"])),
+  account-list:not([mode="selecting"]):has(> account-avatar ~ account-avatar) {
+    justify-content: space-evenly;
   }
   /* Hide in-progress create tiles while a selection panel is open — selecting
      drafts that don't have a pubkey yet is meaningless. */

@@ -5,6 +5,8 @@ import { generateSecretKey, getPublicKey } from 'libp2r2p/key'
 import * as passkey from '../docs/services/passkey.js'
 import * as secrets from '../docs/services/secrets.js'
 import * as store from '../docs/services/accounts-store.js'
+import * as journal from '../docs/services/account-mutation-journal.js'
+import { filterVisibleAccounts, runSecretAccountMutation } from '../docs/services/account-mutations.js'
 import { bytesToHex, hexToBytes } from 'libp2r2p/base16'
 import { bytesToBase64Url } from 'libp2r2p/base64'
 import { getState } from '../docs/services/storage/index.js'
@@ -171,6 +173,65 @@ test('writeSecretsBlob can reject cancellation for destructive flows', async () 
   )
 
   assert.equal(getState('ez-vault:passkey:blob'), null)
+})
+
+test('secret account mutation finalizes only after the passkey write completes', async () => {
+  const prfBytes = new Uint8Array(32)
+  prfBytes[0] = 6
+  installCredentialMocks({ prfBytes })
+  await passkey.ensureRegistered()
+
+  let signalWriteStarted
+  const writeStarted = new Promise(resolve => { signalWriteStarted = resolve })
+  let finishWrite
+  const pendingWrite = new Promise(resolve => { finishWrite = resolve })
+  installCredentialMocks({
+    prfBytes,
+    onGet: options => {
+      signalWriteStarted(options)
+      return pendingWrite
+    }
+  })
+
+  const secret = bytesToHex(generateSecretKey())
+  const record = {
+    type: 'nsec',
+    pubkey: getPublicKey(hexToBytes(secret)),
+    name: 'Pending account',
+    picture: ''
+  }
+  const phases = []
+  const unsubscribe = journal.subscribe(() => {
+    if (!journal.read()) phases.push('clear')
+  })
+
+  const mutation = runSecretAccountMutation({
+    operation: 'create-account',
+    beforeAccounts: [],
+    afterAccounts: [record],
+    apply: async () => {
+      phases.push('apply')
+      await store.add(record)
+      await secrets.setNsecSecret(record.pubkey, secret)
+    },
+    finalize: () => { phases.push('finalize') }
+  })
+
+  await writeStarted
+  assert.deepEqual(phases, ['apply'])
+  assert.deepEqual(store.get(record.pubkey), record)
+  assert.deepEqual(filterVisibleAccounts(store.list()), [])
+  assert.equal(journal.read()?.operation, 'create-account')
+
+  finishWrite({
+    getClientExtensionResults: () => ({ largeBlob: { written: true } })
+  })
+  await mutation
+  unsubscribe()
+
+  assert.deepEqual(phases, ['apply', 'finalize', 'clear'])
+  assert.deepEqual(filterVisibleAccounts(store.list()), [record])
+  assert.equal(journal.read(), null)
 })
 
 test('openSecrets decrypts NIP-44 v3 sealed largeBlob payloads', async () => {

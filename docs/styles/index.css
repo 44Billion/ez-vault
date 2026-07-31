@@ -13,7 +13,7 @@
 }
 
 .accounts-section:has(account-list account-avatar) {
-  gap: 18px;
+  gap: 24px;
   margin-bottom: 8px;
 }
 

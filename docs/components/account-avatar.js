@@ -59,6 +59,8 @@ const STYLES = /* css */`
     aspect-ratio: 1 / 1;
     border-radius: 50%;
     background-color: oklch(0.22 0 89.88);
+    max-width: 100px;
+    justify-self: center;
   }
   account-avatar .avatar-image {
     position: absolute;
@@ -326,6 +328,7 @@ export class AccountAvatar extends HTMLElement {
   #image
   #nameField
   #savingName = false
+  #savingAccount = false
   #nameFlashTimer = null
   #flashTimers = new Map()
   #flashLabels = new Map()
@@ -435,8 +438,19 @@ export class AccountAvatar extends HTMLElement {
     if (canRefreshValue) field.value = this.#currentName()
     this.#syncNameFieldWidth()
     field.readOnly = !canEdit
-    field.disabled = this.#savingName || (this.#mode === MODE.EDITING && this.#account?.type === 'npub')
-    field.tabIndex = canEdit ? 0 : -1
+    field.disabled = this.#savingName || this.#savingAccount || (this.#mode === MODE.EDITING && this.#account?.type === 'npub')
+    field.tabIndex = canEdit && !this.#savingAccount ? 0 : -1
+  }
+
+  #setAccountSaving (saving) {
+    this.#savingAccount = saving
+    if (saving) this.setAttribute('aria-busy', 'true')
+    else this.removeAttribute('aria-busy')
+    for (const action of ['cancel-create', 'cycle', 'save']) {
+      const btn = this.querySelector(`button[data-action="${action}"]`)
+      if (btn) btn.disabled = saving
+    }
+    this.#syncNameField()
   }
 
   #syncNameFieldWidth () {
@@ -636,21 +650,21 @@ export class AccountAvatar extends HTMLElement {
     if (!this.#draft) return
     const draft = this.#draft
     const icon = btn.querySelector('.avatar-btn-icon')
-    btn.disabled = true
+    this.#setAccountSaving(true)
     icon?.classList.add('pulsate')
     try {
       const writeRelays = relays.freeRelays.slice(0, 2)
       const name = this.#readNameValue()
 
       const relayListEvent = nostr.signRelayListEvent({
-        secretKey: this.#draft.secretKey,
+        secretKey: draft.secretKey,
         writeRelays,
         readRelays: writeRelays
       })
       const profileEvent = nostr.signProfileEvent({
-        secretKey: this.#draft.secretKey,
+        secretKey: draft.secretKey,
         name,
-        picture: this.#draft.picture
+        picture: draft.picture
       })
 
       const relayListPublish = await relayPool.sendEvent(relayListEvent, relays.seedRelays)
@@ -665,29 +679,34 @@ export class AccountAvatar extends HTMLElement {
 
       const record = {
         type: 'nsec',
-        pubkey: this.#draft.pubkey,
-        picture: this.#draft.picture,
+        pubkey: draft.pubkey,
+        picture: draft.picture,
         name,
         profileEvent,
         relayListEvent,
         writeRelays
       }
-      // Convert the draft tile in place so it keeps its DOM position
-      // (account-list's render reuses tiles by pubkey).
       const newSeckey = draft.seckey
       await runSecretAccountMutation({
         operation: 'create-account',
         beforeAccounts: [],
         afterAccounts: [record],
         apply: async () => {
+          // Keep this tile in creating mode while the journal hides the
+          // pending account record. Turning it normal here would make the
+          // account-list remove it until the passkey write completes.
+          await store.add(record)
+          await secrets.setNsecSecret(record.pubkey, newSeckey)
+        },
+        finalize: () => {
+          // Convert the draft tile immediately before the journal is cleared
+          // so account-list reuses this same DOM node without a visible gap.
           this.#draft = null
           this.#account = record
           this.setAttribute('pubkey', record.pubkey)
           this.#applyAccountType()
           this.#updateCopyKeyButton()
           this.#setMode(MODE.NORMAL)
-          await store.add(record)
-          await secrets.setNsecSecret(record.pubkey, newSeckey)
         }
       })
     } catch (err) {
@@ -702,7 +721,7 @@ export class AccountAvatar extends HTMLElement {
       }
       this.#flashError(btn)
     } finally {
-      btn.disabled = false
+      this.#setAccountSaving(false)
       icon?.classList.remove('pulsate')
     }
   }
