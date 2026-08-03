@@ -6,7 +6,7 @@
   html {
     filter: invert(1) hue-rotate(180deg);
   }
-  img, video, iframe, .avatar-image {
+  img, video, .avatar-image, [data-avatar-pubkey] {
     /* inverts it back */
     filter: invert(1) hue-rotate(180deg);
   }

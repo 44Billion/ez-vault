@@ -69,8 +69,8 @@
   align-items: center;
   justify-content: center;
   gap: 6px;
-  background-color: oklch(0.3 0.12 274.76);
-  color: oklch(0.92 0 89.88);
+  background-color: light-dark(oklch(0.34 0.12 274.76), oklch(0.3 0.12 274.76));
+  color: light-dark(oklch(0.88 0 89.88), oklch(0.92 0 89.88));
   border-radius: 8px;
   padding: 10px 8px;
   font-size: 14rem;

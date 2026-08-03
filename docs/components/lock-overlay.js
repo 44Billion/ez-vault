@@ -29,7 +29,7 @@ const STYLES = /* css */`
     gap: 24px;
     padding: 32px 24px;
     background-color: oklch(0.18 0 89.88);
-    color: oklch(0.92 0 89.88);
+    color: light-dark(oklch(0.88 0 89.88), oklch(0.92 0 89.88)));
   }
   lock-overlay[hidden] {
     display: none;
@@ -39,7 +39,7 @@ const STYLES = /* css */`
     height: 88px;
     border-radius: 50%;
     background-color: oklch(0.22 0 89.88);
-    box-shadow: 0 0 0 2px oklch(0.3 0.12 274.76);
+    box-shadow: 0 0 0 2px light-dark(oklch(0.34 0.12 274.76), oklch(0.3 0.12 274.76));
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -69,7 +69,7 @@ const STYLES = /* css */`
     justify-content: center;
     gap: 8px;
     background-color: oklch(0.55 0.18 145);
-    color: oklch(0.98 0 0);
+    color: light-dark(oklch(0.1 0 0), oklch(0.98 0 0));
     border-radius: 9999px;
     padding: 12px 24px;
     font-size: 14rem;

@@ -61,7 +61,7 @@ const STYLES = /* css */`
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    color: oklch(0.92 0 89.88);
+    color: light-dark(oklch(0.8 0 89.88), oklch(0.92 0 89.88))
   }
   account-add .add-btn:disabled {
     opacity: 0.6;

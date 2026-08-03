@@ -138,8 +138,8 @@ const STYLES = /* css */`
     width: 100%;
     height: 100%;
     border-radius: 8px;
-    background-color: oklch(0.3 0.12 274.76);
-    color: oklch(0.92 0 89.88);
+    background-color: light-dark(oklch(0.34 0.12 274.76), oklch(0.3 0.12 274.76));
+    color: light-dark(oklch(0.88 0 89.88), oklch(0.92 0 89.88));
     display: flex;
     align-items: center;
     justify-content: center;
@@ -171,9 +171,9 @@ const STYLES = /* css */`
     width: 16px;
     height: 16px;
     border-radius: 50%;
-    background-color: oklch(0.22 0 89.88);
-    border: 1.5px solid oklch(0.22 0 89.88);
-    box-shadow: 0 0 0 1px oklch(0.4 0.1 274.76);
+    background-color: light-dark(oklch(0.78 0 89.88), oklch(0.22 0 89.88));
+    border: 1.5px solid light-dark(oklch(0.78 0 89.88), oklch(0.22 0 89.88));
+    box-shadow: 0 0 0 1px light-dark(oklch(0.6 0.1 274.76), oklch(0.4 0.1 274.76));
     object-fit: cover;
   }
   activity-log .app-name {
@@ -186,7 +186,7 @@ const STYLES = /* css */`
   activity-log .op-method {
     display: block;
     font-weight: 600;
-    color: oklch(0.92 0 89.88);
+    color: light-dark(oklch(0.88 0 89.88), oklch(0.92 0 89.88));
   }
   activity-log .op-status {
     display: inline-block;
@@ -219,7 +219,7 @@ const STYLES = /* css */`
   }
   activity-log .data-cell summary:active {
     background-color: oklch(0.30 0 89.88);
-    color: oklch(0.92 0 89.88);
+    color: light-dark(oklch(0.88 0 89.88), oklch(0.92 0 89.88));
   }
   activity-log .data-cell .data-preview {
     flex: 1 1 auto;
@@ -231,7 +231,7 @@ const STYLES = /* css */`
   activity-log .data-cell details[open] .data-preview {
     white-space: normal;
     word-break: break-word;
-    color: oklch(0.92 0 89.88);
+    color: light-dark(oklch(0.88 0 89.88), oklch(0.92 0 89.88));
   }
   activity-log .data-cell .data-toggle-icon {
     flex-shrink: 0;
@@ -279,8 +279,8 @@ const STYLES = /* css */`
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    background-color: oklch(0.3 0.12 274.76);
-    color: oklch(0.92 0 89.88);
+    background-color: light-dark(oklch(0.34 0.12 274.76), oklch(0.3 0.12 274.76));
+    color: light-dark(oklch(0.88 0 89.88), oklch(0.92 0 89.88));
     border-radius: 6px;
     padding: 4px 10px;
     font-size: 12rem;

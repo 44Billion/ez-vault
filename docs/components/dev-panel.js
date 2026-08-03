@@ -38,7 +38,7 @@ const STYLES = /* css */`
     margin-bottom: 12px;
   }
   dev-panel .dev-section-title {
-    color: oklch(0.92 0 89.88);
+    color: light-dark(oklch(0.88 0 89.88), oklch(0.92 0 89.88));
     font-size: 13rem;
     font-weight: 700;
     margin-bottom: 10px;
@@ -71,13 +71,13 @@ const STYLES = /* css */`
     height: 28px;
     flex: 0 0 28px;
     border-radius: 50%;
-    background-color: oklch(0.22 0 89.88);
+    background-color: light-dark(oklch(0.78 0 89.88), oklch(0.22 0 89.88));
     background-position: center;
     background-repeat: no-repeat;
     background-size: cover;
     box-shadow:
-      0 0 0 1px oklch(0.18 0 89.88),
-      0 0 0 2px oklch(0.3 0.12 274.76);
+      0 0 0 1px light-dark(oklch(0.82 0 89.88), oklch(0.18 0 89.88)),
+      0 0 0 2px light-dark(oklch(0.7 0.12 274.76), light-dark(oklch(0.34 0.12 274.76), oklch(0.3 0.12 274.76)));
   }
   dev-panel .account-name {
     min-width: 0;
@@ -114,8 +114,8 @@ const STYLES = /* css */`
     align-items: center;
     justify-content: center;
     gap: 6px;
-    background-color: oklch(0.3 0.12 274.76);
-    color: oklch(0.92 0 89.88);
+    background-color: light-dark(oklch(0.34 0.12 274.76), oklch(0.3 0.12 274.76));
+    color: light-dark(oklch(0.88 0 89.88), oklch(0.92 0 89.88));
     font-size: 12rem;
     font-weight: 700;
   }
