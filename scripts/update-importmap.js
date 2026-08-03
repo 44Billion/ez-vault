@@ -11,6 +11,8 @@ const IMPORT_MAP_RE = /^([ \t]*)<script\s+type=["']importmap["'][^>]*>([\s\S]*?)
 const EXACT_VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/
 const JSPM_ORIGIN = 'https://ga.jspm.io'
 const RESOLUTION_PACKAGES = Object.freeze([
+  '@dicebear/avataaars',
+  '@dicebear/core',
   '@noble/ciphers',
   '@noble/curves',
   '@noble/hashes',

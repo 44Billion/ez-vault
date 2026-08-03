@@ -313,13 +313,8 @@ const STYLES = /* css */`
   }
 `
 
-const pictureCache = new Map()
 async function resolvePicture (pubkey) {
-  if (pictureCache.has(pubkey)) return pictureCache.get(pubkey)
-  const stored = accountsStore.get(pubkey)?.picture
-  const promise = stored ? Promise.resolve(stored) : seededAvatarDataUrl(pubkey)
-  pictureCache.set(pubkey, promise)
-  return promise
+  return accountsStore.get(pubkey)?.picture || seededAvatarDataUrl(pubkey)
 }
 
 let fixturesPromise = null
@@ -453,6 +448,7 @@ function relativeTime (tsSeconds) {
 export class ActivityLog extends HTMLElement {
   #unsub = null
   #unsubSecrets = null
+  #unsubAccounts = null
   #unsubLocale = null
   #renderId = 0
 
@@ -463,6 +459,7 @@ export class ActivityLog extends HTMLElement {
     // Sealed entries inflate to their decrypted shape only while the vault
     // is unlocked; re-render on lock state changes so previews refresh.
     this.#unsubSecrets = secrets.subscribe(() => this.#render())
+    this.#unsubAccounts = accountsStore.subscribe(() => this.#render())
     this.#unsubLocale = subscribeLocaleChanged(() => this.#render())
     this.#render()
   }
@@ -473,6 +470,8 @@ export class ActivityLog extends HTMLElement {
     this.#unsub = null
     this.#unsubSecrets?.()
     this.#unsubSecrets = null
+    this.#unsubAccounts?.()
+    this.#unsubAccounts = null
     this.#unsubLocale?.()
     this.#unsubLocale = null
   }

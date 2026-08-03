@@ -8,7 +8,6 @@ import { seededAvatarDataUrl } from '../services/avatar.js'
 import { defineLocales, getLocale, getT, subscribeLocaleChanged } from '../i18n/index.js'
 
 const ICON_PLUS = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5l0 14" /><path d="M5 12l14 0" /></svg>'
-const avatarCache = new Map()
 
 export const devPanelLocales = defineLocales({
   none: ['aucun', 'nessuno', 'keine', 'ninguno', 'nenhum', 'нет', '无', '無', 'なし', '없음'],
@@ -161,10 +160,7 @@ function formatDate (createdAt) {
 
 function accountAvatarSrc (account) {
   if (account.picture) return Promise.resolve(account.picture)
-  if (!avatarCache.has(account.pubkey)) {
-    avatarCache.set(account.pubkey, seededAvatarDataUrl(account.pubkey))
-  }
-  return avatarCache.get(account.pubkey)
+  return seededAvatarDataUrl(account.pubkey)
 }
 
 function setAvatarImage (element, src) {

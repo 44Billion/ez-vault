@@ -334,6 +334,7 @@ export class AccountAvatar extends HTMLElement {
   #flashLabels = new Map()
   #unsubStatus = null
   #unsubLocale = null
+  #pictureRenderId = 0
 
   connectedCallback () {
     injectComponentStyles('account-avatar', STYLES)
@@ -376,6 +377,7 @@ export class AccountAvatar extends HTMLElement {
   }
 
   disconnectedCallback () {
+    this.#pictureRenderId++
     this.removeEventListener('click', this.#onClick)
     this.#nameField?.removeEventListener('input', this.#onNameInput)
     this.#nameField?.removeEventListener('change', this.#onNameChange)
@@ -615,25 +617,31 @@ export class AccountAvatar extends HTMLElement {
   }
 
   async #renderPicture (url, seedKey) {
-    this.#image.dataset.loaded = 'false'
+    const renderId = ++this.#pictureRenderId
+    const image = this.#image
+    image.dataset.loaded = 'false'
     if (!url && seedKey) url = await seededAvatarDataUrl(seedKey)
+    if (renderId !== this.#pictureRenderId || image !== this.#image || !this.isConnected) return
     if (!url) {
-      this.#image.style.backgroundImage = ''
+      image.style.backgroundImage = ''
       return
     }
     try {
       await this.#probeImage(url)
-      this.#image.style.backgroundImage = `url("${url}")`
-      this.#image.dataset.loaded = 'true'
+      if (renderId !== this.#pictureRenderId || image !== this.#image || !this.isConnected) return
+      image.style.backgroundImage = `url(${JSON.stringify(url)})`
+      image.dataset.loaded = 'true'
     } catch {
+      if (renderId !== this.#pictureRenderId || image !== this.#image || !this.isConnected) return
       if (!seedKey) {
-        this.#image.style.backgroundImage = ''
-        this.#image.dataset.loaded = 'false'
+        image.style.backgroundImage = ''
+        image.dataset.loaded = 'false'
         return
       }
       const fallback = await seededAvatarDataUrl(seedKey)
-      this.#image.style.backgroundImage = `url("${fallback}")`
-      this.#image.dataset.loaded = 'true'
+      if (renderId !== this.#pictureRenderId || image !== this.#image || !this.isConnected) return
+      image.style.backgroundImage = `url(${JSON.stringify(fallback)})`
+      image.dataset.loaded = 'true'
     }
   }
 
