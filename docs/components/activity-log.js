@@ -2,6 +2,7 @@ import * as log from '../services/messenger-log/index.js'
 import * as accountsStore from '../services/accounts-store.js'
 import * as secrets from '../services/secrets.js'
 import { seededAvatarDataUrl } from '../services/avatar.js'
+import { getAppIconMonogram } from '../helpers/app-monogram.js'
 import { injectComponentStyles } from '../helpers/dom.js'
 import { defineLocales, getLocale, getT, subscribeLocaleChanged } from '../i18n/index.js'
 import './shared/table-saw.js'
@@ -86,6 +87,10 @@ const STYLES = /* css */`
      query here. Keep this in sync with table-saw's default breakpoint. */
   @container (max-width: 39.9375em) {
     activity-log colgroup { display: none; }
+    activity-log .app-cell {
+      width: 100%;
+      max-width: 100%;
+    }
     /* zero-padding on table-saw kills horizontal cell padding when stacked,
        so the zebra goes flush to the table-saw edge without it. Put the
        horizontal breathing room on the row instead. */
@@ -179,10 +184,23 @@ const STYLES = /* css */`
   activity-log .app-name {
     font-size: 13rem;
     color: var(--fg-strong);
+    min-width: 0;
+    flex: 1 1 auto;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* Deterministic per-app monogram palettes (theme.css --monogram-* tokens). */
+  activity-log .app-icon[data-palette="0"] { background-color: var(--monogram-0-bg); color: var(--monogram-0-fg); }
+  activity-log .app-icon[data-palette="1"] { background-color: var(--monogram-1-bg); color: var(--monogram-1-fg); }
+  activity-log .app-icon[data-palette="2"] { background-color: var(--monogram-2-bg); color: var(--monogram-2-fg); }
+  activity-log .app-icon[data-palette="3"] { background-color: var(--monogram-3-bg); color: var(--monogram-3-fg); }
+  activity-log .app-icon[data-palette="4"] { background-color: var(--monogram-4-bg); color: var(--monogram-4-fg); }
+  activity-log .app-icon[data-palette="5"] { background-color: var(--monogram-5-bg); color: var(--monogram-5-fg); }
+  activity-log .app-icon[data-palette="6"] { background-color: var(--monogram-6-bg); color: var(--monogram-6-fg); }
+  activity-log .app-icon[data-palette="7"] { background-color: var(--monogram-7-bg); color: var(--monogram-7-fg); }
+  activity-log .app-icon[data-palette="8"] { background-color: var(--monogram-8-bg); color: var(--monogram-8-fg); }
+  activity-log .app-icon[data-palette="9"] { background-color: var(--monogram-9-bg); color: var(--monogram-9-fg); }
   activity-log .op-method {
     display: block;
     font-weight: 600;
@@ -339,18 +357,23 @@ function escapeHtml (s) {
     .replaceAll("'", '&#39;')
 }
 
-function appFallbackLetters (app) {
-  const name = app?.name?.trim()
-  const id = (app?.id ?? '').replace(/^\+{1,3}/, '').trim()
-  const source = name || id
-  return (source.slice(0, 2) || '??').toUpperCase()
+function shortAppId (id) {
+  const raw = String(id ?? '')
+  // The launcher sends app ids as `+{1,3}<entity>` where the prefix encodes
+  // the publish channel (main/next/draft); keep it when shortening.
+  const prefix = raw.match(/^\+{1,3}/)?.[0] ?? ''
+  const cleaned = raw.replace(/^\+{1,3}/, '').trim()
+  if (!cleaned) return ''
+  const short = cleaned.length > 14 ? `${cleaned.slice(0, 14)}…` : cleaned
+  return `${prefix}${short}`
 }
 
 function appDisplayName (app) {
   const name = app?.name?.trim()
   if (name) return name
-  const id = (app?.id ?? '').replace(/^\+{1,3}/, '').trim()
-  return id || t('Unknown app')
+  const alias = app?.alias?.trim()
+  if (alias) return alias
+  return shortAppId(app?.id) || t('Unknown app')
 }
 
 function nip44v3Label (action, suffix, eventKind) {
@@ -525,7 +548,7 @@ export class ActivityLog extends HTMLElement {
 
   #rowHtml (entry, idx) {
     const app = entry.app ?? {}
-    const fallback = appFallbackLetters(app)
+    const monogram = getAppIconMonogram(app.id, app.name)
     const name = appDisplayName(app)
     const op = methodLabel(entry.method, entry.eventKind, entry.code, entry.context)
     const preview = previewFor(entry)
@@ -544,9 +567,9 @@ export class ActivityLog extends HTMLElement {
         <td>
           <div class="app-cell">
             <div class="app-icon-wrap" aria-label="${escapeHtml(name)}" title="${escapeHtml(name)}">
-              <div class="app-icon" data-loaded="false">
+              <div class="app-icon" data-loaded="false" data-palette="${monogram.paletteIndex}">
                 <img class="app-icon-image" alt="" />
-                <span class="app-icon-fallback">${escapeHtml(fallback)}</span>
+                <span class="app-icon-fallback">${escapeHtml(monogram.label)}</span>
               </div>
               <img class="pubkey-avatar" alt="" />
             </div>
@@ -588,12 +611,13 @@ export class ActivityLog extends HTMLElement {
       const app = entry.app ?? {}
       const iconBox = wrap.querySelector('.app-icon')
       const iconImg = wrap.querySelector('.app-icon-image')
-      if (iconBox && iconImg && app.icon) {
+      const iconUrl = app.icon?.url ?? ''
+      if (iconBox && iconImg && iconUrl) {
         iconImg.onload = () => {
           if (iconImg.isConnected) iconBox.dataset.loaded = 'true'
         }
         iconImg.onerror = () => { /* keep fallback letters */ }
-        iconImg.src = app.icon
+        iconImg.src = iconUrl
       }
 
       const pubkeyImg = wrap.querySelector('.pubkey-avatar')

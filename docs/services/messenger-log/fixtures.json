@@ -7,7 +7,7 @@
     "app": {
       "id": "com.coracle.social",
       "name": "Coracle",
-      "icon": "https://coracle.social/favicon.ico"
+      "icon": { "url": "https://coracle.social/favicon.ico" }
     },
     "origin": "https://coracle.social",
     "eventKind": 1,
@@ -38,7 +38,7 @@
     "app": {
       "id": "+chat.0xchat",
       "name": "0xchat",
-      "icon": ""
+      "icon": { "url": "" }
     },
     "origin": "https://0xchat.com",
     "status": "success",
@@ -56,7 +56,7 @@
     "app": {
       "id": "com.amethyst",
       "name": "Amethyst",
-      "icon": "https://amethyst.social/icon.png"
+      "icon": { "url": "https://amethyst.social/icon.png" }
     },
     "origin": "https://amethyst.social",
     "eventKind": 7,
@@ -93,7 +93,7 @@
     "app": {
       "id": "+++mystery.app",
       "name": "",
-      "icon": ""
+      "icon": { "url": "" }
     },
     "origin": "https://mystery.example",
     "status": "success",
@@ -111,7 +111,7 @@
     "app": {
       "id": "com.habla",
       "name": "Habla",
-      "icon": "https://habla.news/favicon.ico"
+      "icon": { "url": "https://habla.news/favicon.ico" }
     },
     "origin": "https://habla.news",
     "eventKind": 30023,
@@ -154,7 +154,7 @@
     "app": {
       "id": "com.iris",
       "name": "Iris",
-      "icon": "https://iris.to/favicon.ico"
+      "icon": { "url": "https://iris.to/favicon.ico" }
     },
     "origin": "https://iris.to",
     "status": "success",
@@ -172,7 +172,7 @@
     "app": {
       "id": "com.snort",
       "name": "Snort",
-      "icon": "https://snort.social/favicon.ico"
+      "icon": { "url": "https://snort.social/favicon.ico" }
     },
     "origin": "https://snort.social",
     "eventKind": 4,
@@ -203,7 +203,7 @@
     "app": {
       "id": "++unknown",
       "name": "",
-      "icon": ""
+      "icon": { "url": "" }
     },
     "origin": "https://unnamed.example",
     "status": "success",
@@ -221,7 +221,7 @@
     "app": {
       "id": "com.primal",
       "name": "Primal",
-      "icon": "https://primal.net/favicon.ico"
+      "icon": { "url": "https://primal.net/favicon.ico" }
     },
     "origin": "https://primal.net",
     "eventKind": 1,

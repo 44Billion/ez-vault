@@ -38,11 +38,15 @@ function normalizedEventKind (kind) {
 export function signerRequestApp (app) {
   const id = app?.id ?? ''
   const name = app?.name ?? ''
-  const icon = app?.icon ?? ''
-  if (!String(id).trim() && !String(name).trim() && !String(icon).trim()) {
-    return { id: '', name: LAUNCHER_APP_NAME, icon: '' }
+  const alias = app?.alias ?? ''
+  // The launcher sends the icon as an object { fx?, url }; a plain string is
+  // not a supported shape. `fx` (the launcher's icon content hash) is not
+  // used by the vault, which only renders the URL.
+  const icon = app?.icon?.url ?? ''
+  if (!String(id).trim() && !String(name).trim() && !String(alias).trim() && !String(icon).trim()) {
+    return { id: '', name: LAUNCHER_APP_NAME, icon: '', alias: '' }
   }
-  return { id, name, icon }
+  return { id, name, icon, alias }
 }
 
 export function signerRequestContext (method, params = []) {

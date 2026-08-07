@@ -91,12 +91,24 @@ test('legacy view messages reset the route-less UI and UNLOCK_ACCOUNT replies re
 })
 
 test('signerRequestApp labels empty app metadata as the launcher', () => {
-  assert.deepEqual(signerRequestApp(undefined), { id: '', name: 'App launcher', icon: '' })
-  assert.deepEqual(signerRequestApp({}), { id: '', name: 'App launcher', icon: '' })
-  assert.deepEqual(signerRequestApp({ id: '', name: '', icon: '' }), { id: '', name: 'App launcher', icon: '' })
+  assert.deepEqual(signerRequestApp(undefined), { id: '', name: 'App launcher', icon: '', alias: '' })
+  assert.deepEqual(signerRequestApp({}), { id: '', name: 'App launcher', icon: '', alias: '' })
+  assert.deepEqual(signerRequestApp({ id: '', name: '', icon: '' }), { id: '', name: 'App launcher', icon: '', alias: '' })
   assert.deepEqual(
     signerRequestApp({ id: '+app', name: 'Real App', icon: 'icon' }),
-    { id: '+app', name: 'Real App', icon: 'icon' }
+    { id: '+app', name: 'Real App', icon: '', alias: '' }
+  )
+  assert.deepEqual(
+    signerRequestApp({ id: 'app', icon: { fx: 'abc', url: 'https://example.test/icon.png' } }),
+    { id: 'app', name: '', icon: 'https://example.test/icon.png', alias: '' }
+  )
+  assert.deepEqual(
+    signerRequestApp({ id: 'app', icon: { url: 'https://example.test/icon.png' } }),
+    { id: 'app', name: '', icon: 'https://example.test/icon.png', alias: '' }
+  )
+  assert.deepEqual(
+    signerRequestApp({ id: 'app', alias: 'human-id' }),
+    { id: 'app', name: '', icon: '', alias: 'human-id' }
   )
 })
 

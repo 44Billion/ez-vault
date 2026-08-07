@@ -302,6 +302,51 @@ export async function appendMessengerLog (entry, {
   })
 }
 
+// Fill presentation gaps (name/icon/alias) in an existing app identity with
+// the incoming values; never downgrades richer fields. Returns the original
+// object when nothing changed so callers can skip the write.
+function mergeLogAppMetadata (existing, incoming) {
+  if (!incoming || typeof incoming !== 'object') return existing
+  const merged = { ...(existing && typeof existing === 'object' ? existing : {}) }
+  let changed = false
+  for (const field of ['name', 'icon', 'alias']) {
+    if (incoming[field] && !merged[field]) {
+      merged[field] = incoming[field]
+      changed = true
+    }
+  }
+  return changed ? merged : existing
+}
+
+// Backfill richer app metadata (name/icon/alias) into every stored log entry
+// of an app bucket, keeping the global byte budget accurate.
+export async function updateMessengerLogAppMetadata (appKey, app) {
+  await initializeStorage()
+  return enqueueMutation(async () => {
+    return transaction([MESSENGER_LOG_STORE, STATE_STORE], 'readwrite', async tx => {
+      let usage = await readLogUsage(tx)
+      const keys = (await run('getAllKeys', [idRangeForApp(appKey)], MESSENGER_LOG_STORE, 'byApp', { tx })).result
+      let updated = 0
+      for (const id of keys) {
+        const record = (await run('get', [id], MESSENGER_LOG_STORE, null, { tx })).result
+        if (!record) continue
+        const patchedApp = mergeLogAppMetadata(record.app, app)
+        if (patchedApp === record.app) continue
+        usage = Math.max(0, usage - (Number(record.byteSize) || byteLength(record)))
+        record.app = patchedApp
+        record.byteSize = byteLength(record)
+        usage += record.byteSize
+        await run('put', [record], MESSENGER_LOG_STORE, null, { tx })
+        updated++
+      }
+      if (updated > 0) {
+        await run('put', [{ key: LOG_USAGE_KEY, value: usage }], STATE_STORE, null, { tx })
+      }
+      return updated
+    })
+  })
+}
+
 function cursorPage (tx, { beforeId, limit }) {
   const store = tx.objectStore(MESSENGER_LOG_STORE)
   const range = Number.isSafeInteger(beforeId) && beforeId > 0

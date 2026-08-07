@@ -3,7 +3,8 @@ import {
   appendMessengerLog,
   clearMessengerLogs,
   listMessengerLogs,
-  removeMessengerLogsForPubkey
+  removeMessengerLogsForPubkey,
+  updateMessengerLogAppMetadata
 } from '../storage/index.js'
 
 export const MAX_ENTRIES_PER_APP = 500
@@ -16,6 +17,9 @@ export const PAGE_SIZE = 100
 // `ez-vault` id remains a separate app like any other.
 
 const listeners = new Set()
+// appKey -> JSON of the richest app metadata already propagated to older
+// entries this session. Skips repeat backfill scans for busy apps.
+const propagatedAppMetadata = new Map()
 
 function notify () {
   for (const fn of listeners) {
@@ -69,6 +73,16 @@ export async function append (entry) {
       maxEntriesPerApp: MAX_ENTRIES_PER_APP,
       maxBytes: MAX_LOG_BYTES
     })
+    // A launcher may progressively learn app metadata (name/icon), so once
+    // a richer app identity arrives, patch older entries of the same app.
+    const richApp = stored.app && (stored.app.name || stored.app.icon || stored.app.alias)
+    if (richApp) {
+      const cacheKey = JSON.stringify([stored.app.name, stored.app.icon, stored.app.alias])
+      if (propagatedAppMetadata.get(stored.appKey) !== cacheKey) {
+        await updateMessengerLogAppMetadata(stored.appKey, stored.app)
+        propagatedAppMetadata.set(stored.appKey, cacheKey)
+      }
+    }
     notify()
   } catch (err) {
     // Audit history must never make a signing request fail.

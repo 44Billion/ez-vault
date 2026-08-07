@@ -51,4 +51,27 @@
   --shadow-strong: light-dark(rgb(0 0 0 / 0.3), rgb(0 0 0 / 0.5));
   --scrim: light-dark(rgb(0 0 0 / 0.45), rgb(0 0 0 / 0.45));
   --scrim-strong: light-dark(rgb(0 0 0 / 0.65), rgb(0 0 0 / 0.65));
+
+  /* App monogram palettes — deterministic per-app identity colors, same
+     set used by the 44billion and nappstore launchers. */
+  --monogram-0-bg: light-dark(#fee2e2, #7f1d1d);
+  --monogram-0-fg: light-dark(#991b1b, #fecaca);
+  --monogram-1-bg: light-dark(#ffedd5, #7c2d12);
+  --monogram-1-fg: light-dark(#9a3412, #fed7aa);
+  --monogram-2-bg: light-dark(#fef3c7, #78350f);
+  --monogram-2-fg: light-dark(#92400e, #fde68a);
+  --monogram-3-bg: light-dark(#dcfce7, #14532d);
+  --monogram-3-fg: light-dark(#166534, #bbf7d0);
+  --monogram-4-bg: light-dark(#ccfbf1, #134e4a);
+  --monogram-4-fg: light-dark(#115e59, #99f6e4);
+  --monogram-5-bg: light-dark(#dbeafe, #1e3a8a);
+  --monogram-5-fg: light-dark(#1e40af, #bfdbfe);
+  --monogram-6-bg: light-dark(#e0e7ff, #312e81);
+  --monogram-6-fg: light-dark(#3730a3, #c7d2fe);
+  --monogram-7-bg: light-dark(#f3e8ff, #581c87);
+  --monogram-7-fg: light-dark(#6b21a8, #e9d5ff);
+  --monogram-8-bg: light-dark(#fce7f3, #831843);
+  --monogram-8-fg: light-dark(#9d174d, #fbcfe8);
+  --monogram-9-bg: light-dark(#e2e8f0, #334155);
+  --monogram-9-fg: light-dark(#334155, #e2e8f0);
 }
