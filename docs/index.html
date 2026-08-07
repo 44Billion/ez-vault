@@ -11,7 +11,12 @@
     <link href="./styles/index.css" rel="stylesheet" />
   </head>
   <body>
-    <div id="vault">
+    <!-- Boot gate: #vault starts hidden so a lock/create overlay never has
+         to cover an already-painted vault screen. index.js reveals it after
+         the overlay components decide their visibility; there is deliberately
+         no load-based failsafe (the vault fails closed if the module graph
+         fails to load). -->
+    <div id="vault" style="visibility: hidden">
       <section class="accounts-section">
         <div class="accounts-header">
           <div class="accounts-actions">
@@ -172,7 +177,6 @@
     }
   }
   </script>
-  <script src="./pre-paint.js"></script>
   <script type="module">
     import './index.js'
   </script>

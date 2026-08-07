@@ -27,6 +27,10 @@ await Promise.all([
   import('./components/create-overlay.js')
 ])
 
+// The overlay components were upgraded during the imports above and already
+// decided their visibility; the main interface can now be revealed.
+document.getElementById('vault').style.visibility = 'visible'
+
 const list = document.querySelector('account-list')
 const addPanel = document.querySelector('account-add')
 const syncPanel = document.querySelector('sync-panel')
