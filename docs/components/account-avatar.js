@@ -58,7 +58,7 @@ const STYLES = /* css */`
     width: 100%;
     aspect-ratio: 1 / 1;
     border-radius: 50%;
-    background-color: oklch(0.22 0 89.88);
+    background-color: var(--surface);
     max-width: 100px;
     justify-self: center;
   }
@@ -76,7 +76,7 @@ const STYLES = /* css */`
     display: flex;
     align-items: center;
     justify-content: center;
-    color: oklch(0.3 0.12 274.76);
+    color: var(--accent-fg);
   }
   account-avatar .avatar-fallback svg {
     width: 70%;
@@ -90,8 +90,8 @@ const STYLES = /* css */`
     position: absolute;
     inset: 0;
     border-radius: 50%;
-    background-color: oklch(0.55 0.2 25 / 0.5);
-    border: 2px solid oklch(0.55 0.2 25);
+    background-color: oklch(from var(--error) l c h / 0.5);
+    border: 2px solid var(--error);
     display: none;
     align-items: center;
     justify-content: center;
@@ -104,7 +104,7 @@ const STYLES = /* css */`
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    color: oklch(0.55 0.2 25);
+    color: var(--error-fg);
   }
   account-avatar .avatar-error-icon svg {
     width: 50%;
@@ -119,15 +119,15 @@ const STYLES = /* css */`
     display: none;
     align-items: center;
     justify-content: center;
-    background-color: oklch(0.22 0 89.88 / 0.88);
-    color: oklch(0.92 0 89.88);
+    background-color: oklch(from var(--surface) l c h / 0.88);
+    color: var(--fg-strong);
     font-size: 13rem;
     line-height: 1;
-    box-shadow: 0 0 0 2px oklch(0.3 0.12 274.76);
+    box-shadow: 0 0 0 2px var(--accent);
     z-index: 2;
   }
   account-avatar .avatar-btn:active {
-    background-color: oklch(0.38 0.1 274.76 / 0.9);
+    background-color: oklch(from var(--accent-hover) l c h / 0.9);
   }
   account-avatar .avatar-btn.at-top-left { top: -4px; left: -4px; }
   account-avatar .avatar-btn.at-top-center {
@@ -147,11 +147,11 @@ const STYLES = /* css */`
     transform: translateY(-50%);
   }
   account-avatar .avatar-btn.at-primary {
-    background-color: oklch(0.55 0.18 145 / 0.88);
-    color: oklch(0.98 0 0);
+    background-color: oklch(from var(--success) l c h / 0.88);
+    color: var(--fg-on-accent);
   }
   account-avatar .avatar-btn.at-primary:active {
-    background-color: oklch(0.48 0.16 145 / 0.92);
+    background-color: oklch(from var(--success-active) l c h / 0.92);
   }
   account-avatar[mode="creating"] .avatar-btn[data-action="cancel-create"],
   account-avatar[mode="creating"] .avatar-btn[data-action="cycle"],
@@ -173,13 +173,13 @@ const STYLES = /* css */`
     padding: 0 8px;
     height: 18px;
     border-radius: 9999px;
-    background-color: oklch(0.22 0 89.88 / 0.82);
-    color: oklch(0.92 0 89.88);
+    background-color: oklch(from var(--surface) l c h / 0.82);
+    color: var(--fg-strong);
     font-size: 9rem;
     font-weight: 600;
     letter-spacing: 0.05em;
     text-transform: uppercase;
-    box-shadow: 0 0 0 2px oklch(0.3 0.12 274.76);
+    box-shadow: 0 0 0 2px var(--accent);
     pointer-events: none;
     z-index: 2;
   }
@@ -199,8 +199,8 @@ const STYLES = /* css */`
     border-radius: 9999px;
     padding: 0 8px;
     box-sizing: border-box;
-    background-color: oklch(0.22 0 89.88 / 0.82);
-    color: oklch(0.92 0 89.88);
+    background-color: oklch(from var(--surface) l c h / 0.82);
+    color: var(--fg-strong);
     font-size: 12rem;
     font-weight: 600;
     letter-spacing: 0;
@@ -210,15 +210,15 @@ const STYLES = /* css */`
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    box-shadow: 0 0 0 2px oklch(0.3 0.12 274.76);
+    box-shadow: 0 0 0 2px var(--accent);
     outline: none;
     z-index: 1;
   }
   account-avatar .avatar-name-field:focus {
-    box-shadow: 0 0 0 2px oklch(0.55 0.18 145);
+    box-shadow: 0 0 0 2px var(--success);
   }
   account-avatar .avatar-name-field::placeholder {
-    color: oklch(0.78 0 89.88 / 0.72);
+    color: oklch(from var(--fg) l c h / 0.72);
     opacity: 1;
   }
   account-avatar .avatar-name-field[readonly],
@@ -233,18 +233,18 @@ const STYLES = /* css */`
     pointer-events: none;
   }
   account-avatar .avatar-name-field.is-success {
-    box-shadow: 0 0 0 2px oklch(0.55 0.18 145);
+    box-shadow: 0 0 0 2px var(--success);
   }
   account-avatar .avatar-name-field.is-error {
-    box-shadow: 0 0 0 2px oklch(0.55 0.2 25);
+    box-shadow: 0 0 0 2px var(--error);
   }
   account-avatar .avatar-btn.is-success {
-    background-color: oklch(0.55 0.18 145 / 0.88);
-    color: oklch(0.98 0 0);
+    background-color: oklch(from var(--success) l c h / 0.88);
+    color: var(--fg-on-accent);
   }
   account-avatar .avatar-btn.is-error {
-    background-color: oklch(0.55 0.2 25 / 0.88);
-    color: oklch(0.98 0 0);
+    background-color: oklch(from var(--error) l c h / 0.88);
+    color: var(--fg-on-accent);
   }
   account-avatar .avatar-btn-icon {
     display: inline-flex;
@@ -290,12 +290,12 @@ const STYLES = /* css */`
     width: 22px;
     height: 22px;
     border-radius: 0;
-    background-color: oklch(0.3 0.12 274.76);
-    color: oklch(0.98 0 0);
+    background-color: var(--accent);
+    color: var(--fg-on-accent);
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    box-shadow: 0 0 0 2px oklch(0.35 0.11 277.19);
+    box-shadow: 0 0 0 2px var(--accent);
   }
   account-avatar .avatar-select-badge svg {
     width: 16px;

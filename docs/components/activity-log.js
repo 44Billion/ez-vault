@@ -57,7 +57,7 @@ const STYLES = /* css */`
   }
   activity-log .empty {
     padding: 16px 4px;
-    color: oklch(0.6 0 89.88);
+    color: var(--fg-muted);
     font-size: 13rem;
     text-align: center;
   }
@@ -71,7 +71,7 @@ const STYLES = /* css */`
     width: 100%;
     border-collapse: collapse;
     font-size: 13rem;
-    color: oklch(0.85 0 89.88);
+    color: var(--fg-strong);
   }
   /* In stacked mode table-saw turns cells into display: grid, so the col
      widths only matter for the desktop / wide preview. */
@@ -101,23 +101,23 @@ const STYLES = /* css */`
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: oklch(0.62 0 89.88);
-    border-bottom: 1px solid oklch(0.28 0 89.88);
+    color: var(--fg-muted);
+    border-bottom: 1px solid var(--border);
   }
   activity-log tbody td {
     padding: 10px 6px;
     vertical-align: top;
   }
   activity-log tbody tr {
-    border-bottom: 1px solid oklch(0.25 0 89.88);
+    border-bottom: 1px solid var(--border);
   }
   /* Explicit on both odd and even so neither row falls through to the
      accordion-panel's bg (which would create an inconsistent zebra). */
   activity-log tbody tr:nth-child(odd) {
-    background-color: oklch(0.22 0 89.88);
+    background-color: var(--surface);
   }
   activity-log tbody tr:nth-child(even) {
-    background-color: oklch(0.25 0 89.88);
+    background-color: var(--surface-raised);
   }
   activity-log tbody tr:last-child {
     border-bottom: 0;
@@ -138,8 +138,8 @@ const STYLES = /* css */`
     width: 100%;
     height: 100%;
     border-radius: 8px;
-    background-color: light-dark(oklch(0.34 0.12 274.76), oklch(0.3 0.12 274.76));
-    color: light-dark(oklch(0.88 0 89.88), oklch(0.92 0 89.88));
+    background-color: var(--accent);
+    color: var(--fg-on-accent);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -171,14 +171,14 @@ const STYLES = /* css */`
     width: 16px;
     height: 16px;
     border-radius: 50%;
-    background-color: light-dark(oklch(0.78 0 89.88), oklch(0.22 0 89.88));
-    border: 1.5px solid light-dark(oklch(0.78 0 89.88), oklch(0.22 0 89.88));
-    box-shadow: 0 0 0 1px light-dark(oklch(0.6 0.1 274.76), oklch(0.4 0.1 274.76));
+    background-color: var(--surface);
+    border: 1.5px solid var(--surface);
+    box-shadow: 0 0 0 1px var(--accent);
     object-fit: cover;
   }
   activity-log .app-name {
     font-size: 13rem;
-    color: oklch(0.85 0 89.88);
+    color: var(--fg-strong);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -186,7 +186,7 @@ const STYLES = /* css */`
   activity-log .op-method {
     display: block;
     font-weight: 600;
-    color: light-dark(oklch(0.88 0 89.88), oklch(0.92 0 89.88));
+    color: var(--fg-strong);
   }
   activity-log .op-status {
     display: inline-block;
@@ -196,7 +196,7 @@ const STYLES = /* css */`
     letter-spacing: 0.04em;
   }
   activity-log .op-status[data-status="failure"] {
-    color: oklch(0.7 0.18 25);
+    color: var(--error-fg);
   }
   activity-log .op-status[data-status="success"] {
     display: none;
@@ -211,15 +211,15 @@ const STYLES = /* css */`
     align-items: flex-start;
     gap: 6px;
     border-radius: 4px;
-    color: oklch(0.85 0 89.88);
+    color: var(--fg-strong);
     user-select: none;
   }
   activity-log .data-cell summary::-webkit-details-marker {
     display: none;
   }
   activity-log .data-cell summary:active {
-    background-color: oklch(0.30 0 89.88);
-    color: light-dark(oklch(0.88 0 89.88), oklch(0.92 0 89.88));
+    background-color: var(--surface-interactive);
+    color: var(--fg-strong);
   }
   activity-log .data-cell .data-preview {
     flex: 1 1 auto;
@@ -231,14 +231,14 @@ const STYLES = /* css */`
   activity-log .data-cell details[open] .data-preview {
     white-space: normal;
     word-break: break-word;
-    color: light-dark(oklch(0.88 0 89.88), oklch(0.92 0 89.88));
+    color: var(--fg-strong);
   }
   activity-log .data-cell .data-toggle-icon {
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    color: oklch(0.65 0 89.88);
+    color: var(--fg-muted);
     transition: transform 180ms ease-out;
   }
   activity-log .data-cell .data-toggle-icon svg {
@@ -253,12 +253,12 @@ const STYLES = /* css */`
     margin-bottom: 6px;
   }
   activity-log .data-cell .empty-data {
-    color: oklch(0.5 0 89.88);
+    color: var(--fg-faint);
     font-style: italic;
   }
   activity-log .data-full {
     margin: 0;
-    background-color: oklch(0.18 0 89.88);
+    background-color: var(--surface-sunken);
     border-radius: 6px;
     padding: 8px 10px;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -268,7 +268,7 @@ const STYLES = /* css */`
     word-break: break-word;
     max-height: 280px;
     overflow: auto;
-    color: oklch(0.85 0 89.88);
+    color: var(--fg-strong);
   }
   activity-log .data-actions {
     display: flex;
@@ -279,8 +279,8 @@ const STYLES = /* css */`
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    background-color: light-dark(oklch(0.34 0.12 274.76), oklch(0.3 0.12 274.76));
-    color: light-dark(oklch(0.88 0 89.88), oklch(0.92 0 89.88));
+    background-color: var(--accent);
+    color: var(--fg-on-accent);
     border-radius: 6px;
     padding: 4px 10px;
     font-size: 12rem;
@@ -288,13 +288,13 @@ const STYLES = /* css */`
     border: 0;
   }
   activity-log .copy-btn:active {
-    background-color: oklch(0.38 0.1 274.76);
+    background-color: var(--accent-hover);
   }
   activity-log .copy-btn.is-success {
-    background-color: oklch(0.55 0.18 145);
+    background-color: var(--success);
   }
   activity-log .copy-btn.is-error {
-    background-color: oklch(0.55 0.2 25);
+    background-color: var(--error);
   }
   activity-log .copy-btn .copy-btn-icon {
     display: inline-flex;
@@ -307,7 +307,7 @@ const STYLES = /* css */`
     display: block;
   }
   activity-log time {
-    color: oklch(0.62 0 89.88);
+    color: var(--fg-muted);
     font-size: 12rem;
     white-space: nowrap;
   }

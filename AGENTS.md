@@ -151,7 +151,7 @@ The CSS reset in [`docs/styles/reset.css`](docs/styles/reset.css) sets `html { f
 
 Other style conventions:
 
-- **Dark mode is the baseline.** Only author dark-theme colors. Light mode is produced automatically via a `filter: invert(1) hue-rotate(180deg)` rule in [`docs/styles/global.css`](docs/styles/global.css) — do not add a parallel light-mode palette.
+- **Colors come from [`docs/styles/theme.css`](docs/styles/theme.css).** Every token is a `light-dark(<light>, <dark>)` pair resolved natively from `prefers-color-scheme` (via `color-scheme: light dark`). Do not author color literals (`oklch(...)`, `#hex`, `rgb(...)`, `light-dark(...)`) outside `theme.css` (or the `inverted-colors` accessibility rule in `reset.css`) — consume tokens via `var()` references. Relative color syntax (`oklch(from <token> l c h / 0.5)`) is allowed when genuinely useful, e.g. translucent states of a token. UGC media (avatar photos, images, video) must never receive theme inversion filters — with tokens it stays untouched by construction.
 - **Loading indicators:** prefer the existing `.pulsate` animation defined in `global.css`. The typical pattern is: on click, `disabled` the button and add the `pulsate` class while the async work runs; remove both on completion. Reach for spinners only when pulsate is genuinely unsuitable.
   - When the button has its own background color (e.g. a colored pill wrapping an icon), apply `.pulsate` to the inner icon/label element rather than the button itself — animating opacity on the whole button makes the background go transparent, which looks wrong. Wrap the glyph in a dedicated inner element so you have something to target.
 - **Icons:** use [Tabler outline icons](https://github.com/tabler/tabler-icons/tree/main/icons/outline). Icons already copied into the project live under [`icons/`](icons/); grab any missing icon from the Tabler repo and drop the `.svg` in there. Inline the SVG markup directly in the template (HTML or JS template literal) so `stroke="currentColor"` inherits the host text color — loading via `<img src>` isolates the SVG from CSS and breaks theming.
@@ -161,7 +161,7 @@ Other style conventions:
 
 Page-level and cross-component styles live under `docs/styles/` (`reset.css`, `global.css`, `index.css`). Styles that only concern a single Web Component should live **inside that component's `.js` file** so the component is self-contained.
 
-Pattern (using light DOM — we deliberately avoid Shadow DOM so the global filter-invert light-mode trick and the `1rem = 1px` font-size trick keep working):
+Pattern (using light DOM — we deliberately avoid Shadow DOM so `:root` theme tokens inherit consistently and the `1rem = 1px` font-size trick keeps working):
 
 ```js
 import { injectComponentStyles } from '../helpers/dom.js'
@@ -184,7 +184,7 @@ Rules for component CSS:
 - **Always prefix selectors with the component's tag name** (e.g. `account-avatar .avatar-btn`). The styles live in the global stylesheet scope, so the tag prefix is the scoping mechanism.
 - **Use `injectComponentStyles(id, css)`** from [`docs/helpers/dom.js`](docs/helpers/dom.js). It is idempotent — safe to call from every `connectedCallback`.
 - **Tag the template literal with a leading `/* css */` comment** so editors / extensions that opt into tag-based highlighting syntax-highlight the CSS inside. Same idea applies to any HTML template literal (`/* html */`).
-- Keep tokens that need to be shared across components (colors, spacing scale) in `global.css` and consume them via CSS custom properties.
+- Keep theme color tokens in `docs/styles/theme.css` (single source, `light-dark()` pairs). Spacing and other shared tokens live in `global.css`. Consume them via CSS custom properties.
 
 ## JavaScript Module Conventions
 

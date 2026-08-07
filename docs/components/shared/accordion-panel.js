@@ -19,7 +19,7 @@ const STYLES = /* css */`
     display: block;
   }
   accordion-panel > details {
-    background-color: oklch(0.22 0 89.88);
+    background-color: var(--surface);
     border-radius: 8px;
     overflow: hidden;
   }
@@ -31,7 +31,7 @@ const STYLES = /* css */`
     justify-content: space-between;
     gap: 8px;
     padding: 12px 14px;
-    color: light-dark(oklch(0.88 0 89.88), oklch(0.92 0 89.88));
+    color: var(--fg-strong);
     font-size: 14rem;
     font-weight: 600;
     user-select: none;
@@ -40,7 +40,7 @@ const STYLES = /* css */`
     display: none;
   }
   accordion-panel > details > summary:active {
-    background-color: oklch(0.28 0 89.88);
+    background-color: var(--surface-interactive);
   }
   accordion-panel .accordion-title {
     display: inline-flex;
@@ -55,8 +55,8 @@ const STYLES = /* css */`
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    color: oklch(0.82 0.11 274.76);
-    background-color: light-dark(oklch(0.32 0.08 274.76), oklch(0.28 0.08 274.76));
+    color: var(--accent-fg);
+    background-color: var(--accent-soft);
     flex: 0 0 auto;
   }
   accordion-panel .accordion-icon svg {

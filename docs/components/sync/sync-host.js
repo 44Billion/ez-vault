@@ -73,21 +73,21 @@ const STYLES = /* css */`
   sync-host .host-title {
     font-size: 13rem;
     font-weight: 600;
-    color: oklch(0.92 0 89.88);
+    color: var(--fg-strong);
   }
   sync-host .host-cancel {
     width: 18px;
     height: 18px;
     border-radius: 50%;
-    background-color: oklch(0.28 0 89.88);
-    color: oklch(0.92 0 89.88);
+    background-color: var(--surface-interactive);
+    color: var(--fg-strong);
     display: inline-flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
   }
   sync-host .host-cancel:active {
-    background-color: oklch(0.38 0 89.88);
+    background-color: var(--surface-interactive-active);
   }
   sync-host .host-cancel svg {
     width: 12px;
@@ -96,7 +96,7 @@ const STYLES = /* css */`
   sync-host .host-qr-wrap {
     align-self: center;
     padding: 8px;
-    background-color: oklch(0.98 0 0);
+    background-color: var(--surface-inverse);
     border-radius: 8px;
   }
   sync-host .host-qr {
@@ -111,7 +111,7 @@ const STYLES = /* css */`
   sync-host .host-url {
     width: 100%;
     padding-right: 42px;
-    background-color: oklch(0.28 0 89.88);
+    background-color: var(--surface-interactive);
     font-size: 12rem;
   }
   sync-host .host-copy {
@@ -123,16 +123,16 @@ const STYLES = /* css */`
     height: 28px;
     border-radius: 50%;
     background-color: transparent;
-    color: oklch(0.92 0 89.88);
+    color: var(--fg-strong);
     display: inline-flex;
     align-items: center;
     justify-content: center;
   }
   sync-host .host-copy:active {
-    background-color: oklch(0.38 0 89.88);
+    background-color: var(--surface-interactive-active);
   }
   sync-host .host-copy.is-success {
-    color: oklch(0.55 0.18 145);
+    color: var(--success-fg);
   }
   sync-host .host-copy svg {
     width: 16px;
@@ -162,7 +162,7 @@ const STYLES = /* css */`
   sync-host .host-code-label {
     font-size: 14rem;
     font-weight: 600;
-    color: oklch(0.7 0 89.88);
+    color: var(--fg);
   }
   /* 3-column grid centers the digits even though the copy button only sits
      on the right (column 1 mirrors column 3's button width). */
@@ -170,8 +170,8 @@ const STYLES = /* css */`
     display: grid;
     grid-template-columns: 32px 1fr 32px;
     align-items: center;
-    background-color: oklch(0.28 0 89.88);
-    color: oklch(0.92 0 89.88);
+    background-color: var(--surface-interactive);
+    color: var(--fg-strong);
     padding: 8px;
     border-radius: 6px;
   }
@@ -189,16 +189,16 @@ const STYLES = /* css */`
     height: 32px;
     border-radius: 50%;
     background-color: transparent;
-    color: oklch(0.92 0 89.88);
+    color: var(--fg-strong);
     display: inline-flex;
     align-items: center;
     justify-content: center;
   }
   sync-host .host-code-copy:active {
-    background-color: oklch(0.38 0 89.88);
+    background-color: var(--surface-interactive-active);
   }
   sync-host .host-code-copy.is-success {
-    color: oklch(0.55 0.18 145);
+    color: var(--success-fg);
   }
   sync-host .host-code-copy svg {
     width: 16px;
@@ -208,11 +208,11 @@ const STYLES = /* css */`
   sync-host .host-status {
     font-size: 12rem;
     align-self: center;
-    color: oklch(0.7 0 89.88);
+    color: var(--fg);
     min-height: 16px;
   }
-  sync-host .host-status.is-error { color: oklch(0.7 0.18 25); }
-  sync-host .host-status.is-success { color: oklch(0.7 0.16 145); }
+  sync-host .host-status.is-error { color: var(--error-fg); }
+  sync-host .host-status.is-success { color: var(--success-fg); }
 `
 
 const TEMPLATE = /* html */`

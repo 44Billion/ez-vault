@@ -89,7 +89,7 @@ const STYLES = /* css */`
   sync-joiner .joiner-input {
     padding-left: 36px;
     padding-right: 42px;
-    background-color: oklch(0.28 0 89.88);
+    background-color: var(--surface-interactive);
   }
   sync-joiner[data-camera="true"] .joiner-input {
     padding-right: 78px;
@@ -99,7 +99,7 @@ const STYLES = /* css */`
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    color: oklch(0.92 0 89.88);
+    color: var(--fg-strong);
   }
   sync-joiner .joiner-btn:disabled {
     opacity: 0.6;
@@ -114,7 +114,7 @@ const STYLES = /* css */`
     background-color: transparent;
   }
   sync-joiner .joiner-btn[data-action="cancel"]:active {
-    background-color: oklch(0.38 0 89.88);
+    background-color: var(--surface-interactive-active);
   }
   sync-joiner .joiner-btn[data-action="scan"] {
     top: calc(50% + 6px);
@@ -130,7 +130,7 @@ const STYLES = /* css */`
     display: inline-flex;
   }
   sync-joiner .joiner-btn[data-action="scan"]:active {
-    background-color: oklch(0.38 0 89.88);
+    background-color: var(--surface-interactive-active);
   }
   sync-joiner .joiner-btn[data-action="connect"] {
     top: 12px;
@@ -138,14 +138,14 @@ const STYLES = /* css */`
     bottom: 0;
     width: 36px;
     border-radius: 0 7px 7px 0;
-    background-color: oklch(0.55 0.18 145);
+    background-color: var(--success);
   }
   sync-joiner .joiner-btn[data-action="connect"]:active {
-    background-color: oklch(0.48 0.16 145);
+    background-color: var(--success-active);
   }
   sync-joiner .joiner-btn[data-action="connect"].is-error {
-    background-color: oklch(0.55 0.2 25);
-    color: oklch(0.98 0 0);
+    background-color: var(--error);
+    color: var(--fg-on-accent);
   }
   sync-joiner .joiner-btn-icon {
     display: inline-flex;
@@ -174,7 +174,7 @@ const STYLES = /* css */`
   sync-joiner .pair-label {
     font-size: 14rem;
     font-weight: 600;
-    color: oklch(0.7 0 89.88);
+    color: var(--fg);
     align-self: center;
   }
   /* OTP-style: six separate cells, equally spaced. flex: 1 1 0 + min-width: 0
@@ -194,7 +194,7 @@ const STYLES = /* css */`
     text-align: center;
     font-size: 22rem;
     font-variant-numeric: tabular-nums;
-    background-color: oklch(0.28 0 89.88);
+    background-color: var(--surface-interactive);
     border: 1px solid transparent;
     border-radius: 6px;
     outline: none;
@@ -206,23 +206,23 @@ const STYLES = /* css */`
     margin: 0;
   }
   sync-joiner .pin-cell:focus {
-    border-color: oklch(0.55 0.18 145);
-    background-color: oklch(0.32 0 89.88);
+    border-color: var(--success);
+    background-color: var(--surface-interactive);
   }
   sync-joiner .pin-cell:disabled {
     opacity: 0.6;
   }
   sync-joiner .pair-pin.is-error .pin-cell {
-    background-color: oklch(0.32 0.12 25);
+    background-color: oklch(from var(--error) l c h / 0.5);
   }
   sync-joiner .pair-status {
     font-size: 12rem;
     align-self: center;
-    color: oklch(0.7 0 89.88);
+    color: var(--fg);
     min-height: 16px;
   }
-  sync-joiner .pair-status.is-error { color: oklch(0.7 0.18 25); }
-  sync-joiner .pair-status.is-success { color: oklch(0.7 0.16 145); }
+  sync-joiner .pair-status.is-error { color: var(--error-fg); }
+  sync-joiner .pair-status.is-success { color: var(--success-fg); }
   sync-joiner .scan-overlay {
     display: none;
     flex-direction: column;
@@ -243,7 +243,7 @@ const STYLES = /* css */`
     width: 100%;
     max-height: 320px;
     border-radius: 8px;
-    background-color: oklch(0.18 0 89.88);
+    background-color: var(--surface-sunken);
     object-fit: cover;
     display: block;
   }
@@ -254,16 +254,16 @@ const STYLES = /* css */`
     width: 32px;
     height: 32px;
     border-radius: 50%;
-    background-color: oklch(0 0 0 / 0.45);
-    color: oklch(0.98 0 0);
+    background-color: var(--scrim);
+    color: var(--fg-on-accent);
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    filter: drop-shadow(0 1px 2px oklch(0 0 0 / 0.7));
+    filter: drop-shadow(0 1px 2px var(--shadow-strong));
     z-index: 1;
   }
   sync-joiner .scan-stop:active {
-    background-color: oklch(0 0 0 / 0.65);
+    background-color: var(--scrim-strong);
   }
   sync-joiner .scan-stop svg {
     width: 18px;

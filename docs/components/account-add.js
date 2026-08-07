@@ -51,7 +51,7 @@ const STYLES = /* css */`
   account-add .add-input {
     padding-left: 36px;
     padding-right: 42px;
-    background-color: oklch(0.28 0 89.88);
+    background-color: var(--surface-interactive);
   }
   account-add[data-camera="true"] .add-input {
     padding-right: 78px;
@@ -61,7 +61,7 @@ const STYLES = /* css */`
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    color: light-dark(oklch(0.8 0 89.88), oklch(0.92 0 89.88))
+    color: var(--fg-strong)
   }
   account-add .add-btn:disabled {
     opacity: 0.6;
@@ -76,7 +76,7 @@ const STYLES = /* css */`
     background-color: transparent;
   }
   account-add .add-btn[data-action="cancel"]:active {
-    background-color: oklch(0.38 0 89.88);
+    background-color: var(--surface-interactive-active);
   }
   account-add .add-btn[data-action="scan"] {
     top: calc(50% + 6px);
@@ -92,7 +92,7 @@ const STYLES = /* css */`
     display: inline-flex;
   }
   account-add .add-btn[data-action="scan"]:active {
-    background-color: oklch(0.38 0 89.88);
+    background-color: var(--surface-interactive-active);
   }
   account-add .add-btn[data-action="confirm"] {
     top: 12px;
@@ -100,14 +100,14 @@ const STYLES = /* css */`
     bottom: 0;
     width: 36px;
     border-radius: 0 7px 7px 0;
-    background-color: oklch(0.55 0.18 145);
+    background-color: var(--success);
   }
   account-add .add-btn[data-action="confirm"]:active {
-    background-color: oklch(0.48 0.16 145);
+    background-color: var(--success-active);
   }
   account-add .add-btn[data-action="confirm"].is-error {
-    background-color: oklch(0.55 0.2 25);
-    color: oklch(0.98 0 0);
+    background-color: var(--error);
+    color: var(--fg-on-accent);
   }
   account-add .add-btn-icon {
     display: inline-flex;
@@ -142,7 +142,7 @@ const STYLES = /* css */`
     width: 100%;
     max-height: 320px;
     border-radius: 8px;
-    background-color: oklch(0.18 0 89.88);
+    background-color: var(--surface-sunken);
     object-fit: cover;
     display: block;
   }
@@ -153,16 +153,16 @@ const STYLES = /* css */`
     width: 32px;
     height: 32px;
     border-radius: 50%;
-    background-color: oklch(0 0 0 / 0.45);
-    color: oklch(0.98 0 0);
+    background-color: var(--scrim);
+    color: var(--fg-on-accent);
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    filter: drop-shadow(0 1px 2px oklch(0 0 0 / 0.7));
+    filter: drop-shadow(0 1px 2px var(--shadow-strong));
     z-index: 1;
   }
   account-add .scan-stop:active {
-    background-color: oklch(0 0 0 / 0.65);
+    background-color: var(--scrim-strong);
   }
   account-add .scan-stop svg {
     width: 18px;

@@ -24,7 +24,7 @@
 }
 
 .diagnostics-section accordion-panel > details {
-  border: 1px solid oklch(0.31 0 89.88);
+  border: 1px solid var(--border);
 }
 
 /* The three toolbar buttons (New Account, Add Account, Sync Devices) share a
@@ -69,8 +69,8 @@
   align-items: center;
   justify-content: center;
   gap: 6px;
-  background-color: light-dark(oklch(0.34 0.12 274.76), oklch(0.3 0.12 274.76));
-  color: light-dark(oklch(0.88 0 89.88), oklch(0.92 0 89.88));
+  background-color: var(--accent);
+  color: var(--fg-on-accent);
   border-radius: 8px;
   padding: 10px 8px;
   font-size: 14rem;
@@ -104,7 +104,7 @@
 }
 
 .primary-action:active {
-  background-color: oklch(0.38 0.1 274.76);
+  background-color: var(--accent-hover);
 }
 
 /* "On" state — applied by JS while the button's feature owns the screen
@@ -112,8 +112,8 @@
    button so the user can tell which UI is currently active without us
    needing a sub-route. */
 .primary-action.is-active {
-  background-color: oklch(0.45 0.13 274.76);
-  box-shadow: inset 0 2px 4px oklch(0 0 0 / 0.3);
+  background-color: var(--accent-active);
+  box-shadow: inset 0 2px 4px var(--shadow);
 }
 
 /* While one feature is active, the other two are disabled to prevent

@@ -2,30 +2,21 @@
   color-scheme: dark light;
 }
 
-@media (prefers-color-scheme: light) {
-  html {
-    filter: invert(1) hue-rotate(180deg);
-  }
-  img, video, .avatar-image, [data-avatar-pubkey] {
-    /* inverts it back */
-    filter: invert(1) hue-rotate(180deg);
-  }
-}
-
 .invisible {
   display: none !important;
 }
 
 body {
-  color: oklch(0.78 0 89.88);
+  color: var(--fg);
+  background-color: var(--surface);
 }
 
 body.dev {
-  background-color: oklch(0.22 0 89.88) !important;
+  background-color: var(--surface) !important;
 }
 
 body.detached {
-  background-color: oklch(0.22 0 89.88);
+  background-color: var(--surface);
   width: 360px;
 }
 
@@ -46,8 +37,8 @@ label:after {
 
 input {
   width: 100%;
-  background-color: oklch(0.19 0 89.88);
-  color: oklch(0.78 0 89.88);
+  background-color: var(--surface-sunken);
+  color: var(--fg);
   border: 0;
   height: 30px; /* 30rem height won't be 30px on Safari 17.6 but 270px; use rem unit just for font-size */
   font-size: 16rem;

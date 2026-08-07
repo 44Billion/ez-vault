@@ -33,7 +33,7 @@ const STYLES = /* css */`
   }
   trusted-signers-panel .empty-state {
     margin: 0;
-    color: oklch(0.72 0 89.88);
+    color: var(--fg);
     font-size: 13rem;
     line-height: 1.35;
   }
@@ -50,14 +50,14 @@ const STYLES = /* css */`
     align-items: center;
     justify-content: center;
     gap: 8px;
-    background-color: oklch(0.55 0.18 145);
-    color: oklch(0.98 0 0);
+    background-color: var(--success);
+    color: var(--fg-on-accent);
     font-size: 13rem;
     font-weight: 600;
     cursor: pointer;
   }
   trusted-signers-panel .unlock-btn:active {
-    background-color: oklch(0.48 0.16 145);
+    background-color: var(--success-active);
   }
   trusted-signers-panel .unlock-btn:disabled {
     opacity: 0.7;
@@ -82,14 +82,14 @@ const STYLES = /* css */`
     gap: 8px;
     align-items: start;
     padding: 8px 0;
-    border-top: 1px solid oklch(0.32 0 89.88);
+    border-top: 1px solid var(--border);
   }
   trusted-signers-panel .device-row:first-child {
     border-top: 0;
     padding-top: 0;
   }
   trusted-signers-panel .device-title {
-    color: oklch(0.9 0 89.88);
+    color: var(--fg-strong);
     font-size: 14rem;
     font-weight: 600;
     line-height: 1.25;
@@ -97,7 +97,7 @@ const STYLES = /* css */`
   }
   trusted-signers-panel .device-meta {
     margin-top: 3px;
-    color: oklch(0.68 0 89.88);
+    color: var(--fg);
     font-size: 12rem;
     line-height: 1.3;
     overflow-wrap: anywhere;
@@ -110,12 +110,12 @@ const STYLES = /* css */`
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    color: oklch(0.72 0.18 25);
-    background-color: oklch(0.26 0.08 25);
+    color: var(--error-fg);
+    background-color: oklch(from var(--error) l c h / 0.5);
     cursor: pointer;
   }
   trusted-signers-panel .remove-btn:active {
-    background-color: oklch(0.32 0.1 25);
+    background-color: oklch(from var(--error) l c h / 0.65);
   }
   trusted-signers-panel .remove-btn:disabled {
     opacity: 0.55;

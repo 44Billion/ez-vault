@@ -1,0 +1,54 @@
+/*
+ * Theme tokens
+ * ------------
+ * Single source of authored UI colors for ez-vault. Every token is a
+ * `light-dark(<light>, <dark>)` pair; `color-scheme: light dark` in
+ * global.css lets the browser pick the value per prefers-color-scheme.
+ * UGC media (avatar photos, images, video) intentionally stays outside this
+ * palette — never apply theme inversion filters to it.
+ *
+ * Alpha variants of tokens are expressed inline where needed with relative
+ * color syntax (`oklch(from <token> l c h / 0.88)`); add a derived token
+ * here only when two or more consumers need the same derived value.
+ */
+:root {
+  /* Surfaces */
+  --surface: light-dark(oklch(0.97 0 89.88), oklch(0.22 0 89.88));
+  --surface-raised: light-dark(oklch(0.99 0 89.88), oklch(0.25 0 89.88));
+  --surface-sunken: light-dark(oklch(0.92 0 89.88), oklch(0.18 0 89.88));
+  --surface-interactive: light-dark(oklch(0.95 0 89.88), oklch(0.28 0 89.88));
+  --surface-interactive-active: light-dark(oklch(0.87 0 89.88), oklch(0.38 0 89.88));
+  /* Scan/QR surfaces must stay white in both schemes for scannability. */
+  --surface-inverse: light-dark(oklch(0.98 0 0), oklch(0.98 0 0));
+
+  /* Text */
+  --fg-strong: light-dark(oklch(0.25 0 89.88), oklch(0.92 0 89.88));
+  --fg: light-dark(oklch(0.32 0 89.88), oklch(0.78 0 89.88));
+  --fg-muted: light-dark(oklch(0.4 0 89.88), oklch(0.65 0 89.88));
+  --fg-faint: light-dark(oklch(0.5 0 89.88), oklch(0.55 0 89.88));
+  --fg-on-accent: light-dark(oklch(0.98 0 0), oklch(0.98 0 0));
+
+  /* Accent (brand purple) */
+  --accent: light-dark(oklch(0.48 0.16 274.76), oklch(0.3 0.12 274.76));
+  --accent-hover: light-dark(oklch(0.44 0.16 274.76), oklch(0.38 0.1 274.76));
+  --accent-active: light-dark(oklch(0.41 0.16 274.76), oklch(0.45 0.13 274.76));
+  --accent-soft: light-dark(oklch(0.92 0.05 274.76), oklch(0.28 0.08 274.76));
+  --accent-fg: light-dark(oklch(0.4 0.16 274.76), oklch(0.78 0.16 274.76));
+
+  /* Status */
+  --success: light-dark(oklch(0.52 0.18 145), oklch(0.52 0.18 145));
+  --success-active: light-dark(oklch(0.45 0.16 145), oklch(0.48 0.16 145));
+  --success-fg: light-dark(oklch(0.45 0.16 145), oklch(0.7 0.16 145));
+  --error: light-dark(oklch(0.55 0.2 25), oklch(0.55 0.2 25));
+  --error-active: light-dark(oklch(0.5 0.2 25), oklch(0.5 0.2 25));
+  --error-fg: light-dark(oklch(0.45 0.2 25), oklch(0.72 0.18 25));
+  --warning-fg: light-dark(oklch(0.5 0.14 80), oklch(0.78 0.14 80));
+  --info-fg: light-dark(oklch(0.5 0.15 240), oklch(0.62 0.15 240));
+
+  /* Lines, shadows, scrims */
+  --border: light-dark(oklch(0.82 0 89.88), oklch(0.32 0 89.88));
+  --shadow: light-dark(rgb(0 0 0 / 0.15), rgb(0 0 0 / 0.35));
+  --shadow-strong: light-dark(rgb(0 0 0 / 0.3), rgb(0 0 0 / 0.5));
+  --scrim: light-dark(rgb(0 0 0 / 0.45), rgb(0 0 0 / 0.45));
+  --scrim-strong: light-dark(rgb(0 0 0 / 0.65), rgb(0 0 0 / 0.65));
+}

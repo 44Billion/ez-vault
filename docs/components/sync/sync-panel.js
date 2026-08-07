@@ -46,21 +46,21 @@ const STYLES = /* css */`
   sync-panel .panel-title {
     font-size: 14rem;
     font-weight: 600;
-    color: oklch(0.92 0 89.88);
+    color: var(--fg-strong);
   }
   sync-panel .panel-cancel {
     width: 28px;
     height: 28px;
     border-radius: 50%;
-    background-color: oklch(0.28 0 89.88);
-    color: oklch(0.92 0 89.88);
+    background-color: var(--surface-interactive);
+    color: var(--fg-strong);
     display: inline-flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
   }
   sync-panel .panel-cancel:active {
-    background-color: oklch(0.38 0 89.88);
+    background-color: var(--surface-interactive-active);
   }
   sync-panel .panel-cancel svg {
     width: 16px;
@@ -71,16 +71,16 @@ const STYLES = /* css */`
     align-items: center;
     gap: 8px;
     padding: 8px 10px;
-    background-color: oklch(0.22 0 89.88);
+    background-color: var(--surface);
     border-radius: 4px;
-    border-left: 3px solid oklch(0.65 0.14 80);
+    border-left: 3px solid var(--warning-fg);
     font-size: 13rem;
-    color: oklch(0.78 0 89.88);
+    color: var(--fg);
     line-height: 1.35;
   }
   sync-panel .panel-hint .hint-icon {
     flex-shrink: 0;
-    color: oklch(0.78 0.14 80);
+    color: var(--warning-fg);
     position: relative;
     bottom: 2px;
   }
@@ -96,22 +96,22 @@ const STYLES = /* css */`
   sync-panel .device-btn {
     flex: 1 1 0;
     min-width: 0;
-    background-color: oklch(0.3 0.12 274.76);
-    color: oklch(0.92 0 89.88);
+    background-color: var(--accent);
+    color: var(--fg-on-accent);
     border-radius: 8px;
     padding: 10px 8px;
     font-size: 14rem;
     text-align: center;
   }
   sync-panel .device-btn:active {
-    background-color: oklch(0.38 0.1 274.76);
+    background-color: var(--accent-hover);
   }
   /* Mirror the toolbar "on" state for the two device buttons — whichever
      flow (host / joiner) is open marks its button is-active and disables
      the sibling, so the user can see which device flow is running. */
   sync-panel .device-btn.is-active {
-    background-color: oklch(0.45 0.13 274.76);
-    box-shadow: inset 0 2px 4px oklch(0 0 0 / 0.3);
+    background-color: var(--accent-active);
+    box-shadow: inset 0 2px 4px var(--shadow);
   }
   sync-panel .device-btn:disabled {
     opacity: 0.45;

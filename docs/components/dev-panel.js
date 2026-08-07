@@ -31,13 +31,13 @@ const STYLES = /* css */`
     padding-bottom: 24px;
   }
   dev-panel .dev-note {
-    color: oklch(0.68 0 89.88);
+    color: var(--fg);
     font-size: 12rem;
     line-height: 1.35;
     margin-bottom: 12px;
   }
   dev-panel .dev-section-title {
-    color: light-dark(oklch(0.88 0 89.88), oklch(0.92 0 89.88));
+    color: var(--fg-strong);
     font-size: 13rem;
     font-weight: 700;
     margin-bottom: 10px;
@@ -48,10 +48,10 @@ const STYLES = /* css */`
     gap: 10px;
   }
   dev-panel .content-key-row {
-    border: 1px solid oklch(0.33 0 89.88);
+    border: 1px solid var(--border);
     border-radius: 8px;
     padding: 10px;
-    background-color: oklch(0.18 0 89.88);
+    background-color: var(--surface-sunken);
   }
   dev-panel .row-top {
     display: flex;
@@ -70,17 +70,17 @@ const STYLES = /* css */`
     height: 28px;
     flex: 0 0 28px;
     border-radius: 50%;
-    background-color: light-dark(oklch(0.78 0 89.88), oklch(0.22 0 89.88));
+    background-color: var(--surface);
     background-position: center;
     background-repeat: no-repeat;
     background-size: cover;
     box-shadow:
-      0 0 0 1px light-dark(oklch(0.82 0 89.88), oklch(0.18 0 89.88)),
-      0 0 0 2px light-dark(oklch(0.7 0.12 274.76), light-dark(oklch(0.34 0.12 274.76), oklch(0.3 0.12 274.76)));
+      0 0 0 1px var(--border),
+      0 0 0 2px var(--accent);
   }
   dev-panel .account-name {
     min-width: 0;
-    color: oklch(0.9 0 89.88);
+    color: var(--fg-strong);
     font-size: 13rem;
     font-weight: 700;
     overflow-wrap: anywhere;
@@ -89,19 +89,19 @@ const STYLES = /* css */`
   dev-panel .meta-line,
   dev-panel .status-line {
     margin-top: 7px;
-    color: oklch(0.7 0 89.88);
+    color: var(--fg);
     font-size: 12rem;
     line-height: 1.3;
     overflow-wrap: anywhere;
   }
   dev-panel .line-label {
-    color: oklch(0.56 0 89.88);
+    color: var(--fg-muted);
   }
   dev-panel .status-line.is-error {
-    color: oklch(0.72 0.17 28);
+    color: var(--error-fg);
   }
   dev-panel .status-line.is-ok {
-    color: oklch(0.74 0.14 148);
+    color: var(--success-fg);
   }
   dev-panel .generate-btn {
     flex: 0 0 auto;
@@ -113,13 +113,13 @@ const STYLES = /* css */`
     align-items: center;
     justify-content: center;
     gap: 6px;
-    background-color: light-dark(oklch(0.34 0.12 274.76), oklch(0.3 0.12 274.76));
-    color: light-dark(oklch(0.88 0 89.88), oklch(0.92 0 89.88));
+    background-color: var(--accent);
+    color: var(--fg-on-accent);
     font-size: 12rem;
     font-weight: 700;
   }
   dev-panel .generate-btn:active {
-    background-color: oklch(0.38 0.1 274.76);
+    background-color: var(--accent-hover);
   }
   dev-panel .generate-btn:disabled {
     opacity: 0.48;
@@ -130,7 +130,7 @@ const STYLES = /* css */`
     flex: 0 0 auto;
   }
   dev-panel .empty-state {
-    color: oklch(0.64 0 89.88);
+    color: var(--fg-muted);
     font-size: 12rem;
   }
 `

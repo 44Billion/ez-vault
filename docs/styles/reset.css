@@ -38,3 +38,10 @@ a {
 i {
   font-style: normal;
 }
+@media (inverted-colors: inverted) {
+  /* OS-level color inversion accessibility mode — not a theme concern.
+     Re-invert UGC media so it keeps its original colors. */
+  img, video, iframe, svg {
+    filter: invert(1) hue-rotate(180deg);
+  }
+}

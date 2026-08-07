@@ -28,8 +28,8 @@ const STYLES = /* css */`
     justify-content: center;
     gap: 24px;
     padding: 32px 24px;
-    background-color: oklch(0.18 0 89.88);
-    color: light-dark(oklch(0.88 0 89.88), oklch(0.92 0 89.88)));
+    background-color: var(--surface-sunken);
+    color: var(--fg-strong);
   }
   lock-overlay[hidden] {
     display: none;
@@ -38,12 +38,12 @@ const STYLES = /* css */`
     width: 88px;
     height: 88px;
     border-radius: 50%;
-    background-color: oklch(0.22 0 89.88);
-    box-shadow: 0 0 0 2px light-dark(oklch(0.34 0.12 274.76), oklch(0.3 0.12 274.76));
+    background-color: var(--surface);
+    box-shadow: 0 0 0 2px var(--accent);
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    color: oklch(0.78 0.16 274.76);
+    color: var(--accent-fg);
   }
   lock-overlay .lock-badge svg {
     width: 44px;
@@ -57,7 +57,7 @@ const STYLES = /* css */`
   }
   lock-overlay .lock-hint {
     font-size: 13rem;
-    color: oklch(0.62 0 89.88);
+    color: var(--fg-muted);
     text-align: center;
     margin: 0;
     max-width: 280px;
@@ -68,8 +68,8 @@ const STYLES = /* css */`
     align-items: center;
     justify-content: center;
     gap: 8px;
-    background-color: oklch(0.55 0.18 145);
-    color: light-dark(oklch(0.1 0 0), oklch(0.98 0 0));
+    background-color: var(--success);
+    color: var(--fg-on-accent);
     border-radius: 9999px;
     padding: 12px 24px;
     font-size: 14rem;
@@ -77,7 +77,7 @@ const STYLES = /* css */`
     min-width: 200px;
   }
   lock-overlay .lock-unlock:active {
-    background-color: oklch(0.48 0.16 145);
+    background-color: var(--success-active);
   }
   lock-overlay .lock-unlock:disabled {
     opacity: 0.7;
