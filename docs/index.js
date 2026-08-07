@@ -23,7 +23,8 @@ await Promise.all([
   import('./components/shared/accordion-panel.js'),
   import('./components/shared/toast.js'),
   import('./components/activity-log.js'),
-  import('./components/lock-overlay.js')
+  import('./components/lock-overlay.js'),
+  import('./components/create-overlay.js')
 ])
 
 const list = document.querySelector('account-list')
