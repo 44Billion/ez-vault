@@ -29,6 +29,7 @@ export const accountAvatarLocales = defineLocales({
   'Copy bunker URL': ['Copier l’URL bunker', 'Copia URL bunker', 'Bunker-URL kopieren', 'Copiar URL bunker', 'Copiar URL bunker', 'Копировать URL bunker', '复制 bunker URL', '複製 bunker URL', 'bunker URL をコピー', 'bunker URL 복사'],
   Save: ['Enregistrer', 'Salva', 'Speichern', 'Guardar', 'Salvar', 'Сохранить', '保存', '儲存', '保存', '저장'],
   'Copy npub': ['Copier le npub', 'Copia npub', 'npub kopieren', 'Copiar npub', 'Copiar npub', 'Копировать npub', '复制 npub', '複製 npub', 'npub をコピー', 'npub 복사'],
+  'Could not create account': ['Impossible de créer le compte', 'Impossibile creare l’account', 'Konto konnte nicht erstellt werden', 'No se pudo crear la cuenta', 'Não foi possível criar a conta', 'Не удалось создать учётную запись', '无法创建账户', '無法建立帳戶', 'アカウントを作成できませんでした', '계정을 만들 수 없습니다'],
   'Account name': ['Nom du compte', 'Nome account', 'Kontoname', 'Nombre de la cuenta', 'Nome da conta', 'Имя учётной записи', '账户名称', '帳戶名稱', 'アカウント名', '계정 이름'],
   unnamed: ['sans nom', 'senza nome', 'unbenannt', 'sin nombre', 'sem nome', 'без имени', '未命名', '未命名', '名前なし', '이름 없음'],
   'Name update failed': ['Échec de la mise à jour du nom', 'Aggiornamento del nome non riuscito', 'Namensänderung fehlgeschlagen', 'No se pudo actualizar el nombre', 'Falha ao atualizar o nome', 'Не удалось изменить имя', '名称更新失败', '名稱更新失敗', '名前の更新に失敗しました', '이름 업데이트 실패'],
@@ -719,6 +720,7 @@ export class AccountAvatar extends HTMLElement {
       })
     } catch (err) {
       console.error(err)
+      toast.error(t('Could not create account'), err?.message ?? '')
       if (!this.#draft && draft) {
         this.#draft = draft
         this.#account = null
