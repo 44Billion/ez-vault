@@ -5,6 +5,7 @@ import {
   applyAccountEvents,
   handleLegacyViewMessage,
   isTrustedOrigin,
+  requestVaultClose,
   signerRequestApp,
   signerRequestContext,
   snapshotAccounts
@@ -46,6 +47,10 @@ test('signerRequestContext extracts NIP-44 v3 kind and scope', () => {
     signerRequestContext('nip44v3_decrypt_double_dh', ['peer', '3560', '', 'ciphertext', 'peer-content', 'own-content']),
     { eventKind: 3560, eventScope: '' }
   )
+})
+
+test('requestVaultClose resolves immediately without a launcher port', async () => {
+  await assert.doesNotReject(requestVaultClose())
 })
 
 test('launcher origin allowlist accepts local hosts and 44billion.net only', () => {

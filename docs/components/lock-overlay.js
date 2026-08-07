@@ -5,6 +5,7 @@ import { filterVisibleAccounts, pendingMutationNeedsUnlock, subscribePendingMuta
 import * as toast from './shared/toast.js'
 import { injectComponentStyles } from '../helpers/dom.js'
 import { defineLocales, getT, subscribeLocaleChanged } from '../i18n/index.js'
+import { requestVaultClose } from '../services/messenger.js'
 
 const ICON_LOCK = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13a2 2 0 0 1 2 -2h10a2 2 0 0 1 2 2v6a2 2 0 0 1 -2 2h-10a2 2 0 0 1 -2 -2v-6z" /><path d="M11 16a1 1 0 1 0 2 0a1 1 0 0 0 -2 0" /><path d="M8 11v-4a4 4 0 1 1 8 0v4" /></svg>'
 
@@ -110,6 +111,8 @@ export class LockOverlay extends HTMLElement {
   #unlockBtn = null
   #unlockIcon = null
   #unsubLocale = null
+  #wasVisible = false
+  #closing = false
 
   connectedCallback () {
     injectComponentStyles('lock-overlay', STYLES)
@@ -147,7 +150,27 @@ export class LockOverlay extends HTMLElement {
   }
 
   #applyVisibility () {
-    this.toggleAttribute('hidden', !shouldShow())
+    const show = shouldShow()
+    if (show) {
+      this.#wasVisible = true
+      this.#closing = false
+      this.toggleAttribute('hidden', false)
+      return
+    }
+    if (this.#closing) return
+    // Successful unlock: keep the overlay covering the main UI while asking
+    // the launcher to close the drawer, then hide.
+    if (this.#wasVisible && secrets.isUnlocked()) {
+      this.#closing = true
+      requestVaultClose().then(() => {
+        this.#closing = false
+        this.#wasVisible = false
+        this.toggleAttribute('hidden', true)
+      })
+      return
+    }
+    this.#wasVisible = false
+    this.toggleAttribute('hidden', true)
   }
 
   #onUnlock = async () => {

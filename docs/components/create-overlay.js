@@ -1,6 +1,6 @@
 import * as store from '../services/accounts-store.js'
+import * as secrets from '../services/secrets.js'
 import {
-  filterVisibleAccounts,
   pendingMutationNeedsUnlock,
   subscribePendingMutations
 } from '../services/account-mutations.js'
@@ -8,6 +8,7 @@ import { injectComponentStyles } from '../helpers/dom.js'
 import { shouldShowCreateOverlay } from '../helpers/create-overlay-visibility.js'
 import { defineLocales, getT, subscribeLocaleChanged } from '../i18n/index.js'
 import './account-avatar.js'
+import { requestVaultClose } from '../services/messenger.js'
 
 // Tabler outline user-plus icon (icons/user-plus.svg), inlined so it
 // inherits currentColor.
@@ -110,6 +111,8 @@ export class CreateOverlay extends HTMLElement {
   #tile = null
   #dismissBtn = null
   #dismissed = false
+  #wasVisible = false
+  #closing = false
 
   connectedCallback () {
     injectComponentStyles('create-overlay', STYLES)
@@ -143,13 +146,38 @@ export class CreateOverlay extends HTMLElement {
   }
 
   #applyVisibility () {
-    const shouldShow = !this.#dismissed && shouldShowCreateOverlay(
-      filterVisibleAccounts(store.list()),
-      pendingMutationNeedsUnlock()
+    const accounts = store.list()
+    const pendingNeedsUnlock = pendingMutationNeedsUnlock()
+    // While the tile is saving, keep the overlay even though the journal may
+    // hide the not-yet-committed account (or a pending mutation shows up).
+    const ownCreateInFlight = this.#tile?.getAttribute('mode') === 'creating'
+    const shouldShow = !this.#dismissed && (
+      ownCreateInFlight ||
+      shouldShowCreateOverlay(accounts, pendingNeedsUnlock, secrets.isUnlocked())
     )
-    this.toggleAttribute('hidden', !shouldShow)
-    if (shouldShow) this.#ensureTile()
-    else this.#removeTile()
+    if (shouldShow) {
+      this.#wasVisible = true
+      this.#closing = false
+      this.toggleAttribute('hidden', false)
+      this.#ensureTile()
+      return
+    }
+    if (this.#closing) return
+    // Account created through the tile: keep the overlay covering the main
+    // UI while asking the launcher to close the drawer, then hide.
+    if (this.#wasVisible && !this.#dismissed && accounts.length > 0) {
+      this.#closing = true
+      requestVaultClose().then(() => {
+        this.#closing = false
+        this.#wasVisible = false
+        this.toggleAttribute('hidden', true)
+        this.#removeTile()
+      })
+      return
+    }
+    this.#wasVisible = false
+    this.toggleAttribute('hidden', true)
+    this.#removeTile()
   }
 
   #ensureTile () {

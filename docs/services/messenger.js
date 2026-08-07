@@ -178,10 +178,26 @@ const pendingTranslateMessages = []
 
 export function setAccountsState () {
   if (!handshakeComplete || !launcherPort) return
+  // Only broadcast committed state. While a mutation is pending the journal
+  // hides affected accounts, and the mutation may still be cancelled (e.g.
+  // the user aborts the passkey prompt) — journal.clear() re-triggers this
+  // with the final state, so the launcher never sees an uncommitted change.
+  if (accountMutationJournal.read()) return
   tell(launcherPort, {
     code: 'SET_ACCOUNTS_STATE',
     payload: { accounts: snapshotAccounts() }
   })
+}
+
+// Ask the launcher to close the vault drawer. Resolves when the launcher
+// acknowledges (REPLY) or after `timeoutMs`, whichever comes first; resolves
+// immediately when the vault is not embedded (no trusted launcher port).
+export async function requestVaultClose (timeoutMs = 1500) {
+  if (!handshakeComplete || !launcherPort) return
+  await ask(launcherPort, {
+    code: 'CLOSE_VAULT_VIEW',
+    payload: null
+  }, { timeout: timeoutMs })
 }
 
 function scheduleAccountsState () {
