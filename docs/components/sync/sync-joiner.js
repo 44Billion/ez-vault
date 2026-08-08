@@ -32,6 +32,7 @@ export const syncJoinerLocales = {
     Connect: ['Connecter', 'Connetti', 'Verbinden', 'Conectar', 'Conectar', 'Подключить', '连接', '連線', '接続', '연결'],
     'Scan QR': ['Scanner le QR', 'Scansiona QR', 'QR scannen', 'Escanear QR', 'Ler QR', 'Сканировать QR', '扫描二维码', '掃描 QR 碼', 'QR をスキャン', 'QR 스캔'],
     'Stop scanning': ['Arrêter le scan', 'Interrompi scansione', 'Scannen beenden', 'Detener escaneo', 'Parar leitura', 'Остановить сканирование', '停止扫描', '停止掃描', 'スキャンを停止', '스캔 중지'],
+    'Could not start the camera': ['Impossible de démarrer la caméra', 'Impossibile avviare la fotocamera', 'Kamera konnte nicht gestartet werden', 'No se pudo iniciar la cámara', 'Não foi possível iniciar a câmera', 'Не удалось запустить камеру', '无法启动相机', '無法啟動相機', 'カメラを起動できませんでした', '카메라를 시작할 수 없습니다'],
     'Type the code shown on the other device:': ['Saisissez le code affiché sur l’autre appareil :', 'Digita il codice mostrato sull’altro dispositivo:', 'Den auf dem anderen Gerät angezeigten Code eingeben:', 'Escribe el código mostrado en el otro dispositivo:', 'Digite o código mostrado no outro dispositivo:', 'Введите код, показанный на другом устройстве:', '输入另一台设备上显示的代码：', '輸入另一台裝置上顯示的代碼：', '別のデバイスに表示されたコードを入力してください：', '다른 기기에 표시된 코드를 입력하세요:'],
     'Digit {{number}}': ['Chiffre {{number}}', 'Cifra {{number}}', 'Ziffer {{number}}', 'Dígito {{number}}', 'Dígito {{number}}', 'Цифра {{number}}', '第 {{number}} 位', '第 {{number}} 位', '{{number}} 桁目', '{{number}}번째 숫자'],
     'Paste a nostrpair:// URL or scan the QR shown by the other device.': ['Collez une URL nostrpair:// ou scannez le QR affiché par l’autre appareil.', 'Incolla un URL nostrpair:// o scansiona il QR mostrato dall’altro dispositivo.', 'Eine nostrpair://-URL einfügen oder den QR-Code des anderen Geräts scannen.', 'Pega una URL nostrpair:// o escanea el QR mostrado por el otro dispositivo.', 'Cole uma URL nostrpair:// ou leia o QR exibido pelo outro dispositivo.', 'Вставьте URL nostrpair:// или отсканируйте QR-код на другом устройстве.', '粘贴 nostrpair:// URL，或扫描另一台设备显示的二维码。', '貼上 nostrpair:// URL，或掃描另一台裝置顯示的 QR 碼。', 'nostrpair:// URL を貼り付けるか、別のデバイスの QR コードをスキャンしてください。', 'nostrpair:// URL을 붙여 넣거나 다른 기기의 QR 코드를 스캔하세요.'],
@@ -710,6 +711,7 @@ export class SyncJoiner extends HTMLElement {
       this.dataset.scanning = 'true'
     } catch (err) {
       console.error('camera start failed', err?.message ?? err)
+      toast.error(t('Could not start the camera'), err?.message ?? '')
       try { scanner.stop() } catch { /* noop */ }
       this.#removeScanVideo()
       this.#flashError()
