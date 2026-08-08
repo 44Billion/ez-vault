@@ -17,14 +17,22 @@ import { getState, hasState, removeState, requestPersistentStorage, updateState 
 // raw secret material all live inside `secrets.js` and never travel
 // through this file.
 //
-// Syncing is intentionally discouraged — `residentKey: 'discouraged'` keeps
-// the credential non-discoverable and we always address it by the
-// credentialId persisted in IndexedDB. Some authenticators still promote
-// the credential to discoverable and sync it across devices; to make sure a
-// fresh registration on a second device can't *overwrite* the first one (the
-// spec mandates overwrite when `(rpId, user.id)` collide for a discoverable
-// credential), we randomize `user.id` per registration and persist it so we
-// can later target the credential via `signalCurrentUserDetails`.
+// Cross-device portability is deliberately routed through the vault's own
+// pairing flow (`nostrpair://` QR codes), never through authenticator sync.
+// Vendor-backed sync (Google Password Manager, iCloud Keychain, ...) means
+// the vendor holds the keys backing the synced credential, which is a weaker
+// guarantee than our pairing flow provides — so authenticator sync is not
+// the trust anchor. `residentKey: 'preferred'` is a pragmatic compromise:
+// the credential stays non-discoverable where the authenticator allows it,
+// while Android still gets a Google Password Manager passkey because that is
+// the only Android path that exposes PRF. If the platform syncs the
+// credential anyway, we don't rely on that sync — the vault always addresses
+// the credential by the credentialId persisted in IndexedDB. The random
+// `user.id` is the belt: for a discoverable credential the spec mandates
+// overwrite when `(rpId, user.id)` collide, so randomizing it per
+// registration keeps a fresh registration on a second device from clobbering
+// the first; we persist it so `signalCurrentUserDetails` can later target
+// the credential.
 //
 // LargeBlob and PRF are best-effort across authenticators:
 // - largeBlob may refuse to write (legacy double-prompt cancellation, or
@@ -117,11 +125,12 @@ function buildUserName (userId) {
   return `${base} (${suffix})`
 }
 
-// Some platforms (notably older Android/Chrome and certain WebView contexts)
-// only surface PRF on the assertion ceremony, not on creation. After a fresh
-// `create()` that came back without PRF, this re-prompts via `get()` against
-// the credential we just minted. `userVerification: 'discouraged'` lets
-// platforms that cache UV across a recent create() skip the second prompt.
+// Some platforms and authenticators only surface PRF on the assertion
+// ceremony, not on creation (e.g. certain older Android/Chrome and WebView
+// contexts). After a fresh `create()` that came back without PRF, this
+// re-prompts via `get()` against the credential we just minted.
+// `userVerification: 'discouraged'` lets platforms that cache UV across a
+// recent create() skip the second prompt.
 async function fetchPrfViaGet (rawId) {
   try {
     const credential = await navigator.credentials.get({
@@ -211,19 +220,23 @@ export async function register () {
       ],
       authenticatorSelection: {
         authenticatorAttachment: 'platform',
-        // Non-discoverable: keeps the credential local-only and dodges the
-        // sync paths used by major platform authenticators for discoverable
-        // (resident) credentials. The random `user.id` above is the belt to
-        // this suspenders — if the authenticator promotes the credential to
-        // discoverable and syncs it anyway, a future registration on another
-        // device won't collide on `(rpId, user.id)` and overwrite it.
-        residentKey: 'discouraged',
+        // Preferred: non-discoverable where the authenticator honors it, but
+        // Android then creates a Google Password Manager passkey — the only
+        // Android credential type that exposes PRF. Platform sync may
+        // happen, but it is never the intended cross-device path (that's
+        // `nostrpair`); the random `user.id` above is the belt against a
+        // synced credential being overwritten by a future registration on
+        // another device.
+        residentKey: 'preferred',
         userVerification: 'discouraged'
       },
       hints: CREATE_HINTS,
       extensions: {
         prf: { eval: { first: PRF_SALT_BYTES } },
-        largeBlob: { support: 'preferred' }
+        largeBlob: { support: 'preferred' },
+        // Diagnostic: reports whether the created credential is actually
+        // discoverable (rk), which we use to confirm the Android path.
+        credProps: true
       }
     }
   })
@@ -232,10 +245,15 @@ export async function register () {
 
   const ext = extractExtensions(credential)
   let prfBytes = extractPrfBytes(ext)
-  // Some platforms (e.g. older Android/Chrome) only expose PRF on get(),
-  // not on create(). Try one assertion against the just-minted credential
-  // before giving up on this passkey.
-  if (!prfBytes?.length) prfBytes = await fetchPrfViaGet(credential.rawId)
+  const isDiscoverable = Boolean(ext.credProps?.rk)
+  if (prfBytes?.length) {
+    console.info('[passkey] PRF returned on create', { rk: isDiscoverable })
+  } else {
+    // Some platforms only expose PRF on get(), not on create(). Try one
+    // assertion against the just-minted credential before giving up.
+    console.info('[passkey] PRF missing on create — retrying via get()', { rk: isDiscoverable })
+    prfBytes = await fetchPrfViaGet(credential.rawId)
+  }
   if (!prfBytes?.length) {
     // Credential is useless to us without PRF — best-effort tell the
     // authenticator to forget it so the user isn't left with a dangling
