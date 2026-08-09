@@ -3,9 +3,9 @@ import { describe, it } from 'node:test'
 import { readFile, readdir } from 'node:fs/promises'
 import path from 'node:path'
 
-const docsRoot = path.resolve(import.meta.dirname, '../docs')
-const themeCssPath = path.join(docsRoot, 'styles/theme.css')
-const resetCssPath = path.join(docsRoot, 'styles/reset.css')
+const srcRoot = path.resolve(import.meta.dirname, '../src')
+const themeCssPath = path.join(srcRoot, 'styles/theme.css')
+const resetCssPath = path.join(srcRoot, 'styles/reset.css')
 
 const normalTextPairs = [
   ['fg-strong', 'surface'],
@@ -58,13 +58,13 @@ describe('native color themes', () => {
     for (const file of files) {
       const source = await readFile(file, 'utf8')
       for (const match of source.matchAll(/var\((--[a-z0-9-]+)\)/g)) {
-        assert.ok(tokens[match[1].slice(2)] !== undefined, `${path.relative(docsRoot, file)} uses undefined ${match[1]}`)
+        assert.ok(tokens[match[1].slice(2)] !== undefined, `${path.relative(srcRoot, file)} uses undefined ${match[1]}`)
       }
     }
   })
 
   it('links theme.css before global.css in index.html', async () => {
-    const html = await readFile(path.join(docsRoot, 'index.html'), 'utf8')
+    const html = await readFile(path.join(srcRoot, 'index.html'), 'utf8')
     const themeLink = html.indexOf('./styles/theme.css')
     const globalLink = html.indexOf('./styles/global.css')
     assert.ok(themeLink !== -1, 'index.html must link theme.css')
@@ -118,7 +118,7 @@ describe('native color themes', () => {
       // `#add-account-btn` is an id selector, not a hex color; strip it so
       // the hex-color regex can't false-positive on its all-hex letters.
       source = source.replace(/#add-account-btn/g, '')
-      const relative = path.relative(docsRoot, file)
+      const relative = path.relative(srcRoot, file)
       assert.doesNotMatch(source, hexColor, relative)
       assert.doesNotMatch(source, authoredOklch, relative)
       assert.doesNotMatch(source, authoredRgbHsl, relative)
@@ -151,9 +151,12 @@ function countCommas (value) {
   return value.split(',').length - 1
 }
 
-async function listDocsFiles (directory = docsRoot) {
+async function listDocsFiles (directory = srcRoot) {
   const entries = await readdir(directory, { withFileTypes: true })
   const nested = await Promise.all(entries.map(entry => {
+    // Generated build outputs (esbuild) contain vendor code with their own
+    // colors — only authored sources are scanned for literals.
+    if (entry.name === 'chunks' || entry.name === 'app.js' || entry.name === 'sw.js') return []
     const entryPath = path.join(directory, entry.name)
     if (entry.isDirectory()) return listDocsFiles(entryPath)
     return /\.(?:css|js|html)$/.test(entry.name) ? [entryPath] : []

@@ -9,7 +9,7 @@ import {
   resolveSupportedLocale,
   setLocale,
   subscribeLocaleChanged
-} from '../docs/i18n/index.js'
+} from '../src/i18n/index.js'
 
 const locales = defineLocales({
   Hello: ['Bonjour', 'Ciao', 'Hallo', 'Hola', 'Olá', 'Привет', '你好', '你好', 'こんにちは', '안녕하세요']

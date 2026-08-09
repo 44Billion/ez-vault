@@ -1,15 +1,15 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { generateSecretKey } from 'libp2r2p/key'
-import NsecSigner from '../docs/services/nsec-signer.js'
-import * as secrets from '../docs/services/secrets.js'
+import NsecSigner from '../src/services/nsec-signer.js'
+import * as secrets from '../src/services/secrets.js'
 import { freeRelays, seedRelays } from 'libp2r2p/relay'
 import {
   canConnectRelay,
   refreshDeviceRelayList,
   refreshDeviceRelayListIfDue,
   resolveDeviceRelays
-} from '../docs/services/device-relays.js'
+} from '../src/services/device-relays.js'
 
 const data = new Map()
 

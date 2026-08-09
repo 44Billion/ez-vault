@@ -21,3 +21,6 @@ todo
 .claude
 .codex
 .kilo
+
+# Dev watcher output — never committed (docs/ is the committed build output)
+.dev/

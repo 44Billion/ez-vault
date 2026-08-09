@@ -4,7 +4,7 @@ import {
   ACCOUNT_NAME_COLORS,
   ACCOUNT_NAME_NATURE,
   randomAccountName
-} from '../docs/services/account-names.js'
+} from '../src/services/account-names.js'
 import { profileEventTemplate } from 'libp2r2p/key'
 
 test('randomAccountName returns a color and nature combination', () => {

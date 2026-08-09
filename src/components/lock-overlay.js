@@ -5,7 +5,9 @@ import { filterVisibleAccounts, pendingMutationNeedsUnlock, subscribePendingMuta
 import * as toast from './shared/toast.js'
 import { injectComponentStyles } from '../helpers/dom.js'
 import { defineLocales, getT, subscribeLocaleChanged } from '../i18n/index.js'
+import { swUpdateLocales } from '../i18n/sw-update.js'
 import { requestVaultClose } from '../services/messenger.js'
+import { applySwUpdate, isUpdateAvailable, subscribeSwUpdate } from '../services/sw-manager.js'
 
 const ICON_LOCK = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13a2 2 0 0 1 2 -2h10a2 2 0 0 1 2 2v6a2 2 0 0 1 -2 2h-10a2 2 0 0 1 -2 -2v-6z" /><path d="M11 16a1 1 0 1 0 2 0a1 1 0 0 0 -2 0" /><path d="M8 11v-4a4 4 0 1 1 8 0v4" /></svg>'
 
@@ -17,6 +19,7 @@ export const lockOverlayLocales = defineLocales({
 })
 
 const t = getT(lockOverlayLocales)
+const swT = getT(swUpdateLocales)
 
 const STYLES = /* css */`
   lock-overlay {
@@ -93,6 +96,42 @@ const STYLES = /* css */`
     height: 18px;
     display: block;
   }
+  lock-overlay .overlay-update-indicator {
+    position: absolute;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 6px 6px 14px;
+    background-color: var(--surface-raised);
+    color: var(--fg-strong);
+    border: 1px solid var(--border);
+    border-radius: 9999px;
+    font-size: 13rem;
+    cursor: pointer;
+  }
+  lock-overlay .overlay-update-indicator[hidden] {
+    display: none;
+  }
+  lock-overlay .overlay-update-label {
+    color: var(--fg);
+    font-weight: 500;
+  }
+  lock-overlay .overlay-update-action {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    background-color: var(--accent);
+    color: var(--fg-on-accent);
+    border-radius: 9999px;
+    padding: 6px 12px;
+    font-weight: 600;
+  }
+  lock-overlay .overlay-update-indicator:active .overlay-update-action {
+    background-color: var(--accent-active);
+  }
 `
 
 // Visibility rule: shown when at least one non-npub account exists *and* the
@@ -111,12 +150,18 @@ export class LockOverlay extends HTMLElement {
   #unlockBtn = null
   #unlockIcon = null
   #unsubLocale = null
+  #updateIndicator = null
+  #unsubUpdate = null
   #wasVisible = false
   #closing = false
 
   connectedCallback () {
     injectComponentStyles('lock-overlay', STYLES)
     this.innerHTML = `
+      <button type="button" class="overlay-update-indicator" hidden>
+        <span class="overlay-update-label"></span>
+        <span class="overlay-update-action"></span>
+      </button>
       <span class="lock-badge" aria-hidden="true">${ICON_LOCK}</span>
       <h2 class="lock-title">Vault locked</h2>
       <p class="lock-hint">Unlock with the passkey that holds your account secrets.</p>
@@ -128,6 +173,11 @@ export class LockOverlay extends HTMLElement {
     this.#unlockBtn = this.querySelector('.lock-unlock')
     this.#unlockIcon = this.querySelector('.lock-unlock-icon')
     this.#unlockBtn.addEventListener('click', this.#onUnlock)
+    this.#updateIndicator = this.querySelector('.overlay-update-indicator')
+    this.#updateIndicator.addEventListener('click', applySwUpdate)
+    this.#unsubUpdate = subscribeSwUpdate(available =>
+      this.#updateIndicator.toggleAttribute('hidden', !isUpdateAvailable(available))
+    )
     this.#translate()
     this.#unsubLocale = subscribeLocaleChanged(() => this.#translate())
 
@@ -145,6 +195,10 @@ export class LockOverlay extends HTMLElement {
     this.#unsubPending?.()
     this.#unsubPending = null
     this.#unlockBtn?.removeEventListener('click', this.#onUnlock)
+    this.#updateIndicator?.removeEventListener('click', applySwUpdate)
+    this.#updateIndicator = null
+    this.#unsubUpdate?.()
+    this.#unsubUpdate = null
     this.#unsubLocale?.()
     this.#unsubLocale = null
   }
@@ -199,6 +253,8 @@ export class LockOverlay extends HTMLElement {
     this.querySelector('.lock-title').textContent = t('Vault locked')
     this.querySelector('.lock-hint').textContent = t('Unlock with the passkey that holds your account secrets.')
     this.querySelector('.lock-unlock span:last-child').textContent = t('Unlock with passkey')
+    this.querySelector('.overlay-update-label').textContent = swT('Update available')
+    this.querySelector('.overlay-update-action').textContent = swT('Update')
   }
 }
 

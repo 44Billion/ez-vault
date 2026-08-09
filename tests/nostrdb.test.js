@@ -7,8 +7,8 @@ import {
   disconnect,
   forAccount,
   isConnected
-} from '../docs/services/nostrdb.js'
-import * as store from '../docs/services/accounts-store.js'
+} from '../src/services/nostrdb.js'
+import * as store from '../src/services/accounts-store.js'
 
 if (!globalThis.localStorage) {
   const data = new Map()

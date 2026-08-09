@@ -9,10 +9,10 @@ import {
   signerRequestApp,
   signerRequestContext,
   snapshotAccounts
-} from '../docs/services/messenger.js'
-import * as store from '../docs/services/accounts-store.js'
-import * as secrets from '../docs/services/secrets.js'
-import * as journal from '../docs/services/account-mutation-journal.js'
+} from '../src/services/messenger.js'
+import * as store from '../src/services/accounts-store.js'
+import * as secrets from '../src/services/secrets.js'
+import * as journal from '../src/services/account-mutation-journal.js'
 import { npubFromPubkey } from 'libp2r2p/key'
 
 if (!globalThis.localStorage) {

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { getAppIconMonogram } from '../docs/helpers/app-monogram.js'
+import { getAppIconMonogram } from '../src/helpers/app-monogram.js'
 
 test('builds deterministic monograms from app identity', () => {
   const first = getAppIconMonogram('jumble-1', 'Jumble')

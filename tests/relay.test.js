@@ -7,7 +7,7 @@ import {
   parseRelayListEvent,
   resolveWriteRelays,
   seedRelays
-} from '../docs/services/relay.js'
+} from '../src/services/relay.js'
 
 function event (overrides = {}) {
   return {

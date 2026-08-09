@@ -1,0 +1,64 @@
+:root {
+  color-scheme: dark light;
+}
+
+.invisible {
+  display: none !important;
+}
+
+body {
+  color: var(--fg);
+  background-color: var(--surface);
+}
+
+body.dev {
+  background-color: var(--surface) !important;
+}
+
+body.detached {
+  background-color: var(--surface);
+  width: 360px;
+}
+
+.field {
+  width: 100%;
+}
+
+label {
+  font-size: 14rem;
+  padding-left: 4px;
+}
+
+label:after {
+  display: block;
+  content: '';
+  padding-bottom: 5px;
+}
+
+input {
+  width: 100%;
+  background-color: var(--surface-sunken);
+  color: var(--fg);
+  border: 0;
+  height: 30px; /* 30rem height won't be 30px on Safari 17.6 but 270px; use rem unit just for font-size */
+  font-size: 16rem;
+  border-radius: 7px;
+  padding: 14px 10px;
+}
+
+input[type="text"] {
+  font-size: 15rem;
+}
+
+h2 {
+  font-size: 15rem;
+}
+
+.pulsate {
+  animation: pulsate .7s infinite alternate;
+}
+
+@keyframes pulsate {
+  from { opacity: 1 }
+  to { opacity: 0.5 }
+}

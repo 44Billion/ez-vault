@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { generateSecretKey, getPublicKey } from 'libp2r2p/key'
 import {
   buildSyncAccountPayload
-} from '../docs/services/nostrpair.js'
+} from '../src/services/nostrpair.js'
 import {
   nsecFromHex,
   npubFromPubkey

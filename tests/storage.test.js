@@ -1,15 +1,15 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import * as accounts from '../docs/services/accounts-store.js'
-import * as messengerLog from '../docs/services/messenger-log/index.js'
-import * as secrets from '../docs/services/secrets.js'
+import * as accounts from '../src/services/accounts-store.js'
+import * as messengerLog from '../src/services/messenger-log/index.js'
+import * as secrets from '../src/services/secrets.js'
 import {
   appendMessengerLog,
   initializeStorage,
   listMessengerLogs,
   mutateAccounts,
   resetStorageForTests
-} from '../docs/services/storage/index.js'
+} from '../src/services/storage/index.js'
 
 const ACCOUNT_A = { pubkey: 'a'.repeat(64), type: 'npub', name: 'A' }
 const ACCOUNT_B = { pubkey: 'b'.repeat(64), type: 'npub', name: 'B' }

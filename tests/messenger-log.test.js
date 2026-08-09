@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import * as log from '../docs/services/messenger-log/index.js'
+import * as log from '../src/services/messenger-log/index.js'
 
 if (!globalThis.localStorage) {
   const data = new Map()

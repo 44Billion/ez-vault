@@ -5,7 +5,7 @@ import {
   parseNostrpairInput,
   extractBunkerClientKey,
   buildBunkerUrlWithClientKey
-} from '../docs/helpers/nostrpair-url.js'
+} from '../src/helpers/nostrpair-url.js'
 
 const PUBKEY = 'a'.repeat(64)
 const RELAY = 'wss://relay.44billion.net'

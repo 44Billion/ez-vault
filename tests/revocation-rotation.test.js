@@ -1,14 +1,14 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { generateSecretKey, getPublicKey } from 'libp2r2p/key'
-import NsecSigner from '../docs/services/nsec-signer.js'
-import * as store from '../docs/services/accounts-store.js'
-import * as secrets from '../docs/services/secrets.js'
+import NsecSigner from '../src/services/nsec-signer.js'
+import * as store from '../src/services/accounts-store.js'
+import * as secrets from '../src/services/secrets.js'
 import {
   FALLBACK_ROTATION_DELAY_MS,
   runDueRevocationRotations,
   scheduleRevocationRotationsForRemovedSigner
-} from '../docs/services/sync/revocation-rotation.js'
+} from '../src/services/sync/revocation-rotation.js'
 import { bytesToHex, hexToBytes } from 'libp2r2p/base16'
 
 const data = new Map()

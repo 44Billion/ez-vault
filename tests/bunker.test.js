@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { stripBunkerSecret } from '../docs/services/bunker.js'
+import { stripBunkerSecret } from '../src/services/bunker.js'
 
 const PUBKEY = 'a'.repeat(64)
 

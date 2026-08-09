@@ -2,9 +2,9 @@ import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { generateSecretKey, getPublicKey } from 'libp2r2p/key'
 import { bytesToHex } from 'libp2r2p/base16'
-import * as store from '../docs/services/accounts-store.js'
-import * as secrets from '../docs/services/secrets.js'
-import * as journal from '../docs/services/account-mutation-journal.js'
+import * as store from '../src/services/accounts-store.js'
+import * as secrets from '../src/services/secrets.js'
+import * as journal from '../src/services/account-mutation-journal.js'
 
 const storage = new Map()
 const styles = new Map()
@@ -46,7 +46,7 @@ globalThis.document = {
   }
 }
 
-const { DevPanel } = await import('../docs/components/dev-panel.js')
+const { DevPanel } = await import('../src/components/dev-panel.js')
 
 function nsecAccount (name) {
   const secretBytes = generateSecretKey()

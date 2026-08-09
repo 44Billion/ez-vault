@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { getSvgAvatar, seededAvatarDataUrl } from '../docs/services/avatar.js'
+import { getSvgAvatar, seededAvatarDataUrl } from '../src/services/avatar.js'
 
 describe('local avatars', () => {
   it('generates a circular Avataaars SVG without an HTTP request', (t) => {

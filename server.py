@@ -44,14 +44,16 @@ if __name__ == "__main__":
     # Set up signal handler for CTRL+C
     signal.signal(signal.SIGINT, signal_handler)
 
-    # Change to the docs directory to serve its files
-    os.chdir("docs")
+    # Serve the requested output directory (docs/ for production, .dev/ for
+    # the dev watcher — see bin/dev.js). Defaults to docs/.
+    serve_dir = os.environ.get("EZ_VAULT_SERVE_DIR", "docs")
+    os.chdir(serve_dir)
 
     # Allow address reuse to avoid "Address already in use" errors
     socketserver.TCPServer.allow_reuse_address = True
 
     with socketserver.TCPServer(("", PORT), NoCacheHTTPRequestHandler) as httpd:
-        print(f"Serving EZ Vault docs folder at http://localhost:{PORT}")
+        print(f"Serving EZ Vault {serve_dir} folder at http://localhost:{PORT}")
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:

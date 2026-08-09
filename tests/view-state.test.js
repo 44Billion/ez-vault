@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { resetVaultView, setVaultViewShell } from '../docs/services/view-state.js'
+import { resetVaultView, setVaultViewShell } from '../src/services/view-state.js'
 
 function classList () {
   const values = new Set(['is-active'])

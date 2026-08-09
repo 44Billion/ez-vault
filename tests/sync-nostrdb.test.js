@@ -8,7 +8,7 @@ import {
   NOSTRDB_SYNC_PUSH_CODE,
   NOSTRDB_SYNC_APP_ASK_CODE,
   NOSTRDB_SYNC_APP_REPLY_CODE
-} from '../docs/services/sync/nostrdb.js'
+} from '../src/services/sync/nostrdb.js'
 
 const data = new Map()
 globalThis.localStorage = {

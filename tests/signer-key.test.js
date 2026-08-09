@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { webcrypto } from 'node:crypto'
 import { getPublicKey } from 'libp2r2p/key'
-import { deriveSignerSeckey } from '../docs/helpers/signer-key.js'
+import { deriveSignerSeckey } from '../src/helpers/signer-key.js'
 import { hexToBytes } from 'libp2r2p/base16'
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto

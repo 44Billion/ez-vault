@@ -7,8 +7,10 @@ import {
 import { injectComponentStyles } from '../helpers/dom.js'
 import { shouldShowCreateOverlay } from '../helpers/create-overlay-visibility.js'
 import { defineLocales, getT, subscribeLocaleChanged } from '../i18n/index.js'
+import { swUpdateLocales } from '../i18n/sw-update.js'
 import './account-avatar.js'
 import { requestVaultClose } from '../services/messenger.js'
+import { applySwUpdate, isUpdateAvailable, subscribeSwUpdate } from '../services/sw-manager.js'
 
 // Tabler outline user-plus icon (icons/user-plus.svg), inlined so it
 // inherits currentColor.
@@ -20,6 +22,7 @@ export const createOverlayLocales = defineLocales({
 })
 
 const t = getT(createOverlayLocales)
+const swT = getT(swUpdateLocales)
 
 const STYLES = /* css */`
   create-overlay {
@@ -97,6 +100,42 @@ const STYLES = /* css */`
   create-overlay .create-dismiss:disabled {
     opacity: 0.6;
   }
+  create-overlay .overlay-update-indicator {
+    position: absolute;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 6px 6px 14px;
+    background-color: var(--surface-raised);
+    color: var(--fg-strong);
+    border: 1px solid var(--border);
+    border-radius: 9999px;
+    font-size: 13rem;
+    cursor: pointer;
+  }
+  create-overlay .overlay-update-indicator[hidden] {
+    display: none;
+  }
+  create-overlay .overlay-update-label {
+    color: var(--fg);
+    font-weight: 500;
+  }
+  create-overlay .overlay-update-action {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    background-color: var(--accent);
+    color: var(--fg-on-accent);
+    border-radius: 9999px;
+    padding: 6px 12px;
+    font-weight: 600;
+  }
+  create-overlay .overlay-update-indicator:active .overlay-update-action {
+    background-color: var(--accent-active);
+  }
 `
 
 // Shown when the vault has no visible accounts: a one-tap create flow that
@@ -110,6 +149,8 @@ export class CreateOverlay extends HTMLElement {
   #tileObserver = null
   #tile = null
   #dismissBtn = null
+  #updateIndicator = null
+  #unsubUpdate = null
   #dismissed = false
   #wasVisible = false
   #closing = false
@@ -117,6 +158,10 @@ export class CreateOverlay extends HTMLElement {
   connectedCallback () {
     injectComponentStyles('create-overlay', STYLES)
     this.innerHTML = `
+      <button type="button" class="overlay-update-indicator" hidden>
+        <span class="overlay-update-label"></span>
+        <span class="overlay-update-action"></span>
+      </button>
       <h2 class="create-title">
         <span class="create-title-icon" aria-hidden="true">${ICON_USER_PLUS}</span>
         <span class="create-title-text">Create your first account</span>
@@ -126,6 +171,11 @@ export class CreateOverlay extends HTMLElement {
     `
     this.#dismissBtn = this.querySelector('.create-dismiss')
     this.#dismissBtn.addEventListener('click', this.#onDismiss)
+    this.#updateIndicator = this.querySelector('.overlay-update-indicator')
+    this.#updateIndicator.addEventListener('click', applySwUpdate)
+    this.#unsubUpdate = subscribeSwUpdate(available =>
+      this.#updateIndicator.toggleAttribute('hidden', !isUpdateAvailable(available))
+    )
     this.#translate()
     this.#unsubLocale = subscribeLocaleChanged(() => this.#translate())
 
@@ -142,6 +192,10 @@ export class CreateOverlay extends HTMLElement {
     this.#unsubLocale?.()
     this.#unsubLocale = null
     this.#dismissBtn?.removeEventListener('click', this.#onDismiss)
+    this.#updateIndicator?.removeEventListener('click', applySwUpdate)
+    this.#updateIndicator = null
+    this.#unsubUpdate?.()
+    this.#unsubUpdate = null
     this.#removeTile()
   }
 
@@ -218,6 +272,8 @@ export class CreateOverlay extends HTMLElement {
   #translate () {
     this.querySelector('.create-title-text').textContent = t('Create your first account')
     this.querySelector('.create-dismiss').textContent = t('I already have an account')
+    this.querySelector('.overlay-update-label').textContent = swT('Update available')
+    this.querySelector('.overlay-update-action').textContent = swT('Update')
   }
 }
 

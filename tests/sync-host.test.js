@@ -1,7 +1,7 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { webcrypto } from 'node:crypto'
-import * as secrets from '../docs/services/secrets.js'
+import * as secrets from '../src/services/secrets.js'
 
 const storage = new Map()
 const styles = new Map()
@@ -129,7 +129,7 @@ globalThis.document = {
   }
 }
 
-const { SyncHost } = await import('../docs/components/sync/sync-host.js')
+const { SyncHost } = await import('../src/components/sync/sync-host.js')
 
 function deferred () {
   let resolve

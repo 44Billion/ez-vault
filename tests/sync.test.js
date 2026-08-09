@@ -1,8 +1,8 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { generateSecretKey, getPublicKey } from 'libp2r2p/key'
-import NsecSigner from '../docs/services/nsec-signer.js'
-import { createSyncController } from '../docs/services/sync/index.js'
+import NsecSigner from '../src/services/nsec-signer.js'
+import { createSyncController } from '../src/services/sync/index.js'
 import { DEFAULT_STALE_CHANNEL_SECONDS } from 'libp2r2p/private-messenger'
 import {
   announceContentKeys,
@@ -13,10 +13,10 @@ import {
   getDebugSnapshot,
   handleMessage,
   resetDebugSources
-} from '../docs/services/sync/content-keys.js'
-import { TRUSTED_SIGNERS_STATE_CODE } from '../docs/services/sync/trusted-signers.js'
-import * as store from '../docs/services/accounts-store.js'
-import * as secrets from '../docs/services/secrets.js'
+} from '../src/services/sync/content-keys.js'
+import { TRUSTED_SIGNERS_STATE_CODE } from '../src/services/sync/trusted-signers.js'
+import * as store from '../src/services/accounts-store.js'
+import * as secrets from '../src/services/secrets.js'
 import { bytesToHex, hexToBytes } from 'libp2r2p/base16'
 import { TEMPORARY_STORAGE_KEYS_KEY } from 'libp2r2p/temporary-storage'
 

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { shouldShowCreateOverlay } from '../docs/helpers/create-overlay-visibility.js'
+import { shouldShowCreateOverlay } from '../src/helpers/create-overlay-visibility.js'
 
 test('shows the create overlay only with no visible accounts and no locked pending mutation', () => {
   assert.equal(shouldShowCreateOverlay([], false, false), true)

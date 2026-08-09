@@ -8,7 +8,10 @@ import { startContentKeyEventRefresh } from './services/content-key/index.js'
 import { startDeviceRelayListRefresh } from './services/device-relays.js'
 import { startRevocationRotation } from './services/sync/revocation-rotation.js'
 import { initShellI18n } from './i18n/shell.js'
+import { getT, subscribeLocaleChanged } from './i18n/index.js'
+import { swUpdateLocales } from './i18n/sw-update.js'
 import { initializeStorage } from './services/storage/index.js'
+import { applySwUpdate, initSwManager, isUpdateAvailable, subscribeSwUpdate } from './services/sw-manager.js'
 import { setVaultViewShell } from './services/view-state.js'
 
 // Storage is a hard prerequisite: no component may observe an empty cache
@@ -39,6 +42,22 @@ const addBtn = document.getElementById('add-account-btn')
 const syncBtn = document.getElementById('sync-devices-btn')
 
 initShellI18n()
+
+// Non-dismissible update banner: always visible while a new service worker is
+// waiting; the user applies it explicitly (skipWaiting -> reload).
+const updateBanner = document.getElementById('update-banner')
+const updateBannerText = updateBanner.querySelector('.update-banner-text')
+const updateBannerButton = updateBanner.querySelector('.update-banner-button')
+const updateT = getT(swUpdateLocales)
+function translateUpdateBanner () {
+  updateBannerText.textContent = updateT('Update available')
+  updateBannerButton.textContent = updateT('Update')
+}
+subscribeSwUpdate(available => updateBanner.toggleAttribute('hidden', !isUpdateAvailable(available)))
+updateBannerButton.addEventListener('click', applySwUpdate)
+translateUpdateBanner()
+subscribeLocaleChanged(translateUpdateBanner)
+initSwManager()
 
 // Each toolbar button represents one mutually-exclusive feature. The
 // owning component disables the *other* two while its feature is open,
