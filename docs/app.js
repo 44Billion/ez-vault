@@ -6,12 +6,12 @@ import {
   setVaultViewShell,
   subscribeSwUpdate,
   swUpdateLocales
-} from "./chunks/chunk-ACP3EGJ5.js";
+} from "./chunks/chunk-FXDTUVT4.js";
 import {
   init,
   startDeviceRelayListRefresh,
   startRevocationRotation
-} from "./chunks/chunk-B2QVZD3W.js";
+} from "./chunks/chunk-GH5ACQXA.js";
 import {
   clearError,
   setError
@@ -20,18 +20,18 @@ import {
   isOnline,
   onOnline,
   startContentKeyEventRefresh
-} from "./chunks/chunk-DHDZ4PWC.js";
+} from "./chunks/chunk-47TWQHYT.js";
 import {
   filterVisibleAccounts,
   recoverPendingMutation,
   runSecretAccountMutation
-} from "./chunks/chunk-XTCLK3QJ.js";
-import "./chunks/chunk-RGXQEW2G.js";
+} from "./chunks/chunk-FQWZBX36.js";
+import "./chunks/chunk-ZOPYVJB4.js";
 import {
   checkForIconUpdate,
   hasPasskey
-} from "./chunks/chunk-GGSUTURR.js";
-import "./chunks/chunk-UA7KOUXD.js";
+} from "./chunks/chunk-A4OBQLFD.js";
+import "./chunks/chunk-SDOMGLPX.js";
 import {
   seededAvatarDataUrl
 } from "./chunks/chunk-4RHK4XWQ.js";
@@ -49,7 +49,7 @@ import {
   subscribe2 as subscribe,
   transferBunkerSecret,
   update
-} from "./chunks/chunk-7S7ZXFS2.js";
+} from "./chunks/chunk-GUYFWDAK.js";
 import {
   defineLocales,
   getT,
@@ -207,15 +207,15 @@ function initShellI18n() {
 // src/index.js
 await initializeStorage();
 await Promise.all([
-  import("./chunks/account-list-5SMZEZIQ.js"),
-  import("./chunks/account-add-UMFUZA4F.js"),
-  import("./chunks/sync-panel-4FQQM46I.js"),
-  import("./chunks/trusted-signers-panel-QGYGSJP7.js"),
+  import("./chunks/account-list-BSYOHHDX.js"),
+  import("./chunks/account-add-JKVVWNJ6.js"),
+  import("./chunks/sync-panel-JEWBHVUM.js"),
+  import("./chunks/trusted-signers-panel-EKCUZ32I.js"),
   import("./chunks/accordion-panel-AGHO422R.js"),
   import("./chunks/toast-VTWQ4NKU.js"),
-  import("./chunks/activity-log-YT7RAYNM.js"),
-  import("./chunks/lock-overlay-2FQ3OQGN.js"),
-  import("./chunks/create-overlay-PRHLHBJS.js")
+  import("./chunks/activity-log-LGBR65W4.js"),
+  import("./chunks/lock-overlay-4OOMSRJJ.js"),
+  import("./chunks/create-overlay-WAE5WMEJ.js")
 ]);
 document.getElementById("vault").style.visibility = "visible";
 var list2 = document.querySelector("account-list");
@@ -292,7 +292,7 @@ startRevocationRotation().catch((err) => {
 });
 if (window === window.top) {
   document.body.classList.add("dev");
-  import("./chunks/dev-panel-OJWPAKTZ.js").then(() => {
+  import("./chunks/dev-panel-AQCFAZID.js").then(() => {
     document.querySelector(".diagnostics-section")?.append(document.createElement("dev-panel"));
   });
 }

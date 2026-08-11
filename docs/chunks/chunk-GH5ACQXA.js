@@ -4,15 +4,15 @@ import {
   onOnline,
   rotateContentKeyIfStillCanonical,
   upsertContentKeyEvent
-} from "./chunk-DHDZ4PWC.js";
+} from "./chunk-47TWQHYT.js";
 import {
   filterVisibleAccounts,
   hasPendingMutation,
   subscribePendingMutations
-} from "./chunk-XTCLK3QJ.js";
+} from "./chunk-FQWZBX36.js";
 import {
   trusted_signers_exports
-} from "./chunk-RGXQEW2G.js";
+} from "./chunk-ZOPYVJB4.js";
 import {
   NOSTRDB_SYNC,
   PrivateMessenger,
@@ -44,7 +44,7 @@ import {
   setState,
   subscribe2 as subscribe,
   subscribeRelayListUpdates
-} from "./chunk-7S7ZXFS2.js";
+} from "./chunk-GUYFWDAK.js";
 import {
   __export
 } from "./chunk-NZLE2WMY.js";
@@ -821,6 +821,14 @@ function entriesExceptPubkey(entries, pubkey) {
 function senderTrustUpdatedAt(context, senderPubkey) {
   return normalizeTimestamp(context.trustedByPubkey?.get?.(senderPubkey)?.updatedAt);
 }
+function assertPublished(result) {
+  if (!result?.delivery) return result;
+  const reports = result.delivery.reports;
+  if (!Array.isArray(reports) || !reports.length || reports.some((report) => report?.success !== true)) {
+    throw new Error("SYNC_PUBLICATION_FAILED");
+  }
+  return result;
+}
 async function announceTrustedSignerState({
   messenger,
   peerChannels,
@@ -839,12 +847,12 @@ async function announceTrustedSignerState({
       if (!channelPubkey) continue;
       const payloadEntries = entriesExceptPubkey(entries, peerPubkey);
       if (!payloadEntries.length) continue;
-      await messenger.tell({
+      assertPublished(await messenger.tell({
         channelPubkey,
         receiverPubkey: peerPubkey,
         code: TRUSTED_SIGNERS_STATE_CODE,
         payload: { entries: payloadEntries }
-      });
+      }));
       sent += 1;
     }
   }
@@ -853,12 +861,12 @@ async function announceTrustedSignerState({
     if (active.includes(record.pubkey)) continue;
     const channelPubkey = channels.get(record.pubkey);
     if (!channelPubkey) continue;
-    await messenger.tell({
+    assertPublished(await messenger.tell({
       channelPubkey,
       receiverPubkey: record.pubkey,
       code: TRUSTED_SIGNERS_STATE_CODE,
       payload: { entries: [record] }
-    });
+    }));
     sent += 1;
   }
   return { sent };
@@ -1445,7 +1453,17 @@ function isTrustedSender2(message, context) {
   return context.trustedByPubkey?.has?.(message?.event?.pubkey) || false;
 }
 function ownerChannelPubkey(ownerPubkey, context) {
-  return context.channelPubkeyForOwner?.(ownerPubkey) || ownerPubkey;
+  return context.channelPubkeyForOwner?.(ownerPubkey) || "";
+}
+function isOwnerReady(ownerPubkey, context) {
+  const ready = context.readyOwnerPubkeys;
+  if (ready instanceof Set) return ready.has(ownerPubkey);
+  return Boolean(ownerChannelPubkey(ownerPubkey, context));
+}
+function publicationSucceeded(result) {
+  if (!result?.delivery) return true;
+  const reports = result.delivery.reports;
+  return Array.isArray(reports) && reports.length > 0 && reports.every((report) => report?.success === true);
 }
 function trustedPubkeys(context) {
   if (Array.isArray(context.receiverPubkeys)) return context.receiverPubkeys.filter(Boolean);
@@ -1471,6 +1489,9 @@ function createNostrDbSyncController({
   const recentSyncEventIds = /* @__PURE__ */ new Map();
   let runtime = {};
   let retryTimer = null;
+  let appBackfillProcessTail = Promise.resolve();
+  let appBackfillProcessGeneration = 0;
+  let pendingAppBackfillProcess = null;
   let durableState = storage ? readState(storage) : readRecords(NOSTRDB_SYNC).find((record) => record.key === "state")?.value || {};
   let stateWriteTail = Promise.resolve();
   function report(err) {
@@ -1505,9 +1526,9 @@ function createNostrDbSyncController({
     pruneRecentSyncEventIds();
     return recentSyncEventIds.has(event?.id);
   }
-  async function announceRange({ messenger, ownerPubkey, channelPubkey = ownerPubkey, receiverPubkeys, debug = runtime.debug } = {}) {
+  async function announceRange({ messenger, ownerPubkey, channelPubkey = "", receiverPubkeys, debug = runtime.debug } = {}) {
     const receivers = [...new Set((receiverPubkeys || []).filter(Boolean))];
-    if (!messenger?.yell || !ownerPubkey || !receivers.length) return null;
+    if (!messenger?.yell || !ownerPubkey || !channelPubkey || !receivers.length) return null;
     let range;
     const generatedAt = _nowMs();
     try {
@@ -1556,6 +1577,8 @@ function createNostrDbSyncController({
   }
   async function maybeAsk(ownerPubkey, peerPubkey, context = runtime, { onlineHint = false, force = false } = {}) {
     if (!context.messenger?.ask) return null;
+    const channelPubkey = ownerChannelPubkey(ownerPubkey, context);
+    if (!isOwnerReady(ownerPubkey, context) || !channelPubkey) return null;
     const state = getState2();
     const entry = peerState(state, ownerPubkey, peerPubkey);
     const advert = entry.advert;
@@ -1594,17 +1617,6 @@ function createNostrDbSyncController({
       excludeIds: askWindow.excludeIds,
       limit: REQUEST_LIMIT
     };
-    try {
-      await context.messenger.ask({
-        channelPubkey: ownerChannelPubkey(ownerPubkey, context),
-        receiverPubkey: peerPubkey,
-        code: NOSTRDB_SYNC_ASK_CODE,
-        payload
-      });
-    } catch (err) {
-      report(err);
-      return null;
-    }
     entry.windowMs = askWindow.windowMs;
     entry.pending = {
       requestId: id,
@@ -1619,9 +1631,26 @@ function createNostrDbSyncController({
     };
     entry.updatedAt = now;
     setState2(state);
+    try {
+      const result = await context.messenger.ask({
+        channelPubkey,
+        receiverPubkey: peerPubkey,
+        code: NOSTRDB_SYNC_ASK_CODE,
+        payload
+      });
+      if (!publicationSucceeded(result)) throw new Error("SYNC_PUBLICATION_FAILED");
+    } catch (err) {
+      entry.pending.nextRetryAt = _nowMs() + onlineDelay;
+      entry.pending.onlineRetryAt = entry.pending.nextRetryAt;
+      entry.updatedAt = _nowMs();
+      setState2(state);
+      scheduleRetrySweep(context);
+      report(err);
+      return null;
+    }
     scheduleRetrySweep(context);
     emitDebug2(context.debug, "ask", {
-      channelPubkey: ownerChannelPubkey(ownerPubkey, context),
+      channelPubkey,
       ownerPubkey,
       receiverPubkey: peerPubkey,
       sinceScore: payload.sinceScore,
@@ -1630,8 +1659,10 @@ function createNostrDbSyncController({
     });
     return payload;
   }
-  async function maybeAskAppBackfill(ownerPubkey, appId, peerPubkey, context = runtime, { onlineHint = false, force = false } = {}) {
+  async function maybeAskAppBackfill(ownerPubkey, appId, peerPubkey, context = runtime, { onlineHint = false } = {}) {
     if (!context.messenger?.ask) return null;
+    const channelPubkey = ownerChannelPubkey(ownerPubkey, context);
+    if (!isOwnerReady(ownerPubkey, context) || !channelPubkey) return null;
     if (!normalizeAppId(appId) || !normalizePubkey5(peerPubkey)) return null;
     if (context.ownerPubkeys instanceof Set && !context.ownerPubkeys.has(ownerPubkey)) return null;
     if (!context.trustedByPubkey?.has?.(peerPubkey)) return null;
@@ -1641,9 +1672,9 @@ function createNostrDbSyncController({
     if (!isPlainObject3(existingApp?.peers) || !Object.hasOwn(existingApp.peers, peerPubkey)) return null;
     const app = appBackfillState(state, ownerPubkey, appId);
     const entry = appBackfillPeerState(state, ownerPubkey, appId, peerPubkey);
-    if (entry.completed && !force) return null;
+    if (entry.completed) return null;
     const now = _nowMs();
-    if (entry.pending && !force) {
+    if (entry.pending) {
       const retryAt = onlineHint ? Math.min(entry.pending.nextRetryAt || Infinity, entry.pending.onlineRetryAt || Infinity) : entry.pending.nextRetryAt;
       if (!Number.isFinite(retryAt) || now < retryAt) {
         scheduleRetrySweep(context);
@@ -1651,7 +1682,7 @@ function createNostrDbSyncController({
       }
     }
     const id = requestId(_random);
-    const attempt = force && entry.pending ? (entry.pending.attempt || 0) + 1 : 0;
+    const attempt = entry.pending ? (entry.pending.attempt || 0) + 1 : 0;
     const onlineDelay = Math.min(ONLINE_RETRY_MAX_MS, ONLINE_RETRY_MIN_MS * 2 ** attempt);
     const payload = {
       requestId: id,
@@ -1675,21 +1706,24 @@ function createNostrDbSyncController({
     app.updatedAt = now;
     setState2(state);
     try {
-      await context.messenger.ask({
-        channelPubkey: ownerChannelPubkey(ownerPubkey, context),
+      const result = await context.messenger.ask({
+        channelPubkey,
         receiverPubkey: peerPubkey,
         code: NOSTRDB_SYNC_APP_ASK_CODE,
         payload
       });
+      if (!publicationSucceeded(result)) throw new Error("SYNC_PUBLICATION_FAILED");
     } catch (err) {
       const nextState = getState2();
       const { app: nextApp, entry: nextEntry } = existingAppBackfillPeerState(nextState, ownerPubkey, appId, peerPubkey);
       if (nextEntry?.pending?.requestId === id) {
-        nextEntry.pending = null;
+        nextEntry.pending.nextRetryAt = _nowMs() + onlineDelay;
+        nextEntry.pending.onlineRetryAt = nextEntry.pending.nextRetryAt;
         nextEntry.updatedAt = _nowMs();
         nextApp.updatedAt = nextEntry.updatedAt;
         setState2(nextState);
       }
+      scheduleRetrySweep(context);
       report(err);
       return null;
     }
@@ -1702,7 +1736,7 @@ function createNostrDbSyncController({
     });
     return payload;
   }
-  async function processAppBackfills(context = runtime, { ownerPubkey = "", peerPubkey = "", onlineHint = false } = {}) {
+  async function processAppBackfillsNow(context = runtime, { ownerPubkey = "", peerPubkey = "", onlineHint = false } = {}) {
     const state = getState2();
     const owners = state.appBackfills || {};
     const contextOwners = context.ownerPubkeys instanceof Set ? context.ownerPubkeys : new Set(context.ownerPubkeys || []);
@@ -1715,11 +1749,6 @@ function createNostrDbSyncController({
         const appId = normalizeAppId(appState?.appId) || appIdFromStateKey(key);
         if (!appId) continue;
         if (appState.unresolvedPeers) {
-          if (!context.deferAppBackfillPeerResolution && !contextPeers.length) {
-            delete apps[key];
-            changed = true;
-            continue;
-          }
           if (!contextPeers.length) continue;
           setAppBackfillTargetPeers(appState, contextPeers);
           appState.unresolvedPeers = false;
@@ -1742,12 +1771,44 @@ function createNostrDbSyncController({
     }
     if (changed) setState2(state);
   }
+  function processAppBackfills(context = runtime, options = {}) {
+    const generation = appBackfillProcessGeneration;
+    if (pendingAppBackfillProcess?.generation === generation) {
+      const pending2 = pendingAppBackfillProcess;
+      pending2.context = context;
+      pending2.options = {
+        ownerPubkey: pending2.options.ownerPubkey && options.ownerPubkey === pending2.options.ownerPubkey ? pending2.options.ownerPubkey : "",
+        peerPubkey: pending2.options.peerPubkey && options.peerPubkey === pending2.options.peerPubkey ? pending2.options.peerPubkey : "",
+        onlineHint: Boolean(pending2.options.onlineHint || options.onlineHint)
+      };
+      return pending2.promise;
+    }
+    const pending = {
+      generation,
+      context,
+      options: {
+        ownerPubkey: options.ownerPubkey || "",
+        peerPubkey: options.peerPubkey || "",
+        onlineHint: Boolean(options.onlineHint)
+      },
+      promise: null
+    };
+    const run = appBackfillProcessTail.catch(() => {
+    }).then(() => {
+      if (pendingAppBackfillProcess === pending) pendingAppBackfillProcess = null;
+      if (generation !== appBackfillProcessGeneration) return null;
+      return processAppBackfillsNow(pending.context, pending.options);
+    });
+    pending.promise = run;
+    pendingAppBackfillProcess = pending;
+    appBackfillProcessTail = run;
+    return run;
+  }
   function requestAppBackfill({ ownerPubkey, appId } = {}, context = runtime) {
     const owner = normalizePubkey5(ownerPubkey);
     const app = normalizeAppId(appId);
     if (!owner || !app) return false;
     const peers = trustedPubkeys(context);
-    if (!peers.length && !context.deferAppBackfillPeerResolution) return false;
     const state = getState2();
     const entry = appBackfillState(state, owner, app);
     const now = _nowMs();
@@ -1997,7 +2058,7 @@ function createNostrDbSyncController({
         hasMore,
         nextAfter
       });
-      if (hasMore) await maybeAskAppBackfill(ownerPubkey, payload.appId, peerPubkey, context, { force: true });
+      if (hasMore) await processAppBackfills(context, { ownerPubkey, peerPubkey });
       return true;
     }
     entry.updatedAt = _nowMs();
@@ -2032,10 +2093,11 @@ function createNostrDbSyncController({
   }
   function pushRuntime(ownerPubkey) {
     const receiverPubkeys = trustedPubkeys(runtime);
-    if (!runtime.messenger?.yell || !receiverPubkeys.length) return null;
+    const channelPubkey = ownerChannelPubkey(ownerPubkey, runtime);
+    if (!runtime.messenger?.yell || !receiverPubkeys.length || !isOwnerReady(ownerPubkey, runtime) || !channelPubkey) return null;
     return {
       messenger: runtime.messenger,
-      channelPubkey: ownerChannelPubkey(ownerPubkey, runtime),
+      channelPubkey,
       receiverPubkeys
     };
   }
@@ -2174,17 +2236,19 @@ function createNostrDbSyncController({
     }
     setState2(state);
   }
-  function nextRetryAt() {
+  function nextRetryAt(context = runtime) {
     const state = getState2();
     let next = Infinity;
-    for (const owner of Object.values(state.owners || {})) {
+    for (const [ownerPubkey, owner] of Object.entries(state.owners || {})) {
+      if (!isOwnerReady(ownerPubkey, context)) continue;
       for (const entry of Object.values(owner || {})) {
         const pending = entry?.pending;
         if (!pending) continue;
         next = Math.min(next, pending.nextRetryAt || Infinity);
       }
     }
-    for (const apps of Object.values(state.appBackfills || {})) {
+    for (const [ownerPubkey, apps] of Object.entries(state.appBackfills || {})) {
+      if (!isOwnerReady(ownerPubkey, context)) continue;
       for (const app of Object.values(apps || {})) {
         for (const entry of Object.values(app?.peers || {})) {
           const pending = entry?.pending;
@@ -2198,7 +2262,7 @@ function createNostrDbSyncController({
   function scheduleRetrySweep(context = runtime) {
     if (retryTimer) _clearTimeout?.(retryTimer);
     retryTimer = null;
-    const next = nextRetryAt();
+    const next = nextRetryAt(context);
     if (!next) return;
     retryTimer = _setTimeout(() => {
       retryTimer = null;
@@ -2223,7 +2287,8 @@ function createNostrDbSyncController({
         if (!appId) continue;
         for (const [peerPubkey, entry] of Object.entries(app?.peers || {})) {
           if (!entry?.pending || (entry.pending.nextRetryAt || Infinity) > now) continue;
-          await maybeAskAppBackfill(ownerPubkey, appId, peerPubkey, context, { force: true });
+          await processAppBackfills(context, { ownerPubkey, peerPubkey });
+          break;
         }
       }
     }
@@ -2248,6 +2313,9 @@ function createNostrDbSyncController({
     pushQueues.clear();
     if (retryTimer) _clearTimeout?.(retryTimer);
     retryTimer = null;
+    appBackfillProcessGeneration += 1;
+    appBackfillProcessTail = Promise.resolve();
+    pendingAppBackfillProcess = null;
     runtime = {};
   }
   return {
@@ -2368,6 +2436,8 @@ function createSyncController({
   let lastStoreIdentityKey = "";
   let stopRelayListWatcher = null;
   let relayListWatcherKey = "";
+  let relayListRevision = 0;
+  let refreshQueued = false;
   let lifecycleId = 0;
   const pendingAnnounceOwners = /* @__PURE__ */ new Set();
   const unsubscribers = [];
@@ -2375,6 +2445,9 @@ function createSyncController({
   const ownerPubkeyByChannelPubkey = /* @__PURE__ */ new Map();
   const signerChannelPubkeyByPeerPubkey = /* @__PURE__ */ new Map();
   const readRelaysByOwnerPubkey = /* @__PURE__ */ new Map();
+  const knownOwnerPubkeys = /* @__PURE__ */ new Set();
+  const readyOwnerPubkeys = /* @__PURE__ */ new Set();
+  const channelBuildFailuresByOwner = /* @__PURE__ */ new Map();
   let devicePubkey = "";
   const debug = _debug === void 0 ? defaultDebugSink() : _debug;
   const nostrDbSync = _createNostrDbSyncController({
@@ -2388,6 +2461,14 @@ function createSyncController({
     } catch (err) {
       onError(err);
     }
+  }
+  function assertPublished2(result) {
+    if (!result?.delivery) return result;
+    const reports = result.delivery.reports;
+    if (!Array.isArray(reports) || !reports.length || reports.some((report) => report?.success !== true)) {
+      throw new Error("SYNC_PUBLICATION_FAILED");
+    }
+    return result;
   }
   function isCurrentLifecycle(id) {
     return initialized && id === lifecycleId;
@@ -2408,7 +2489,7 @@ function createSyncController({
     return typeof _trustedSigners.listRemovedForReminder === "function" ? _trustedSigners.listRemovedForReminder() : [];
   }
   function channelPubkeyForOwner(ownerPubkey) {
-    return channelPubkeyByOwnerPubkey.get(ownerPubkey) || ownerPubkey;
+    return channelPubkeyByOwnerPubkey.get(ownerPubkey) || "";
   }
   function ownerPubkeyForChannel(channelPubkey) {
     return ownerPubkeyByChannelPubkey.get(channelPubkey) || "";
@@ -2429,40 +2510,97 @@ function createSyncController({
     }
     return [...byPubkey.values()];
   }
+  function reportChannelBuildFailure(ownerPubkey, stage, cause) {
+    const detail = cause?.message ?? String(cause);
+    const err = new Error(`SYNC_CHANNEL_BUILD_FAILED owner=${ownerPubkey} stage=${stage} cause=${detail}`);
+    err.code = "SYNC_CHANNEL_BUILD_FAILED";
+    err.ownerPubkey = ownerPubkey;
+    err.stage = stage;
+    err.cause = cause;
+    onError(err);
+    emitDebug3("channel-build-failed", { ownerPubkey, stage, cause: detail });
+    return err;
+  }
+  function replaceMap(target, source) {
+    target.clear();
+    for (const [key, value] of source) target.set(key, value);
+  }
+  function replaceSet(target, source) {
+    target.clear();
+    for (const value of source) target.add(value);
+  }
+  function publishChannelSnapshot(snapshot) {
+    replaceMap(channelPubkeyByOwnerPubkey, snapshot.channelPubkeyByOwnerPubkey);
+    replaceMap(ownerPubkeyByChannelPubkey, snapshot.ownerPubkeyByChannelPubkey);
+    replaceMap(signerChannelPubkeyByPeerPubkey, snapshot.signerChannelPubkeyByPeerPubkey);
+    if (snapshot.relayListRevision === relayListRevision) {
+      replaceMap(readRelaysByOwnerPubkey, snapshot.readRelaysByOwnerPubkey);
+    }
+    replaceMap(channelBuildFailuresByOwner, snapshot.channelBuildFailuresByOwner);
+    replaceSet(knownOwnerPubkeys, snapshot.knownOwnerPubkeys);
+    replaceSet(readyOwnerPubkeys, snapshot.readyOwnerPubkeys);
+    devicePubkey = snapshot.devicePubkey;
+  }
   async function buildChannels(deviceSigner) {
+    const snapshotRelayListRevision = relayListRevision;
     const seeders = trustedPubkeys2();
     const channels = [];
     const nextChannelPubkeyByOwnerPubkey = /* @__PURE__ */ new Map();
     const nextOwnerPubkeyByChannelPubkey = /* @__PURE__ */ new Map();
     const nextSignerChannelPubkeyByPeerPubkey = /* @__PURE__ */ new Map();
     const nextOwnerPubkeys = /* @__PURE__ */ new Set();
+    const nextReadyOwnerPubkeys = /* @__PURE__ */ new Set();
+    const nextReadRelaysByOwnerPubkey = /* @__PURE__ */ new Map();
+    const nextChannelBuildFailuresByOwner = /* @__PURE__ */ new Map();
     for (const account of filterVisibleAccounts(_store.list())) {
       if (account.type !== "nsec") continue;
       nextOwnerPubkeys.add(account.pubkey);
-      try {
-        const accountSigner = _claimSigner(account);
-        const channelSigner = accountSigner.withSharedKey(account.pubkey, TRUSTED_SIGNER_SYNC_INFO2);
-        const channelPubkey = await channelSigner.getPublicKey();
-        const relays = await accountReadRelays(account.pubkey, accountSigner);
-        nextChannelPubkeyByOwnerPubkey.set(account.pubkey, channelPubkey);
-        nextOwnerPubkeyByChannelPubkey.set(channelPubkey, account.pubkey);
-        channels.push({
-          pubkey: channelPubkey,
-          signer: channelSigner,
-          relays,
-          sendRelays: syncRelays(relays),
-          mode: "seeder",
-          seeders
-        });
-      } catch (err) {
-        onError(err);
+      if (readRelaysByOwnerPubkey.has(account.pubkey)) {
+        nextReadRelaysByOwnerPubkey.set(account.pubkey, readRelaysByOwnerPubkey.get(account.pubkey));
       }
+      let accountSigner;
+      try {
+        accountSigner = _claimSigner(account);
+      } catch (err) {
+        nextChannelBuildFailuresByOwner.set(account.pubkey, reportChannelBuildFailure(account.pubkey, "claim-signer", err));
+        continue;
+      }
+      let channelSigner;
+      let channelPubkey;
+      try {
+        channelSigner = accountSigner.withSharedKey(account.pubkey, TRUSTED_SIGNER_SYNC_INFO2);
+        channelPubkey = await channelSigner.getPublicKey();
+        if (!channelPubkey) throw new Error("CHANNEL_PUBKEY_REQUIRED");
+      } catch (err) {
+        nextChannelBuildFailuresByOwner.set(account.pubkey, reportChannelBuildFailure(account.pubkey, "derive-channel-pubkey", err));
+        continue;
+      }
+      let relays;
+      try {
+        relays = await accountReadRelays(account.pubkey, accountSigner);
+      } catch (err) {
+        nextChannelBuildFailuresByOwner.set(account.pubkey, reportChannelBuildFailure(account.pubkey, "resolve-read-relays", err));
+        continue;
+      }
+      nextReadRelaysByOwnerPubkey.set(account.pubkey, relays);
+      nextChannelPubkeyByOwnerPubkey.set(account.pubkey, channelPubkey);
+      nextOwnerPubkeyByChannelPubkey.set(channelPubkey, account.pubkey);
+      nextReadyOwnerPubkeys.add(account.pubkey);
+      channels.push({
+        pubkey: channelPubkey,
+        signer: channelSigner,
+        relays,
+        sendRelays: syncRelays(relays),
+        mode: "seeder",
+        seeders
+      });
     }
+    let nextDevicePubkey = "";
     try {
-      devicePubkey = await deviceSigner.getPublicKey();
-      const localDeviceRelays = await resolveDeviceSyncRelays(devicePubkey);
+      nextDevicePubkey = await deviceSigner.getPublicKey();
+      const localDeviceRelays = await resolveDeviceSyncRelays(nextDevicePubkey);
       for (const peer of signerSyncPeers()) {
-        if (!peer.pubkey || peer.pubkey === devicePubkey) continue;
+        if (!peer.pubkey || peer.pubkey === nextDevicePubkey) continue;
         const channelSigner = deviceSigner.withSharedKey(peer.pubkey, _trustedSignerSync.TRUSTED_SIGNER_SYNC_INFO);
         const channelPubkey = await channelSigner.getPublicKey();
         const peerRelays = await resolveDeviceSyncRelays(peer.pubkey);
@@ -2479,22 +2617,18 @@ function createSyncController({
     } catch (err) {
       onError(err);
     }
-    for (const ownerPubkey of [...readRelaysByOwnerPubkey.keys()]) {
-      if (!nextOwnerPubkeys.has(ownerPubkey)) readRelaysByOwnerPubkey.delete(ownerPubkey);
-    }
-    channelPubkeyByOwnerPubkey.clear();
-    ownerPubkeyByChannelPubkey.clear();
-    signerChannelPubkeyByPeerPubkey.clear();
-    for (const [ownerPubkey, channelPubkey] of nextChannelPubkeyByOwnerPubkey) {
-      channelPubkeyByOwnerPubkey.set(ownerPubkey, channelPubkey);
-    }
-    for (const [channelPubkey, ownerPubkey] of nextOwnerPubkeyByChannelPubkey) {
-      ownerPubkeyByChannelPubkey.set(channelPubkey, ownerPubkey);
-    }
-    for (const [peerPubkey, channelPubkey] of nextSignerChannelPubkeyByPeerPubkey) {
-      signerChannelPubkeyByPeerPubkey.set(peerPubkey, channelPubkey);
-    }
-    return channels;
+    return {
+      channels,
+      devicePubkey: nextDevicePubkey,
+      channelPubkeyByOwnerPubkey: nextChannelPubkeyByOwnerPubkey,
+      ownerPubkeyByChannelPubkey: nextOwnerPubkeyByChannelPubkey,
+      signerChannelPubkeyByPeerPubkey: nextSignerChannelPubkeyByPeerPubkey,
+      readRelaysByOwnerPubkey: nextReadRelaysByOwnerPubkey,
+      knownOwnerPubkeys: nextOwnerPubkeys,
+      readyOwnerPubkeys: nextReadyOwnerPubkeys,
+      channelBuildFailuresByOwner: nextChannelBuildFailuresByOwner,
+      relayListRevision: snapshotRelayListRevision
+    };
   }
   function clearRelayListWatcher() {
     stopRelayListWatcher?.();
@@ -2502,7 +2636,7 @@ function createSyncController({
     relayListWatcherKey = "";
   }
   function relayListWatcherPubkeys() {
-    return [...channelPubkeyByOwnerPubkey.keys()];
+    return [...knownOwnerPubkeys];
   }
   function ensureRelayListWatcher() {
     const pubkeys = relayListWatcherPubkeys();
@@ -2526,8 +2660,11 @@ function createSyncController({
     }
   }
   function onAccountRelayListChange(update) {
-    if (!channelPubkeyByOwnerPubkey.has(update.pubkey)) return;
+    if (!knownOwnerPubkeys.has(update.pubkey)) return;
     const relays = syncWatchRelays(update.relays?.read);
+    const previous = readRelaysByOwnerPubkey.get(update.pubkey) || [];
+    if (previous.length === relays.length && previous.every((relay) => relays.includes(relay))) return;
+    relayListRevision += 1;
     readRelaysByOwnerPubkey.set(update.pubkey, relays);
     emitDebug3("relay-list", {
       ownerPubkey: update.pubkey,
@@ -2604,13 +2741,13 @@ function createSyncController({
       else if (!isCurrentLifecycle(id) && initialized && drainQueued) scheduleDrain();
     }
   }
-  function clearAnnouncementTimers() {
+  function clearAnnouncementTimers({ clearPending = true } = {}) {
     if (announceTimer) _clearTimeout(announceTimer);
     if (announceInterval) _clearInterval(announceInterval);
     announceTimer = null;
     announceInterval = null;
     pendingResetInterval = false;
-    pendingAnnounceOwners.clear();
+    if (clearPending) pendingAnnounceOwners.clear();
   }
   function ensureAnnouncementInterval() {
     if (announceInterval) return;
@@ -2630,12 +2767,18 @@ function createSyncController({
     announceTimer = null;
     const resetInterval = pendingResetInterval;
     pendingResetInterval = false;
+    const currentRefresh = refreshPromise;
+    if (currentRefresh) await currentRefresh;
+    if (!isCurrentLifecycle(id)) return;
     if (!messenger || !_secrets.isUnlocked()) {
-      pendingAnnounceOwners.clear();
       return;
     }
+    const currentMessenger = messenger;
     const receivers = trustedPubkeys2();
-    const hasSignerSyncTargets = signerChannelPubkeyByPeerPubkey.size > 0;
+    const peerChannels = new Map(signerChannelPubkeyByPeerPubkey);
+    const ownerChannels = new Map(channelPubkeyByOwnerPubkey);
+    const readyOwners = new Set(readyOwnerPubkeys);
+    const hasSignerSyncTargets = peerChannels.size > 0;
     if (!receivers.length && !hasSignerSyncTargets) {
       pendingAnnounceOwners.clear();
       return;
@@ -2645,38 +2788,49 @@ function createSyncController({
     if (receivers.length) {
       for (const ownerPubkey of owners) {
         if (!isCurrentLifecycle(id)) return;
+        const channelPubkey = ownerChannels.get(ownerPubkey);
+        if (!readyOwners.has(ownerPubkey) || !channelPubkey) {
+          pendingAnnounceOwners.add(ownerPubkey);
+          emitDebug3("announce-deferred", {
+            ownerPubkey,
+            reason: channelBuildFailuresByOwner.has(ownerPubkey) ? "channel-build-failed" : "channel-not-ready"
+          });
+          continue;
+        }
         try {
-          await _contentKeys.announceContentKeys({
-            messenger,
-            channelPubkey: channelPubkeyForOwner(ownerPubkey),
+          assertPublished2(await _contentKeys.announceContentKeys({
+            messenger: currentMessenger,
+            channelPubkey,
             ownerPubkey,
             receiverPubkeys: receivers,
             debug
-          });
+          }));
           if (HEX326.test(ownerPubkey)) {
-            await nostrDbSync.announceRange({
-              messenger,
-              channelPubkey: channelPubkeyForOwner(ownerPubkey),
+            assertPublished2(await nostrDbSync.announceRange({
+              messenger: currentMessenger,
+              channelPubkey,
               ownerPubkey,
               receiverPubkeys: receivers,
               debug
-            });
+            }));
           }
         } catch (err) {
+          pendingAnnounceOwners.add(ownerPubkey);
           onError(err);
         }
       }
     }
     try {
       await _trustedSignerSync.announceTrustedSignerState({
-        messenger,
-        peerChannels: signerChannelPubkeyByPeerPubkey,
+        messenger: currentMessenger,
+        peerChannels,
         records: trustedRecords(),
         activePeerPubkeys: receivers,
         reminderRecords: removedReminderRecords(),
         debug
       });
     } catch (err) {
+      pendingAnnounceOwners.add(ANNOUNCE_ALL);
       onError(err);
     }
     if (resetInterval && isCurrentLifecycle(id)) resetAnnouncementInterval();
@@ -2707,6 +2861,7 @@ function createSyncController({
       channelPubkeyForOwner,
       ownerPubkeyForChannel,
       ownerPubkeys: new Set(nostrDbOwnerPubkeys(_store)),
+      readyOwnerPubkeys: new Set([...readyOwnerPubkeys].filter((pubkey) => HEX326.test(pubkey))),
       debug
     };
   }
@@ -2720,7 +2875,7 @@ function createSyncController({
     }
     context.deferAppBackfillPeerResolution = !_secrets.isUnlocked();
     const accepted = nostrDbSync.requestAppBackfill({ ownerPubkey: owner, appId: app }, context);
-    if (accepted && initialized && _secrets.isUnlocked()) {
+    if (accepted && initialized && _secrets.isUnlocked() && !readyOwnerPubkeys.has(owner)) {
       refresh2().catch(onError);
     }
     return accepted || _secrets.isUnlocked();
@@ -2752,7 +2907,6 @@ function createSyncController({
         scheduleAnnounceAll2({ immediate: true, resetInterval: true });
       }
     });
-    scheduleAnnounceAll2({ immediate: true, resetInterval: true });
     return promise;
   }
   function stop2() {
@@ -2765,6 +2919,10 @@ function createSyncController({
     ownerPubkeyByChannelPubkey.clear();
     signerChannelPubkeyByPeerPubkey.clear();
     readRelaysByOwnerPubkey.clear();
+    relayListRevision += 1;
+    knownOwnerPubkeys.clear();
+    readyOwnerPubkeys.clear();
+    channelBuildFailuresByOwner.clear();
     devicePubkey = "";
     clearAnnouncementTimers();
     nostrDbSync.stop();
@@ -2782,23 +2940,36 @@ function createSyncController({
     devicePubkey = await userSigner.getPublicKey();
     await _trustedSigners.forgetLocal?.(devicePubkey);
     trustedByPubkey = trustedMap(_trustedSigners.list());
-    const channels = await buildChannels(userSigner);
+    const snapshot = await buildChannels(userSigner);
     if (!isCurrentLifecycle(id)) return null;
-    if (!channels.length) {
-      await stop2();
+    if (!snapshot.channels.length) {
+      const currentMessenger = messenger;
+      messenger = null;
+      clearAnnouncementTimers({ clearPending: false });
+      await Promise.resolve(currentMessenger?.close?.()).catch(onError);
+      if (!isCurrentLifecycle(id)) return null;
+      publishChannelSnapshot(snapshot);
+      ensureRelayListWatcher();
+      nostrDbSync.ensureSubscriptions(nostrDbRuntimeContext());
       return null;
     }
     const options = {
       userSigner,
       contentKeySigner: null,
-      channels,
+      channels: snapshot.channels,
       relays: [],
       mode: "seeder"
     };
     if (!messenger) {
       const nextMessenger = new MessengerClass({ onMessageQueued: scheduleDrain, onError, useContentKeys: false, onDebug: debug });
       messenger = nextMessenger;
-      await nextMessenger.init(options);
+      try {
+        await nextMessenger.init(options);
+      } catch (err) {
+        if (messenger === nextMessenger) messenger = null;
+        await Promise.resolve(nextMessenger.close?.()).catch(onError);
+        throw err;
+      }
       if (!isCurrentLifecycle(id)) {
         if (messenger === nextMessenger) {
           messenger = null;
@@ -2811,6 +2982,7 @@ function createSyncController({
       await currentMessenger.update(options);
       if (!isCurrentLifecycle(id) || messenger !== currentMessenger) return null;
     }
+    publishChannelSnapshot(snapshot);
     ensureRelayListWatcher();
     nostrDbSync.ensureSubscriptions(nostrDbRuntimeContext());
     ensureAnnouncementInterval();
@@ -2819,19 +2991,29 @@ function createSyncController({
     return messenger;
   }
   function refresh2() {
-    if (!refreshPromise) {
-      const id = lifecycleId;
-      const promise = Promise.resolve().then(() => refreshNow(id)).catch((err) => {
-        onError(err);
-        return null;
-      }).finally(() => {
-        if (refreshPromise === promise) refreshPromise = null;
-      });
-      refreshPromise = promise;
+    if (refreshPromise) {
+      refreshQueued = true;
+      return refreshPromise;
     }
+    const id = lifecycleId;
+    const promise = Promise.resolve().then(async () => {
+      let result = null;
+      do {
+        refreshQueued = false;
+        result = await refreshNow(id);
+      } while (refreshQueued && isCurrentLifecycle(id));
+      return result;
+    }).catch((err) => {
+      onError(err);
+      return null;
+    }).finally(() => {
+      if (refreshPromise === promise) refreshPromise = null;
+    });
+    refreshPromise = promise;
     return refreshPromise;
   }
   function refreshOnStoreIdentityChange() {
+    if (_hasPendingMutation()) return null;
     const nextKey = syncAccountIdentityKey(_store);
     if (nextKey === lastStoreIdentityKey) return null;
     lastStoreIdentityKey = nextKey;
@@ -2847,13 +3029,24 @@ function createSyncController({
     }
     return refreshOnStoreIdentityChange();
   }
+  function onSecretsChange() {
+    if (!initialized) return null;
+    if (!_secrets.isUnlocked()) {
+      lifecycleId += 1;
+      refreshPromise = null;
+      refreshQueued = false;
+      return stop2();
+    }
+    if (_hasPendingMutation()) return null;
+    return refresh2();
+  }
   function init2() {
     if (initialized) return refresh2();
     PrivateMessenger.maintainStorage().catch(onError);
     initialized = true;
     lifecycleId += 1;
     lastStoreIdentityKey = syncAccountIdentityKey(_store);
-    unsubscribers.push(_secrets.subscribe(refresh2));
+    unsubscribers.push(_secrets.subscribe(onSecretsChange));
     if (_secrets.subscribeContentKeys) unsubscribers.push(_secrets.subscribeContentKeys(onContentKeyChange));
     unsubscribers.push(_store.subscribe(refreshOnStoreIdentityChange));
     unsubscribers.push(_subscribePendingMutations(refreshAfterAccountMutation));
@@ -2865,6 +3058,7 @@ function createSyncController({
     for (const unsubscribe of unsubscribers.splice(0)) unsubscribe();
     initialized = false;
     refreshPromise = null;
+    refreshQueued = false;
     return stop2();
   }
   return {

@@ -6,7 +6,7 @@ import {
   updateMessengerLogAppMetadata,
   vaultDecrypt,
   vaultEncrypt
-} from "./chunk-7S7ZXFS2.js";
+} from "./chunk-GUYFWDAK.js";
 
 // src/services/messenger-log/index.js
 var MAX_ENTRIES_PER_APP = 500;

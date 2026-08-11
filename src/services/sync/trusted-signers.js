@@ -56,6 +56,15 @@ function senderTrustUpdatedAt (context, senderPubkey) {
   return normalizeTimestamp(context.trustedByPubkey?.get?.(senderPubkey)?.updatedAt)
 }
 
+function assertPublished (result) {
+  if (!result?.delivery) return result
+  const reports = result.delivery.reports
+  if (!Array.isArray(reports) || !reports.length || reports.some(report => report?.success !== true)) {
+    throw new Error('SYNC_PUBLICATION_FAILED')
+  }
+  return result
+}
+
 export async function announceTrustedSignerState ({
   messenger,
   peerChannels,
@@ -75,12 +84,12 @@ export async function announceTrustedSignerState ({
       if (!channelPubkey) continue
       const payloadEntries = entriesExceptPubkey(entries, peerPubkey)
       if (!payloadEntries.length) continue
-      await messenger.tell({
+      assertPublished(await messenger.tell({
         channelPubkey,
         receiverPubkey: peerPubkey,
         code: TRUSTED_SIGNERS_STATE_CODE,
         payload: { entries: payloadEntries }
-      })
+      }))
       sent += 1
     }
   }
@@ -90,12 +99,12 @@ export async function announceTrustedSignerState ({
     if (active.includes(record.pubkey)) continue
     const channelPubkey = channels.get(record.pubkey)
     if (!channelPubkey) continue
-    await messenger.tell({
+    assertPublished(await messenger.tell({
       channelPubkey,
       receiverPubkey: record.pubkey,
       code: TRUSTED_SIGNERS_STATE_CODE,
       payload: { entries: [record] }
-    })
+    }))
     sent += 1
   }
 

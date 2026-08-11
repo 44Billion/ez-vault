@@ -4,20 +4,20 @@ import {
 } from "./chunk-OQVZFKQZ.js";
 import {
   claimSigner
-} from "./chunk-DHDZ4PWC.js";
+} from "./chunk-47TWQHYT.js";
 import {
   runSecretAccountMutation
-} from "./chunk-XTCLK3QJ.js";
+} from "./chunk-FQWZBX36.js";
 import {
   ensureRegistered,
   openSecrets
-} from "./chunk-GGSUTURR.js";
+} from "./chunk-A4OBQLFD.js";
 import {
   error
 } from "./chunk-BDYCOPAX.js";
 import {
   removeForPubkey
-} from "./chunk-UA7KOUXD.js";
+} from "./chunk-SDOMGLPX.js";
 import {
   seededAvatarDataUrl
 } from "./chunk-4RHK4XWQ.js";
@@ -39,7 +39,7 @@ import {
   signProfileEvent,
   signRelayListEvent,
   update
-} from "./chunk-7S7ZXFS2.js";
+} from "./chunk-GUYFWDAK.js";
 import {
   defineLocales,
   getT,

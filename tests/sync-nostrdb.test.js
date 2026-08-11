@@ -54,6 +54,7 @@ function context (msg, extra = {}) {
     messenger: msg,
     trustedByPubkey: new Map([[PEER, { pubkey: PEER }]]),
     ownerPubkeys: new Set([OWNER]),
+    readyOwnerPubkeys: new Set([OWNER]),
     ownerPubkeyForChannel: channelPubkey => channelPubkey === 'channel' ? OWNER : '',
     channelPubkeyForOwner: ownerPubkey => ownerPubkey === OWNER ? 'channel' : '',
     ...extra
@@ -269,7 +270,7 @@ test('nostrdb app backfill stores install intent and asks trusted peers', async 
   assert.equal(appState.peers[PEER].pending.requestId, msg.sent[0].options.payload.requestId)
 })
 
-test('nostrdb app backfill drops unlocked requests when no trusted peers exist', () => {
+test('nostrdb app backfill persists unlocked requests when no trusted peers exist', () => {
   const msg = messenger()
   const controller = createNostrDbSyncController({
     _nowMs: () => 1000,
@@ -279,9 +280,9 @@ test('nostrdb app backfill drops unlocked requests when no trusted peers exist',
   assert.equal(controller.requestAppBackfill({
     ownerPubkey: OWNER,
     appId: 'app-1'
-  }, context(msg, { trustedByPubkey: new Map() })), false)
+  }, context(msg, { trustedByPubkey: new Map() })), true)
 
-  assert.deepEqual(Object.keys(controller._getState().appBackfills || {}), [])
+  assert.deepEqual(Object.keys(controller._getState().appBackfills || {}), [OWNER])
   assert.deepEqual(msg.sent, [])
 })
 
@@ -305,8 +306,7 @@ test('nostrdb app backfill resolves locked intents once and freezes target peers
   assert.deepEqual(msg.sent, [])
 
   controller.ensureSubscriptions(context(msg))
-  await Promise.resolve()
-  await Promise.resolve()
+  await controller.processAppBackfills(context(msg))
 
   assert.equal(msg.sent.length, 1)
   assert.equal(msg.sent[0].options.receiverPubkey, PEER)
@@ -326,7 +326,7 @@ test('nostrdb app backfill resolves locked intents once and freezes target peers
   assert.deepEqual(Object.keys(appState.peers), [PEER])
 })
 
-test('nostrdb app backfill drops locked intents if unlock finds no trusted peers', async () => {
+test('nostrdb app backfill keeps locked intents if unlock still has no trusted peers', async () => {
   const msg = messenger()
   const controller = createNostrDbSyncController({
     _nowMs: () => 1000,
@@ -345,8 +345,59 @@ test('nostrdb app backfill drops locked intents if unlock finds no trusted peers
   controller.ensureSubscriptions(context(msg, { trustedByPubkey: new Map() }))
   await Promise.resolve()
 
-  assert.deepEqual(Object.keys(controller._getState().appBackfills || {}), [])
+  assert.deepEqual(Object.keys(controller._getState().appBackfills || {}), [OWNER])
   assert.deepEqual(msg.sent, [])
+})
+
+test('nostrdb app backfill waits for channel readiness and sends once', async () => {
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({ subscribe: emptySubscription })
+  })
+  const notReady = context(msg, {
+    readyOwnerPubkeys: new Set(),
+    channelPubkeyForOwner: () => ''
+  })
+
+  assert.equal(controller.requestAppBackfill({ ownerPubkey: OWNER, appId: 'app-1' }, notReady), true)
+  await controller.processAppBackfills(notReady)
+  assert.deepEqual(msg.sent, [])
+
+  const ready = context(msg)
+  controller.ensureSubscriptions(ready)
+  await Promise.all([
+    controller.processAppBackfills(ready),
+    controller.processAppBackfills(ready)
+  ])
+
+  assert.equal(msg.sent.length, 1)
+  assert.equal(msg.sent[0].options.channelPubkey, 'channel')
+})
+
+test('nostrdb app backfill retains pending state when publication fails', async () => {
+  const errors = []
+  const msg = messenger()
+  msg.ask = async options => {
+    msg.sent.push({ method: 'ask', options })
+    return { delivery: { reports: [{ success: false }] } }
+  }
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    onError: err => errors.push(err),
+    getDb: () => ({ subscribe: emptySubscription })
+  })
+
+  controller.requestAppBackfill({ ownerPubkey: OWNER, appId: 'app-1' }, context(msg))
+  await controller.processAppBackfills(context(msg))
+
+  const appState = Object.values(controller._getState().appBackfills[OWNER])[0]
+  assert.ok(appState.peers[PEER].pending)
+  assert.equal(errors.at(-1).message, 'SYNC_PUBLICATION_FAILED')
 })
 
 test('nostrdb app backfill ask exports one app page', async () => {

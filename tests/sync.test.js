@@ -187,7 +187,10 @@ test('sync initialization clears private messenger temporary storage before unlo
 test('sync orchestration watches nsec channels with identity-only sync options', async () => {
   const deviceSigner = signer('device')
   const accountSigners = {
-    nsec1: signer('nsec1', { readRelays: ['wss://nsec-one.example', 'wss://nsec-two.example', 'wss://nsec-three.example'] }),
+    nsec1: signer('nsec1', {
+      readRelays: ['wss://nsec-one.example', 'wss://nsec-two.example', 'wss://nsec-three.example'],
+      writeRelays: ['wss://nsec-write-only.example']
+    }),
     bunker1: signer('bunker1', { readRelays: ['wss://bunker-one.example', 'wss://bunker-two.example'] })
   }
   let accounts = [
@@ -269,6 +272,7 @@ test('sync orchestration watches nsec channels with identity-only sync options',
   assert.deepEqual(instances[0].initOptions.channels.map(channel => channel.mode), ['seeder', 'seeder'])
   assert.deepEqual(instances[0].initOptions.channels[0].relays, ['wss://nsec-one.example', 'wss://nsec-two.example', 'wss://nsec-three.example'])
   assert.deepEqual(instances[0].initOptions.channels[0].sendRelays, ['wss://nsec-one.example', 'wss://nsec-two.example'])
+  assert.equal(instances[0].initOptions.channels[0].relays.includes('wss://nsec-write-only.example'), false)
   assert.deepEqual(instances[0].initOptions.channels[0].seeders, ['trusted1'])
   assert.deepEqual(instances[0].initOptions.channels[1].relays, ['wss://relay.44billion.net', 'wss://nos.lol'])
   assert.deepEqual(instances[0].initOptions.channels[1].sendRelays, ['wss://relay.44billion.net', 'wss://nos.lol'])
@@ -305,6 +309,8 @@ test('sync orchestration watches nsec channels with identity-only sync options',
   await accountMutationsStub.emit()
   accountSigners.nsec3 = signer('nsec3')
   accounts = [...accounts, { type: 'nsec', pubkey: 'nsec3' }]
+  await secretsStub.emit()
+  await storeStub.emit()
   await accountMutationsStub.emit()
   assert.equal(instances[0].updates.length, 3)
 
@@ -389,6 +395,16 @@ test('sync refreshes messenger channels when watched account read relays change'
   await relayUpdates.subscriptions[0].emit({
     pubkey: 'nsec1',
     relays: {
+      read: ['wss://old-two.example', 'wss://old-one.example'],
+      write: ['wss://changed-write.example']
+    }
+  })
+  await flushMicrotasks()
+  assert.equal(instances[0].updates.length, 0)
+
+  await relayUpdates.subscriptions[0].emit({
+    pubkey: 'nsec1',
+    relays: {
       read: ['wss://new-one.example', 'wss://new-two.example', 'wss://new-three.example'],
       write: []
     }
@@ -402,6 +418,139 @@ test('sync refreshes messenger channels when watched account read relays change'
   controller.close()
 
   assert.equal(relayUpdates.subscriptions[0].closed, true)
+})
+
+test('sync ignores the first unchanged NIP-65 event for five unlocked accounts', async () => {
+  const accounts = Array.from({ length: 5 }, (_value, index) => ({ type: 'nsec', pubkey: `owner-${index}` }))
+  const accountSigners = Object.fromEntries(accounts.map(account => [
+    account.pubkey,
+    signer(account.pubkey, { readRelays: [`wss://${account.pubkey}.read.example`] })
+  ]))
+  const relayUpdates = createRelayListUpdates()
+  const instances = []
+
+  class FakeMessenger {
+    constructor () {
+      this.updates = []
+      instances.push(this)
+    }
+
+    async init (options) { this.options = options; return this }
+    async update (options) { this.updates.push(options); return this }
+    nextMessage () { return null }
+    close () {}
+  }
+
+  const controller = createSyncController({
+    MessengerClass: FakeMessenger,
+    _store: createSubscribable({ list: () => accounts }),
+    _secrets: createSubscribable({ isUnlocked: () => true, getDeviceSigner: async () => signer('device') }),
+    _trustedSigners: createSubscribable({ list: () => [] }),
+    _claimSigner: account => accountSigners[account.pubkey],
+    _subscribeRelayListUpdates: relayUpdates.subscribe,
+    _setTimeout: () => ({}),
+    _clearTimeout: () => {},
+    _setInterval: () => ({}),
+    _clearInterval: () => {}
+  })
+
+  await controller.init()
+  for (const account of accounts) {
+    await relayUpdates.subscriptions[0].emit({
+      pubkey: account.pubkey,
+      relays: { read: [`wss://${account.pubkey}.read.example`], write: [] }
+    })
+  }
+  await flushMicrotasks()
+
+  assert.equal(instances[0].updates.length, 0)
+  await controller.close()
+})
+
+test('sync keeps failed owners known without using write relays or blocking ready announcements', async () => {
+  const storeStub = createSubscribable({
+    list: () => [
+      { type: 'nsec', pubkey: 'ready-owner' },
+      { type: 'nsec', pubkey: 'write-only-owner' }
+    ]
+  })
+  const secretsStub = createSubscribable({
+    isUnlocked: () => true,
+    getDeviceSigner: async () => signer('device')
+  })
+  const trustedStub = createSubscribable({
+    list: () => [{ pubkey: 'trusted1', platform: 'Laptop' }]
+  })
+  const accountSigners = {
+    'ready-owner': signer('ready-owner', { readRelays: ['wss://ready.read.example'] }),
+    'write-only-owner': signer('write-only-owner', {
+      readRelays: [],
+      writeRelays: ['wss://must-not-be-used.write.example']
+    })
+  }
+  const errors = []
+  const announced = []
+  const timers = []
+  const relayUpdates = createRelayListUpdates()
+
+  class FakeMessenger {
+    async init (options) {
+      this.options = options
+      return this
+    }
+
+    async tell () {}
+    nextMessage () { return null }
+    close () {}
+  }
+
+  const controller = createSyncController({
+    MessengerClass: FakeMessenger,
+    _store: storeStub,
+    _secrets: secretsStub,
+    _trustedSigners: trustedStub,
+    _claimSigner: account => accountSigners[account.pubkey],
+    _subscribeRelayListUpdates: relayUpdates.subscribe,
+    _contentKeys: {
+      resetDebugSources: () => {},
+      handleMessage: async () => false,
+      announceContentKeys: async options => announced.push(options)
+    },
+    _createNostrDbSyncController: () => ({
+      announceRange: async () => {},
+      handleMessage: async () => false,
+      ensureSubscriptions: () => {},
+      requestAppBackfill: () => true,
+      stop: () => {}
+    }),
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: () => {},
+    _setInterval: () => ({}),
+    _clearInterval: () => {},
+    onError: err => errors.push(err)
+  })
+
+  await controller.init()
+
+  assert.deepEqual(controller.messenger.options.channels.map(channel => channel.pubkey), [
+    `ready-owner:shared:ready-owner:${SYNC_INFO}`,
+    `device:shared:trusted1:${SIGNER_LIST_SYNC_INFO}`
+  ])
+  assert.deepEqual(relayUpdates.subscriptions[0].pubkeys.sort(), ['ready-owner', 'write-only-owner'])
+  const buildError = errors.find(err => err.code === 'SYNC_CHANNEL_BUILD_FAILED')
+  assert.equal(buildError.ownerPubkey, 'write-only-owner')
+  assert.equal(buildError.stage, 'resolve-read-relays')
+  assert.equal(errors.some(err => err.message === 'UNKNOWN_CHANNEL'), false)
+
+  await timers.find(timer => timer.ms === 1000).fn()
+
+  assert.deepEqual(announced.map(entry => entry.ownerPubkey), ['ready-owner'])
+  assert.equal(announced.some(entry => entry.channelPubkey === 'write-only-owner'), false)
+  await controller.close()
 })
 
 test('sync app backfill accepts valid unlocked requests even when no trusted peers exist', () => {

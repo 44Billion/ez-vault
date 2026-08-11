@@ -8,14 +8,14 @@ import {
   isCameraSupported,
   parseNostrpairInput,
   prepareBareKey
-} from "./chunk-AFHJX5KL.js";
-import "./chunk-XTCLK3QJ.js";
-import "./chunk-RGXQEW2G.js";
+} from "./chunk-EBGHTV4C.js";
+import "./chunk-FQWZBX36.js";
+import "./chunk-ZOPYVJB4.js";
 import {
   detectPlatform,
   ensureRegistered,
   openSecrets
-} from "./chunk-GGSUTURR.js";
+} from "./chunk-A4OBQLFD.js";
 import {
   error,
   info,
@@ -36,7 +36,7 @@ import {
   npubFromPubkey,
   nsecFromHex,
   relayPool
-} from "./chunk-7S7ZXFS2.js";
+} from "./chunk-GUYFWDAK.js";
 import {
   defineLocales,
   getT,

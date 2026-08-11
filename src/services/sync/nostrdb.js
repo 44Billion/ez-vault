@@ -357,7 +357,19 @@ function isTrustedSender (message, context) {
 }
 
 function ownerChannelPubkey (ownerPubkey, context) {
-  return context.channelPubkeyForOwner?.(ownerPubkey) || ownerPubkey
+  return context.channelPubkeyForOwner?.(ownerPubkey) || ''
+}
+
+function isOwnerReady (ownerPubkey, context) {
+  const ready = context.readyOwnerPubkeys
+  if (ready instanceof Set) return ready.has(ownerPubkey)
+  return Boolean(ownerChannelPubkey(ownerPubkey, context))
+}
+
+function publicationSucceeded (result) {
+  if (!result?.delivery) return true
+  const reports = result.delivery.reports
+  return Array.isArray(reports) && reports.length > 0 && reports.every(report => report?.success === true)
 }
 
 function trustedPubkeys (context) {
@@ -386,6 +398,9 @@ export function createNostrDbSyncController ({
   const recentSyncEventIds = new Map()
   let runtime = {}
   let retryTimer = null
+  let appBackfillProcessTail = Promise.resolve()
+  let appBackfillProcessGeneration = 0
+  let pendingAppBackfillProcess = null
   let durableState = storage
     ? readState(storage)
     : (readRecords(NOSTRDB_SYNC).find(record => record.key === 'state')?.value || {})
@@ -428,9 +443,9 @@ export function createNostrDbSyncController ({
     return recentSyncEventIds.has(event?.id)
   }
 
-  async function announceRange ({ messenger, ownerPubkey, channelPubkey = ownerPubkey, receiverPubkeys, debug = runtime.debug } = {}) {
+  async function announceRange ({ messenger, ownerPubkey, channelPubkey = '', receiverPubkeys, debug = runtime.debug } = {}) {
     const receivers = [...new Set((receiverPubkeys || []).filter(Boolean))]
-    if (!messenger?.yell || !ownerPubkey || !receivers.length) return null
+    if (!messenger?.yell || !ownerPubkey || !channelPubkey || !receivers.length) return null
     let range
     const generatedAt = _nowMs()
     try {
@@ -485,6 +500,8 @@ export function createNostrDbSyncController ({
 
   async function maybeAsk (ownerPubkey, peerPubkey, context = runtime, { onlineHint = false, force = false } = {}) {
     if (!context.messenger?.ask) return null
+    const channelPubkey = ownerChannelPubkey(ownerPubkey, context)
+    if (!isOwnerReady(ownerPubkey, context) || !channelPubkey) return null
     const state = getState()
     const entry = peerState(state, ownerPubkey, peerPubkey)
     const advert = entry.advert
@@ -532,18 +549,6 @@ export function createNostrDbSyncController ({
       limit: REQUEST_LIMIT
     }
 
-    try {
-      await context.messenger.ask({
-        channelPubkey: ownerChannelPubkey(ownerPubkey, context),
-        receiverPubkey: peerPubkey,
-        code: NOSTRDB_SYNC_ASK_CODE,
-        payload
-      })
-    } catch (err) {
-      report(err)
-      return null
-    }
-
     entry.windowMs = askWindow.windowMs
     entry.pending = {
       requestId: id,
@@ -558,9 +563,28 @@ export function createNostrDbSyncController ({
     }
     entry.updatedAt = now
     setState(state)
+
+    try {
+      const result = await context.messenger.ask({
+        channelPubkey,
+        receiverPubkey: peerPubkey,
+        code: NOSTRDB_SYNC_ASK_CODE,
+        payload
+      })
+      if (!publicationSucceeded(result)) throw new Error('SYNC_PUBLICATION_FAILED')
+    } catch (err) {
+      entry.pending.nextRetryAt = _nowMs() + onlineDelay
+      entry.pending.onlineRetryAt = entry.pending.nextRetryAt
+      entry.updatedAt = _nowMs()
+      setState(state)
+      scheduleRetrySweep(context)
+      report(err)
+      return null
+    }
+
     scheduleRetrySweep(context)
     emitDebug(context.debug, 'ask', {
-      channelPubkey: ownerChannelPubkey(ownerPubkey, context),
+      channelPubkey,
       ownerPubkey,
       receiverPubkey: peerPubkey,
       sinceScore: payload.sinceScore,
@@ -570,8 +594,10 @@ export function createNostrDbSyncController ({
     return payload
   }
 
-  async function maybeAskAppBackfill (ownerPubkey, appId, peerPubkey, context = runtime, { onlineHint = false, force = false } = {}) {
+  async function maybeAskAppBackfill (ownerPubkey, appId, peerPubkey, context = runtime, { onlineHint = false } = {}) {
     if (!context.messenger?.ask) return null
+    const channelPubkey = ownerChannelPubkey(ownerPubkey, context)
+    if (!isOwnerReady(ownerPubkey, context) || !channelPubkey) return null
     if (!normalizeAppId(appId) || !normalizePubkey(peerPubkey)) return null
     if (context.ownerPubkeys instanceof Set && !context.ownerPubkeys.has(ownerPubkey)) return null
     if (!context.trustedByPubkey?.has?.(peerPubkey)) return null
@@ -582,10 +608,10 @@ export function createNostrDbSyncController ({
     if (!isPlainObject(existingApp?.peers) || !Object.hasOwn(existingApp.peers, peerPubkey)) return null
     const app = appBackfillState(state, ownerPubkey, appId)
     const entry = appBackfillPeerState(state, ownerPubkey, appId, peerPubkey)
-    if (entry.completed && !force) return null
+    if (entry.completed) return null
 
     const now = _nowMs()
-    if (entry.pending && !force) {
+    if (entry.pending) {
       const retryAt = onlineHint
         ? Math.min(entry.pending.nextRetryAt || Infinity, entry.pending.onlineRetryAt || Infinity)
         : entry.pending.nextRetryAt
@@ -596,7 +622,7 @@ export function createNostrDbSyncController ({
     }
 
     const id = requestId(_random)
-    const attempt = force && entry.pending ? (entry.pending.attempt || 0) + 1 : 0
+    const attempt = entry.pending ? (entry.pending.attempt || 0) + 1 : 0
     const onlineDelay = Math.min(ONLINE_RETRY_MAX_MS, ONLINE_RETRY_MIN_MS * (2 ** attempt))
     const payload = {
       requestId: id,
@@ -622,21 +648,24 @@ export function createNostrDbSyncController ({
     setState(state)
 
     try {
-      await context.messenger.ask({
-        channelPubkey: ownerChannelPubkey(ownerPubkey, context),
+      const result = await context.messenger.ask({
+        channelPubkey,
         receiverPubkey: peerPubkey,
         code: NOSTRDB_SYNC_APP_ASK_CODE,
         payload
       })
+      if (!publicationSucceeded(result)) throw new Error('SYNC_PUBLICATION_FAILED')
     } catch (err) {
       const nextState = getState()
       const { app: nextApp, entry: nextEntry } = existingAppBackfillPeerState(nextState, ownerPubkey, appId, peerPubkey)
       if (nextEntry?.pending?.requestId === id) {
-        nextEntry.pending = null
+        nextEntry.pending.nextRetryAt = _nowMs() + onlineDelay
+        nextEntry.pending.onlineRetryAt = nextEntry.pending.nextRetryAt
         nextEntry.updatedAt = _nowMs()
         nextApp.updatedAt = nextEntry.updatedAt
         setState(nextState)
       }
+      scheduleRetrySweep(context)
       report(err)
       return null
     }
@@ -651,7 +680,7 @@ export function createNostrDbSyncController ({
     return payload
   }
 
-  async function processAppBackfills (context = runtime, { ownerPubkey = '', peerPubkey = '', onlineHint = false } = {}) {
+  async function processAppBackfillsNow (context = runtime, { ownerPubkey = '', peerPubkey = '', onlineHint = false } = {}) {
     const state = getState()
     const owners = state.appBackfills || {}
     const contextOwners = context.ownerPubkeys instanceof Set ? context.ownerPubkeys : new Set(context.ownerPubkeys || [])
@@ -664,11 +693,6 @@ export function createNostrDbSyncController ({
         const appId = normalizeAppId(appState?.appId) || appIdFromStateKey(key)
         if (!appId) continue
         if (appState.unresolvedPeers) {
-          if (!context.deferAppBackfillPeerResolution && !contextPeers.length) {
-            delete apps[key]
-            changed = true
-            continue
-          }
           if (!contextPeers.length) continue
           setAppBackfillTargetPeers(appState, contextPeers)
           appState.unresolvedPeers = false
@@ -694,12 +718,50 @@ export function createNostrDbSyncController ({
     if (changed) setState(state)
   }
 
+  function processAppBackfills (context = runtime, options = {}) {
+    const generation = appBackfillProcessGeneration
+    if (pendingAppBackfillProcess?.generation === generation) {
+      const pending = pendingAppBackfillProcess
+      pending.context = context
+      pending.options = {
+        ownerPubkey: pending.options.ownerPubkey && options.ownerPubkey === pending.options.ownerPubkey
+          ? pending.options.ownerPubkey
+          : '',
+        peerPubkey: pending.options.peerPubkey && options.peerPubkey === pending.options.peerPubkey
+          ? pending.options.peerPubkey
+          : '',
+        onlineHint: Boolean(pending.options.onlineHint || options.onlineHint)
+      }
+      return pending.promise
+    }
+    const pending = {
+      generation,
+      context,
+      options: {
+        ownerPubkey: options.ownerPubkey || '',
+        peerPubkey: options.peerPubkey || '',
+        onlineHint: Boolean(options.onlineHint)
+      },
+      promise: null
+    }
+    const run = appBackfillProcessTail
+      .catch(() => {})
+      .then(() => {
+        if (pendingAppBackfillProcess === pending) pendingAppBackfillProcess = null
+        if (generation !== appBackfillProcessGeneration) return null
+        return processAppBackfillsNow(pending.context, pending.options)
+      })
+    pending.promise = run
+    pendingAppBackfillProcess = pending
+    appBackfillProcessTail = run
+    return run
+  }
+
   function requestAppBackfill ({ ownerPubkey, appId } = {}, context = runtime) {
     const owner = normalizePubkey(ownerPubkey)
     const app = normalizeAppId(appId)
     if (!owner || !app) return false
     const peers = trustedPubkeys(context)
-    if (!peers.length && !context.deferAppBackfillPeerResolution) return false
     const state = getState()
     const entry = appBackfillState(state, owner, app)
     const now = _nowMs()
@@ -977,7 +1039,7 @@ export function createNostrDbSyncController ({
         hasMore,
         nextAfter
       })
-      if (hasMore) await maybeAskAppBackfill(ownerPubkey, payload.appId, peerPubkey, context, { force: true })
+      if (hasMore) await processAppBackfills(context, { ownerPubkey, peerPubkey })
       return true
     }
 
@@ -1017,10 +1079,11 @@ export function createNostrDbSyncController ({
 
   function pushRuntime (ownerPubkey) {
     const receiverPubkeys = trustedPubkeys(runtime)
-    if (!runtime.messenger?.yell || !receiverPubkeys.length) return null
+    const channelPubkey = ownerChannelPubkey(ownerPubkey, runtime)
+    if (!runtime.messenger?.yell || !receiverPubkeys.length || !isOwnerReady(ownerPubkey, runtime) || !channelPubkey) return null
     return {
       messenger: runtime.messenger,
-      channelPubkey: ownerChannelPubkey(ownerPubkey, runtime),
+      channelPubkey,
       receiverPubkeys
     }
   }
@@ -1169,17 +1232,19 @@ export function createNostrDbSyncController ({
     setState(state)
   }
 
-  function nextRetryAt () {
+  function nextRetryAt (context = runtime) {
     const state = getState()
     let next = Infinity
-    for (const owner of Object.values(state.owners || {})) {
+    for (const [ownerPubkey, owner] of Object.entries(state.owners || {})) {
+      if (!isOwnerReady(ownerPubkey, context)) continue
       for (const entry of Object.values(owner || {})) {
         const pending = entry?.pending
         if (!pending) continue
         next = Math.min(next, pending.nextRetryAt || Infinity)
       }
     }
-    for (const apps of Object.values(state.appBackfills || {})) {
+    for (const [ownerPubkey, apps] of Object.entries(state.appBackfills || {})) {
+      if (!isOwnerReady(ownerPubkey, context)) continue
       for (const app of Object.values(apps || {})) {
         for (const entry of Object.values(app?.peers || {})) {
           const pending = entry?.pending
@@ -1194,7 +1259,7 @@ export function createNostrDbSyncController ({
   function scheduleRetrySweep (context = runtime) {
     if (retryTimer) _clearTimeout?.(retryTimer)
     retryTimer = null
-    const next = nextRetryAt()
+    const next = nextRetryAt(context)
     if (!next) return
     retryTimer = _setTimeout(() => {
       retryTimer = null
@@ -1220,7 +1285,8 @@ export function createNostrDbSyncController ({
         if (!appId) continue
         for (const [peerPubkey, entry] of Object.entries(app?.peers || {})) {
           if (!entry?.pending || (entry.pending.nextRetryAt || Infinity) > now) continue
-          await maybeAskAppBackfill(ownerPubkey, appId, peerPubkey, context, { force: true })
+          await processAppBackfills(context, { ownerPubkey, peerPubkey })
+          break
         }
       }
     }
@@ -1247,6 +1313,9 @@ export function createNostrDbSyncController ({
     pushQueues.clear()
     if (retryTimer) _clearTimeout?.(retryTimer)
     retryTimer = null
+    appBackfillProcessGeneration += 1
+    appBackfillProcessTail = Promise.resolve()
+    pendingAppBackfillProcess = null
     runtime = {}
   }
 
