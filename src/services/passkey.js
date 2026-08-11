@@ -43,10 +43,14 @@ import { getState, hasState, removeState, requestPersistentStorage, updateState 
 
 const PRF_SALT = 'ez-vault'
 const RP_NAME = '44billion · EZ Vault'
-const CREATE_HINTS = ['client-device']
-const GET_TRANSPORTS = ['internal']
+// Hints are preferences, not filters. Ask browsers to foreground the current
+// device while still allowing security keys and hybrid phone flows when no
+// platform authenticator is available (notably Firefox on desktop Linux).
+const CREATE_HINTS = ['client-device', 'hybrid', 'security-key']
+const LEGACY_GET_TRANSPORTS = ['internal']
 
 const CRED_ID_KEY = 'ez-vault:passkey:credential-id'
+const TRANSPORTS_KEY = 'ez-vault:passkey:transports'
 const USER_ID_KEY = 'ez-vault:passkey:user-id'
 const ICON_KEY = 'ez-vault:passkey:icon'
 const PRF_BACKUP_KEY = 'ez-vault:passkey:prf'
@@ -119,12 +123,38 @@ function readStoragePolicy () {
   return storagePolicy(policy.mode, policy.largeBlobSupport, policy.cleanupPending)
 }
 
-function descriptorFromCredentialId (credentialId) {
+function normalizeTransports (transports) {
+  if (!Array.isArray(transports)) return []
+  return [...new Set(transports.filter(transport => typeof transport === 'string' && transport))]
+}
+
+function transportsFromCredential (credential) {
+  const getTransports = credential?.response?.getTransports
+  if (typeof getTransports !== 'function') return []
+  try {
+    return normalizeTransports(getTransports.call(credential.response))
+  } catch {
+    return []
+  }
+}
+
+function readStoredTransports () {
+  // Registrations made before transport metadata was introduced were
+  // explicitly platform-only, so `internal` is exact for those credentials.
+  // New registrations persist even an empty array, which means "unknown" and
+  // deliberately omits the descriptor hint rather than excluding valid paths.
+  const transports = getState(TRANSPORTS_KEY, null)
+  return Array.isArray(transports)
+    ? normalizeTransports(transports)
+    : LEGACY_GET_TRANSPORTS
+}
+
+function descriptorFromCredentialId (credentialId, transports = readStoredTransports()) {
   if (!credentialId) return null
   return {
     id: base64UrlToBytes(credentialId),
     type: 'public-key',
-    transports: GET_TRANSPORTS
+    ...(transports.length && { transports })
   }
 }
 
@@ -162,17 +192,16 @@ function buildUserName (userId) {
 // attempted even when create() already returned PRF. `userVerification:
 // 'discouraged'` minimizes the chance of a second visible prompt after the
 // immediately preceding creation ceremony.
-async function fetchPrfViaGet (rawId) {
+async function fetchPrfViaGet (rawId, transports) {
   try {
     const credential = await navigator.credentials.get({
       publicKey: {
         challenge: crypto.getRandomValues(new Uint8Array(32)),
         rpId: window.location.hostname,
-        allowCredentials: [{
-          id: new Uint8Array(rawId),
-          type: 'public-key',
-          transports: GET_TRANSPORTS
-        }],
+        allowCredentials: [descriptorFromCredentialId(
+          bytesToBase64Url(new Uint8Array(rawId)),
+          transports
+        )],
         userVerification: 'discouraged',
         extensions: {
           prf: { eval: { first: PRF_SALT_BYTES } }
@@ -251,7 +280,6 @@ export async function register () {
         { alg: -257, type: 'public-key' }
       ],
       authenticatorSelection: {
-        authenticatorAttachment: 'platform',
         // Preferred: non-discoverable where the authenticator honors it, but
         // Android then creates a Google Password Manager passkey — the only
         // Android credential type that exposes PRF. Platform sync may
@@ -275,9 +303,9 @@ export async function register () {
     }
   })
   if (!credential) throw new Error('PASSKEY_CREATE_FAILED')
-  if (credential.authenticatorAttachment !== 'platform') throw new Error('PASSKEY_NOT_PLATFORM')
 
   const ext = extractExtensions(credential)
+  const transports = transportsFromCredential(credential)
   const prfFromCreate = extractPrfBytes(ext)
   const largeBlobSupport = largeBlobSupportFromCreate(ext)
   const isDiscoverable = Boolean(ext.credProps?.rk)
@@ -285,7 +313,7 @@ export async function register () {
     rk: isDiscoverable,
     createPrf: Boolean(prfFromCreate?.length)
   })
-  const prfFromAssertion = await fetchPrfViaGet(credential.rawId)
+  const prfFromAssertion = await fetchPrfViaGet(credential.rawId, transports)
 
   if (prfFromCreate?.length && prfFromAssertion?.length && !bytesEqual(prfFromCreate, prfFromAssertion)) {
     await discardCredential(credential.rawId)
@@ -312,6 +340,7 @@ export async function register () {
   await updateState({
     set: {
       [CRED_ID_KEY]: credentialId,
+      [TRANSPORTS_KEY]: transports,
       [USER_ID_KEY]: bytesToBase64Url(userId),
       ...(!prfFromAssertion?.length && { [PRF_BACKUP_KEY]: bytesToHex(prfBytes) }),
       [STORAGE_POLICY_KEY]: policy,
@@ -497,7 +526,6 @@ async function obtainVaultMaterial ({ freshVerification = false } = {}) {
       rpId: window.location.hostname,
       allowCredentials: [descriptor],
       userVerification: 'required',
-      ...(!freshVerification && { hints: CREATE_HINTS }),
       extensions
     },
     ...(freshVerification && { mediation: 'required' })

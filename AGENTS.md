@@ -121,6 +121,15 @@ When in doubt about a layout decision, ask: "does this still work as a tall vert
   `residentKey`, `credProps.rk`, backup eligibility (`BE`) and backup state
   (`BS`) describe distinct properties; do not treat any of them as proof that
   a credential is unsynced or add UI/policy based on them.
+- Registration orders the advisory WebAuthn `hints` as `client-device`,
+  `hybrid`, then `security-key`, but does not require
+  `authenticatorAttachment: 'platform'`. Security keys and hybrid phone
+  authentication must remain available for browsers without a platform
+  authenticator. Persist the result of `response.getTransports()` (including
+  an empty array meaning unknown) and use it in future allow-credential
+  descriptors; only legacy registrations, which were platform-only, may
+  default to `['internal']`. Do not put a client-device hint on assertions for
+  a specific credential because it can contradict its stored transports.
 - IndexedDB database `ez-vault` is the durable store for account records,
   encrypted vault/sidecars, passkey metadata, sync state and the bounded
   activity log. Do not add new `localStorage` or `sessionStorage` persistence.

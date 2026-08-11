@@ -37,6 +37,9 @@ function installCredentialMocks ({
   onCreate,
   onGet,
   onPersist,
+  authenticatorAttachment = 'platform',
+  transports = ['internal'],
+  exposeTransports = true,
   userAgent = 'Node Test'
 }) {
   Object.defineProperty(globalThis, 'window', {
@@ -61,7 +64,10 @@ function installCredentialMocks ({
           onCreate?.(options)
           return {
             rawId: new Uint8Array([1, 2, 3, 4]),
-            authenticatorAttachment: 'platform',
+            authenticatorAttachment,
+            response: exposeTransports
+              ? { getTransports: () => [...transports] }
+              : {},
             getClientExtensionResults: () => ({
               prf: createPrfBytes
                 ? { results: { first: createPrfBytes } }
@@ -118,6 +124,8 @@ test('empty vault can register passkey and derive a device signer pubkey', async
       assert.equal(new TextDecoder().decode(extensions.prf.eval.first), 'ez-vault')
       assert.deepEqual(extensions.largeBlob, { support: 'preferred' })
       assert.equal(extensions.credProps, true)
+      assert.equal(options.publicKey.authenticatorSelection.authenticatorAttachment, undefined)
+      assert.deepEqual(options.publicKey.hints, ['client-device', 'hybrid', 'security-key'])
     }
   })
 
@@ -133,6 +141,7 @@ test('empty vault can register passkey and derive a device signer pubkey', async
   assert.equal(secrets.isUnlocked(), true)
   assert.match(pubkey, /^[0-9a-f]{64}$/)
   assert.equal(getState('ez-vault:passkey:credential-id'), 'AQIDBA')
+  assert.deepEqual(getState('ez-vault:passkey:transports'), ['internal'])
   assert.match(getState('ez-vault:passkey:user-id'), /^[A-Za-z0-9_-]{86}$/)
   assert.equal(getState('ez-vault:passkey:prf'), null)
   assert.deepEqual(getState('ez-vault:passkey:storage-policy'), {
@@ -148,6 +157,60 @@ test('empty vault can register passkey and derive a device signer pubkey', async
   assert.ok(getState('ez-vault:passkey:blob'))
   assert.equal(getState('ez-vault:passkey:prf'), null)
   assert.equal(data.size, 0)
+})
+
+test('cross-platform credentials retain their transports for follow-up and unlock assertions', async () => {
+  const prfBytes = new Uint8Array(32)
+  prfBytes[0] = 24
+  const requestedTransports = []
+
+  installCredentialMocks({
+    prfBytes,
+    authenticatorAttachment: 'cross-platform',
+    transports: ['usb', 'hybrid'],
+    onGet: options => {
+      requestedTransports.push(options.publicKey.allowCredentials[0].transports)
+      return {
+        getClientExtensionResults: () => ({ prf: { results: { first: prfBytes } } })
+      }
+    }
+  })
+
+  await passkey.ensureRegistered()
+  secrets.lock()
+  await passkey.unlock()
+
+  assert.deepEqual(getState('ez-vault:passkey:transports'), ['usb', 'hybrid'])
+  assert.deepEqual(requestedTransports, [
+    ['usb', 'hybrid'],
+    ['usb', 'hybrid']
+  ])
+})
+
+test('credentials without transport metadata do not receive a restrictive transport hint', async () => {
+  const prfBytes = new Uint8Array(32)
+  prfBytes[0] = 25
+  const descriptors = []
+
+  installCredentialMocks({
+    prfBytes,
+    authenticatorAttachment: null,
+    exposeTransports: false,
+    onGet: options => {
+      descriptors.push(options.publicKey.allowCredentials[0])
+      return {
+        getClientExtensionResults: () => ({ prf: { results: { first: prfBytes } } })
+      }
+    }
+  })
+
+  await passkey.ensureRegistered()
+  secrets.lock()
+  await passkey.unlock()
+
+  assert.deepEqual(getState('ez-vault:passkey:transports'), [])
+  assert.equal(descriptors[0].transports, undefined)
+  assert.equal(descriptors[1].transports, undefined)
 })
 
 test('passkey user name prefixes a known platform with the persistent product label', async () => {

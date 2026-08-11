@@ -33,6 +33,15 @@ ciphertext in IndexedDB as an authoritative fallback until it can be synced.
 Pairing is required if a credential promoted this way later stops returning
 PRF.
 
+Registration orders WebAuthn `hints` as current device, hybrid authentication
+through a phone, then a physical security key, but it does not require a
+platform authenticator. This fallback is required on systems such as desktop
+Linux where the browser may report no user-verifying platform authenticator.
+The browser controls how prominently each choice is displayed. EZ Vault
+persists the transports reported by the created credential so later assertions
+do not accidentally restrict it to the `internal` transport; credentials
+created by older platform-only releases keep their legacy `internal` hint.
+
 The activity log keeps at most 500 entries per app and 64 MiB globally;
 sensitive request and result fields remain encrypted while at rest.
 

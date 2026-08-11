@@ -65,9 +65,10 @@ function blobToDataUrl(blob) {
 // src/services/passkey.js
 var PRF_SALT = "ez-vault";
 var RP_NAME = "44billion \xB7 EZ Vault";
-var CREATE_HINTS = ["client-device"];
-var GET_TRANSPORTS = ["internal"];
+var CREATE_HINTS = ["client-device", "hybrid", "security-key"];
+var LEGACY_GET_TRANSPORTS = ["internal"];
 var CRED_ID_KEY = "ez-vault:passkey:credential-id";
+var TRANSPORTS_KEY = "ez-vault:passkey:transports";
 var USER_ID_KEY = "ez-vault:passkey:user-id";
 var ICON_KEY = "ez-vault:passkey:icon";
 var PRF_BACKUP_KEY = "ez-vault:passkey:prf";
@@ -124,12 +125,29 @@ function readStoragePolicy() {
   if (![SUPPORT_SUPPORTED, SUPPORT_UNSUPPORTED, SUPPORT_UNKNOWN].includes(policy.largeBlobSupport)) return null;
   return storagePolicy(policy.mode, policy.largeBlobSupport, policy.cleanupPending);
 }
-function descriptorFromCredentialId(credentialId) {
+function normalizeTransports(transports) {
+  if (!Array.isArray(transports)) return [];
+  return [...new Set(transports.filter((transport) => typeof transport === "string" && transport))];
+}
+function transportsFromCredential(credential) {
+  const getTransports = credential?.response?.getTransports;
+  if (typeof getTransports !== "function") return [];
+  try {
+    return normalizeTransports(getTransports.call(credential.response));
+  } catch {
+    return [];
+  }
+}
+function readStoredTransports() {
+  const transports = getState(TRANSPORTS_KEY, null);
+  return Array.isArray(transports) ? normalizeTransports(transports) : LEGACY_GET_TRANSPORTS;
+}
+function descriptorFromCredentialId(credentialId, transports = readStoredTransports()) {
   if (!credentialId) return null;
   return {
     id: base64UrlToBytes(credentialId),
     type: "public-key",
-    transports: GET_TRANSPORTS
+    ...transports.length && { transports }
   };
 }
 function generateUserId() {
@@ -151,17 +169,16 @@ function buildUserName(userId) {
   const suffix = bytesToBase64Url(userId).slice(0, 6);
   return `${base} (${suffix})`;
 }
-async function fetchPrfViaGet(rawId) {
+async function fetchPrfViaGet(rawId, transports) {
   try {
     const credential = await navigator.credentials.get({
       publicKey: {
         challenge: crypto.getRandomValues(new Uint8Array(32)),
         rpId: window.location.hostname,
-        allowCredentials: [{
-          id: new Uint8Array(rawId),
-          type: "public-key",
-          transports: GET_TRANSPORTS
-        }],
+        allowCredentials: [descriptorFromCredentialId(
+          bytesToBase64Url(new Uint8Array(rawId)),
+          transports
+        )],
         userVerification: "discouraged",
         extensions: {
           prf: { eval: { first: PRF_SALT_BYTES } }
@@ -217,7 +234,6 @@ async function register() {
         { alg: -257, type: "public-key" }
       ],
       authenticatorSelection: {
-        authenticatorAttachment: "platform",
         // Preferred: non-discoverable where the authenticator honors it, but
         // Android then creates a Google Password Manager passkey — the only
         // Android credential type that exposes PRF. Platform sync may
@@ -241,8 +257,8 @@ async function register() {
     }
   });
   if (!credential) throw new Error("PASSKEY_CREATE_FAILED");
-  if (credential.authenticatorAttachment !== "platform") throw new Error("PASSKEY_NOT_PLATFORM");
   const ext = extractExtensions(credential);
+  const transports = transportsFromCredential(credential);
   const prfFromCreate = extractPrfBytes(ext);
   const largeBlobSupport = largeBlobSupportFromCreate(ext);
   const isDiscoverable = Boolean(ext.credProps?.rk);
@@ -250,7 +266,7 @@ async function register() {
     rk: isDiscoverable,
     createPrf: Boolean(prfFromCreate?.length)
   });
-  const prfFromAssertion = await fetchPrfViaGet(credential.rawId);
+  const prfFromAssertion = await fetchPrfViaGet(credential.rawId, transports);
   if (prfFromCreate?.length && prfFromAssertion?.length && !bytesEqual(prfFromCreate, prfFromAssertion)) {
     await discardCredential(credential.rawId);
     throw new Error("PASSKEY_PRF_MISMATCH");
@@ -265,6 +281,7 @@ async function register() {
   await updateState({
     set: {
       [CRED_ID_KEY]: credentialId,
+      [TRANSPORTS_KEY]: transports,
       [USER_ID_KEY]: bytesToBase64Url(userId),
       ...!prfFromAssertion?.length && { [PRF_BACKUP_KEY]: bytesToHex(prfBytes) },
       [STORAGE_POLICY_KEY]: policy,
@@ -427,7 +444,6 @@ async function obtainVaultMaterial({ freshVerification = false } = {}) {
       rpId: window.location.hostname,
       allowCredentials: [descriptor],
       userVerification: "required",
-      ...!freshVerification && { hints: CREATE_HINTS },
       extensions
     },
     ...freshVerification && { mediation: "required" }
