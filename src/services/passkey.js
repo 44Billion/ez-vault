@@ -1,7 +1,7 @@
 import { getPublicKey } from 'libp2r2p/key'
 import { hexToBytes, bytesToHex } from 'libp2r2p/base16'
-import { decodeSecretEntries } from './secret-blob.js'
-import { base64ToBytes, base64UrlToBytes, bytesToBase64Url } from 'libp2r2p/base64'
+import { decodeSecretEntries, encodeSecretEntries } from './secret-blob.js'
+import { base64ToBytes, base64UrlToBytes, bytesToBase64, bytesToBase64Url } from 'libp2r2p/base64'
 import { detectPlatform } from '../helpers/platform.js'
 import { fetchFaviconBase64 } from '../helpers/favicon.js'
 import { sharedXOnlySecret } from 'libp2r2p/ecdh'
@@ -34,13 +34,12 @@ import { getState, hasState, removeState, requestPersistentStorage, updateState 
 // the first; we persist it so `signalCurrentUserDetails` can later target
 // the credential.
 //
-// LargeBlob and PRF are best-effort across authenticators:
-// - largeBlob may refuse to write (legacy double-prompt cancellation, or
-//   unsupported authenticator). We fall back to an IndexedDB copy of the
-//   same ciphertext — same security model, just a different at-rest home.
-// - PRF may only be exposed on credential creation, not on subsequent get().
-//   We persist the creation-time PRF in IndexedDB and clear it the moment
-//   a get() starts returning PRF (newer browsers will).
+// Secret persistence adapts to the credential's current capabilities. When
+// assertions return PRF, IndexedDB holds only the encrypted secret blob. When
+// PRF is create-only, IndexedDB holds the compatibility PRF and largeBlob holds
+// the ciphertext. If largeBlob is unavailable, both must coexist in IndexedDB
+// as an explicit compatibility fallback. Promotion to assertion PRF + IDB blob
+// is monotonic: the plaintext PRF backup is never recreated afterwards.
 
 const PRF_SALT = 'ez-vault'
 const RP_NAME = '44billion · EZ Vault'
@@ -51,7 +50,14 @@ const CRED_ID_KEY = 'ez-vault:passkey:credential-id'
 const USER_ID_KEY = 'ez-vault:passkey:user-id'
 const ICON_KEY = 'ez-vault:passkey:icon'
 const PRF_BACKUP_KEY = 'ez-vault:passkey:prf'
-const BLOB_FALLBACK_KEY = 'ez-vault:passkey:blob'
+const SECRETS_BLOB_KEY = 'ez-vault:passkey:blob'
+const STORAGE_POLICY_KEY = 'ez-vault:passkey:storage-policy'
+const MODE_IDB = 'idb'
+const MODE_LARGE_BLOB = 'largeblob'
+const MODE_IDB_COMPAT = 'idb-compat'
+const SUPPORT_SUPPORTED = 'supported'
+const SUPPORT_UNSUPPORTED = 'unsupported'
+const SUPPORT_UNKNOWN = 'unknown'
 const VAULT_NIP44_KIND = 2
 const VAULT_SECRETS_SCOPE = 'vault-secrets-v1'
 
@@ -86,6 +92,31 @@ function extractLargeBlobBytes (extensions) {
   const blob = extensions?.largeBlob?.blob
   const bytes = bufferToUint8(blob)
   return bytes && bytes.length ? bytes : null
+}
+
+function bytesEqual (left, right) {
+  if (!left || !right || left.length !== right.length) return false
+  let difference = 0
+  for (let i = 0; i < left.length; i++) difference |= left[i] ^ right[i]
+  return difference === 0
+}
+
+function storagePolicy (mode, largeBlobSupport, cleanupPending = false) {
+  return { mode, largeBlobSupport, cleanupPending: Boolean(cleanupPending) }
+}
+
+function largeBlobSupportFromCreate (extensions) {
+  if (extensions?.largeBlob?.supported === true) return SUPPORT_SUPPORTED
+  if (extensions?.largeBlob?.supported === false) return SUPPORT_UNSUPPORTED
+  return SUPPORT_UNKNOWN
+}
+
+function readStoragePolicy () {
+  const policy = getState(STORAGE_POLICY_KEY)
+  if (!policy || typeof policy !== 'object') return null
+  if (![MODE_IDB, MODE_LARGE_BLOB, MODE_IDB_COMPAT].includes(policy.mode)) return null
+  if (![SUPPORT_SUPPORTED, SUPPORT_UNSUPPORTED, SUPPORT_UNKNOWN].includes(policy.largeBlobSupport)) return null
+  return storagePolicy(policy.mode, policy.largeBlobSupport, policy.cleanupPending)
 }
 
 function descriptorFromCredentialId (credentialId) {
@@ -125,12 +156,12 @@ function buildUserName (userId) {
   return `${base} (${suffix})`
 }
 
-// Some platforms and authenticators only surface PRF on the assertion
-// ceremony, not on creation (e.g. certain older Android/Chrome and WebView
-// contexts). After a fresh `create()` that came back without PRF, this
-// re-prompts via `get()` against the credential we just minted.
-// `userVerification: 'discouraged'` lets platforms that cache UV across a
-// recent create() skip the second prompt.
+// Probe every freshly-created credential with an assertion. Some platforms
+// expose PRF only on creation, others only on assertions, and assertion support
+// lets us avoid persisting the creation-time PRF in plaintext. This is always
+// attempted even when create() already returned PRF. `userVerification:
+// 'discouraged'` minimizes the chance of a second visible prompt after the
+// immediately preceding creation ceremony.
 async function fetchPrfViaGet (rawId) {
   try {
     const credential = await navigator.credentials.get({
@@ -142,10 +173,10 @@ async function fetchPrfViaGet (rawId) {
           type: 'public-key',
           transports: GET_TRANSPORTS
         }],
-        userVerification: 'discouraged'
-      },
-      extensions: {
-        prf: { eval: { first: PRF_SALT_BYTES } }
+        userVerification: 'discouraged',
+        extensions: {
+          prf: { eval: { first: PRF_SALT_BYTES } }
+        }
       }
     })
     return extractPrfBytes(extractExtensions(credential))
@@ -156,9 +187,10 @@ async function fetchPrfViaGet (rawId) {
 }
 
 // Tell the platform to discard the credential we just created — used when a
-// fresh registration cannot yield PRF and the credential is therefore
-// useless to us. Best-effort: silently no-ops if the API isn't supported,
-// and swallows errors so the caller's meaningful throw is never masked.
+// fresh registration cannot yield PRF or returns inconsistent PRF outputs and
+// is therefore unsafe/useless to us. Best-effort: silently no-ops if the API
+// isn't supported, and swallows errors so the caller's meaningful throw is
+// never masked.
 async function discardCredential (rawId) {
   const signalFn = window?.PublicKeyCredential?.signalUnknownCredential
   if (typeof signalFn !== 'function') return
@@ -197,7 +229,7 @@ export async function ensureRegistered () {
 
 // Create the passkey, derive the vault key from PRF, and mark the vault as
 // unlocked with no secrets yet. Caller is expected to populate `secrets`
-// with the new account's material and then call `writeSecretsBlob()`.
+// with the new account's material and then call `persistSecretsBlob()`.
 export async function register () {
   const userId = generateUserId()
   const iconURL = await fetchFaviconBase64()
@@ -235,7 +267,9 @@ export async function register () {
         prf: { eval: { first: PRF_SALT_BYTES } },
         largeBlob: { support: 'preferred' },
         // Diagnostic: reports whether the created credential is actually
-        // discoverable (rk), which we use to confirm the Android path.
+        // discoverable (rk). This is intentionally diagnostic only: rk,
+        // residentKey, backup eligibility (BE), and backup state (BS) are
+        // distinct properties, and none gives the RP control over sync.
         credProps: true
       }
     }
@@ -244,16 +278,23 @@ export async function register () {
   if (credential.authenticatorAttachment !== 'platform') throw new Error('PASSKEY_NOT_PLATFORM')
 
   const ext = extractExtensions(credential)
-  let prfBytes = extractPrfBytes(ext)
+  const prfFromCreate = extractPrfBytes(ext)
+  const largeBlobSupport = largeBlobSupportFromCreate(ext)
   const isDiscoverable = Boolean(ext.credProps?.rk)
-  if (prfBytes?.length) {
-    console.info('[passkey] PRF returned on create', { rk: isDiscoverable })
-  } else {
-    // Some platforms only expose PRF on get(), not on create(). Try one
-    // assertion against the just-minted credential before giving up.
-    console.info('[passkey] PRF missing on create — retrying via get()', { rk: isDiscoverable })
-    prfBytes = await fetchPrfViaGet(credential.rawId)
+  console.info('[passkey] probing assertion PRF after create', {
+    rk: isDiscoverable,
+    createPrf: Boolean(prfFromCreate?.length)
+  })
+  const prfFromAssertion = await fetchPrfViaGet(credential.rawId)
+
+  if (prfFromCreate?.length && prfFromAssertion?.length && !bytesEqual(prfFromCreate, prfFromAssertion)) {
+    await discardCredential(credential.rawId)
+    throw new Error('PASSKEY_PRF_MISMATCH')
   }
+
+  // Prefer the assertion result because that is the path every future unlock
+  // uses. Fall back to create-time PRF only for create-only authenticators.
+  const prfBytes = prfFromAssertion?.length ? prfFromAssertion : prfFromCreate
   if (!prfBytes?.length) {
     // Credential is useless to us without PRF — best-effort tell the
     // authenticator to forget it so the user isn't left with a dangling
@@ -263,25 +304,192 @@ export async function register () {
   }
 
   const credentialId = bytesToBase64Url(new Uint8Array(credential.rawId))
+  const policy = prfFromAssertion?.length
+    ? storagePolicy(MODE_IDB, largeBlobSupport)
+    : largeBlobSupport === SUPPORT_SUPPORTED
+      ? storagePolicy(MODE_LARGE_BLOB, SUPPORT_SUPPORTED)
+      : storagePolicy(MODE_IDB_COMPAT, largeBlobSupport)
   await updateState({
     set: {
       [CRED_ID_KEY]: credentialId,
       [USER_ID_KEY]: bytesToBase64Url(userId),
-      [PRF_BACKUP_KEY]: bytesToHex(prfBytes),
+      ...(!prfFromAssertion?.length && { [PRF_BACKUP_KEY]: bytesToHex(prfBytes) }),
+      [STORAGE_POLICY_KEY]: policy,
       ...(iconURL ? { [ICON_KEY]: iconURL } : {})
-    }
+    },
+    // Avoid even a transient plaintext IDB copy when the assertion path is
+    // already known to provide PRF. Also clears debris from an interrupted
+    // prior registration attempt.
+    remove: prfFromAssertion?.length ? [PRF_BACKUP_KEY] : []
   })
 
   secrets.unlock(prfBytes, null)
   await requestPersistentStorage()
 }
 
-// Read the passkey, fetch the largeBlob ciphertext (or its IndexedDB
-// fallback), and hand them to `secrets.unlock` for decryption + adoption.
-export async function unlock () {
+function sealEmptyVault (prfBytes) {
+  const ck = sharedXOnlySecret(prfBytes, getPublicKey(prfBytes))
+  return nip44v3.encryptWithConversationKey(
+    ck,
+    VAULT_NIP44_KIND,
+    VAULT_SECRETS_SCOPE,
+    bytesToBase64(encodeSecretEntries([]))
+  )
+}
+
+function readPrfBackup () {
+  const stored = getState(PRF_BACKUP_KEY, '')
+  return stored ? hexToBytes(stored) : null
+}
+
+function resolvePrfMaterial (extensions, { assertionRequired = false } = {}) {
+  const assertion = extractPrfBytes(extensions)
+  const backup = readPrfBackup()
+  if (assertion?.length && backup?.length && !bytesEqual(assertion, backup)) {
+    throw new Error('PASSKEY_PRF_MISMATCH')
+  }
+  if (assertionRequired && !assertion?.length) throw new Error('PASSKEY_PRF_MISSING')
+  const selected = assertion?.length ? assertion : backup
+  if (!selected?.length) throw new Error('PASSKEY_PRF_MISSING')
+  return { assertion, backup, selected }
+}
+
+function decodeLargeBlob (extensions) {
+  const bytes = extractLargeBlobBytes(extensions)
+  return bytes ? textDecoder.decode(bytes) : ''
+}
+
+function validateCiphertext (prfBytes, ciphertext) {
+  unsealEntries(prfBytes, ciphertext)
+  return ciphertext
+}
+
+function assertionRequest (policy, localCiphertext) {
+  const extensions = { prf: { eval: { first: PRF_SALT_BYTES } } }
+  if (!policy) {
+    extensions.largeBlob = { read: true }
+    return { extensions, action: 'read' }
+  }
+  if (policy.mode === MODE_IDB && policy.cleanupPending) {
+    extensions.largeBlob = { write: new Uint8Array(0) }
+    return { extensions, action: 'cleanup' }
+  }
+  if (policy.mode === MODE_LARGE_BLOB) {
+    if (localCiphertext) {
+      extensions.largeBlob = { write: textEncoder.encode(localCiphertext) }
+      return { extensions, action: 'write-fallback' }
+    }
+    extensions.largeBlob = { read: true }
+    return { extensions, action: 'read' }
+  }
+  return { extensions, action: 'none' }
+}
+
+async function promoteToIdb (ciphertext, largeBlobSupport, cleanupPending) {
+  await updateState({
+    set: {
+      [SECRETS_BLOB_KEY]: ciphertext,
+      [STORAGE_POLICY_KEY]: storagePolicy(MODE_IDB, largeBlobSupport, cleanupPending)
+    },
+    remove: [PRF_BACKUP_KEY]
+  })
+}
+
+async function resolveLegacyAccess (extensions, localCiphertext) {
+  const remoteCiphertext = decodeLargeBlob(extensions)
+  const { assertion, selected } = resolvePrfMaterial(extensions)
+  const ciphertext = localCiphertext || remoteCiphertext || sealEmptyVault(selected)
+  validateCiphertext(selected, ciphertext)
+
+  if (assertion?.length) {
+    await promoteToIdb(
+      ciphertext,
+      remoteCiphertext ? SUPPORT_SUPPORTED : SUPPORT_UNKNOWN,
+      Boolean(remoteCiphertext)
+    )
+  } else {
+    await updateState({
+      set: {
+        [STORAGE_POLICY_KEY]: storagePolicy(
+          MODE_LARGE_BLOB,
+          remoteCiphertext ? SUPPORT_SUPPORTED : SUPPORT_UNKNOWN
+        )
+      }
+    })
+  }
+  return { prfBytes: selected, ciphertext }
+}
+
+async function resolveIdbAccess (policy, extensions, localCiphertext, action) {
+  const { assertion } = resolvePrfMaterial(extensions, { assertionRequired: true })
+  const ciphertext = localCiphertext || sealEmptyVault(assertion)
+  validateCiphertext(assertion, ciphertext)
+  const cleanupPending = action === 'cleanup' && extensions?.largeBlob?.written === true
+    ? false
+    : policy.cleanupPending
+  await updateState({
+    set: {
+      [SECRETS_BLOB_KEY]: ciphertext,
+      [STORAGE_POLICY_KEY]: storagePolicy(MODE_IDB, policy.largeBlobSupport, cleanupPending)
+    },
+    remove: [PRF_BACKUP_KEY]
+  })
+  return { prfBytes: assertion, ciphertext }
+}
+
+async function resolveCompatAccess (policy, extensions, localCiphertext) {
+  const { assertion, selected } = resolvePrfMaterial(extensions)
+  const ciphertext = localCiphertext || sealEmptyVault(selected)
+  validateCiphertext(selected, ciphertext)
+  if (assertion?.length) {
+    await promoteToIdb(ciphertext, policy.largeBlobSupport, false)
+  } else if (!localCiphertext) {
+    await updateState({ set: { [SECRETS_BLOB_KEY]: ciphertext } })
+  }
+  return { prfBytes: selected, ciphertext }
+}
+
+async function resolveLargeBlobAccess (policy, extensions, localCiphertext, action) {
+  const remoteCiphertext = action === 'read' ? decodeLargeBlob(extensions) : ''
+  const { assertion, selected } = resolvePrfMaterial(extensions)
+  const ciphertext = localCiphertext || remoteCiphertext || sealEmptyVault(selected)
+  validateCiphertext(selected, ciphertext)
+
+  if (assertion?.length) {
+    // A write means an older largeBlob may still exist even when this write
+    // was declined, so cleanup is conservative in that branch.
+    const cleanupPending = action === 'write-fallback' || Boolean(remoteCiphertext)
+    const support = extensions?.largeBlob?.written === true
+      ? SUPPORT_SUPPORTED
+      : policy.largeBlobSupport
+    await promoteToIdb(ciphertext, support, cleanupPending)
+  } else if (action === 'write-fallback' && extensions?.largeBlob?.written === true) {
+    await updateState({
+      set: { [STORAGE_POLICY_KEY]: storagePolicy(MODE_LARGE_BLOB, SUPPORT_SUPPORTED) },
+      remove: [SECRETS_BLOB_KEY]
+    })
+  } else if (remoteCiphertext && policy.largeBlobSupport !== SUPPORT_SUPPORTED) {
+    await updateState({
+      set: { [STORAGE_POLICY_KEY]: storagePolicy(MODE_LARGE_BLOB, SUPPORT_SUPPORTED) }
+    })
+  }
+  return { prfBytes: selected, ciphertext }
+}
+
+async function resolveVaultMaterial (policy, extensions, localCiphertext, action) {
+  if (!policy) return resolveLegacyAccess(extensions, localCiphertext)
+  if (policy.mode === MODE_IDB) return resolveIdbAccess(policy, extensions, localCiphertext, action)
+  if (policy.mode === MODE_IDB_COMPAT) return resolveCompatAccess(policy, extensions, localCiphertext)
+  return resolveLargeBlobAccess(policy, extensions, localCiphertext, action)
+}
+
+async function obtainVaultMaterial ({ freshVerification = false } = {}) {
   const credentialId = getState(CRED_ID_KEY, '')
   if (!credentialId) throw new Error('PASSKEY_NOT_REGISTERED')
   const descriptor = descriptorFromCredentialId(credentialId)
+  const policy = readStoragePolicy()
+  const localCiphertext = getState(SECRETS_BLOB_KEY, '')
+  const { extensions, action } = assertionRequest(policy, localCiphertext)
 
   const credential = await navigator.credentials.get({
     publicKey: {
@@ -289,56 +497,33 @@ export async function unlock () {
       rpId: window.location.hostname,
       allowCredentials: [descriptor],
       userVerification: 'required',
-      hints: CREATE_HINTS
+      ...(!freshVerification && { hints: CREATE_HINTS }),
+      extensions
     },
-    extensions: {
-      prf: { eval: { first: PRF_SALT_BYTES } },
-      largeBlob: { read: true }
-    }
+    ...(freshVerification && { mediation: 'required' })
   })
   if (!credential) throw new Error('PASSKEY_GET_FAILED')
 
-  const ext = extractExtensions(credential)
-  const prfFromAssertion = extractPrfBytes(ext)
-  let prfBytes = prfFromAssertion
-  if (prfBytes?.length) {
-    // Platform exposed PRF on get — the create-time backup is no longer
-    // needed.
-    await removeState(PRF_BACKUP_KEY)
-  } else {
-    const stored = getState(PRF_BACKUP_KEY, '')
-    if (stored) prfBytes = hexToBytes(stored)
-  }
-  if (!prfBytes?.length) throw new Error('PASSKEY_PRF_MISSING')
+  return resolveVaultMaterial(policy, extractExtensions(credential), localCiphertext, action)
+}
 
-  let ciphertext = null
-  const blobBytes = extractLargeBlobBytes(ext)
-  if (blobBytes) {
-    ciphertext = textDecoder.decode(blobBytes)
-    // largeBlob just yielded a payload — drop any stale IndexedDB copy.
-    await removeState(BLOB_FALLBACK_KEY)
-  } else {
-    ciphertext = getState(BLOB_FALLBACK_KEY)
-  }
-
+// Read the passkey and resolve the adaptive PRF/ciphertext storage policy.
+export async function unlock () {
+  const { prfBytes, ciphertext } = await obtainVaultMaterial()
   secrets.unlock(prfBytes, ciphertext)
   await requestPersistentStorage()
 }
 
-// Re-seal the current secrets snapshot and push it into the passkey
-// largeBlob. The plaintext never enters this module — `secrets` returns
-// already-encrypted bytes via `sealCurrentEntries()`. Falls back to
-// IndexedDB if the authenticator declines the write. Most callers also
-// allow fallback when the user cancels the secondary prompt; destructive
-// flows can opt out so a cancelled prompt aborts the mutation instead.
-export async function writeSecretsBlob ({ fallbackOnCancel = true } = {}) {
-  if (!secrets.isUnlocked()) throw new Error('VAULT_LOCKED')
+async function writeLargeBlob (ciphertext, policy) {
   const credentialId = getState(CRED_ID_KEY, '')
-  if (!credentialId) throw new Error('PASSKEY_NOT_REGISTERED')
-
-  const ciphertext = secrets.sealCurrentEntries()
-
   const descriptor = descriptorFromCredentialId(credentialId)
+  const previousFallback = getState(SECRETS_BLOB_KEY, '')
+
+  // If a fallback already exists, keep it current before crossing the
+  // non-transactional WebAuthn boundary. A crash can then never resurrect its
+  // older contents over a newly-written largeBlob.
+  if (previousFallback) await updateState({ set: { [SECRETS_BLOB_KEY]: ciphertext } })
+
   let credential
   try {
     credential = await navigator.credentials.get({
@@ -346,37 +531,104 @@ export async function writeSecretsBlob ({ fallbackOnCancel = true } = {}) {
         challenge: crypto.getRandomValues(new Uint8Array(32)),
         rpId: window.location.hostname,
         allowCredentials: [descriptor],
-        // We just unlocked (or just created) — minimize re-prompting friction
-        // for the largeBlob write.
-        userVerification: 'discouraged'
-      },
-      extensions: {
-        largeBlob: { write: textEncoder.encode(ciphertext) },
-        // Opportunistically re-eval PRF: when an authenticator starts
-        // exposing PRF on get() this is where we'll first see it and prune
-        // the IndexedDB backup.
-        prf: { eval: { first: PRF_SALT_BYTES } }
+        userVerification: 'discouraged',
+        extensions: {
+          prf: { eval: { first: PRF_SALT_BYTES } },
+          largeBlob: { write: textEncoder.encode(ciphertext) }
+        }
       }
     })
   } catch (err) {
-    // NotAllowedError can mean the user cancelled the secondary prompt.
-    // Treat as "largeBlob write didn't happen" and fall back below.
-    if (err.name !== 'NotAllowedError' || !fallbackOnCancel) throw err
+    if (err?.name === 'NotAllowedError') {
+      await updateState({ set: { [SECRETS_BLOB_KEY]: ciphertext } })
+      return
+    }
+    await restoreSecretsBlobSnapshot(previousFallback || null)
+    throw err
   }
 
-  const ext = extractExtensions(credential)
-  const prfBytes = extractPrfBytes(ext)
-  if (prfBytes?.length) await removeState(PRF_BACKUP_KEY)
-
-  if (ext.largeBlob?.written) {
-    // largeBlob is now authoritative — drop any stale IndexedDB copy.
-    await removeState(BLOB_FALLBACK_KEY)
-  } else {
-    await updateState({ set: { [BLOB_FALLBACK_KEY]: ciphertext } })
+  const extensions = extractExtensions(credential)
+  const written = extensions?.largeBlob?.written === true
+  let prf
+  try {
+    prf = resolvePrfMaterial(extensions)
+  } catch (err) {
+    if (written) err.persistenceMayHaveCommitted = true
+    else await restoreSecretsBlobSnapshot(previousFallback || null)
+    throw err
   }
+
+  if (prf.assertion?.length) {
+    try {
+      validateCiphertext(prf.assertion, ciphertext)
+    } catch (err) {
+      if (written) err.persistenceMayHaveCommitted = true
+      else await restoreSecretsBlobSnapshot(previousFallback || null)
+      throw err
+    }
+    try {
+      await promoteToIdb(
+        ciphertext,
+        written ? SUPPORT_SUPPORTED : policy.largeBlobSupport,
+        true
+      )
+    } catch (err) {
+      // A successful remote write remains recoverable under the old policy;
+      // a current pre-existing fallback does too. Only fail when neither
+      // destination committed the new bytes.
+      if (written || previousFallback) {
+        console.warn('storage-policy promotion deferred', err?.message ?? err)
+        return
+      }
+      throw err
+    }
+    return
+  }
+
+  if (written) {
+    try {
+      await updateState({
+        set: { [STORAGE_POLICY_KEY]: storagePolicy(MODE_LARGE_BLOB, SUPPORT_SUPPORTED) },
+        remove: [SECRETS_BLOB_KEY]
+      })
+    } catch (err) {
+      // The authenticator has the current ciphertext. If a fallback existed,
+      // it was pre-staged with the same bytes, so leaving it is also safe.
+      console.warn('largeBlob post-write state update failed', err?.message ?? err)
+    }
+    return
+  }
+
+  await updateState({ set: { [SECRETS_BLOB_KEY]: ciphertext } })
 }
 
-// Self-decrypt the largeBlob payload with a freshly-obtained PRF key. Kept
+// Re-seal the current secrets snapshot into the destination selected by the
+// adaptive storage policy.
+export async function persistSecretsBlob (ciphertext = null) {
+  if (!secrets.isUnlocked()) throw new Error('VAULT_LOCKED')
+  if (!hasPasskey()) throw new Error('PASSKEY_NOT_REGISTERED')
+  const sealed = ciphertext ?? secrets.sealCurrentEntries()
+  const policy = readStoragePolicy()
+  if (!policy) throw new Error('PASSKEY_STORAGE_POLICY_MISSING')
+  if (policy.mode === MODE_LARGE_BLOB) return writeLargeBlob(sealed, policy)
+  await updateState({ set: { [SECRETS_BLOB_KEY]: sealed } })
+}
+
+// Ciphertext-only snapshot used by the account mutation rollback boundary.
+// Keeping this accessor here avoids duplicating the storage key elsewhere.
+export function snapshotSecretsBlob () {
+  return getState(SECRETS_BLOB_KEY, '') || null
+}
+
+// Direct local restoration for mutation rollback. This deliberately bypasses
+// the adaptive writer: a failed mutation must not open another WebAuthn prompt.
+export function restoreSecretsBlobSnapshot (ciphertext) {
+  return ciphertext
+    ? updateState({ set: { [SECRETS_BLOB_KEY]: ciphertext } })
+    : removeState(SECRETS_BLOB_KEY)
+}
+
+// Self-decrypt the local ciphertext with a freshly-obtained PRF key. Kept
 // inside this function's scope so prfBytes never escapes the call frame —
 // `secrets.js` deliberately does not export a "give me plaintext if I hand
 // you the prf" surface, which is the whole point of this approach.
@@ -395,48 +647,9 @@ function unsealEntries (prfBytes, ciphertext) {
 //
 // Throws if the user cancels the prompt or the authenticator declines.
 export async function openSecrets () {
-  const credentialId = getState(CRED_ID_KEY, '')
-  if (!credentialId) throw new Error('PASSKEY_NOT_REGISTERED')
-  const descriptor = descriptorFromCredentialId(credentialId)
-
-  const credential = await navigator.credentials.get({
-    publicKey: {
-      challenge: crypto.getRandomValues(new Uint8Array(32)),
-      rpId: window.location.hostname,
-      allowCredentials: [descriptor],
-      userVerification: 'required'
-    },
-    // Force a fresh prompt — never pulled from a recent-auth cache.
-    mediation: 'required',
-    extensions: {
-      prf: { eval: { first: PRF_SALT_BYTES } },
-      largeBlob: { read: true }
-    }
-  })
-  if (!credential) throw new Error('PASSKEY_GET_FAILED')
-
-  const ext = extractExtensions(credential)
-  let prfBytes = extractPrfBytes(ext)
-  if (prfBytes?.length) {
-    // get() now returns PRF — the create-time IndexedDB backup is no
-    // longer needed.
-    await removeState(PRF_BACKUP_KEY)
-  } else {
-    const stored = getState(PRF_BACKUP_KEY, '')
-    if (stored) prfBytes = hexToBytes(stored)
-  }
-  if (!prfBytes?.length) throw new Error('PASSKEY_PRF_MISSING')
-
-  let ciphertext = null
-  const blobBytes = extractLargeBlobBytes(ext)
-  if (blobBytes) {
-    ciphertext = textDecoder.decode(blobBytes)
-    await removeState(BLOB_FALLBACK_KEY)
-  } else {
-    ciphertext = getState(BLOB_FALLBACK_KEY)
-  }
-
-  if (!ciphertext) return []
+  // `mediation: required` forces a fresh prompt — never pulled from a
+  // recent-auth cache. The same assertion can migrate or clean largeBlob.
+  const { prfBytes, ciphertext } = await obtainVaultMaterial({ freshVerification: true })
   return unsealEntries(prfBytes, ciphertext)
 }
 

@@ -87,15 +87,42 @@ When in doubt about a layout decision, ask: "does this still work as a tall vert
 ## Key Storage
 
 - Account secrets are encrypted with a vault key obtained from the WebAuthn
-  PRF extension. The primary encrypted blob is the passkey `largeBlob`; an
-  authenticator that cannot store it uses the same ciphertext in IndexedDB.
+  PRF extension. The passkey unlocks that key; it does not itself hold account
+  secrets. Persistence is adaptive and recorded under
+  `ez-vault:passkey:storage-policy`: `idb` means assertion PRF plus authoritative
+  ciphertext at `ez-vault:passkey:blob`; `largeblob` means a compatibility PRF
+  backup in IDB plus authoritative authenticator `largeBlob`; `idb-compat`
+  means both values in IDB because `largeBlob` was unavailable. In `largeblob`
+  mode, a local ciphertext is a newer write fallback and always wins until it
+  is synced to the authenticator.
 - Raw `nsec`, bunker client keys, content-key secret keys and decrypted
-  activity payloads must never be persisted in plaintext. The short-lived
-  create-time PRF compatibility backup is the sole exception: some
-  authenticators do not return PRF on assertions, so it is stored in IDB and
-  removed as soon as an assertion supplies PRF.
+  activity payloads must never be persisted in plaintext. The create-time PRF
+  compatibility backup is the sole exception. Every registration must perform
+  a follow-up `get()` with `userVerification: 'discouraged'`; when that
+  assertion returns PRF, do not persist a plaintext backup. If it is cancelled
+  or omits PRF, some authenticators require the creation-time output to be
+  stored in IDB. Request `largeBlob: { support: 'preferred' }` during creation
+  and use the reported support to keep that backup separate from ciphertext
+  where possible. A future assertion PRF must match the backup and decrypt the
+  selected ciphertext before one IDB transaction stores the blob, switches to
+  `idb`, and removes the backup. This promotion is irreversible; never recreate
+  the backup afterward. If `largeBlob` was unavailable, backup and ciphertext
+  may remain together indefinitely, which is a conscious compatibility tradeoff.
+- Normal secret writes go directly to IDB in `idb` and `idb-compat` modes. In
+  `largeblob` mode they use a PRF + `largeBlob.write` assertion with
+  `userVerification: 'discouraged'`; `NotAllowedError` and `written !== true`
+  retain the new ciphertext as the authoritative IDB fallback, while other
+  failures roll the whole account mutation back. If an existing fallback is
+  present, update it before WebAuthn so interruption cannot resurrect stale
+  secrets. Once assertion PRF works, promote monotonically to `idb` and erase
+  the obsolete `largeBlob` best-effort on a later required assertion.
+- Pairing (`nostrpair://`) is the recovery and cross-device transfer mechanism.
+  WebAuthn exposes no RP option that prohibits authenticator/vendor sync.
+  `residentKey`, `credProps.rk`, backup eligibility (`BE`) and backup state
+  (`BS`) describe distinct properties; do not treat any of them as proof that
+  a credential is unsynced or add UI/policy based on them.
 - IndexedDB database `ez-vault` is the durable store for account records,
-  encrypted sidecars, passkey metadata/fallbacks, sync state and the bounded
+  encrypted vault/sidecars, passkey metadata, sync state and the bounded
   activity log. Do not add new `localStorage` or `sessionStorage` persistence.
 - Use `libp2r2p/idb.run()` for IndexedDB requests. Attach transaction
   completion/error handlers immediately, await `oncomplete`, and publish

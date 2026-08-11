@@ -19,8 +19,8 @@ import { extractBunkerClientKey } from '../helpers/nostrpair-url.js'
 //   - components/sync/sync-host.js + components/sync/sync-joiner.js —
 //     commit accounts received from a paired peer
 //
-// Both flows funnel through `commitPrepared` so the passkey ceremony and
-// the largeBlob write run back-to-back, with rollback on writeBlob failure.
+// Both flows funnel through `commitPrepared` so registration/unlock and the
+// adaptive ciphertext commit share one rollback boundary.
 
 // Per-intake abort token. Carries:
 //   - cancelled: flag that intake steps poll between awaits
@@ -121,8 +121,7 @@ export async function resolveMetadata (pubkey, {
 // Each `prepare*` resolves the pubkey, runs the duplicate check, and fetches
 // metadata + the seeded avatar, but does NOT touch the store or the secrets
 // module. The returned object holds everything `commitPrepared` needs to
-// apply the mutation synchronously, so the passkey + largeBlob prompts can
-// fire back-to-back with no awaited work splitting them.
+// apply the mutation synchronously after any required passkey ceremony.
 
 export async function prepareSeckey (raw, options = {}) {
   const { pubkey, seckey } = nostr.keypairFromSeckey(raw)
@@ -252,13 +251,12 @@ export async function prepareBunker (bunkerUrlInput, token, options = {}) {
   }
 }
 
-// Atomic-ish commit for a batch of prepared items. The passkey ceremony
-// (ensureRegistered + writeSecretsBlob) brackets the synchronous store /
-// secrets mutations + the trusted-signers write. If the trailing
-// writeSecretsBlob throws — or any of the inner mutations does — we roll
-// the store back to its prior records, reload the secrets pool from a
-// snapshot taken just before commit, and restore local encrypted sidecars
-// such as content keys and trusted signers.
+// Atomic-ish commit for a batch of prepared items. Registration/unlock (when
+// needed) precedes the store / secrets mutations; create-only PRF credentials
+// may also need a largeBlob write assertion after finalization. If any step
+// throws, we roll the store back to its prior records, reload the secrets pool
+// and ciphertext from a snapshot taken just before commit, and restore local
+// encrypted sidecars such as content keys and trusted signers.
 //
 // `options.peerSigner` is `{ pubkey, platform }` — the single device
 // signer pubkey the peer announced in `register_trusted_signer`. We
@@ -268,7 +266,7 @@ export async function commitPrepared (prepared, options = {}) {
   const { peerSigner = null } = options
   if (!prepared.length && !peerSigner) return
   const needsSecretsPersist = prepared.some(p => p.type !== 'npub')
-  // ensureRegistered if EITHER we'll write secrets (largeBlob) OR encrypt
+  // ensureRegistered if EITHER we'll persist secrets OR encrypt
   // the trusted-signers list (vault-key encryption).
   if (needsSecretsPersist || peerSigner) await passkey.ensureRegistered()
   const peerSignerActorPubkey = peerSigner ? await secrets.getDeviceSignerPubkey().catch(() => '') : ''
@@ -298,9 +296,8 @@ export async function commitPrepared (prepared, options = {}) {
       }
       committedCount++
     }
-    // Trusted-signer write BEFORE the largeBlob write: bracketing both
-    // inside this try/catch means the rollback can put the prior
-    // ciphertext back if writeSecretsBlob below throws.
+    // Trusted-signer write BEFORE the vault ciphertext commit: bracketing
+    // both inside this try/catch means rollback can restore the prior bytes.
     if (peerSigner) {
       await trustedSigners.add({ ...peerSigner, actorPubkey: peerSignerActorPubkey })
       trustedSignerWritten = true
@@ -329,8 +326,7 @@ export async function commitPrepared (prepared, options = {}) {
         beforeAccounts: [...priorStoreRecords.values()].filter(Boolean),
         afterAccounts: prepared.map(p => p.record).filter(Boolean),
         apply: applyPrepared,
-        finalize: () => {},
-        writeOptions: {}
+        finalize: () => {}
       })
     } else {
       await applyPrepared()

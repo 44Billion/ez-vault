@@ -14,7 +14,7 @@ import { getState, removeState, setState } from './storage/index.js'
 // In-memory home for every account's secret material plus the deterministic
 // vault key derived from the passkey PRF extension. Account secrets live in
 // this module while the vault is unlocked, and are otherwise sealed into the
-// passkey largeBlob by passkey.js.
+// ciphertext destination selected by passkey.js's adaptive storage policy.
 //
 // Encapsulation, mirroring the NsecSigner pattern in nsec-signer.js:
 //
@@ -26,11 +26,11 @@ import { getState, removeState, setState } from './storage/index.js'
 //   which stashes the bytes in *its* private WeakMap. We pool the handle
 //   here and hand callers back the handle — same shape as nsec.
 // - The raw account hex strings are also kept in module-private Maps that
-//   the sealing path (TLV encode → encrypt → write to passkey) reads.
+//   the sealing path (TLV encode → encrypt → adaptive persistence) reads.
 //   Those maps are not exported. There is no `getSeckey` / `getClientKey` /
 //   `exportEntries` surface — the export and copy-nsec flows reach the
 //   raw bytes by going through `passkey.openSecrets()`, which prompts the
-//   user for fresh verification and decrypts the largeBlob ad-hoc.
+//   user for fresh verification and decrypts the selected ciphertext ad-hoc.
 //
 // The vault key doubles as a NIP-44 v3 self-encryption key; messenger-log and
 // content-key persistence use it to seal sensitive IndexedDB payloads
@@ -278,9 +278,9 @@ export function isUnlocked () {
 }
 
 // Bring the vault online. `vaultKeyBytes` is the 32-byte PRF output the
-// passkey just produced; `ciphertext` is the sealed payload from the
-// passkey's largeBlob (or its IndexedDB fallback), or null on a fresh
-// registration where there is nothing to load yet.
+// passkey just produced; `ciphertext` is the sealed payload selected by the
+// adaptive persistence layer, or null on a fresh registration where there is
+// nothing to load yet.
 export function unlock (vaultKeyBytes, ciphertext) {
   vaultPrivkey = vaultKeyBytes
   vaultConversationKey = deriveVaultConversationKey(vaultKeyBytes)
@@ -290,7 +290,7 @@ export function unlock (vaultKeyBytes, ciphertext) {
 
 // Restore the pool to the state captured by an earlier `sealCurrentEntries()`
 // snapshot, using the already-set vault key. The import flow uses this to
-// roll back adopt-replace mutations when the post-commit largeBlob write
+// roll back adopt-replace mutations when the ciphertext commit or finalizer
 // fails: walking the pool back to the snapshot closes any handles adopted
 // in the intervening commit (clearAll inside loadEntries) and re-adopts the
 // prior set from the same ciphertext that was on disk a moment ago.
@@ -423,8 +423,7 @@ export async function setContentKeySecret (ownerPubkey, seckey, createdAt = Math
     if (shouldSkipContentKeyStorage(ownerPubkey, normalizedCreatedAt)) return null
     const signer = adoptContentKey(ownerPubkey, seckey, normalizedCreatedAt)
     // Content keys can rotate during quiet background sync. Keep them in
-    // vault-key-encrypted IndexedDB so rotation never needs a largeBlob
-    // WebAuthn prompt.
+    // vault-key-encrypted IndexedDB so rotation never needs WebAuthn.
     await persistContentKeyEntries()
     notifyContentKeys(ownerPubkey)
     return signer
@@ -525,7 +524,7 @@ export async function adoptBunkerHandle (pubkey, handle, clientKey) {
 // helpers below, same pattern as nsec/bunker handles.
 // Lazily ensure the device signer seckey is loaded. Returns the cached hex
 // when the blob carried it, or derives + caches it from the vault PRF on
-// first access (next writeSecretsBlob persists the derived bytes). Callers
+// first access (the next persistSecretsBlob persists the derived bytes). Callers
 // awaiting `getDeviceSignerPubkey` / `withDeviceSignerSeckey` go through
 // this so the seckey is always present before either returns.
 async function ensureDeviceSignerSeckey () {
@@ -624,15 +623,15 @@ export function hasSecretRef ({ type, pubkey } = {}) {
   return Boolean(pubkey && (type === 'nsec' || type === 'bunker') && accountTypeByPubkey.get(pubkey) === type)
 }
 
-// Re-encrypt the current secret set into the largeBlob ciphertext. Used by
-// passkey.writeSecretsBlob — the sealed bytes are all the passkey layer
+// Re-encrypt the current secret set into the vault ciphertext. Used by
+// passkey.persistSecretsBlob — the sealed bytes are all the passkey layer
 // ever sees, plaintext stays inside this module.
 //
 // Note: encodeSecretEntries always emits at least one record (a zero-length
 // padding tag when the entry list is empty), so the NIP-44 plaintext is
 // never empty. That matters because deleting the last account still has to
-// overwrite the largeBlob — otherwise the prior ciphertext stays put and
-// the deleted secret resurrects on the next unlock.
+// overwrite the authoritative destination — otherwise the prior ciphertext
+// stays put and the deleted secret resurrects on the next unlock.
 export function sealCurrentEntries () {
   if (!isUnlocked()) throw new Error('VAULT_LOCKED')
   const tlvBytes = encodeSecretEntries(listRawEntriesInternal())

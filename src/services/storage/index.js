@@ -26,7 +26,7 @@ accounts, keyPath "pubkey"
 
 state, keyPath "key"
   key    state record name
-  value  passkey metadata/fallbacks, encrypted sidecars, mutation journal,
+  value  passkey metadata, encrypted vault/sidecars, mutation journal,
          refresh timestamps, hints, or the messenger-log byte counter
 
 revocationRotations, keyPath "key"

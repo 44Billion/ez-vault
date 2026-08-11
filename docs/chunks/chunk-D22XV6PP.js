@@ -1,6 +1,8 @@
 import {
-  writeSecretsBlob
-} from "./chunk-35T5INCI.js";
+  persistSecretsBlob,
+  restoreSecretsBlobSnapshot,
+  snapshotSecretsBlob
+} from "./chunk-IR4NQX7N.js";
 import {
   applyRecords,
   getState,
@@ -13,7 +15,7 @@ import {
   sealCurrentEntries,
   setState,
   snapshotContentKeySecrets
-} from "./chunk-KDVVJYRE.js";
+} from "./chunk-7S7ZXFS2.js";
 
 // src/services/account-mutation-journal.js
 var KEY = "account-mutation";
@@ -175,41 +177,52 @@ function affectedFromAccounts(beforeAccounts, afterAccounts) {
     afterAccounts.map((a) => a.pubkey)
   );
 }
-async function rollbackAccountState(affectedPubkeys2, beforeAccounts, priorBlob, priorContentKeysBlob) {
+async function rollbackAccountState(affectedPubkeys2, beforeAccounts, priorMemoryBlob, priorLocalBlob, priorContentKeysBlob) {
+  let succeeded = true;
   try {
     await applyRecords(affectedPubkeys2, beforeAccounts);
   } catch (err) {
+    succeeded = false;
     console.warn("account rollback failed", err?.message ?? err);
   }
-  if (priorBlob !== null) {
+  if (priorMemoryBlob !== null) {
     try {
-      reload(priorBlob);
+      reload(priorMemoryBlob);
     } catch (err) {
+      succeeded = false;
       console.warn("secrets rollback failed", err?.message ?? err);
     }
+  }
+  try {
+    await restoreSecretsBlobSnapshot(priorLocalBlob);
+  } catch (err) {
+    succeeded = false;
+    console.warn("ciphertext rollback failed", err?.message ?? err);
   }
   if (priorContentKeysBlob !== null) {
     try {
       await restoreContentKeySecrets(priorContentKeysBlob);
     } catch (err) {
+      succeeded = false;
       console.warn("content-key rollback failed", err?.message ?? err);
     }
   }
+  return succeeded;
 }
 async function runSecretAccountMutation({
   operation,
   beforeAccounts = [],
   afterAccounts = [],
   apply,
-  finalize,
-  writeOptions = {}
+  finalize
 }) {
   const cleanBefore = cleanAccounts(beforeAccounts);
   const cleanAfter = cleanAccounts(afterAccounts);
   const affectedPubkeys2 = affectedFromAccounts(cleanBefore, cleanAfter);
   const beforeSecretRefs = secretRefsForPubkeys(affectedPubkeys2);
   const afterSecretRefs = secretRefsForAccounts(cleanAfter);
-  const priorBlob = sealCurrentEntries();
+  const priorMemoryBlob = sealCurrentEntries();
+  const priorLocalBlob = snapshotSecretsBlob();
   const priorContentKeysBlob = snapshotContentKeySecrets();
   await begin({
     operation,
@@ -221,14 +234,21 @@ async function runSecretAccountMutation({
   });
   try {
     await apply();
-    await writeSecretsBlob(writeOptions);
     await finalize?.();
-    await clear();
+    await persistSecretsBlob();
   } catch (err) {
-    await rollbackAccountState(affectedPubkeys2, cleanBefore, priorBlob, priorContentKeysBlob);
-    await clear();
+    if (err?.persistenceMayHaveCommitted) throw err;
+    const rolledBack = await rollbackAccountState(
+      affectedPubkeys2,
+      cleanBefore,
+      priorMemoryBlob,
+      priorLocalBlob,
+      priorContentKeysBlob
+    );
+    if (rolledBack) await clear();
     throw err;
   }
+  await clear();
 }
 function accountsByPubkey(accounts) {
   return new Map(cleanAccounts(accounts).map((account) => [account.pubkey, account]));

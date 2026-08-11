@@ -2,9 +2,9 @@ import { getPublicKey } from 'libp2r2p/key'
 import { hexToBytes, bytesToHex } from 'libp2r2p/base16'
 import { encodeTlv, decodeTlv } from '../helpers/tlv.js'
 
-// Wire format for the encrypted secret blob written into the passkey's
-// largeBlob extension. The bytes here are the *plaintext* — the surrounding
-// NIP-44 self-encryption (with the PRF-derived vault key) lives in
+// Wire format for the encrypted secret blob persisted through passkey.js's
+// adaptive IDB/largeBlob policy. The bytes here are the *plaintext* — the
+// surrounding NIP-44 self-encryption (with the PRF-derived vault key) lives in
 // secrets.js (seal-time) and passkey.js (open-time).
 //
 // Forward compatibility: the decoder ignores any type tag it doesn't
@@ -30,8 +30,8 @@ const TLV_PADDING = 0x00
 //
 // When the entry list is empty we still emit one zero-length padding
 // record. NIP-44 rejects empty plaintext, and we *want* to overwrite the
-// largeBlob in that case (otherwise a previously-deleted secret would
-// resurrect on the next unlock).
+// authoritative ciphertext in that case (otherwise a previously-deleted secret
+// would resurrect on the next unlock).
 export function encodeSecretEntries (entries) {
   const records = []
   for (const e of entries) {

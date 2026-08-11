@@ -63,20 +63,29 @@ function affectedFromAccounts (beforeAccounts, afterAccounts) {
   )
 }
 
-async function rollbackAccountState (affectedPubkeys, beforeAccounts, priorBlob, priorContentKeysBlob) {
+async function rollbackAccountState (affectedPubkeys, beforeAccounts, priorMemoryBlob, priorLocalBlob, priorContentKeysBlob) {
+  let succeeded = true
   try { await store.applyRecords(affectedPubkeys, beforeAccounts) } catch (err) {
+    succeeded = false
     console.warn('account rollback failed', err?.message ?? err)
   }
-  if (priorBlob !== null) {
-    try { secrets.reload(priorBlob) } catch (err) {
+  if (priorMemoryBlob !== null) {
+    try { secrets.reload(priorMemoryBlob) } catch (err) {
+      succeeded = false
       console.warn('secrets rollback failed', err?.message ?? err)
     }
   }
+  try { await passkey.restoreSecretsBlobSnapshot(priorLocalBlob) } catch (err) {
+    succeeded = false
+    console.warn('ciphertext rollback failed', err?.message ?? err)
+  }
   if (priorContentKeysBlob !== null) {
     try { await secrets.restoreContentKeySecrets(priorContentKeysBlob) } catch (err) {
+      succeeded = false
       console.warn('content-key rollback failed', err?.message ?? err)
     }
   }
+  return succeeded
 }
 
 export async function runSecretAccountMutation ({
@@ -84,15 +93,15 @@ export async function runSecretAccountMutation ({
   beforeAccounts = [],
   afterAccounts = [],
   apply,
-  finalize,
-  writeOptions = {}
+  finalize
 }) {
   const cleanBefore = cleanAccounts(beforeAccounts)
   const cleanAfter = cleanAccounts(afterAccounts)
   const affectedPubkeys = affectedFromAccounts(cleanBefore, cleanAfter)
   const beforeSecretRefs = secretRefsForPubkeys(affectedPubkeys)
   const afterSecretRefs = secretRefsForAccounts(cleanAfter)
-  const priorBlob = secrets.sealCurrentEntries()
+  const priorMemoryBlob = secrets.sealCurrentEntries()
+  const priorLocalBlob = passkey.snapshotSecretsBlob()
   const priorContentKeysBlob = secrets.snapshotContentKeySecrets()
 
   await journal.begin({
@@ -106,14 +115,26 @@ export async function runSecretAccountMutation ({
 
   try {
     await apply()
-    await passkey.writeSecretsBlob(writeOptions)
     await finalize?.()
-    await journal.clear()
+    await passkey.persistSecretsBlob()
   } catch (err) {
-    await rollbackAccountState(affectedPubkeys, cleanBefore, priorBlob, priorContentKeysBlob)
-    await journal.clear()
+    // A successful largeBlob write followed by an impossible PRF mismatch may
+    // have committed the after-state remotely. Keep the journal so the next
+    // authenticated recovery can reconcile against the durable ciphertext.
+    if (err?.persistenceMayHaveCommitted) throw err
+    const rolledBack = await rollbackAccountState(
+      affectedPubkeys,
+      cleanBefore,
+      priorMemoryBlob,
+      priorLocalBlob,
+      priorContentKeysBlob
+    )
+    // Keep the journal if a rollback itself failed. Startup recovery can then
+    // reconcile the records against whichever ciphertext actually committed.
+    if (rolledBack) await journal.clear()
     throw err
   }
+  await journal.clear()
 }
 
 function accountsByPubkey (accounts) {

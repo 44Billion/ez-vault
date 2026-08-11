@@ -13,7 +13,7 @@ const ICON_LOCK = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" f
 
 export const lockOverlayLocales = defineLocales({
   'Vault locked': ['Coffre verrouillé', 'Vault bloccato', 'Tresor gesperrt', 'Bóveda bloqueada', 'Cofre bloqueado', 'Хранилище заблокировано', '保险库已锁定', '保險庫已鎖定', '保管庫はロックされています', '볼트 잠김'],
-  'Unlock with the passkey that holds your account secrets.': ['Déverrouillez avec la clé d’accès qui protège les secrets de vos comptes.', 'Sblocca con la passkey che protegge i segreti dei tuoi account.', 'Mit dem Passkey entsperren, der die Kontogeheimnisse enthält.', 'Desbloquea con la passkey que protege los secretos de tus cuentas.', 'Desbloqueie com a passkey que protege os segredos das suas contas.', 'Разблокируйте с помощью ключа доступа, защищающего секреты учётных записей.', '使用保存账户机密的通行密钥解锁。', '使用保存帳戶機密的通行金鑰解鎖。', 'アカウントの秘密情報を保持するパスキーでロックを解除してください。', '계정 비밀을 보관하는 패스키로 잠금을 해제하세요.'],
+  'Unlock your encrypted account secrets with your passkey.': ['Déverrouillez les secrets chiffrés de vos comptes avec votre clé d’accès.', 'Sblocca con la passkey i segreti cifrati dei tuoi account.', 'Entsperre deine verschlüsselten Kontogeheimnisse mit deinem Passkey.', 'Desbloquea con tu passkey los secretos cifrados de tus cuentas.', 'Desbloqueie com a passkey os segredos criptografados das suas contas.', 'Разблокируйте зашифрованные секреты учётных записей с помощью ключа доступа.', '使用通行密钥解锁加密的账户机密。', '使用通行金鑰解鎖加密的帳戶機密。', 'パスキーで暗号化されたアカウントの秘密情報をロック解除してください。', '패스키로 암호화된 계정 비밀을 잠금 해제하세요.'],
   'Unlock with passkey': ['Déverrouiller avec la clé d’accès', 'Sblocca con passkey', 'Mit Passkey entsperren', 'Desbloquear con passkey', 'Desbloquear com passkey', 'Разблокировать ключом доступа', '使用通行密钥解锁', '使用通行金鑰解鎖', 'パスキーでロック解除', '패스키로 잠금 해제'],
   'Could not unlock': ['Impossible de déverrouiller', 'Impossibile sbloccare', 'Entsperren nicht möglich', 'No se pudo desbloquear', 'Não foi possível desbloquear', 'Не удалось разблокировать', '无法解锁', '無法解鎖', 'ロックを解除できませんでした', '잠금을 해제하지 못했습니다']
 })
@@ -164,7 +164,7 @@ export class LockOverlay extends HTMLElement {
       </button>
       <span class="lock-badge" aria-hidden="true">${ICON_LOCK}</span>
       <h2 class="lock-title">Vault locked</h2>
-      <p class="lock-hint">Unlock with the passkey that holds your account secrets.</p>
+      <p class="lock-hint">Unlock your encrypted account secrets with your passkey.</p>
       <button type="button" class="lock-unlock">
         <span class="lock-unlock-icon">${ICON_LOCK}</span>
         <span>Unlock with passkey</span>
@@ -251,7 +251,7 @@ export class LockOverlay extends HTMLElement {
 
   #translate () {
     this.querySelector('.lock-title').textContent = t('Vault locked')
-    this.querySelector('.lock-hint').textContent = t('Unlock with the passkey that holds your account secrets.')
+    this.querySelector('.lock-hint').textContent = t('Unlock your encrypted account secrets with your passkey.')
     this.querySelector('.lock-unlock span:last-child').textContent = t('Unlock with passkey')
     this.querySelector('.overlay-update-label').textContent = swT('Update available')
     this.querySelector('.overlay-update-action').textContent = swT('Update')

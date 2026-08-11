@@ -1,14 +1,14 @@
 import {
   runSecretAccountMutation
-} from "./chunk-MEHHDEEL.js";
+} from "./chunk-D22XV6PP.js";
 import {
   add as add2,
   restore,
   snapshot
-} from "./chunk-ZI5XKXWT.js";
+} from "./chunk-RGXQEW2G.js";
 import {
   ensureRegistered
-} from "./chunk-35T5INCI.js";
+} from "./chunk-IR4NQX7N.js";
 import {
   seededAvatarDataUrl
 } from "./chunk-4RHK4XWQ.js";
@@ -27,7 +27,7 @@ import {
   remove,
   replace,
   setNsecSecret
-} from "./chunk-KDVVJYRE.js";
+} from "./chunk-7S7ZXFS2.js";
 import {
   __commonJS,
   __toESM
@@ -10346,8 +10346,7 @@ async function commitPrepared(prepared, options = {}) {
         afterAccounts: prepared.map((p) => p.record).filter(Boolean),
         apply: applyPrepared,
         finalize: () => {
-        },
-        writeOptions: {}
+        }
       });
     } else {
       await applyPrepared();

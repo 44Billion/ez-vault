@@ -547,7 +547,7 @@ export class AccountAvatar extends HTMLElement {
     if (!acc) return this.#flashError(btn)
     if (acc.type === 'bunker') return this.#copy(btn, acc.bunker)
     if (acc.type !== 'nsec') return this.#flashError(btn)
-    // Force a fresh user-verification prompt and decrypt the largeBlob
+    // Force a fresh user-verification prompt and decrypt the selected vault
     // ad-hoc — the in-memory `secrets` module deliberately does not expose
     // the seckey for silent retrieval. The PRF and the entries returned
     // here only live on this stack frame.
@@ -708,8 +708,10 @@ export class AccountAvatar extends HTMLElement {
           await secrets.setNsecSecret(record.pubkey, newSeckey)
         },
         finalize: () => {
-          // Convert the draft tile immediately before the journal is cleared
-          // so account-list reuses this same DOM node without a visible gap.
+          // Convert the draft before the adaptive ciphertext commit. The
+          // journal continues hiding the duplicate account-list entry until
+          // persistence succeeds; the catch below restores this draft on
+          // rollback.
           this.#draft = null
           this.#account = record
           this.setAttribute('pubkey', record.pubkey)
@@ -742,13 +744,10 @@ export class AccountAvatar extends HTMLElement {
     const pubkey = this.#account.pubkey
     const wasNonReadOnly = this.#account.type !== 'npub'
     if (wasNonReadOnly) {
-      // Re-seal the largeBlob *before* dropping the tile from the DOM. If
-      // we removed the account from the store first, account-list would
-      // tear down this avatar and the user would see a passkey prompt with
-      // no visible context — pulsating the delete button keeps the source
-      // of the prompt obvious. secrets.deleteSecret also closes any pooled
-      // BunkerHandle and releases the cached NsecSigner, so there's no
-      // separate signer-cleanup call.
+      // Re-seal the vault *before* dropping the tile from the DOM.
+      // secrets.deleteSecret also closes any pooled BunkerHandle and
+      // releases the cached NsecSigner, so there's no separate
+      // signer-cleanup call.
       const icon = btn?.querySelector('.avatar-btn-icon')
       if (btn) btn.disabled = true
       icon?.classList.add('pulsate')
@@ -761,14 +760,11 @@ export class AccountAvatar extends HTMLElement {
           finalize: async () => {
             await messengerLog.removeForPubkey(pubkey)
             await store.applyRecords([pubkey], [])
-          },
-          writeOptions: { fallbackOnCancel: false }
+          }
         })
       } catch (err) {
-        if (err?.name !== 'NotAllowedError') {
-          console.warn('failed to update vault blob after delete', err?.message ?? err)
-          toast.error(t('Delete failed'))
-        }
+        console.warn('failed to update vault blob after delete', err?.message ?? err)
+        toast.error(t('Delete failed'))
         this.#flashError(btn)
         return
       } finally {
