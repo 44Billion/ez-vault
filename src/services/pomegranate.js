@@ -29,7 +29,11 @@ const CENTRAL_REGISTRATION_KIND = 20445
 const OPERATOR_REGISTRATION_KIND = 20444
 const PROFILE_NAME = 'default'
 const REQUEST_TIMEOUT_MS = 15_000
-const POPUP_TIMEOUT_MS = 2 * 60_000
+// OAuth may be interrupted by an app switch or a hidden desktop window. Give
+// the user ample time to return, but do not leave the shared Pomegranate flow
+// busy indefinitely: this popup was opened by us, so it may also be closed by
+// us when the authentication deadline expires.
+export const POPUP_TIMEOUT_MS = 10 * 60_000
 const ACCOUNT_POLL_MS = 10_000
 const HEX32 = /^[0-9a-f]{64}$/
 const utf8 = new TextEncoder()
@@ -114,7 +118,7 @@ export function authenticateWithGoogle ({
     monitor = setIntervalImpl(() => {
       if (popup.closed) finish(reject, pomegranateError('POMEGRANATE_CANCELLED'))
     }, 250)
-    timeout = setTimeoutImpl(() => finish(reject, pomegranateError('POMEGRANATE_TIMEOUT')), POPUP_TIMEOUT_MS)
+    timeout = setTimeoutImpl(() => finish(reject, pomegranateError('POMEGRANATE_POPUP_TIMEOUT')), POPUP_TIMEOUT_MS)
   })
 }
 

@@ -176,7 +176,9 @@ When in doubt about a layout decision, ask: "does this still work as a tall vert
   shards are ephemeral and must not be logged or persisted. Validate the
   popup window/origin, signed kind-20443 token, returned account configuration
   and bunker-reported pubkey. This flow explicitly trusts the Central as the
-  OAuth intermediary and trusts that fewer than two operators collude.
+  OAuth intermediary and trusts that fewer than two operators collude. The
+  OAuth popup has a 10-minute deadline; on expiry, close the script-opened
+  window, release the shared busy operation and show the localized timeout.
 - IndexedDB database `ez-vault` is the durable store for account records,
   encrypted vault/sidecars, passkey metadata, sync state and the bounded
   activity log. Do not add new `localStorage` or `sessionStorage` persistence.

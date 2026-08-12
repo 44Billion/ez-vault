@@ -5300,7 +5300,7 @@ var CENTRAL_REGISTRATION_KIND = 20445;
 var OPERATOR_REGISTRATION_KIND = 20444;
 var PROFILE_NAME = "default";
 var REQUEST_TIMEOUT_MS = 15e3;
-var POPUP_TIMEOUT_MS = 2 * 6e4;
+var POPUP_TIMEOUT_MS = 10 * 6e4;
 var ACCOUNT_POLL_MS = 1e4;
 var HEX32 = /^[0-9a-f]{64}$/;
 var utf82 = new TextEncoder();
@@ -5390,7 +5390,7 @@ function authenticateWithGoogle({
     monitor = setIntervalImpl(() => {
       if (popup.closed) finish(reject, pomegranateError("POMEGRANATE_CANCELLED"));
     }, 250);
-    timeout = setTimeoutImpl(() => finish(reject, pomegranateError("POMEGRANATE_TIMEOUT")), POPUP_TIMEOUT_MS);
+    timeout = setTimeoutImpl(() => finish(reject, pomegranateError("POMEGRANATE_POPUP_TIMEOUT")), POPUP_TIMEOUT_MS);
   });
 }
 async function request(url, options = {}, fetchImpl = fetch) {
@@ -5624,7 +5624,9 @@ function continueWithGoogle(options) {
 // src/components/google-login-button.js
 var googleLoginLocales = defineLocales({
   "Continue with Google": ["Continuer avec Google", "Continua con Google", "Mit Google fortfahren", "Continuar con Google", "Continuar com o Google", "\u041F\u0440\u043E\u0434\u043E\u043B\u0436\u0438\u0442\u044C \u0441 Google", "\u4F7F\u7528 Google \u7EE7\u7EED", "\u4F7F\u7528 Google \u7E7C\u7E8C", "Google \u3067\u7D9A\u884C", "Google\uB85C \uACC4\uC18D"],
-  "Could not continue with Google": ["Impossible de continuer avec Google", "Impossibile continuare con Google", "Mit Google konnte nicht fortgefahren werden", "No se pudo continuar con Google", "N\xE3o foi poss\xEDvel continuar com o Google", "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043F\u0440\u043E\u0434\u043E\u043B\u0436\u0438\u0442\u044C \u0441 Google", "\u65E0\u6CD5\u4F7F\u7528 Google \u7EE7\u7EED", "\u7121\u6CD5\u4F7F\u7528 Google \u7E7C\u7E8C", "Google \u3067\u7D9A\u884C\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F", "Google\uB85C \uACC4\uC18D\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4"]
+  "Could not continue with Google": ["Impossible de continuer avec Google", "Impossibile continuare con Google", "Mit Google konnte nicht fortgefahren werden", "No se pudo continuar con Google", "N\xE3o foi poss\xEDvel continuar com o Google", "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043F\u0440\u043E\u0434\u043E\u043B\u0436\u0438\u0442\u044C \u0441 Google", "\u65E0\u6CD5\u4F7F\u7528 Google \u7EE7\u7EED", "\u7121\u6CD5\u4F7F\u7528 Google \u7E7C\u7E8C", "Google \u3067\u7D9A\u884C\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F", "Google\uB85C \uACC4\uC18D\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4"],
+  "Google sign-in timed out": ["La connexion avec Google a expir\xE9", "Accesso con Google scaduto", "Google-Anmeldung abgelaufen", "Se agot\xF3 el tiempo para iniciar sesi\xF3n con Google", "O login com o Google expirou", "\u0412\u0440\u0435\u043C\u044F \u0432\u0445\u043E\u0434\u0430 \u0447\u0435\u0440\u0435\u0437 Google \u0438\u0441\u0442\u0435\u043A\u043B\u043E", "Google \u767B\u5F55\u5DF2\u8D85\u65F6", "Google \u767B\u5165\u5DF2\u903E\u6642", "Google \u30ED\u30B0\u30A4\u30F3\u304C\u30BF\u30A4\u30E0\u30A2\u30A6\u30C8\u3057\u307E\u3057\u305F", "Google \uB85C\uADF8\uC778 \uC2DC\uAC04\uC774 \uCD08\uACFC\uB418\uC5C8\uC2B5\uB2C8\uB2E4"],
+  "The sign-in window was closed after 10 minutes without a response. Please try again.": ["La fen\xEAtre de connexion a \xE9t\xE9 ferm\xE9e apr\xE8s 10 minutes sans r\xE9ponse. Veuillez r\xE9essayer.", "La finestra di accesso \xE8 stata chiusa dopo 10 minuti senza risposta. Riprova.", "Das Anmeldefenster wurde nach 10 Minuten ohne Antwort geschlossen. Bitte versuchen Sie es erneut.", "La ventana de inicio de sesi\xF3n se cerr\xF3 despu\xE9s de 10 minutos sin respuesta. Int\xE9ntalo de nuevo.", "A janela de login foi fechada ap\xF3s 10 minutos sem resposta. Tente novamente.", "\u041E\u043A\u043D\u043E \u0432\u0445\u043E\u0434\u0430 \u0431\u044B\u043B\u043E \u0437\u0430\u043A\u0440\u044B\u0442\u043E \u043F\u043E\u0441\u043B\u0435 10 \u043C\u0438\u043D\u0443\u0442 \u0431\u0435\u0437 \u043E\u0442\u0432\u0435\u0442\u0430. \u041F\u043E\u043F\u0440\u043E\u0431\u0443\u0439\u0442\u0435 \u0435\u0449\u0451 \u0440\u0430\u0437.", "\u767B\u5F55\u7A97\u53E3\u5728 10 \u5206\u949F\u65E0\u54CD\u5E94\u540E\u5DF2\u5173\u95ED\u3002\u8BF7\u91CD\u8BD5\u3002", "\u767B\u5165\u8996\u7A97\u5728 10 \u5206\u9418\u7121\u56DE\u61C9\u5F8C\u5DF2\u95DC\u9589\u3002\u8ACB\u518D\u8A66\u4E00\u6B21\u3002", "10 \u5206\u9593\u5FDC\u7B54\u304C\u306A\u304B\u3063\u305F\u305F\u3081\u3001\u30ED\u30B0\u30A4\u30F3\u753B\u9762\u3092\u9589\u3058\u307E\u3057\u305F\u3002\u3082\u3046\u4E00\u5EA6\u304A\u8A66\u3057\u304F\u3060\u3055\u3044\u3002", "10\uBD84 \uB3D9\uC548 \uC751\uB2F5\uC774 \uC5C6\uC5B4 \uB85C\uADF8\uC778 \uCC3D\uC744 \uB2EB\uC558\uC2B5\uB2C8\uB2E4. \uB2E4\uC2DC \uC2DC\uB3C4\uD574 \uC8FC\uC138\uC694."]
 });
 var t = getT(googleLoginLocales);
 var ICON_BRAND_GOOGLE = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.945 11a9 9 0 1 1 -3.284 -5.997l-2.655 2.392a5.5 5.5 0 1 0 2.119 6.605h-4.125v-3h7.945" /></svg>';
@@ -5723,6 +5725,13 @@ var GoogleLoginButton = class extends HTMLElement {
     } catch (err) {
       if (err?.code === "POMEGRANATE_CANCELLED") return;
       console.warn("pomegranate flow failed", err?.code || err?.message || err);
+      if (err?.code === "POMEGRANATE_POPUP_TIMEOUT") {
+        error(
+          t("Google sign-in timed out"),
+          t("The sign-in window was closed after 10 minutes without a response. Please try again.")
+        );
+        return;
+      }
       error(t("Could not continue with Google"), err?.code || "");
     }
   };

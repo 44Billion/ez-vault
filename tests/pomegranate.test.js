@@ -5,6 +5,7 @@ import { generateSecretKey, getPublicKey } from 'libp2r2p/key'
 import {
   CENTRAL_URL,
   OPERATORS,
+  POPUP_TIMEOUT_MS,
   THRESHOLD,
   authenticateWithGoogle,
   continueWithGoogle,
@@ -78,6 +79,32 @@ test('blocked and user-closed Google popups have distinct cancellation errors', 
   popup.closed = true
   monitor()
   await assert.rejects(pending, err => err.code === 'POMEGRANATE_CANCELLED')
+})
+
+test('Google popup times out after ten minutes and is closed by its opener', async () => {
+  const popup = { closed: false, closeCalled: false, close () { this.closeCalled = true } }
+  let timeoutCallback
+  let timeoutDelay
+  const pending = authenticateWithGoogle({
+    openWindow: () => popup,
+    addMessageListener: () => {},
+    removeMessageListener: () => {},
+    setIntervalImpl: () => 1,
+    clearIntervalImpl: () => {},
+    setTimeoutImpl: (fn, delay) => {
+      timeoutCallback = fn
+      timeoutDelay = delay
+      return 2
+    },
+    clearTimeoutImpl: () => {}
+  })
+
+  assert.equal(timeoutDelay, POPUP_TIMEOUT_MS)
+  assert.equal(POPUP_TIMEOUT_MS, 10 * 60_000)
+  timeoutCallback()
+
+  await assert.rejects(pending, err => err.code === 'POMEGRANATE_POPUP_TIMEOUT')
+  assert.equal(popup.closeCalled, true)
 })
 
 test('Pomegranate tokens require a valid kind, signature, email and timestamp', () => {

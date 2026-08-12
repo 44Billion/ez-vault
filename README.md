@@ -94,6 +94,9 @@ The optional Google flow is intentionally fixed to the Pomegranate Central at
 `https://auth.njump.me`. OAuth is intermediated by that service, so users trust
 it to authenticate the correct Google account and mint its signed short-lived
 token. EZ Vault keeps that token and the verified e-mail only in memory. It
+closes its Google login popup and cancels the shared operation if no response
+arrives within 10 minutes, so a hidden or forgotten window cannot leave the UI
+busy indefinitely. It
 reuses an existing Pomegranate account when present; otherwise it creates a
 FROST 2-of-4 account using these fixed operators:
 

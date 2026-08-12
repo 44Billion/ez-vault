@@ -218,7 +218,7 @@ await initializeStorage();
 await initializeVaultProtection();
 await Promise.all([
   import("./chunks/account-list-SO4BUBQQ.js"),
-  import("./chunks/account-add-DIG5DCLR.js"),
+  import("./chunks/account-add-B2VGXXSQ.js"),
   import("./chunks/sync-panel-BG5Z73IY.js"),
   import("./chunks/trusted-signers-panel-5CHHEDLJ.js"),
   import("./chunks/accordion-panel-AGHO422R.js"),
@@ -226,7 +226,7 @@ await Promise.all([
   import("./chunks/activity-log-M76CTKGL.js"),
   import("./chunks/vault-lock-button-YVPDKBFG.js"),
   import("./chunks/lock-overlay-J24DE2XN.js"),
-  import("./chunks/create-overlay-6KEPU7XI.js")
+  import("./chunks/create-overlay-LQLZNEC6.js")
 ]);
 document.getElementById("vault").style.visibility = "visible";
 var list2 = document.querySelector("account-list");

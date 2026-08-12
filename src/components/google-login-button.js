@@ -8,7 +8,9 @@ import { defineLocales, getT, subscribeLocaleChanged } from '../i18n/index.js'
 
 export const googleLoginLocales = defineLocales({
   'Continue with Google': ['Continuer avec Google', 'Continua con Google', 'Mit Google fortfahren', 'Continuar con Google', 'Continuar com o Google', 'Продолжить с Google', '使用 Google 继续', '使用 Google 繼續', 'Google で続行', 'Google로 계속'],
-  'Could not continue with Google': ['Impossible de continuer avec Google', 'Impossibile continuare con Google', 'Mit Google konnte nicht fortgefahren werden', 'No se pudo continuar con Google', 'Não foi possível continuar com o Google', 'Не удалось продолжить с Google', '无法使用 Google 继续', '無法使用 Google 繼續', 'Google で続行できませんでした', 'Google로 계속할 수 없습니다']
+  'Could not continue with Google': ['Impossible de continuer avec Google', 'Impossibile continuare con Google', 'Mit Google konnte nicht fortgefahren werden', 'No se pudo continuar con Google', 'Não foi possível continuar com o Google', 'Не удалось продолжить с Google', '无法使用 Google 继续', '無法使用 Google 繼續', 'Google で続行できませんでした', 'Google로 계속할 수 없습니다'],
+  'Google sign-in timed out': ['La connexion avec Google a expiré', 'Accesso con Google scaduto', 'Google-Anmeldung abgelaufen', 'Se agotó el tiempo para iniciar sesión con Google', 'O login com o Google expirou', 'Время входа через Google истекло', 'Google 登录已超时', 'Google 登入已逾時', 'Google ログインがタイムアウトしました', 'Google 로그인 시간이 초과되었습니다'],
+  'The sign-in window was closed after 10 minutes without a response. Please try again.': ['La fenêtre de connexion a été fermée après 10 minutes sans réponse. Veuillez réessayer.', 'La finestra di accesso è stata chiusa dopo 10 minuti senza risposta. Riprova.', 'Das Anmeldefenster wurde nach 10 Minuten ohne Antwort geschlossen. Bitte versuchen Sie es erneut.', 'La ventana de inicio de sesión se cerró después de 10 minutos sin respuesta. Inténtalo de nuevo.', 'A janela de login foi fechada após 10 minutos sem resposta. Tente novamente.', 'Окно входа было закрыто после 10 минут без ответа. Попробуйте ещё раз.', '登录窗口在 10 分钟无响应后已关闭。请重试。', '登入視窗在 10 分鐘無回應後已關閉。請再試一次。', '10 分間応答がなかったため、ログイン画面を閉じました。もう一度お試しください。', '10분 동안 응답이 없어 로그인 창을 닫았습니다. 다시 시도해 주세요.']
 })
 
 const t = getT(googleLoginLocales)
@@ -115,6 +117,13 @@ export class GoogleLoginButton extends HTMLElement {
     } catch (err) {
       if (err?.code === 'POMEGRANATE_CANCELLED') return
       console.warn('pomegranate flow failed', err?.code || err?.message || err)
+      if (err?.code === 'POMEGRANATE_POPUP_TIMEOUT') {
+        toast.error(
+          t('Google sign-in timed out'),
+          t('The sign-in window was closed after 10 minutes without a response. Please try again.')
+        )
+        return
+      }
       toast.error(t('Could not continue with Google'), err?.code || '')
     }
   }

@@ -34,6 +34,8 @@ test('Google action uses the Tabler component, shared busy pulse and toast path'
   assert.match(button, /pulsate/)
   assert.match(button, /toast\.error/)
   assert.match(button, /POMEGRANATE_CANCELLED/)
+  assert.match(button, /POMEGRANATE_POPUP_TIMEOUT/)
+  assert.match(button, /Google sign-in timed out/)
 })
 
 test('bunker copy stays behind the vault disclosure gate and uses the pairing constructor', () => {
