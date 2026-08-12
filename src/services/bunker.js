@@ -9,9 +9,11 @@ import {
   freeRelays,
   parseRelayListEvent
 } from './relay.js'
+import { buildBunkerUrlWithClientKey } from '../helpers/nostrpair-url.js'
 
 const PING_INTERVAL_MS = 60_000
 const PING_TIMEOUT_MS = 10_000
+const CONNECTION_TIMEOUT_MS = 10_000
 const IDLE_TIMEOUT_MS = 5 * 60_000
 
 // Module-private slot for raw client keys. Mirrors the NsecSigner pattern
@@ -49,6 +51,35 @@ export function stripBunkerSecret (bunkerUrl) {
   }
 }
 
+export function publicBunkerRecord (bunkerUrl) {
+  const pointer = parseBunkerUrl(bunkerUrl)
+  if (!pointer) throw new Error('INVALID_BUNKER_URL')
+  return { bunkerRelays: [...pointer.relays] }
+}
+
+export function buildBunkerUrl ({ handlerPubkey, relays }) {
+  return toBunkerUrl({ remoteSignerPubkey: handlerPubkey, relays, secret: null })
+}
+
+// Single constructor used by authenticated copy and device pairing. The
+// encrypted handler wins; a legacy plaintext URL is consulted only while its
+// relays/handler have not yet completed their post-ciphertext migration.
+export function buildBunkerBackupUrl ({ account, secretEntry }) {
+  if (!account || account.type !== 'bunker' || !secretEntry?.clientKey) {
+    throw new Error('BUNKER_BACKUP_UNAVAILABLE')
+  }
+  let handlerPubkey = secretEntry.handlerPubkey
+  let relays = Array.isArray(account.bunkerRelays) ? account.bunkerRelays : []
+  if ((!handlerPubkey || !relays.length) && account.bunker) {
+    const legacy = parseBunkerUrl(account.bunker)
+    if (!legacy) throw new Error('INVALID_BUNKER_URL')
+    handlerPubkey ||= legacy.remoteSignerPubkey
+    if (!relays.length) relays = legacy.relays
+  }
+  if (!handlerPubkey || !relays.length) throw new Error('BUNKER_BACKUP_UNAVAILABLE')
+  return buildBunkerUrlWithClientKey(buildBunkerUrl({ handlerPubkey, relays }), secretEntry.clientKey)
+}
+
 function vaultClientMetadata () {
   const metadata = { name: 'ez-vault' }
   const origin = globalThis.location?.origin
@@ -71,7 +102,10 @@ async function openSigner (bunkerUrl, clientSecretKey) {
   if (!pointer) throw new Error('INVALID_BUNKER_URL')
   const signer = BunkerSigner.fromBunker(clientSecretKey, pointer, { relayPool })
   try {
-    await signer.connect({ clientMetadata: vaultClientMetadata() })
+    await signer.connect({
+      clientMetadata: vaultClientMetadata(),
+      timeout: CONNECTION_TIMEOUT_MS
+    })
   } catch (err) {
     const msg = typeof err === 'string' ? err : (err?.message ?? '')
     // Some bunkers track prior sessions server-side and reply "already
@@ -87,14 +121,24 @@ async function openSigner (bunkerUrl, clientSecretKey) {
   return signer
 }
 
-// Persists bunker-URL changes (secret stripping, switch_relays result) back
-// to the store record. Safe to call with a null pubkey (e.g. during import
-// before the record exists) — the store lookup just misses.
+// Relays are public connection metadata; the handler pubkey is a capability
+// and stays only in the encrypted secret blob. Legacy records keep their full
+// URL until a later successful secret write has migrated the handler.
 export async function persistHandleState ({ pubkey, bunkerUrl }) {
   if (!pubkey) return
   const rec = store.get(pubkey)
-  if (!rec || rec.bunker === bunkerUrl) return
-  await store.update(pubkey, { bunker: bunkerUrl })
+  if (!rec) return
+  const pointer = parseBunkerUrl(bunkerUrl)
+  if (!pointer) throw new Error('INVALID_BUNKER_URL')
+  if (rec.bunker) {
+    const cleaned = toBunkerUrl({ ...pointer, secret: null })
+    if (rec.bunker !== cleaned) await store.update(pubkey, { bunker: cleaned })
+    return
+  }
+  const relays = [...pointer.relays]
+  if (JSON.stringify(rec.bunkerRelays || []) !== JSON.stringify(relays)) {
+    await store.update(pubkey, { bunkerRelays: relays })
+  }
 }
 
 // Shared, keep-warm handle for a bunker connection. Internally manages a
@@ -143,7 +187,7 @@ export class BunkerHandle {
   }
 
   async getPublicKey () {
-    const pubkey = await this.#request(s => s.getPublicKey())
+    const pubkey = await this.#request(s => s.getPublicKey({ timeout: CONNECTION_TIMEOUT_MS }))
     if (!this.#state.pubkey) {
       this.#state.pubkey = pubkey
       this.#notifyStateChange()
@@ -187,7 +231,9 @@ export class BunkerHandle {
     if (!pubkey) throw new Error('PUBKEY_NOT_READY')
     const clientKey = clientKeysByHandle.get(this)
     if (!clientKey) throw new Error('NO_CLIENT_KEY')
-    await secrets.adoptBunkerHandle(pubkey, this, clientKey)
+    const pointer = parseBunkerUrl(this.#state.bunkerUrl)
+    if (!pointer) throw new Error('INVALID_BUNKER_URL')
+    await secrets.adoptBunkerHandle(pubkey, this, pointer.remoteSignerPubkey, clientKey)
   }
 
   async close () {

@@ -59,8 +59,14 @@ async function addNsecAccount () {
 async function addBunkerAccount (handle = null) {
   const secret = seckey()
   const pubkey = getPublicKey(hexToBytes(secret))
-  await store.add({ type: 'bunker', pubkey, name: '', picture: '', bunker: `bunker://${pubkey}` })
-  if (handle) await secrets.adoptBunkerHandle(pubkey, handle, seckey())
+  await store.add({
+    type: 'bunker',
+    pubkey,
+    name: '',
+    picture: '',
+    bunker: `bunker://${pubkey}?relay=${encodeURIComponent('wss://relay.example')}`
+  })
+  if (handle) await secrets.adoptBunkerHandle(pubkey, handle, pubkey, seckey())
   return { pubkey }
 }
 

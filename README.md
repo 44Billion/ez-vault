@@ -45,6 +45,56 @@ created by older platform-only releases keep their legacy `internal` hint.
 The activity log keeps at most 500 entries per app and 64 MiB globally;
 sensitive request and result fields remain encrypted while at rest.
 
+## Bunker accounts and pairing
+
+For a bunker account, IndexedDB keeps only the account pubkey, profile data
+and normalized relay URLs in cleartext. The encrypted vault record contains
+the account pubkey again as its local index, the secret NIP-46 handler pubkey
+and the persistent client key. A one-use `secret` from an imported pointer is
+consumed during the first connection and is never persisted afterward.
+
+Copying a bunker URL requires a fresh passkey verification. The exported URL
+contains `#client_key=<64 hex>` so a restored or paired device reuses the same
+NIP-46 client identity. The fragment is removed before the pointer is sent to
+the bunker. Pairing uses that same self-contained form. Older 64-byte bunker
+records remain readable; their handler is taken from the old public account
+record and moved into the encrypted 96-byte record on the next successful
+normal secrets write. Relay changes remain public metadata and do not trigger
+a vault reseal or another WebAuthn ceremony.
+
+## Continue with Google
+
+The optional Google flow is intentionally fixed to the Pomegranate Central at
+`https://auth.njump.me`. OAuth is intermediated by that service, so users trust
+it to authenticate the correct Google account and mint its signed short-lived
+token. EZ Vault keeps that token and the verified e-mail only in memory. It
+reuses an existing Pomegranate account when present; otherwise it creates a
+FROST 2-of-4 account using these fixed operators:
+
+- `https://po.coracle.social`
+- `https://po.f7z.io`
+- `https://po.jumble.social`
+- `https://po.njump.me`
+
+The generated nsec exists only during setup and is split locally with the
+pinned `@fiatjaf/promenade-trusted-dealer` implementation. Each operator gets
+one shard and any two operators can jointly sign; consequently, compromise or
+collusion of two operators can compromise the account, while losing three
+operators makes it unavailable. Partial network failure can leave an
+incomplete remote registration which the Central/operators must reconcile.
+Only a newly registered account is bootstrapped on Nostr: EZ Vault assigns a
+local neutral avatar and generated name, publishes its kind `10002` relay list
+to the seed relays, then publishes its kind `0` profile to the selected write
+relays before persisting the bunker account locally. An account already
+returned by the Central is imported unchanged and does not cause either event
+to be republished.
+The selected `default` profile is imported as an ordinary bunker account and
+must report the same account pubkey as `/account`.
+
+Pomegranate avatar fallback also runs locally. Existing account flows retain
+DiceBear Avataaars, while this flow uses Avataaars Neutral after trying a Nostr
+profile picture and an existing local picture.
+
 ## Scripts
 
 - `npm start` — start the local dev server

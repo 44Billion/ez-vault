@@ -23,6 +23,7 @@ export default [
     files: ['**/*.js', '**/*.html'],
     plugins: { html },
     languageOptions: {
+      ecmaVersion: 'latest',
       sourceType: 'module',
       globals: {
         ...globals.browser,

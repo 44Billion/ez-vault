@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { generateSecretKey, getPublicKey } from 'libp2r2p/key'
-import { resolveMetadata } from '../src/services/account-intake.js'
+import { prepareBunker, resolveMetadata } from '../src/services/account-intake.js'
 import { freeRelays } from 'libp2r2p/relay'
 
 function pubkey () {
@@ -59,4 +59,23 @@ test('resolveMetadata prefers relay profile over paired account profile when ava
   assert.deepEqual(fetchedFromRelays, freeRelays.slice(0, 2))
   assert.equal(result.name, 'Relay Name')
   assert.equal(result.profileEvent, relayProfile)
+})
+
+test('bunker intake rejects malformed client identity fragments before connecting', async () => {
+  const handler = 'a'.repeat(64)
+  const relay = encodeURIComponent('wss://relay.example')
+  const key = 'b'.repeat(64)
+
+  await assert.rejects(
+    prepareBunker(`bunker://${handler}?relay=${relay}#client_key=bad`),
+    /INVALID_BUNKER_CLIENT_KEY/
+  )
+  await assert.rejects(
+    prepareBunker(`bunker://${handler}?relay=${relay}#client_key=${key}&client_key=${key}`),
+    /INVALID_BUNKER_CLIENT_KEY/
+  )
+  await assert.rejects(
+    prepareBunker(`bunker://${handler}?relay=${relay}#client_key=${key}&unknown=1`),
+    /INVALID_BUNKER_CLIENT_KEY/
+  )
 })

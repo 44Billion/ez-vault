@@ -18,12 +18,16 @@ const TLV_PADDING = 0x00
 
 // `entries` shape:
 //   { type: 'nsec',          pubkey: hex32, seckey:    hex32 }
-//   { type: 'bunker',        pubkey: hex32, clientKey: hex32 }
+//   { type: 'bunker',        pubkey: hex32, handlerPubkey: hex32, clientKey: hex32 }
 //   { type: 'device-signer', seckey: hex32 }
 //
 // nsec records carry only the seckey (32 bytes); the pubkey is derivable.
-// bunker records carry pubkey || clientKey (64 bytes) since the pubkey is
-// what the bunker decides — we can't recompute it locally.
+// New bunker records carry account pubkey || handler pubkey || clientKey
+// (96 bytes). The account pubkey is deliberately repeated as the stable local
+// index: unlock can associate the encrypted capability with its public account
+// record without contacting the remote signer. Legacy 64-byte records carry
+// account pubkey || clientKey; their handler still lives in account.bunker and
+// is migrated on the next normal secret write.
 // device-signer records carry just the 32-byte seckey: a single key per
 // device, used to sign the trusted-signer exchange in the pairing flow
 // (and, in future, signer-to-signer messaging).
@@ -38,9 +42,10 @@ export function encodeSecretEntries (entries) {
     if (e.type === 'nsec') {
       records.push([TLV_NSEC, hexToBytes(e.seckey)])
     } else if (e.type === 'bunker') {
-      const value = new Uint8Array(64)
+      const value = new Uint8Array(96)
       value.set(hexToBytes(e.pubkey), 0)
-      value.set(hexToBytes(e.clientKey), 32)
+      value.set(hexToBytes(e.handlerPubkey), 32)
+      value.set(hexToBytes(e.clientKey), 64)
       records.push([TLV_BUNKER, value])
     } else if (e.type === 'device-signer') {
       records.push([TLV_DEVICE_SIGNER, hexToBytes(e.seckey)])
@@ -62,12 +67,21 @@ export function decodeSecretEntries (bytes) {
     })
   }
   for (const v of tlv[TLV_BUNKER] || []) {
-    if (v.length !== 64) continue
-    entries.push({
-      type: 'bunker',
-      pubkey: bytesToHex(v.slice(0, 32)),
-      clientKey: bytesToHex(v.slice(32, 64))
-    })
+    if (v.length === 64) {
+      entries.push({
+        type: 'bunker',
+        pubkey: bytesToHex(v.slice(0, 32)),
+        clientKey: bytesToHex(v.slice(32, 64)),
+        legacy: true
+      })
+    } else if (v.length === 96) {
+      entries.push({
+        type: 'bunker',
+        pubkey: bytesToHex(v.slice(0, 32)),
+        handlerPubkey: bytesToHex(v.slice(32, 64)),
+        clientKey: bytesToHex(v.slice(64, 96))
+      })
+    }
   }
   for (const v of tlv[TLV_DEVICE_SIGNER] || []) {
     if (v.length !== 32) continue

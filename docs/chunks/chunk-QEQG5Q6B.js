@@ -4,28 +4,32 @@ import {
 } from "./chunk-OQVZFKQZ.js";
 import {
   claimSigner
-} from "./chunk-47TWQHYT.js";
+} from "./chunk-K4MQVI3L.js";
+import {
+  publishAccountBootstrap,
+  randomAccountName
+} from "./chunk-335NQKAM.js";
 import {
   runSecretAccountMutation
-} from "./chunk-FQWZBX36.js";
+} from "./chunk-RRGKXN3E.js";
 import {
   ensureRegistered,
   openSecrets
-} from "./chunk-A4OBQLFD.js";
+} from "./chunk-AQSHSQLO.js";
 import {
   error
 } from "./chunk-BDYCOPAX.js";
 import {
   removeForPubkey
-} from "./chunk-SDOMGLPX.js";
+} from "./chunk-W44MUTZ3.js";
 import {
   seededAvatarDataUrl
-} from "./chunk-4RHK4XWQ.js";
+} from "./chunk-3RWQBTGN.js";
 import {
   add,
   applyRecords,
+  buildBunkerBackupUrl,
   deleteSecret,
-  freeRelays,
   generateKeypair,
   get,
   npubFromPubkey,
@@ -34,12 +38,9 @@ import {
   relayPool,
   remove,
   resolveWriteRelays,
-  seedRelays,
   setNsecSecret,
-  signProfileEvent,
-  signRelayListEvent,
   update
-} from "./chunk-GUYFWDAK.js";
+} from "./chunk-D6BLQV4I.js";
 import {
   defineLocales,
   getT,
@@ -49,133 +50,6 @@ import {
   injectComponentStyles,
   waitForFocus
 } from "./chunk-3OYOWZEQ.js";
-
-// src/services/account-names.js
-var ACCOUNT_NAME_COLORS = Object.freeze([
-  "Crimson",
-  "Azure",
-  "Emerald",
-  "Golden",
-  "Silver",
-  "Coral",
-  "Violet",
-  "Jade",
-  "Amber",
-  "Sapphire",
-  "Ruby",
-  "Onyx",
-  "Pearl",
-  "Cobalt",
-  "Scarlet",
-  "Ivory",
-  "Magenta",
-  "Indigo",
-  "Bronze",
-  "Turquoise",
-  "Copper",
-  "Lavender",
-  "Chartreuse",
-  "Vermillion",
-  "Teal",
-  "Ochre",
-  "Plum",
-  "Slate",
-  "Aqua",
-  "Maroon",
-  "Olive",
-  "Burgundy",
-  "Tangerine",
-  "Mint",
-  "Navy",
-  "Champagne",
-  "Salmon",
-  "Forest",
-  "Citrine",
-  "Pewter",
-  "Flamingo",
-  "Cerulean",
-  "Saffron",
-  "Amethyst",
-  "Topaz",
-  "Garnet",
-  "Platinum",
-  "Orchid",
-  "Peach",
-  "Rose"
-]);
-var ACCOUNT_NAME_NATURE = Object.freeze([
-  "Glacier",
-  "Ember",
-  "Cascade",
-  "Fjord",
-  "River",
-  "Mountain",
-  "Forest",
-  "Ocean",
-  "Desert",
-  "Meadow",
-  "Canyon",
-  "Valley",
-  "Aurora",
-  "Thunder",
-  "Lightning",
-  "Breeze",
-  "Storm",
-  "Mist",
-  "Frost",
-  "Dew",
-  "Sunrise",
-  "Sunset",
-  "Horizon",
-  "Tundra",
-  "Savanna",
-  "Prairie",
-  "Lagoon",
-  "Delta",
-  "Cliff",
-  "Ridge",
-  "Summit",
-  "Peak",
-  "Grove",
-  "Glade",
-  "Brook",
-  "Spring",
-  "Rapids",
-  "Tide",
-  "Wave",
-  "Coral",
-  "Kelp",
-  "Moss",
-  "Fern",
-  "Willow",
-  "Cedar",
-  "Birch",
-  "Sequoia",
-  "Bamboo",
-  "Crystal",
-  "Quartz"
-]);
-function randomInt(max) {
-  return Math.floor(Math.random() * max);
-}
-function accountNameAt(index) {
-  const color = ACCOUNT_NAME_COLORS[Math.floor(index / ACCOUNT_NAME_NATURE.length)];
-  const nature = ACCOUNT_NAME_NATURE[index % ACCOUNT_NAME_NATURE.length];
-  return `${color} ${nature}`;
-}
-function randomAccountName(previous = "") {
-  const total = ACCOUNT_NAME_COLORS.length * ACCOUNT_NAME_NATURE.length;
-  let previousIndex = -1;
-  for (let i = 0; i < total; i++) {
-    if (accountNameAt(i) === previous) {
-      previousIndex = i;
-      break;
-    }
-  }
-  if (previousIndex === -1) return accountNameAt(randomInt(total));
-  const nextIndex = randomInt(total - 1);
-  return accountNameAt(nextIndex >= previousIndex ? nextIndex + 1 : nextIndex);
-}
 
 // src/components/account-avatar.js
 var MODE = { CREATING: "creating", NORMAL: "normal", EDITING: "editing" };
@@ -679,18 +553,21 @@ var AccountAvatar = class extends HTMLElement {
   async #copyKey(btn) {
     const acc = this.#account;
     if (!acc) return this.#flashError(btn);
-    if (acc.type === "bunker") return this.#copy(btn, acc.bunker);
-    if (acc.type !== "nsec") return this.#flashError(btn);
+    if (acc.type !== "nsec" && acc.type !== "bunker") return this.#flashError(btn);
     const icon = btn.querySelector(".avatar-btn-icon");
     btn.disabled = true;
     icon?.classList.add("pulsate");
     try {
       const entries = await openSecrets();
-      const entry = entries.find((e) => e.type === "nsec" && e.pubkey === acc.pubkey);
-      if (!entry?.seckey) return this.#flashError(btn);
-      return this.#copy(btn, nsecFromHex(entry.seckey));
+      const entry = entries.find((e) => e.type === acc.type && e.pubkey === acc.pubkey);
+      if (acc.type === "nsec") {
+        if (!entry?.seckey) return this.#flashError(btn);
+        return this.#copy(btn, nsecFromHex(entry.seckey));
+      }
+      if (!entry?.clientKey) return this.#flashError(btn);
+      return this.#copy(btn, buildBunkerBackupUrl({ account: acc, secretEntry: entry }));
     } catch (err) {
-      console.warn("copy-nsec auth failed", err?.message ?? err);
+      console.warn("copy-secret auth failed", err?.message ?? err);
       error(t("Authentication failed"));
       this.#flashError(btn);
     } finally {
@@ -793,31 +670,17 @@ var AccountAvatar = class extends HTMLElement {
     this.#setAccountSaving(true);
     icon?.classList.add("pulsate");
     try {
-      const writeRelays = freeRelays.slice(0, 2);
       const name = this.#readNameValue();
-      const relayListEvent = signRelayListEvent({
-        secretKey: draft.secretKey,
-        writeRelays,
-        readRelays: writeRelays
-      });
-      const profileEvent = signProfileEvent({
+      const bootstrap = await publishAccountBootstrap({
         secretKey: draft.secretKey,
         name,
         picture: draft.picture
       });
-      const relayListPublish = await relayPool.sendEvent(relayListEvent, seedRelays);
-      if (!relayListPublish.success) throw new Error("RELAY_LIST_PUBLISH_FAILED");
-      const profilePublish = await relayPool.sendEvent(profileEvent, writeRelays);
-      if (!profilePublish.success) throw new Error("PROFILE_PUBLISH_FAILED");
       await ensureRegistered();
       const record = {
         type: "nsec",
         pubkey: draft.pubkey,
-        picture: draft.picture,
-        name,
-        profileEvent,
-        relayListEvent,
-        writeRelays
+        ...bootstrap
       };
       const newSeckey = draft.seckey;
       await runSecretAccountMutation({

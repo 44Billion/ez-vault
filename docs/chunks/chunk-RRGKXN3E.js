@@ -2,9 +2,10 @@ import {
   persistSecretsBlob,
   restoreSecretsBlobSnapshot,
   snapshotSecretsBlob
-} from "./chunk-A4OBQLFD.js";
+} from "./chunk-AQSHSQLO.js";
 import {
   applyRecords,
+  finalizeLegacyBunkerMigrations,
   getState,
   hasState,
   isUnlocked,
@@ -13,9 +14,10 @@ import {
   removeState,
   restoreContentKeySecrets,
   sealCurrentEntries,
+  secretStateFingerprint,
   setState,
   snapshotContentKeySecrets
-} from "./chunk-GUYFWDAK.js";
+} from "./chunk-D6BLQV4I.js";
 
 // src/services/account-mutation-journal.js
 var KEY = "account-mutation";
@@ -37,6 +39,9 @@ function normalizeAccountList(accounts) {
 }
 function normalizeSecretRefs(refs) {
   return Array.isArray(refs) ? refs.filter((r) => (r?.type === "nsec" || r?.type === "bunker") && r.pubkey).map((r) => ({ type: r.type, pubkey: r.pubkey })) : [];
+}
+function normalizeFingerprint(value) {
+  return typeof value === "string" && /^[0-9a-f]{64}$/i.test(value) ? value.toLowerCase() : "";
 }
 function uniquePubkeys(...groups) {
   const out = [];
@@ -73,6 +78,8 @@ function read() {
       afterAccounts,
       beforeSecretRefs,
       afterSecretRefs,
+      beforeSecretFingerprint: normalizeFingerprint(parsed.beforeSecretFingerprint),
+      afterSecretFingerprint: normalizeFingerprint(parsed.afterSecretFingerprint),
       createdAt: Math.max(0, Math.floor(Number(parsed.createdAt) || 0))
     };
   } catch {
@@ -85,7 +92,8 @@ async function begin({
   beforeAccounts = [],
   afterAccounts = [],
   beforeSecretRefs = [],
-  afterSecretRefs = []
+  afterSecretRefs = [],
+  beforeSecretFingerprint = ""
 }) {
   if (read()) throw new Error("ACCOUNT_MUTATION_IN_PROGRESS");
   const tx = {
@@ -102,10 +110,19 @@ async function begin({
     afterAccounts: normalizeAccountList(afterAccounts),
     beforeSecretRefs: normalizeSecretRefs(beforeSecretRefs),
     afterSecretRefs: normalizeSecretRefs(afterSecretRefs),
+    beforeSecretFingerprint: normalizeFingerprint(beforeSecretFingerprint),
+    afterSecretFingerprint: "",
     createdAt: Math.floor(Date.now() / 1e3)
   };
   await setState(KEY, tx);
   notify();
+  return tx;
+}
+async function setAfterSecretFingerprint(fingerprint) {
+  const tx = read();
+  if (!tx) throw new Error("ACCOUNT_MUTATION_NOT_FOUND");
+  tx.afterSecretFingerprint = normalizeFingerprint(fingerprint);
+  await setState(KEY, tx);
   return tx;
 }
 async function clear() {
@@ -221,6 +238,7 @@ async function runSecretAccountMutation({
   const affectedPubkeys2 = affectedFromAccounts(cleanBefore, cleanAfter);
   const beforeSecretRefs = secretRefsForPubkeys(affectedPubkeys2);
   const afterSecretRefs = secretRefsForAccounts(cleanAfter);
+  const beforeSecretFingerprint = secretStateFingerprint(affectedPubkeys2);
   const priorMemoryBlob = sealCurrentEntries();
   const priorLocalBlob = snapshotSecretsBlob();
   const priorContentKeysBlob = snapshotContentKeySecrets();
@@ -230,11 +248,13 @@ async function runSecretAccountMutation({
     beforeAccounts: cleanBefore,
     afterAccounts: cleanAfter,
     beforeSecretRefs,
-    afterSecretRefs
+    afterSecretRefs,
+    beforeSecretFingerprint
   });
   try {
     await apply();
     await finalize?.();
+    await setAfterSecretFingerprint(secretStateFingerprint(affectedPubkeys2));
     await persistSecretsBlob();
   } catch (err) {
     if (err?.persistenceMayHaveCommitted) throw err;
@@ -249,6 +269,11 @@ async function runSecretAccountMutation({
     throw err;
   }
   await clear();
+  try {
+    await finalizeLegacyBunkerMigrations();
+  } catch (err) {
+    console.warn("legacy bunker migration cleanup failed", err?.message ?? err);
+  }
 }
 function accountsByPubkey(accounts) {
   return new Map(cleanAccounts(accounts).map((account) => [account.pubkey, account]));
@@ -281,11 +306,18 @@ async function recoverPendingMutation() {
     return { recovered: false, outcome: "locked" };
   }
   const actualRefs = secretRefsForPubkeys(tx.affectedPubkeys);
+  const actualFingerprint = secretStateFingerprint(tx.affectedPubkeys);
   let outcome = "mixed";
-  if (refsEqual(actualRefs, tx.afterSecretRefs)) {
+  if (tx.afterSecretFingerprint && actualFingerprint === tx.afterSecretFingerprint) {
     await applyRecords(tx.affectedPubkeys, tx.afterAccounts);
     outcome = "after";
-  } else if (refsEqual(actualRefs, tx.beforeSecretRefs)) {
+  } else if (tx.beforeSecretFingerprint && actualFingerprint === tx.beforeSecretFingerprint) {
+    await applyRecords(tx.affectedPubkeys, tx.beforeAccounts);
+    outcome = "before";
+  } else if (!tx.afterSecretFingerprint && refsEqual(actualRefs, tx.afterSecretRefs)) {
+    await applyRecords(tx.affectedPubkeys, tx.afterAccounts);
+    outcome = "after";
+  } else if (!tx.beforeSecretFingerprint && refsEqual(actualRefs, tx.beforeSecretRefs)) {
     await applyRecords(tx.affectedPubkeys, tx.beforeAccounts);
     outcome = "before";
   } else {

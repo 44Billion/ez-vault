@@ -62,8 +62,20 @@ test('extractBunkerClientKey returns null for URLs without the fragment', () => 
 
 test('extractBunkerClientKey rejects malformed client_key values', () => {
   const url = `bunker://${PUBKEY}?relay=${encodeURIComponent(RELAY)}#client_key=not-hex`
-  const { clientKey } = extractBunkerClientKey(url)
-  assert.equal(clientKey, null)
+  assert.throws(() => extractBunkerClientKey(url), /INVALID_BUNKER_CLIENT_KEY/)
+})
+
+test('extractBunkerClientKey rejects duplicate and unknown fragment fields', () => {
+  const key = 'b'.repeat(64)
+  const base = `bunker://${PUBKEY}?relay=${encodeURIComponent(RELAY)}`
+  assert.throws(
+    () => extractBunkerClientKey(`${base}#client_key=${key}&client_key=${key}`),
+    /INVALID_BUNKER_CLIENT_KEY/
+  )
+  assert.throws(
+    () => extractBunkerClientKey(`${base}#client_key=${key}&extra=1`),
+    /INVALID_BUNKER_CLIENT_KEY/
+  )
 })
 
 test('extractBunkerClientKey ignores non-bunker URLs', () => {

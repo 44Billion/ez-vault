@@ -33,20 +33,12 @@ async function rehydrateOne (account) {
   // we cached. If it has drifted, the fetched pubkey is the new source of
   // truth — adopt it and drop metadata tied to the old one so the relay and
   // profile refresh below repopulates from the new pubkey's own events.
-  if (account.type === 'bunker' && account.bunker) {
-    const handle = secrets.getBunkerHandle(account.pubkey)
-    if (!handle) {
+  if (account.type === 'bunker') {
+    const liveBunkerPubkey = await probeBunkerAccount(account)
+    if (!liveBunkerPubkey) {
       // Vault still locked — nothing to rehydrate yet. The post-unlock
       // re-run in index.js will retry once secrets are loaded.
       return { updated: false }
-    }
-    let liveBunkerPubkey
-    try {
-      liveBunkerPubkey = await handle.getPublicKey()
-      status.clearError(account.pubkey)
-    } catch (err) {
-      status.setError(account.pubkey, String(err?.message ?? err))
-      throw err
     }
     if (liveBunkerPubkey !== account.pubkey) {
       if (store.get(liveBunkerPubkey)) {
@@ -71,8 +63,7 @@ async function rehydrateOne (account) {
           afterAccounts: [afterAccount],
           apply: async () => {
             // Rewrite the store record first so transferBunkerSecret can read
-            // the new bunker URL out of it when it reconstructs the moved
-            // handle.
+            // the public relays when it reconstructs the moved handle.
             await store.update(oldPubkey, reset)
             // The device signer key is account-independent so it stays put
             // across drift; trusted-signers are stored at device level too.
@@ -117,6 +108,25 @@ async function rehydrateOne (account) {
 
   if (Object.keys(patch).length) await store.update(account.pubkey, patch)
   return { updated: Object.keys(patch).length > 0 }
+}
+
+// The avatar subscribes to account-status, so a failed post-unlock probe
+// remains visible until one of rehydrateAll's scheduled retries succeeds.
+// Keep this small seam injectable for a deterministic regression test; the
+// production path always reads the decrypted BunkerHandle from secrets.
+export async function probeBunkerAccount (account, {
+  _getHandle = secrets.getBunkerHandle
+} = {}) {
+  const handle = _getHandle(account.pubkey)
+  if (!handle) return null
+  try {
+    const pubkey = await handle.getPublicKey()
+    status.clearError(account.pubkey)
+    return pubkey
+  } catch (err) {
+    status.setError(account.pubkey, String(err?.message ?? err))
+    throw err
+  }
 }
 
 function scheduleRetry () {

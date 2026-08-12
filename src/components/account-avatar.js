@@ -10,6 +10,8 @@ import * as signer from '../services/signer.js'
 import { runSecretAccountMutation } from '../services/account-mutations.js'
 import { seededAvatarDataUrl } from '../services/avatar.js'
 import { randomAccountName } from '../services/account-names.js'
+import { publishAccountBootstrap } from '../services/account-bootstrap.js'
+import { buildBunkerBackupUrl } from '../services/bunker.js'
 import * as toast from './shared/toast.js'
 import { injectComponentStyles, waitForFocus } from '../helpers/dom.js'
 import { defineLocales, getT, subscribeLocaleChanged } from '../i18n/index.js'
@@ -545,8 +547,7 @@ export class AccountAvatar extends HTMLElement {
   async #copyKey (btn) {
     const acc = this.#account
     if (!acc) return this.#flashError(btn)
-    if (acc.type === 'bunker') return this.#copy(btn, acc.bunker)
-    if (acc.type !== 'nsec') return this.#flashError(btn)
+    if (acc.type !== 'nsec' && acc.type !== 'bunker') return this.#flashError(btn)
     // Force a fresh user-verification prompt and decrypt the selected vault
     // ad-hoc — the in-memory `secrets` module deliberately does not expose
     // the seckey for silent retrieval. The PRF and the entries returned
@@ -556,11 +557,15 @@ export class AccountAvatar extends HTMLElement {
     icon?.classList.add('pulsate')
     try {
       const entries = await passkey.openSecrets()
-      const entry = entries.find(e => e.type === 'nsec' && e.pubkey === acc.pubkey)
-      if (!entry?.seckey) return this.#flashError(btn)
-      return this.#copy(btn, nostr.nsecFromHex(entry.seckey))
+      const entry = entries.find(e => e.type === acc.type && e.pubkey === acc.pubkey)
+      if (acc.type === 'nsec') {
+        if (!entry?.seckey) return this.#flashError(btn)
+        return this.#copy(btn, nostr.nsecFromHex(entry.seckey))
+      }
+      if (!entry?.clientKey) return this.#flashError(btn)
+      return this.#copy(btn, buildBunkerBackupUrl({ account: acc, secretEntry: entry }))
     } catch (err) {
-      console.warn('copy-nsec auth failed', err?.message ?? err)
+      console.warn('copy-secret auth failed', err?.message ?? err)
       toast.error(t('Authentication failed'))
       this.#flashError(btn)
     } finally {
@@ -662,25 +667,12 @@ export class AccountAvatar extends HTMLElement {
     this.#setAccountSaving(true)
     icon?.classList.add('pulsate')
     try {
-      const writeRelays = relays.freeRelays.slice(0, 2)
       const name = this.#readNameValue()
-
-      const relayListEvent = nostr.signRelayListEvent({
-        secretKey: draft.secretKey,
-        writeRelays,
-        readRelays: writeRelays
-      })
-      const profileEvent = nostr.signProfileEvent({
+      const bootstrap = await publishAccountBootstrap({
         secretKey: draft.secretKey,
         name,
         picture: draft.picture
       })
-
-      const relayListPublish = await relayPool.sendEvent(relayListEvent, relays.seedRelays)
-      if (!relayListPublish.success) throw new Error('RELAY_LIST_PUBLISH_FAILED')
-
-      const profilePublish = await relayPool.sendEvent(profileEvent, writeRelays)
-      if (!profilePublish.success) throw new Error('PROFILE_PUBLISH_FAILED')
 
       // Register the vault's passkey on the first non-npub account; no-op
       // when the vault is already unlocked.
@@ -689,11 +681,7 @@ export class AccountAvatar extends HTMLElement {
       const record = {
         type: 'nsec',
         pubkey: draft.pubkey,
-        picture: draft.picture,
-        name,
-        profileEvent,
-        relayListEvent,
-        writeRelays
+        ...bootstrap
       }
       const newSeckey = draft.seckey
       await runSecretAccountMutation({

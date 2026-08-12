@@ -1,11 +1,12 @@
 import { getPublicKey } from 'libp2r2p/key'
 import NsecSigner from './nsec-signer.js'
-import { BunkerHandle, persistHandleState } from './bunker.js'
+import { BunkerHandle, buildBunkerUrl, persistHandleState, publicBunkerRecord } from './bunker.js'
 import * as store from './accounts-store.js'
 import { encodeSecretEntries, decodeSecretEntries } from './secret-blob.js'
 import { DEFAULT_STALE_CHANNEL_SECONDS } from 'libp2r2p/private-messenger'
 import { bytesToBase64, base64ToBytes } from 'libp2r2p/base64'
-import { hexToBytes } from 'libp2r2p/base16'
+import { bytesToHex, hexToBytes } from 'libp2r2p/base16'
+import { sha256 } from '@noble/hashes/sha2.js'
 import { deriveSignerSeckey } from '../helpers/signer-key.js'
 import { sharedXOnlySecret } from 'libp2r2p/ecdh'
 import * as nip44v3 from 'libp2r2p/nip44-v3'
@@ -56,6 +57,8 @@ const contentKeySignersByOwnerPubkey = new Map()
 // here so we can re-emit the TLV blob whenever the secret set changes.
 const rawNsecHexByPubkey = new Map()
 const rawClientKeyHexByPubkey = new Map()
+const rawHandlerPubkeyByPubkey = new Map()
+const legacyBunkerPubkeys = new Set()
 const rawContentKeyHexByOwnerPubkey = new Map()
 
 // Single device-level signer seckey. Deterministically derived from the
@@ -116,6 +119,8 @@ function dropPriorEntry (pubkey) {
     if (handle) handle.close()
     bunkerHandlesByPubkey.delete(pubkey)
     rawClientKeyHexByPubkey.delete(pubkey)
+    rawHandlerPubkeyByPubkey.delete(pubkey)
+    legacyBunkerPubkeys.delete(pubkey)
     contentKeysChanged = dropContentKeysForOwner(pubkey) || contentKeysChanged
   }
   accountTypeByPubkey.delete(pubkey)
@@ -226,29 +231,52 @@ function pruneStaleContentKeys (now = nowSeconds()) {
   return changed
 }
 
-function adoptBunkerWithHandle (pubkey, handle, clientKey) {
+function adoptBunkerWithHandle (pubkey, handle, handlerPubkey, clientKey, { legacy = false } = {}) {
   const contentKeysChanged = dropPriorEntry(pubkey)
+  rawHandlerPubkeyByPubkey.set(pubkey, handlerPubkey)
   rawClientKeyHexByPubkey.set(pubkey, clientKey)
   bunkerHandlesByPubkey.set(pubkey, handle)
   accountTypeByPubkey.set(pubkey, 'bunker')
+  if (legacy) legacyBunkerPubkeys.add(pubkey)
   return contentKeysChanged
 }
 
 // Used at unlock time, where we have the raw clientKey from the TLV but
 // no live handle yet. Construct one using the bunker URL from the store.
-function adoptBunkerFromUnlock (pubkey, clientKey) {
+function adoptBunkerFromUnlock (pubkey, clientKey, encryptedHandlerPubkey = null) {
   const account = store.get(pubkey)
-  if (!account || account.type !== 'bunker' || !account.bunker) {
+  if (!account || account.type !== 'bunker') {
     console.warn('bunker secret without matching store record — skipping', pubkey)
+    return
+  }
+  let handlerPubkey = encryptedHandlerPubkey
+  let relays = Array.isArray(account.bunkerRelays) ? account.bunkerRelays : []
+  let legacy = false
+  if (account.bunker) {
+    try {
+      const parsed = new URL(account.bunker)
+      if (parsed.protocol !== 'bunker:') throw new Error('INVALID_BUNKER_URL')
+      handlerPubkey ||= parsed.hostname.toLowerCase()
+      if (!relays.length) relays = parsed.searchParams.getAll('relay')
+      // Even if the encrypted entry is already in the new format, a leftover
+      // plaintext URL means a prior post-commit cleanup was interrupted.
+      legacy = true
+    } catch {
+      console.warn('invalid legacy bunker URL — skipping', pubkey)
+      return
+    }
+  }
+  if (!HEX32.test(handlerPubkey || '') || !relays.length) {
+    console.warn('bunker secret without usable handler/relays — skipping', pubkey)
     return
   }
   const handle = BunkerHandle.create({
     pubkey,
-    bunkerUrl: account.bunker,
+    bunkerUrl: buildBunkerUrl({ handlerPubkey, relays }),
     clientKey,
     onStateChange: persistHandleState
   })
-  adoptBunkerWithHandle(pubkey, handle, clientKey)
+  adoptBunkerWithHandle(pubkey, handle, handlerPubkey, clientKey, { legacy })
 }
 
 function clearAll () {
@@ -260,6 +288,8 @@ function clearAll () {
   accountTypeByPubkey.clear()
   rawNsecHexByPubkey.clear()
   rawClientKeyHexByPubkey.clear()
+  rawHandlerPubkeyByPubkey.clear()
+  legacyBunkerPubkeys.clear()
   deviceSignerSeckey = null
 }
 
@@ -306,7 +336,7 @@ function loadEntries (ciphertext) {
     const tlvBytes = base64ToBytes(vaultDecryptWithScope(ciphertext, VAULT_SECRETS_SCOPE))
     for (const e of decodeSecretEntries(tlvBytes)) {
       if (e.type === 'nsec') adoptNsec(e.pubkey, e.seckey)
-      else if (e.type === 'bunker') adoptBunkerFromUnlock(e.pubkey, e.clientKey)
+      else if (e.type === 'bunker') adoptBunkerFromUnlock(e.pubkey, e.clientKey, e.handlerPubkey)
       else if (e.type === 'device-signer') deviceSignerSeckey = e.seckey
     }
   }
@@ -506,10 +536,11 @@ export async function replyWithContentKeySecrets ({ ownerPubkey, pubkeys, send }
 // Adopt a freshly-imported, already-connected BunkerHandle into the pool.
 // Called by `BunkerHandle.commit()` from inside bunker.js, which extracts
 // the clientKey from its module-private WeakMap and threads it in here.
-export async function adoptBunkerHandle (pubkey, handle, clientKey) {
+export async function adoptBunkerHandle (pubkey, handle, handlerPubkey, clientKey) {
   if (!isUnlocked()) throw new Error('VAULT_LOCKED')
+  if (!HEX32.test(handlerPubkey || '')) throw new Error('INVALID_BUNKER_HANDLER')
   const priorContentKeys = snapshotContentKeySecrets()
-  const contentKeysChanged = adoptBunkerWithHandle(pubkey, handle, clientKey)
+  const contentKeysChanged = adoptBunkerWithHandle(pubkey, handle, handlerPubkey, clientKey)
   try {
     if (contentKeysChanged) await persistContentKeyEntries()
   } catch (err) {
@@ -585,7 +616,9 @@ export async function transferBunkerSecret (oldPubkey, newPubkey) {
   if (!isUnlocked()) throw new Error('VAULT_LOCKED')
   if (accountTypeByPubkey.get(oldPubkey) !== 'bunker') return
   const clientKey = rawClientKeyHexByPubkey.get(oldPubkey)
-  if (!clientKey) {
+  const handlerPubkey = rawHandlerPubkeyByPubkey.get(oldPubkey)
+  const wasLegacy = legacyBunkerPubkeys.has(oldPubkey)
+  if (!clientKey || !handlerPubkey) {
     await deleteSecret(oldPubkey)
     return
   }
@@ -593,7 +626,15 @@ export async function transferBunkerSecret (oldPubkey, newPubkey) {
   // the store record (which the caller will have just rewritten under
   // `newPubkey`) finds a clean slate.
   await deleteSecret(oldPubkey)
-  adoptBunkerFromUnlock(newPubkey, clientKey)
+  const account = store.get(newPubkey)
+  const relays = account?.bunkerRelays || (account?.bunker ? publicBunkerRecord(account.bunker).bunkerRelays : [])
+  const handle = BunkerHandle.create({
+    pubkey: newPubkey,
+    bunkerUrl: buildBunkerUrl({ handlerPubkey, relays }),
+    clientKey,
+    onStateChange: persistHandleState
+  })
+  adoptBunkerWithHandle(newPubkey, handle, handlerPubkey, clientKey, { legacy: wasLegacy })
   notify()
 }
 
@@ -617,6 +658,32 @@ export function listSecretRefs () {
     if (type === 'nsec' || type === 'bunker') refs.push({ type, pubkey })
   }
   return refs
+}
+
+export function secretStateFingerprint (pubkeys = []) {
+  const wanted = new Set(pubkeys)
+  const entries = listRawEntriesInternal()
+    .filter(entry => entry.type === 'device-signer' ? !wanted.size : (!wanted.size || wanted.has(entry.pubkey)))
+    .sort((a, b) => `${a.type}:${a.pubkey || ''}`.localeCompare(`${b.type}:${b.pubkey || ''}`))
+  return bytesToHex(sha256(encodeSecretEntries(entries)))
+}
+
+// Called only after a newly-encoded ciphertext has reached its authoritative
+// destination. Failure is safe: the legacy URL remains and the next normal
+// mutation retries without requiring a migration-only WebAuthn ceremony.
+export async function finalizeLegacyBunkerMigrations () {
+  for (const pubkey of [...legacyBunkerPubkeys]) {
+    const account = store.get(pubkey)
+    const handlerPubkey = rawHandlerPubkeyByPubkey.get(pubkey)
+    if (!account?.bunker || !handlerPubkey) {
+      legacyBunkerPubkeys.delete(pubkey)
+      continue
+    }
+    const replacement = { ...account, ...publicBunkerRecord(account.bunker) }
+    delete replacement.bunker
+    await store.replace(pubkey, replacement)
+    legacyBunkerPubkeys.delete(pubkey)
+  }
 }
 
 export function hasSecretRef ({ type, pubkey } = {}) {
@@ -646,7 +713,8 @@ function listRawEntriesInternal () {
       if (seckey) out.push({ type: 'nsec', pubkey, seckey })
     } else if (type === 'bunker') {
       const clientKey = rawClientKeyHexByPubkey.get(pubkey)
-      if (clientKey) out.push({ type: 'bunker', pubkey, clientKey })
+      const handlerPubkey = rawHandlerPubkeyByPubkey.get(pubkey)
+      if (clientKey && handlerPubkey) out.push({ type: 'bunker', pubkey, handlerPubkey, clientKey })
     }
   }
   if (deviceSignerSeckey) {

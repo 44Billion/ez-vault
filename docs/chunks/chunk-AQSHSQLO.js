@@ -19,7 +19,7 @@ import {
   sharedXOnlySecret,
   unlock,
   updateState
-} from "./chunk-GUYFWDAK.js";
+} from "./chunk-D6BLQV4I.js";
 
 // src/helpers/platform.js
 function detectPlatform() {

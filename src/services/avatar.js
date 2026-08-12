@@ -1,23 +1,43 @@
-import { createAvatar } from '@dicebear/core'
-import * as avataaars from '@dicebear/avataaars'
+import { Avatar, Style } from '@dicebear/core'
+import avataaarsDefinition from '@dicebear/styles/avataaars.json' with { type: 'json' }
+import neutralDefinition from '@dicebear/styles/avataaars-neutral.json' with { type: 'json' }
 
+const avataaars = new Style(avataaarsDefinition)
+const avataaarsNeutral = new Style(neutralDefinition)
 const dataUrlCache = new Map()
+const neutralDataUrlCache = new Map()
 
-export function getSvgAvatar (seed) {
-  return createAvatar(avataaars, {
-    radius: 50,
-    randomizeIds: false,
-    seed: [String(seed)]
+function svgAvatar (style, seed) {
+  return new Avatar(style, {
+    borderRadius: 50,
+    idRandomization: false,
+    seed: String(seed)
   }).toString()
 }
 
-// Keep this API asynchronous for existing consumers. Generation is local and
-// the stable result is shared across every component that needs this seed.
-export async function seededAvatarDataUrl (seed) {
+export function getSvgAvatar (seed) {
+  return svgAvatar(avataaars, seed)
+}
+
+export function getNeutralSvgAvatar (seed) {
+  return svgAvatar(avataaarsNeutral, seed)
+}
+
+function avatarDataUrl (cache, render, seed) {
   const key = String(seed)
-  if (!dataUrlCache.has(key)) {
-    const svg = getSvgAvatar(key)
-    dataUrlCache.set(key, `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`)
+  if (!cache.has(key)) {
+    const svg = render(key)
+    cache.set(key, `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`)
   }
-  return dataUrlCache.get(key)
+  return cache.get(key)
+}
+
+// Keep these APIs asynchronous for existing intake consumers. Generation is
+// local; no avatar seed or account pubkey is sent to DiceBear.
+export async function seededAvatarDataUrl (seed) {
+  return avatarDataUrl(dataUrlCache, getSvgAvatar, seed)
+}
+
+export async function seededNeutralAvatarDataUrl (seed) {
+  return avatarDataUrl(neutralDataUrlCache, getNeutralSvgAvatar, seed)
 }

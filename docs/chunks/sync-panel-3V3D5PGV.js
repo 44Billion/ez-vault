@@ -1,31 +1,32 @@
 import {
   QrScanner,
+  isCameraSupported
+} from "./chunk-N4KMIQDP.js";
+import {
   abortIntake,
-  buildBunkerUrlWithClientKey,
-  buildNostrpairUrl,
   commitPrepared,
   createIntakeToken,
-  isCameraSupported,
-  parseNostrpairInput,
   prepareBareKey
-} from "./chunk-EBGHTV4C.js";
-import "./chunk-FQWZBX36.js";
-import "./chunk-ZOPYVJB4.js";
+} from "./chunk-764TZ7DR.js";
+import "./chunk-RRGKXN3E.js";
+import "./chunk-KFD6KK7E.js";
 import {
   detectPlatform,
   ensureRegistered,
   openSecrets
-} from "./chunk-A4OBQLFD.js";
+} from "./chunk-AQSHSQLO.js";
 import {
   error,
   info,
   success,
   warning
 } from "./chunk-BDYCOPAX.js";
-import "./chunk-4RHK4XWQ.js";
+import "./chunk-3RWQBTGN.js";
 import {
   Nip46Client,
   Nip46ServerSession,
+  buildBunkerBackupUrl,
+  buildNostrpairUrl,
   bytesToHex,
   freeRelays,
   generateSecretKey,
@@ -35,8 +36,9 @@ import {
   list,
   npubFromPubkey,
   nsecFromHex,
+  parseNostrpairInput,
   relayPool
-} from "./chunk-GUYFWDAK.js";
+} from "./chunk-D6BLQV4I.js";
 import {
   defineLocales,
   getT,
@@ -2052,10 +2054,8 @@ var JoinerSession = class {
 };
 function buildSyncAccountEntries(accounts, secretEntries, { nsecFromHex: nsecFromHex2, npubFromPubkey: npubFromPubkey2 }) {
   const nsecByPubkey = /* @__PURE__ */ new Map();
-  const clientKeyByPubkey = /* @__PURE__ */ new Map();
   for (const entry of secretEntries) {
     if (entry.type === "nsec") nsecByPubkey.set(entry.pubkey, entry.seckey);
-    else if (entry.type === "bunker") clientKeyByPubkey.set(entry.pubkey, entry.clientKey);
   }
   const out = [];
   for (const account of accounts) {
@@ -2076,11 +2076,17 @@ function buildSyncAccountEntries(accounts, secretEntries, { nsecFromHex: nsecFro
         profile: profileForAccount(account)
       });
     } else if (account.type === "bunker") {
-      const clientKey = clientKeyByPubkey.get(account.pubkey);
-      if (!clientKey) continue;
+      const secret = secretEntries.find((entry) => entry.type === "bunker" && entry.pubkey === account.pubkey);
+      if (!secret?.clientKey) continue;
+      let value;
+      try {
+        value = buildBunkerBackupUrl({ account, secretEntry: secret });
+      } catch {
+        continue;
+      }
       out.push({
         type: "bunker",
-        value: buildBunkerUrlWithClientKey(account.bunker, clientKey),
+        value,
         pubkey: account.pubkey,
         profile: profileForAccount(account)
       });

@@ -11,6 +11,8 @@ import { swUpdateLocales } from '../i18n/sw-update.js'
 import './account-avatar.js'
 import { requestVaultClose } from '../services/messenger.js'
 import { applySwUpdate, isUpdateAvailable, subscribeSwUpdate } from '../services/sw-manager.js'
+import { subscribePomegranateBusy } from '../services/pomegranate.js'
+import './google-login-button.js'
 
 // Tabler outline user-plus icon (icons/user-plus.svg), inlined so it
 // inherits currentColor.
@@ -50,6 +52,16 @@ const STYLES = /* css */`
     font-weight: 600;
     text-align: center;
     margin: 0;
+  }
+  create-overlay .create-main {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 28px;
+    transition: opacity 180ms ease-out;
+  }
+  create-overlay[data-pomegranate-busy="true"] .create-main {
+    opacity: 0.3;
   }
   create-overlay .create-title-icon {
     display: inline-flex;
@@ -136,6 +148,16 @@ const STYLES = /* css */`
   create-overlay .overlay-update-indicator:active .overlay-update-action {
     background-color: var(--accent-active);
   }
+  create-overlay .overlay-google-login {
+    position: absolute;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    white-space: nowrap;
+  }
+  create-overlay .overlay-google-login[inert] {
+    opacity: 0.6;
+  }
 `
 
 // Shown when the vault has no visible accounts: a one-tap create flow that
@@ -154,6 +176,9 @@ export class CreateOverlay extends HTMLElement {
   #dismissed = false
   #wasVisible = false
   #closing = false
+  #googleWrap = null
+  #pomegranateBusy = false
+  #unsubPomegranate = null
 
   connectedCallback () {
     injectComponentStyles('create-overlay', STYLES)
@@ -162,17 +187,23 @@ export class CreateOverlay extends HTMLElement {
         <span class="overlay-update-label"></span>
         <span class="overlay-update-action"></span>
       </button>
-      <h2 class="create-title">
-        <span class="create-title-icon" aria-hidden="true">${ICON_USER_PLUS}</span>
-        <span class="create-title-text">Create your first account</span>
-      </h2>
-      <div class="create-tile"></div>
-      <button type="button" class="create-dismiss">I already have an account</button>
+      <div class="create-main">
+        <h2 class="create-title">
+          <span class="create-title-icon" aria-hidden="true">${ICON_USER_PLUS}</span>
+          <span class="create-title-text">Create your first account</span>
+        </h2>
+        <div class="create-tile"></div>
+        <button type="button" class="create-dismiss">I already have an account</button>
+      </div>
+      <div class="overlay-google-login"><google-login-button></google-login-button></div>
     `
     this.#dismissBtn = this.querySelector('.create-dismiss')
     this.#dismissBtn.addEventListener('click', this.#onDismiss)
     this.#updateIndicator = this.querySelector('.overlay-update-indicator')
     this.#updateIndicator.addEventListener('click', applySwUpdate)
+    this.#googleWrap = this.querySelector('.overlay-google-login')
+    this.#unsubPomegranate = subscribePomegranateBusy(this.#setPomegranateBusy)
+    document.addEventListener('pomegranate-account-added', this.#onPomegranateAdded)
     this.#unsubUpdate = subscribeSwUpdate(available =>
       this.#updateIndicator.toggleAttribute('hidden', !isUpdateAvailable(available))
     )
@@ -196,6 +227,10 @@ export class CreateOverlay extends HTMLElement {
     this.#updateIndicator = null
     this.#unsubUpdate?.()
     this.#unsubUpdate = null
+    this.#unsubPomegranate?.()
+    this.#unsubPomegranate = null
+    document.removeEventListener('pomegranate-account-added', this.#onPomegranateAdded)
+    this.#googleWrap = null
     this.#removeTile()
   }
 
@@ -220,13 +255,7 @@ export class CreateOverlay extends HTMLElement {
     // Account created through the tile: keep the overlay covering the main
     // UI while asking the launcher to close the drawer, then hide.
     if (this.#wasVisible && !this.#dismissed && accounts.length > 0) {
-      this.#closing = true
-      requestVaultClose().then(() => {
-        this.#closing = false
-        this.#wasVisible = false
-        this.toggleAttribute('hidden', true)
-        this.#removeTile()
-      })
+      this.#closeAfterCreation()
       return
     }
     this.#wasVisible = false
@@ -252,15 +281,44 @@ export class CreateOverlay extends HTMLElement {
   #watchTile (tile) {
     this.#stopWatchingTile()
     this.#tileObserver = new MutationObserver(() => {
-      this.#dismissBtn.disabled = tile.hasAttribute('aria-busy')
+      this.#syncBusyState()
     })
     this.#tileObserver.observe(tile, { attributes: true, attributeFilter: ['aria-busy'] })
-    this.#dismissBtn.disabled = tile.hasAttribute('aria-busy')
+    this.#syncBusyState()
   }
 
   #stopWatchingTile () {
     this.#tileObserver?.disconnect()
     this.#tileObserver = null
+  }
+
+  #setPomegranateBusy = busy => {
+    this.#pomegranateBusy = busy
+    this.dataset.pomegranateBusy = String(busy)
+    this.#syncBusyState()
+  }
+
+  #onPomegranateAdded = () => {
+    if (!this.#wasVisible || this.hasAttribute('hidden')) return
+    this.#closeAfterCreation()
+  }
+
+  #closeAfterCreation () {
+    if (this.#closing) return
+    this.#closing = true
+    requestVaultClose().then(() => {
+      this.#closing = false
+      this.#wasVisible = false
+      this.toggleAttribute('hidden', true)
+      this.#removeTile()
+    })
+  }
+
+  #syncBusyState () {
+    const tileBusy = this.#tile?.hasAttribute('aria-busy') || false
+    if (this.#dismissBtn) this.#dismissBtn.disabled = tileBusy || this.#pomegranateBusy
+    if (this.#tile) this.#tile.inert = this.#pomegranateBusy
+    if (this.#googleWrap) this.#googleWrap.inert = tileBusy
   }
 
   #onDismiss = () => {

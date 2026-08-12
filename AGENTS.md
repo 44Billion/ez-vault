@@ -11,6 +11,10 @@ Because the signer custodies private keys, the overriding design principle is **
 ## Core Constraints
 
 - **Vanilla JavaScript.** No framework, no TypeScript, no transpilation.
+- The sole allowed `thenameisf` surface is the signal-free
+  `thenameisf/i18n` utility. Do not import the package root, reactive APIs or
+  `thenameisf/components`; author UI as native Custom Elements and inline SVG
+  markup directly in their templates.
 - **esbuild bundles the app** (`npm run build`, see [`bin/build.js`](bin/build.js)); the source modules in `src/` remain the audit contract — tests run on the source, and the bundle is unminified so the shipped artifact stays readable.
 - **Nostr primitives come from the sibling [`libp2r2p`](../libp2r2p) package.** Everything else is standard Web APIs or an explicitly listed focused dependency. Do not add new runtime dependencies without explicit approval.
 - **Small, readable surface area.** Prefer straightforward code over clever abstractions — the code is the documentation for our security claims.
@@ -60,6 +64,11 @@ To fetch *any* user-authored event (e.g. kind:0 profile, kind:30023 long-form, e
 5. **Publish kind:0 to the user's write relays** (the two free relays chosen in step 1).
 6. Only persist the account locally if both publishes succeed.
 
+Reuse this same bootstrap for a Pomegranate account only when `/account`
+initially returned `404` and EZ Vault created the account with its ephemeral
+nsec. Never republish kind:10002 or kind:0 merely when importing an existing
+Pomegranate account returned by the Central.
+
 ### Multi-relay fetch timing
 
 When querying multiple relays for the same filter, do not wait for every relay to EOSE or time out:
@@ -95,8 +104,11 @@ When in doubt about a layout decision, ask: "does this still work as a tall vert
   means both values in IDB because `largeBlob` was unavailable. In `largeblob`
   mode, a local ciphertext is a newer write fallback and always wins until it
   is synced to the authenticator.
-- Raw `nsec`, bunker client keys, content-key secret keys and decrypted
-  activity payloads must never be persisted in plaintext. The create-time PRF
+- Raw `nsec`, bunker handler pubkeys, bunker client keys, content-key secret
+  keys and decrypted activity payloads must never be persisted in plaintext.
+  Bunker account records keep only normalized relay URLs publicly; the
+  encrypted TLV repeats the account pubkey as its deterministic local index
+  and carries `handlerPubkey || clientKey`. The create-time PRF
   compatibility backup is the sole exception. Every registration must perform
   a follow-up `get()` with `userVerification: 'discouraged'`; when that
   assertion returns PRF, do not persist a plaintext backup. If it is cancelled
@@ -130,6 +142,21 @@ When in doubt about a layout decision, ask: "does this still work as a tall vert
   descriptors; only legacy registrations, which were platform-only, may
   default to `['internal']`. Do not put a client-device hint on assertions for
   a specific credential because it can contradict its stored transports.
+- Bunker backup URLs use a strictly validated local
+  `#client_key=<64 lowercase hex>` fragment. Strip the fragment before any
+  NIP-46 connection, never retain a consumed one-use `secret`, and require a
+  fresh `passkey.openSecrets()` before copying the backup. New encrypted bunker
+  TLVs are 96 bytes (`accountPubkey || handlerPubkey || clientKey`); continue to
+  decode legacy 64-byte (`accountPubkey || clientKey`) records and migrate them
+  only after a normal secret write has committed. `switch_relays` changes only
+  public relay metadata and must not reseal secrets.
+- “Continue with Google” is fixed to `https://auth.njump.me` and creates new
+  Pomegranate accounts as FROST 2-of-4 across `po.coracle.social`, `po.f7z.io`,
+  `po.jumble.social` and `po.njump.me`. OAuth tokens, e-mail, setup nsec and
+  shards are ephemeral and must not be logged or persisted. Validate the
+  popup window/origin, signed kind-20443 token, returned account configuration
+  and bunker-reported pubkey. This flow explicitly trusts the Central as the
+  OAuth intermediary and trusts that fewer than two operators collude.
 - IndexedDB database `ez-vault` is the durable store for account records,
   encrypted vault/sidecars, passkey metadata, sync state and the bounded
   activity log. Do not add new `localStorage` or `sessionStorage` persistence.

@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { getSvgAvatar, seededAvatarDataUrl } from '../src/services/avatar.js'
+import {
+  getNeutralSvgAvatar,
+  getSvgAvatar,
+  seededAvatarDataUrl,
+  seededNeutralAvatarDataUrl
+} from '../src/services/avatar.js'
 
 describe('local avatars', () => {
   it('generates a circular Avataaars SVG without an HTTP request', (t) => {
@@ -13,7 +18,7 @@ describe('local avatars', () => {
 
     assert.match(svg, /^<svg /)
     assert.match(svg, /viewBox="0 0 280 280"/)
-    assert.match(svg, /<mask /)
+    assert.match(svg, /<clipPath /)
     assert.match(svg, /rx="140"/)
     assert.equal(fetchMock.mock.callCount(), 0)
   })
@@ -35,6 +40,17 @@ describe('local avatars', () => {
 
     assert.equal(first, second)
     assert.match(first, /^data:image\/svg\+xml;charset=utf-8,%3Csvg/)
+    assert.equal(fetchMock.mock.callCount(), 0)
+  })
+
+  it('generates the neutral Avataaars style locally and deterministically', async (t) => {
+    const fetchMock = t.mock.method(globalThis, 'fetch', () => {
+      throw new Error('unexpected HTTP request')
+    })
+
+    assert.equal(getNeutralSvgAvatar('same-seed'), getNeutralSvgAvatar('same-seed'))
+    assert.notEqual(getNeutralSvgAvatar('same-seed'), getSvgAvatar('same-seed'))
+    assert.match(await seededNeutralAvatarDataUrl('same-seed'), /^data:image\/svg\+xml/)
     assert.equal(fetchMock.mock.callCount(), 0)
   })
 })

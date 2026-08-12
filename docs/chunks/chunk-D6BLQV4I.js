@@ -517,6 +517,7 @@ var secrets_exports = {};
 __export(secrets_exports, {
   adoptBunkerHandle: () => adoptBunkerHandle,
   deleteSecret: () => deleteSecret,
+  finalizeLegacyBunkerMigrations: () => finalizeLegacyBunkerMigrations,
   getBunkerHandle: () => getBunkerHandle,
   getContentKeySigner: () => getContentKeySigner,
   getDeviceSigner: () => getDeviceSigner,
@@ -533,6 +534,7 @@ __export(secrets_exports, {
   replyWithContentKeySecrets: () => replyWithContentKeySecrets,
   restoreContentKeySecrets: () => restoreContentKeySecrets,
   sealCurrentEntries: () => sealCurrentEntries,
+  secretStateFingerprint: () => secretStateFingerprint,
   setContentKeySecret: () => setContentKeySecret,
   setNsecSecret: () => setNsecSecret,
   snapshotContentKeySecrets: () => snapshotContentKeySecrets,
@@ -6511,7 +6513,7 @@ var Nip46Transport = class {
   #secretKey;
   #pubkey;
   #relayPool;
-  #networkTimeout;
+  #operationTimeout;
   #timeoutAfterFirstEose;
   #onError;
   #contexts = /* @__PURE__ */ new Set();
@@ -6531,7 +6533,7 @@ var Nip46Transport = class {
     this.#secretKey = secretKey;
     this.#pubkey = getPublicKey(secretKey);
     this.#relayPool = relayPool2;
-    this.#networkTimeout = networkTimeout;
+    this.#operationTimeout = networkTimeout;
     this.#timeoutAfterFirstEose = timeoutAfterFirstEose;
     this.#onError = onError;
   }
@@ -6567,7 +6569,7 @@ var Nip46Transport = class {
     })();
     return context;
   }
-  async awaitContextReady(context, { timeout = this.#networkTimeout, signal } = {}) {
+  async awaitContextReady(context, { timeout = this.#operationTimeout, signal } = {}) {
     const report = await waitForNip46(context.stream.ready, {
       timeout,
       signal,
@@ -6609,11 +6611,14 @@ var Nip46Transport = class {
     this.#seenEventIds.add(event.id);
     return true;
   }
-  async sendRequest(peerPubkey, method, params = [], {
-    timeout = null,
-    signal,
-    extension
-  } = {}) {
+  async sendRequest(peerPubkey, method, params = [], options = {}) {
+    const {
+      // Undefined inherits the constructor-wide operation timeout. Passing
+      // null explicitly is the opt-out for RPCs that may wait indefinitely.
+      timeout = this.#operationTimeout,
+      signal,
+      extension
+    } = options;
     if (this.#closed) throw new Error("NIP46_CLOSED");
     if (typeof method !== "string" || !method) throw new ValidationError("NIP46_METHOD_REQUIRED");
     if (!Array.isArray(params) || !params.every((param) => typeof param === "string")) {
@@ -6672,7 +6677,7 @@ var Nip46Transport = class {
     if (!relays.length) throw new Error("NIP46_NO_READY_RELAYS");
     const event = createNip46Event({ secretKey: this.#secretKey, recipientPubkey: peerPubkey, payload });
     const published = await this.#relayPool.sendEvent(event, relays, {
-      timeout: this.#networkTimeout,
+      timeout: this.#operationTimeout,
       timeoutUntilFirstFulfillment: null
     });
     if (!published.success) {
@@ -6815,7 +6820,9 @@ var Nip46Client = class {
     return { ...this.#pointer, relays: [...this.#pointer.relays] };
   }
   // Connects and immediately asks the remote signer for its preferred relays.
-  async connect({ requestedPermissions = [], clientMetadata, timeout = null, signal } = {}) {
+  // An omitted timeout inherits the configurable constructor timeout; null
+  // explicitly disables the response deadline.
+  async connect({ requestedPermissions = [], clientMetadata, timeout, signal } = {}) {
     const permissions = Array.isArray(requestedPermissions) ? requestedPermissions.filter((permission) => typeof permission === "string" && permission).join(",") : "";
     const metadata = cleanClientMetadata(clientMetadata);
     const params = [this.#pointer.remoteSignerPubkey, this.#pointer.secret || ""];
@@ -7160,9 +7167,59 @@ var Nip46ServerSession = class {
   }
 };
 
+// src/helpers/nostrpair-url.js
+function buildNostrpairUrl({ pubkey, relay, secret }) {
+  const u = new URL(`nostrpair://${pubkey}`);
+  u.searchParams.set("relay", relay);
+  if (secret) u.searchParams.set("secret", secret);
+  return u.toString();
+}
+function parseNostrpairInput(input) {
+  let url;
+  try {
+    url = new URL(input);
+  } catch {
+    throw new Error("INVALID_NOSTRPAIR_URL");
+  }
+  if (url.protocol !== "nostrpair:") throw new Error("INVALID_NOSTRPAIR_URL");
+  const pubkey = (url.hostname || url.pathname.replace(/^\/+/, "")).toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(pubkey)) throw new Error("INVALID_NOSTRPAIR_URL");
+  const relay = url.searchParams.get("relay");
+  const secret = url.searchParams.get("secret") || "";
+  if (!relay) throw new Error("INVALID_NOSTRPAIR_URL");
+  return { pubkey, relay, secret };
+}
+function extractBunkerClientKey(input) {
+  let url;
+  try {
+    url = new URL(input);
+  } catch {
+    throw new Error("INVALID_BUNKER_URL");
+  }
+  if (url.protocol !== "bunker:") return { url: input, clientKey: null };
+  const fragment = url.hash.replace(/^#/, "");
+  if (!fragment) return { url: url.toString(), clientKey: null };
+  const params = new URLSearchParams(fragment);
+  const keys = [...params.keys()];
+  const values = params.getAll("client_key");
+  if (keys.some((key) => key !== "client_key") || values.length !== 1 || !/^[0-9a-f]{64}$/i.test(values[0])) {
+    throw new Error("INVALID_BUNKER_CLIENT_KEY");
+  }
+  url.hash = "";
+  return { url: url.toString(), clientKey: values[0].toLowerCase() };
+}
+function buildBunkerUrlWithClientKey(bunkerUrl, clientKey) {
+  if (!/^[0-9a-f]{64}$/i.test(clientKey || "")) throw new Error("INVALID_BUNKER_CLIENT_KEY");
+  const url = new URL(bunkerUrl);
+  if (url.protocol !== "bunker:") throw new Error("INVALID_BUNKER_URL");
+  url.hash = new URLSearchParams({ client_key: clientKey.toLowerCase() }).toString();
+  return url.toString();
+}
+
 // src/services/bunker.js
 var PING_INTERVAL_MS = 6e4;
 var PING_TIMEOUT_MS = 1e4;
+var CONNECTION_TIMEOUT_MS2 = 1e4;
 var IDLE_TIMEOUT_MS = 5 * 6e4;
 var clientKeysByHandle = /* @__PURE__ */ new WeakMap();
 var handleCreateToken = Symbol("BunkerHandle-create");
@@ -7184,6 +7241,29 @@ function withTimeout(promise, ms, label = "TIMEOUT") {
 function parseJsonResult(value) {
   return typeof value === "string" ? JSON.parse(value) : value;
 }
+function publicBunkerRecord(bunkerUrl) {
+  const pointer = parseBunkerUrl(bunkerUrl);
+  if (!pointer) throw new Error("INVALID_BUNKER_URL");
+  return { bunkerRelays: [...pointer.relays] };
+}
+function buildBunkerUrl({ handlerPubkey, relays }) {
+  return toBunkerUrl({ remoteSignerPubkey: handlerPubkey, relays, secret: null });
+}
+function buildBunkerBackupUrl({ account, secretEntry }) {
+  if (!account || account.type !== "bunker" || !secretEntry?.clientKey) {
+    throw new Error("BUNKER_BACKUP_UNAVAILABLE");
+  }
+  let handlerPubkey = secretEntry.handlerPubkey;
+  let relays = Array.isArray(account.bunkerRelays) ? account.bunkerRelays : [];
+  if ((!handlerPubkey || !relays.length) && account.bunker) {
+    const legacy = parseBunkerUrl(account.bunker);
+    if (!legacy) throw new Error("INVALID_BUNKER_URL");
+    handlerPubkey ||= legacy.remoteSignerPubkey;
+    if (!relays.length) relays = legacy.relays;
+  }
+  if (!handlerPubkey || !relays.length) throw new Error("BUNKER_BACKUP_UNAVAILABLE");
+  return buildBunkerUrlWithClientKey(buildBunkerUrl({ handlerPubkey, relays }), secretEntry.clientKey);
+}
 function vaultClientMetadata() {
   const metadata = { name: "ez-vault" };
   const origin = globalThis.location?.origin;
@@ -7204,7 +7284,10 @@ async function openSigner(bunkerUrl, clientSecretKey) {
   if (!pointer) throw new Error("INVALID_BUNKER_URL");
   const signer = BunkerSigner.fromBunker(clientSecretKey, pointer, { relayPool });
   try {
-    await signer.connect({ clientMetadata: vaultClientMetadata() });
+    await signer.connect({
+      clientMetadata: vaultClientMetadata(),
+      timeout: CONNECTION_TIMEOUT_MS2
+    });
   } catch (err) {
     const msg = typeof err === "string" ? err : err?.message ?? "";
     if (!/already connected/i.test(msg)) {
@@ -7221,8 +7304,18 @@ async function openSigner(bunkerUrl, clientSecretKey) {
 async function persistHandleState({ pubkey, bunkerUrl }) {
   if (!pubkey) return;
   const rec = get(pubkey);
-  if (!rec || rec.bunker === bunkerUrl) return;
-  await update(pubkey, { bunker: bunkerUrl });
+  if (!rec) return;
+  const pointer = parseBunkerUrl(bunkerUrl);
+  if (!pointer) throw new Error("INVALID_BUNKER_URL");
+  if (rec.bunker) {
+    const cleaned = toBunkerUrl({ ...pointer, secret: null });
+    if (rec.bunker !== cleaned) await update(pubkey, { bunker: cleaned });
+    return;
+  }
+  const relays = [...pointer.relays];
+  if (JSON.stringify(rec.bunkerRelays || []) !== JSON.stringify(relays)) {
+    await update(pubkey, { bunkerRelays: relays });
+  }
 }
 var BunkerHandle = class _BunkerHandle {
   #state;
@@ -7252,7 +7345,7 @@ var BunkerHandle = class _BunkerHandle {
     return { ...this.#state };
   }
   async getPublicKey() {
-    const pubkey = await this.#request((s) => s.getPublicKey());
+    const pubkey = await this.#request((s) => s.getPublicKey({ timeout: CONNECTION_TIMEOUT_MS2 }));
     if (!this.#state.pubkey) {
       this.#state.pubkey = pubkey;
       this.#notifyStateChange();
@@ -7307,7 +7400,9 @@ var BunkerHandle = class _BunkerHandle {
     if (!pubkey) throw new Error("PUBKEY_NOT_READY");
     const clientKey = clientKeysByHandle.get(this);
     if (!clientKey) throw new Error("NO_CLIENT_KEY");
-    await adoptBunkerHandle(pubkey, this, clientKey);
+    const pointer = parseBunkerUrl(this.#state.bunkerUrl);
+    if (!pointer) throw new Error("INVALID_BUNKER_URL");
+    await adoptBunkerHandle(pubkey, this, pointer.remoteSignerPubkey, clientKey);
   }
   async close() {
     if (this.#closed) return;
@@ -7534,9 +7629,10 @@ function encodeSecretEntries(entries) {
     if (e.type === "nsec") {
       records.push([TLV_NSEC, hexToBytes3(e.seckey)]);
     } else if (e.type === "bunker") {
-      const value = new Uint8Array(64);
+      const value = new Uint8Array(96);
       value.set(hexToBytes3(e.pubkey), 0);
-      value.set(hexToBytes3(e.clientKey), 32);
+      value.set(hexToBytes3(e.handlerPubkey), 32);
+      value.set(hexToBytes3(e.clientKey), 64);
       records.push([TLV_BUNKER, value]);
     } else if (e.type === "device-signer") {
       records.push([TLV_DEVICE_SIGNER, hexToBytes3(e.seckey)]);
@@ -7557,12 +7653,21 @@ function decodeSecretEntries(bytes) {
     });
   }
   for (const v of tlv[TLV_BUNKER] || []) {
-    if (v.length !== 64) continue;
-    entries.push({
-      type: "bunker",
-      pubkey: bytesToHex3(v.slice(0, 32)),
-      clientKey: bytesToHex3(v.slice(32, 64))
-    });
+    if (v.length === 64) {
+      entries.push({
+        type: "bunker",
+        pubkey: bytesToHex3(v.slice(0, 32)),
+        clientKey: bytesToHex3(v.slice(32, 64)),
+        legacy: true
+      });
+    } else if (v.length === 96) {
+      entries.push({
+        type: "bunker",
+        pubkey: bytesToHex3(v.slice(0, 32)),
+        handlerPubkey: bytesToHex3(v.slice(32, 64)),
+        clientKey: bytesToHex3(v.slice(64, 96))
+      });
+    }
   }
   for (const v of tlv[TLV_DEVICE_SIGNER] || []) {
     if (v.length !== 32) continue;
@@ -13528,6 +13633,8 @@ var accountTypeByPubkey = /* @__PURE__ */ new Map();
 var contentKeySignersByOwnerPubkey = /* @__PURE__ */ new Map();
 var rawNsecHexByPubkey = /* @__PURE__ */ new Map();
 var rawClientKeyHexByPubkey = /* @__PURE__ */ new Map();
+var rawHandlerPubkeyByPubkey = /* @__PURE__ */ new Map();
+var legacyBunkerPubkeys = /* @__PURE__ */ new Set();
 var rawContentKeyHexByOwnerPubkey = /* @__PURE__ */ new Map();
 var deviceSignerSeckey = null;
 var listeners2 = /* @__PURE__ */ new Set();
@@ -13578,6 +13685,8 @@ function dropPriorEntry(pubkey) {
     if (handle) handle.close();
     bunkerHandlesByPubkey.delete(pubkey);
     rawClientKeyHexByPubkey.delete(pubkey);
+    rawHandlerPubkeyByPubkey.delete(pubkey);
+    legacyBunkerPubkeys.delete(pubkey);
     contentKeysChanged = dropContentKeysForOwner(pubkey) || contentKeysChanged;
   }
   accountTypeByPubkey.delete(pubkey);
@@ -13673,26 +13782,47 @@ function pruneStaleContentKeys(now = nowSeconds6()) {
   }
   return changed;
 }
-function adoptBunkerWithHandle(pubkey, handle, clientKey) {
+function adoptBunkerWithHandle(pubkey, handle, handlerPubkey, clientKey, { legacy = false } = {}) {
   const contentKeysChanged = dropPriorEntry(pubkey);
+  rawHandlerPubkeyByPubkey.set(pubkey, handlerPubkey);
   rawClientKeyHexByPubkey.set(pubkey, clientKey);
   bunkerHandlesByPubkey.set(pubkey, handle);
   accountTypeByPubkey.set(pubkey, "bunker");
+  if (legacy) legacyBunkerPubkeys.add(pubkey);
   return contentKeysChanged;
 }
-function adoptBunkerFromUnlock(pubkey, clientKey) {
+function adoptBunkerFromUnlock(pubkey, clientKey, encryptedHandlerPubkey = null) {
   const account = get(pubkey);
-  if (!account || account.type !== "bunker" || !account.bunker) {
+  if (!account || account.type !== "bunker") {
     console.warn("bunker secret without matching store record \u2014 skipping", pubkey);
+    return;
+  }
+  let handlerPubkey = encryptedHandlerPubkey;
+  let relays = Array.isArray(account.bunkerRelays) ? account.bunkerRelays : [];
+  let legacy = false;
+  if (account.bunker) {
+    try {
+      const parsed = new URL(account.bunker);
+      if (parsed.protocol !== "bunker:") throw new Error("INVALID_BUNKER_URL");
+      handlerPubkey ||= parsed.hostname.toLowerCase();
+      if (!relays.length) relays = parsed.searchParams.getAll("relay");
+      legacy = true;
+    } catch {
+      console.warn("invalid legacy bunker URL \u2014 skipping", pubkey);
+      return;
+    }
+  }
+  if (!HEX32.test(handlerPubkey || "") || !relays.length) {
+    console.warn("bunker secret without usable handler/relays \u2014 skipping", pubkey);
     return;
   }
   const handle = BunkerHandle.create({
     pubkey,
-    bunkerUrl: account.bunker,
+    bunkerUrl: buildBunkerUrl({ handlerPubkey, relays }),
     clientKey,
     onStateChange: persistHandleState
   });
-  adoptBunkerWithHandle(pubkey, handle, clientKey);
+  adoptBunkerWithHandle(pubkey, handle, handlerPubkey, clientKey, { legacy });
 }
 function clearAll() {
   for (const pubkey of nsecSignersByPubkey.keys()) NsecSigner.release(pubkey);
@@ -13703,6 +13833,8 @@ function clearAll() {
   accountTypeByPubkey.clear();
   rawNsecHexByPubkey.clear();
   rawClientKeyHexByPubkey.clear();
+  rawHandlerPubkeyByPubkey.clear();
+  legacyBunkerPubkeys.clear();
   deviceSignerSeckey = null;
 }
 function subscribe3(fn) {
@@ -13733,7 +13865,7 @@ function loadEntries(ciphertext) {
     const tlvBytes = base64ToBytes(vaultDecryptWithScope(ciphertext, VAULT_SECRETS_SCOPE));
     for (const e of decodeSecretEntries(tlvBytes)) {
       if (e.type === "nsec") adoptNsec(e.pubkey, e.seckey);
-      else if (e.type === "bunker") adoptBunkerFromUnlock(e.pubkey, e.clientKey);
+      else if (e.type === "bunker") adoptBunkerFromUnlock(e.pubkey, e.clientKey, e.handlerPubkey);
       else if (e.type === "device-signer") deviceSignerSeckey = e.seckey;
     }
   }
@@ -13905,10 +14037,11 @@ async function replyWithContentKeySecrets({ ownerPubkey, pubkeys, send }) {
   if (!keys.length) return null;
   return send({ ownerPubkey, keys });
 }
-async function adoptBunkerHandle(pubkey, handle, clientKey) {
+async function adoptBunkerHandle(pubkey, handle, handlerPubkey, clientKey) {
   if (!isUnlocked()) throw new Error("VAULT_LOCKED");
+  if (!HEX32.test(handlerPubkey || "")) throw new Error("INVALID_BUNKER_HANDLER");
   const priorContentKeys = snapshotContentKeySecrets();
-  const contentKeysChanged = adoptBunkerWithHandle(pubkey, handle, clientKey);
+  const contentKeysChanged = adoptBunkerWithHandle(pubkey, handle, handlerPubkey, clientKey);
   try {
     if (contentKeysChanged) await persistContentKeyEntries();
   } catch (err) {
@@ -13961,12 +14094,22 @@ async function transferBunkerSecret(oldPubkey, newPubkey) {
   if (!isUnlocked()) throw new Error("VAULT_LOCKED");
   if (accountTypeByPubkey.get(oldPubkey) !== "bunker") return;
   const clientKey = rawClientKeyHexByPubkey.get(oldPubkey);
-  if (!clientKey) {
+  const handlerPubkey = rawHandlerPubkeyByPubkey.get(oldPubkey);
+  const wasLegacy = legacyBunkerPubkeys.has(oldPubkey);
+  if (!clientKey || !handlerPubkey) {
     await deleteSecret(oldPubkey);
     return;
   }
   await deleteSecret(oldPubkey);
-  adoptBunkerFromUnlock(newPubkey, clientKey);
+  const account = get(newPubkey);
+  const relays = account?.bunkerRelays || (account?.bunker ? publicBunkerRecord(account.bunker).bunkerRelays : []);
+  const handle = BunkerHandle.create({
+    pubkey: newPubkey,
+    bunkerUrl: buildBunkerUrl({ handlerPubkey, relays }),
+    clientKey,
+    onStateChange: persistHandleState
+  });
+  adoptBunkerWithHandle(newPubkey, handle, handlerPubkey, clientKey, { legacy: wasLegacy });
   notify2();
 }
 function getNsecSigner(pubkey) {
@@ -13981,6 +14124,25 @@ function listSecretRefs() {
     if (type === "nsec" || type === "bunker") refs.push({ type, pubkey });
   }
   return refs;
+}
+function secretStateFingerprint(pubkeys = []) {
+  const wanted = new Set(pubkeys);
+  const entries = listRawEntriesInternal().filter((entry) => entry.type === "device-signer" ? !wanted.size : !wanted.size || wanted.has(entry.pubkey)).sort((a, b) => `${a.type}:${a.pubkey || ""}`.localeCompare(`${b.type}:${b.pubkey || ""}`));
+  return bytesToHex3(sha256(encodeSecretEntries(entries)));
+}
+async function finalizeLegacyBunkerMigrations() {
+  for (const pubkey of [...legacyBunkerPubkeys]) {
+    const account = get(pubkey);
+    const handlerPubkey = rawHandlerPubkeyByPubkey.get(pubkey);
+    if (!account?.bunker || !handlerPubkey) {
+      legacyBunkerPubkeys.delete(pubkey);
+      continue;
+    }
+    const replacement = { ...account, ...publicBunkerRecord(account.bunker) };
+    delete replacement.bunker;
+    await replace(pubkey, replacement);
+    legacyBunkerPubkeys.delete(pubkey);
+  }
 }
 function hasSecretRef({ type, pubkey } = {}) {
   return Boolean(pubkey && (type === "nsec" || type === "bunker") && accountTypeByPubkey.get(pubkey) === type);
@@ -13998,7 +14160,8 @@ function listRawEntriesInternal() {
       if (seckey) out.push({ type: "nsec", pubkey, seckey });
     } else if (type === "bunker") {
       const clientKey = rawClientKeyHexByPubkey.get(pubkey);
-      if (clientKey) out.push({ type: "bunker", pubkey, clientKey });
+      const handlerPubkey = rawHandlerPubkeyByPubkey.get(pubkey);
+      if (clientKey && handlerPubkey) out.push({ type: "bunker", pubkey, handlerPubkey, clientKey });
     }
   }
   if (deviceSignerSeckey) {
@@ -14027,8 +14190,11 @@ function vaultDecrypt(ciphertext) {
 }
 
 export {
+  sha256,
   bytesToHex3 as bytesToHex,
   hexToBytes3 as hexToBytes,
+  finalizeEvent,
+  isValidEvent,
   generateSecretKey,
   getPublicKey,
   generateKeypair,
@@ -14083,6 +14249,11 @@ export {
   remove,
   applyRecords,
   accounts_store_exports,
+  buildNostrpairUrl,
+  parseNostrpairInput,
+  extractBunkerClientKey,
+  publicBunkerRecord,
+  buildBunkerBackupUrl,
   fetchBunkerUserPubkey,
   encodeSecretEntries,
   decodeSecretEntries,
@@ -14114,6 +14285,8 @@ export {
   getNsecSigner,
   getBunkerHandle,
   listSecretRefs,
+  secretStateFingerprint,
+  finalizeLegacyBunkerMigrations,
   sealCurrentEntries,
   vaultEncrypt,
   vaultDecrypt,

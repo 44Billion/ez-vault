@@ -10,6 +10,8 @@ import { QrScanner, isCameraSupported } from '../services/qr-scanner.js'
 import * as toast from './shared/toast.js'
 import { injectComponentStyles } from '../helpers/dom.js'
 import { defineLocales, getT, subscribeLocaleChanged } from '../i18n/index.js'
+import { subscribePomegranateBusy } from '../services/pomegranate.js'
+import './google-login-button.js'
 
 const ICON_X = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6l-12 12" /><path d="M6 6l12 12" /></svg>'
 const ICON_CHECK = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5l10 -10" /></svg>'
@@ -37,7 +39,7 @@ const STYLES = /* css */`
     transition: max-height 280ms ease-out;
   }
   account-add[open] {
-    max-height: 60px;
+    max-height: 112px;
   }
   /* Scan flow swaps the input row out for a camera preview + Stop button.
      Drop the height cap entirely so the video gets its natural box. */
@@ -45,8 +47,10 @@ const STYLES = /* css */`
     max-height: 420px;
   }
   account-add .add-form {
-    position: relative;
     padding-top: 12px;
+  }
+  account-add .add-input-row {
+    position: relative;
   }
   account-add .add-input {
     padding-left: 36px;
@@ -67,7 +71,7 @@ const STYLES = /* css */`
     opacity: 0.6;
   }
   account-add .add-btn[data-action="cancel"] {
-    top: calc(50% + 6px);
+    top: 50%;
     transform: translateY(-50%);
     left: 5px;
     width: 24px;
@@ -79,7 +83,7 @@ const STYLES = /* css */`
     background-color: var(--surface-interactive-active);
   }
   account-add .add-btn[data-action="scan"] {
-    top: calc(50% + 6px);
+    top: 50%;
     transform: translateY(-50%);
     right: 42px;
     width: 28px;
@@ -95,7 +99,7 @@ const STYLES = /* css */`
     background-color: var(--surface-interactive-active);
   }
   account-add .add-btn[data-action="confirm"] {
-    top: 12px;
+    top: 0;
     right: 0;
     bottom: 0;
     width: 36px;
@@ -122,6 +126,14 @@ const STYLES = /* css */`
   account-add .add-btn[data-action="scan"] svg {
     width: 16px;
     height: 16px;
+  }
+  account-add .google-login-row {
+    display: flex;
+    justify-content: center;
+    margin-top: 8px;
+  }
+  account-add .google-login-row .google-login-button {
+    width: 100%;
   }
   account-add .scan-overlay {
     display: none;
@@ -172,14 +184,17 @@ const STYLES = /* css */`
 
 const TEMPLATE = /* html */`
   <form class="add-form" autocomplete="off">
-    <button class="add-btn" data-action="cancel" type="button" title="Cancel">
-      <span class="add-btn-icon">${ICON_X}</span>
-    </button>
-    <input class="add-input" type="text" placeholder="nsec1.../hex, npub1..., or bunker://" spellcheck="false" autocorrect="off" autocapitalize="off" />
-    <button class="add-btn" data-action="scan" type="button" title="Scan QR">${ICON_CAMERA}</button>
-    <button class="add-btn" data-action="confirm" type="submit" title="Add">
-      <span class="add-btn-icon">${ICON_CHECK}</span>
-    </button>
+    <div class="add-input-row">
+      <button class="add-btn" data-action="cancel" type="button" title="Cancel">
+        <span class="add-btn-icon">${ICON_X}</span>
+      </button>
+      <input class="add-input" type="text" placeholder="nsec1.../hex, npub1..., or bunker://" spellcheck="false" autocorrect="off" autocapitalize="off" />
+      <button class="add-btn" data-action="scan" type="button" title="Scan QR">${ICON_CAMERA}</button>
+      <button class="add-btn" data-action="confirm" type="submit" title="Add">
+        <span class="add-btn-icon">${ICON_CHECK}</span>
+      </button>
+    </div>
+    <div class="google-login-row"><google-login-button></google-login-button></div>
   </form>
   <div class="scan-overlay">
     <div class="scan-video-wrap">
@@ -202,6 +217,8 @@ export class AccountAdd extends HTMLElement {
   #scanner = null
   #activeIntake = null
   #unsubscribeLocale = null
+  #unsubscribePomegranate = null
+  #pomegranateBusy = false
 
   // Wired by index.js. `toolbarButtons` are the sibling toolbar buttons
   // we grey out while the add panel owns the screen; `activeButton` is
@@ -226,6 +243,8 @@ export class AccountAdd extends HTMLElement {
     this.#cancelBtn.addEventListener('click', this.#onCancel)
     this.#scanBtn.addEventListener('click', this.#onStartScan)
     this.#scanStopBtn.addEventListener('click', () => this.#stopScan())
+    document.addEventListener('pomegranate-account-added', this.#onPomegranateAdded)
+    this.#unsubscribePomegranate = subscribePomegranateBusy(this.#setPomegranateBusy)
 
     this.#translate()
     this.#unsubscribeLocale = subscribeLocaleChanged(() => this.#translate())
@@ -238,6 +257,9 @@ export class AccountAdd extends HTMLElement {
     this.#stopScan()
     this.#unsubscribeLocale?.()
     this.#unsubscribeLocale = null
+    this.#unsubscribePomegranate?.()
+    this.#unsubscribePomegranate = null
+    document.removeEventListener('pomegranate-account-added', this.#onPomegranateAdded)
   }
 
   open () {
@@ -266,6 +288,19 @@ export class AccountAdd extends HTMLElement {
   #onCancel = () => {
     if (this.#busy) abortIntake(this.#activeIntake)
     this.close()
+  }
+
+  #onPomegranateAdded = () => {
+    if (this.hasAttribute('open')) this.close()
+  }
+
+  #setPomegranateBusy = busy => {
+    this.#pomegranateBusy = busy
+    if (!this.#busy) {
+      this.#input.disabled = busy
+      this.#scanBtn.disabled = busy
+      this.#confirmBtn.disabled = busy
+    }
   }
 
   #onSubmit = async (e) => {
@@ -319,12 +354,12 @@ export class AccountAdd extends HTMLElement {
 
   #setBusy (on) {
     this.#busy = on
-    this.#input.disabled = on
+    this.#input.disabled = on || this.#pomegranateBusy
     // Cancel button stays enabled on purpose — clicking it during a pending
     // add aborts the in-flight bunker handshake/network work and closes
     // the panel via abortIntake.
-    this.#scanBtn.disabled = on
-    this.#confirmBtn.disabled = on
+    this.#scanBtn.disabled = on || this.#pomegranateBusy
+    this.#confirmBtn.disabled = on || this.#pomegranateBusy
     this.#confirmIcon.classList.toggle('pulsate', on)
   }
 
@@ -343,7 +378,7 @@ export class AccountAdd extends HTMLElement {
     }
     this.#confirmBtn.classList.remove('is-error')
     this.#confirmIcon.innerHTML = ICON_CHECK
-    if (!this.#busy) this.#confirmBtn.disabled = false
+    if (!this.#busy && !this.#pomegranateBusy) this.#confirmBtn.disabled = false
   }
 
   #onStartScan = async () => {

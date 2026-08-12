@@ -100,6 +100,7 @@ export async function runSecretAccountMutation ({
   const affectedPubkeys = affectedFromAccounts(cleanBefore, cleanAfter)
   const beforeSecretRefs = secretRefsForPubkeys(affectedPubkeys)
   const afterSecretRefs = secretRefsForAccounts(cleanAfter)
+  const beforeSecretFingerprint = secrets.secretStateFingerprint(affectedPubkeys)
   const priorMemoryBlob = secrets.sealCurrentEntries()
   const priorLocalBlob = passkey.snapshotSecretsBlob()
   const priorContentKeysBlob = secrets.snapshotContentKeySecrets()
@@ -110,12 +111,14 @@ export async function runSecretAccountMutation ({
     beforeAccounts: cleanBefore,
     afterAccounts: cleanAfter,
     beforeSecretRefs,
-    afterSecretRefs
+    afterSecretRefs,
+    beforeSecretFingerprint
   })
 
   try {
     await apply()
     await finalize?.()
+    await journal.setAfterSecretFingerprint(secrets.secretStateFingerprint(affectedPubkeys))
     await passkey.persistSecretsBlob()
   } catch (err) {
     // A successful largeBlob write followed by an impossible PRF mismatch may
@@ -135,6 +138,11 @@ export async function runSecretAccountMutation ({
     throw err
   }
   await journal.clear()
+  try {
+    await secrets.finalizeLegacyBunkerMigrations()
+  } catch (err) {
+    console.warn('legacy bunker migration cleanup failed', err?.message ?? err)
+  }
 }
 
 function accountsByPubkey (accounts) {
@@ -175,11 +183,18 @@ export async function recoverPendingMutation () {
   }
 
   const actualRefs = secretRefsForPubkeys(tx.affectedPubkeys)
+  const actualFingerprint = secrets.secretStateFingerprint(tx.affectedPubkeys)
   let outcome = 'mixed'
-  if (refsEqual(actualRefs, tx.afterSecretRefs)) {
+  if (tx.afterSecretFingerprint && actualFingerprint === tx.afterSecretFingerprint) {
     await store.applyRecords(tx.affectedPubkeys, tx.afterAccounts)
     outcome = 'after'
-  } else if (refsEqual(actualRefs, tx.beforeSecretRefs)) {
+  } else if (tx.beforeSecretFingerprint && actualFingerprint === tx.beforeSecretFingerprint) {
+    await store.applyRecords(tx.affectedPubkeys, tx.beforeAccounts)
+    outcome = 'before'
+  } else if (!tx.afterSecretFingerprint && refsEqual(actualRefs, tx.afterSecretRefs)) {
+    await store.applyRecords(tx.affectedPubkeys, tx.afterAccounts)
+    outcome = 'after'
+  } else if (!tx.beforeSecretFingerprint && refsEqual(actualRefs, tx.beforeSecretRefs)) {
     await store.applyRecords(tx.affectedPubkeys, tx.beforeAccounts)
     outcome = 'before'
   } else {

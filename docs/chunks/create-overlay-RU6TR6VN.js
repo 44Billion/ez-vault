@@ -4,25 +4,30 @@ import {
   requestVaultClose,
   subscribeSwUpdate,
   swUpdateLocales
-} from "./chunk-FXDTUVT4.js";
-import "./chunk-GH5ACQXA.js";
-import "./chunk-LTTKVOWK.js";
+} from "./chunk-DPEURHLC.js";
+import "./chunk-CDRD3SIJ.js";
+import "./chunk-QEQG5Q6B.js";
 import "./chunk-OQVZFKQZ.js";
-import "./chunk-47TWQHYT.js";
+import "./chunk-K4MQVI3L.js";
+import {
+  subscribePomegranateBusy
+} from "./chunk-Q6UP2N5V.js";
+import "./chunk-335NQKAM.js";
+import "./chunk-764TZ7DR.js";
 import {
   pendingMutationNeedsUnlock,
   subscribePendingMutations
-} from "./chunk-FQWZBX36.js";
-import "./chunk-ZOPYVJB4.js";
-import "./chunk-A4OBQLFD.js";
+} from "./chunk-RRGKXN3E.js";
+import "./chunk-KFD6KK7E.js";
+import "./chunk-AQSHSQLO.js";
 import "./chunk-BDYCOPAX.js";
-import "./chunk-SDOMGLPX.js";
-import "./chunk-4RHK4XWQ.js";
+import "./chunk-W44MUTZ3.js";
+import "./chunk-3RWQBTGN.js";
 import {
   isUnlocked,
   list,
   subscribe
-} from "./chunk-GUYFWDAK.js";
+} from "./chunk-D6BLQV4I.js";
 import {
   defineLocales,
   getT,
@@ -74,6 +79,16 @@ var STYLES = (
     font-weight: 600;
     text-align: center;
     margin: 0;
+  }
+  create-overlay .create-main {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 28px;
+    transition: opacity 180ms ease-out;
+  }
+  create-overlay[data-pomegranate-busy="true"] .create-main {
+    opacity: 0.3;
   }
   create-overlay .create-title-icon {
     display: inline-flex;
@@ -160,6 +175,16 @@ var STYLES = (
   create-overlay .overlay-update-indicator:active .overlay-update-action {
     background-color: var(--accent-active);
   }
+  create-overlay .overlay-google-login {
+    position: absolute;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    white-space: nowrap;
+  }
+  create-overlay .overlay-google-login[inert] {
+    opacity: 0.6;
+  }
 `
 );
 var CreateOverlay = class extends HTMLElement {
@@ -174,6 +199,9 @@ var CreateOverlay = class extends HTMLElement {
   #dismissed = false;
   #wasVisible = false;
   #closing = false;
+  #googleWrap = null;
+  #pomegranateBusy = false;
+  #unsubPomegranate = null;
   connectedCallback() {
     injectComponentStyles("create-overlay", STYLES);
     this.innerHTML = `
@@ -181,17 +209,23 @@ var CreateOverlay = class extends HTMLElement {
         <span class="overlay-update-label"></span>
         <span class="overlay-update-action"></span>
       </button>
-      <h2 class="create-title">
-        <span class="create-title-icon" aria-hidden="true">${ICON_USER_PLUS}</span>
-        <span class="create-title-text">Create your first account</span>
-      </h2>
-      <div class="create-tile"></div>
-      <button type="button" class="create-dismiss">I already have an account</button>
+      <div class="create-main">
+        <h2 class="create-title">
+          <span class="create-title-icon" aria-hidden="true">${ICON_USER_PLUS}</span>
+          <span class="create-title-text">Create your first account</span>
+        </h2>
+        <div class="create-tile"></div>
+        <button type="button" class="create-dismiss">I already have an account</button>
+      </div>
+      <div class="overlay-google-login"><google-login-button></google-login-button></div>
     `;
     this.#dismissBtn = this.querySelector(".create-dismiss");
     this.#dismissBtn.addEventListener("click", this.#onDismiss);
     this.#updateIndicator = this.querySelector(".overlay-update-indicator");
     this.#updateIndicator.addEventListener("click", applySwUpdate);
+    this.#googleWrap = this.querySelector(".overlay-google-login");
+    this.#unsubPomegranate = subscribePomegranateBusy(this.#setPomegranateBusy);
+    document.addEventListener("pomegranate-account-added", this.#onPomegranateAdded);
     this.#unsubUpdate = subscribeSwUpdate(
       (available) => this.#updateIndicator.toggleAttribute("hidden", !isUpdateAvailable(available))
     );
@@ -213,6 +247,10 @@ var CreateOverlay = class extends HTMLElement {
     this.#updateIndicator = null;
     this.#unsubUpdate?.();
     this.#unsubUpdate = null;
+    this.#unsubPomegranate?.();
+    this.#unsubPomegranate = null;
+    document.removeEventListener("pomegranate-account-added", this.#onPomegranateAdded);
+    this.#googleWrap = null;
     this.#removeTile();
   }
   #applyVisibility() {
@@ -229,13 +267,7 @@ var CreateOverlay = class extends HTMLElement {
     }
     if (this.#closing) return;
     if (this.#wasVisible && !this.#dismissed && accounts.length > 0) {
-      this.#closing = true;
-      requestVaultClose().then(() => {
-        this.#closing = false;
-        this.#wasVisible = false;
-        this.toggleAttribute("hidden", true);
-        this.#removeTile();
-      });
+      this.#closeAfterCreation();
       return;
     }
     this.#wasVisible = false;
@@ -258,14 +290,39 @@ var CreateOverlay = class extends HTMLElement {
   #watchTile(tile) {
     this.#stopWatchingTile();
     this.#tileObserver = new MutationObserver(() => {
-      this.#dismissBtn.disabled = tile.hasAttribute("aria-busy");
+      this.#syncBusyState();
     });
     this.#tileObserver.observe(tile, { attributes: true, attributeFilter: ["aria-busy"] });
-    this.#dismissBtn.disabled = tile.hasAttribute("aria-busy");
+    this.#syncBusyState();
   }
   #stopWatchingTile() {
     this.#tileObserver?.disconnect();
     this.#tileObserver = null;
+  }
+  #setPomegranateBusy = (busy) => {
+    this.#pomegranateBusy = busy;
+    this.dataset.pomegranateBusy = String(busy);
+    this.#syncBusyState();
+  };
+  #onPomegranateAdded = () => {
+    if (!this.#wasVisible || this.hasAttribute("hidden")) return;
+    this.#closeAfterCreation();
+  };
+  #closeAfterCreation() {
+    if (this.#closing) return;
+    this.#closing = true;
+    requestVaultClose().then(() => {
+      this.#closing = false;
+      this.#wasVisible = false;
+      this.toggleAttribute("hidden", true);
+      this.#removeTile();
+    });
+  }
+  #syncBusyState() {
+    const tileBusy = this.#tile?.hasAttribute("aria-busy") || false;
+    if (this.#dismissBtn) this.#dismissBtn.disabled = tileBusy || this.#pomegranateBusy;
+    if (this.#tile) this.#tile.inert = this.#pomegranateBusy;
+    if (this.#googleWrap) this.#googleWrap.inert = tileBusy;
   }
   #onDismiss = () => {
     if (this.#dismissBtn.disabled) return;

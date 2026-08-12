@@ -26,8 +26,9 @@
     "end": "pkill -f 'python3 server.py'"
   },
   "devDependencies": {
-    "@dicebear/avataaars": "9.4.2",
-    "@dicebear/core": "9.4.2",
+    "@dicebear/core": "10.4.0",
+    "@dicebear/styles": "10.4.0",
+    "@fiatjaf/promenade-trusted-dealer": "npm:@jsr/fiatjaf__promenade-trusted-dealer@0.4.3",
     "@noble/ciphers": "2.2.0",
     "@noble/curves": "2.2.0",
     "@noble/hashes": "2.2.0",
@@ -37,7 +38,7 @@
     "fake-indexeddb": "6.2.5",
     "globals": "^17.5.0",
     "jsqr": "1.4.0",
-    "libp2r2p": "0.10.3",
+    "libp2r2p": "0.10.4",
     "neostandard": "^0.13.0",
     "qrcode-generator": "1.4.4",
     "thenameisf": "1.2.0"

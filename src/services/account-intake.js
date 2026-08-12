@@ -10,8 +10,8 @@ import {
   parseRelayListEvent,
   freeRelays
 } from './relay.js'
-import { fetchBunkerUserPubkey } from './bunker.js'
-import { seededAvatarDataUrl } from './avatar.js'
+import { fetchBunkerUserPubkey, publicBunkerRecord } from './bunker.js'
+import { seededAvatarDataUrl, seededNeutralAvatarDataUrl } from './avatar.js'
 import { extractBunkerClientKey } from '../helpers/nostrpair-url.js'
 
 // Shared account-intake pipeline. Used by:
@@ -216,12 +216,14 @@ export async function prepareBunker (bunkerUrlInput, token, options = {}) {
       pairedProfile: options.pairedProfile
     })
     if (token?.cancelled) throw new Error('IMPORT_CANCELLED')
-    const picture = meta.picture || existing?.picture || await seededAvatarDataUrl(pubkey)
+    const picture = meta.picture || existing?.picture || await (
+      options.neutralAvatar ? seededNeutralAvatarDataUrl(pubkey) : seededAvatarDataUrl(pubkey)
+    )
     if (token?.cancelled) throw new Error('IMPORT_CANCELLED')
     const record = {
       type: 'bunker',
       pubkey,
-      bunker: bunkerUrl,
+      ...publicBunkerRecord(bunkerUrl),
       picture,
       name: meta.name || existing?.name || '',
       profileEvent: meta.profileEvent || existing?.profileEvent,

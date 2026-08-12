@@ -6,12 +6,12 @@ import {
   setVaultViewShell,
   subscribeSwUpdate,
   swUpdateLocales
-} from "./chunks/chunk-FXDTUVT4.js";
+} from "./chunks/chunk-DPEURHLC.js";
 import {
   init,
   startDeviceRelayListRefresh,
   startRevocationRotation
-} from "./chunks/chunk-GH5ACQXA.js";
+} from "./chunks/chunk-CDRD3SIJ.js";
 import {
   clearError,
   setError
@@ -20,21 +20,21 @@ import {
   isOnline,
   onOnline,
   startContentKeyEventRefresh
-} from "./chunks/chunk-47TWQHYT.js";
+} from "./chunks/chunk-K4MQVI3L.js";
 import {
   filterVisibleAccounts,
   recoverPendingMutation,
   runSecretAccountMutation
-} from "./chunks/chunk-FQWZBX36.js";
-import "./chunks/chunk-ZOPYVJB4.js";
+} from "./chunks/chunk-RRGKXN3E.js";
+import "./chunks/chunk-KFD6KK7E.js";
 import {
   checkForIconUpdate,
   hasPasskey
-} from "./chunks/chunk-A4OBQLFD.js";
-import "./chunks/chunk-SDOMGLPX.js";
+} from "./chunks/chunk-AQSHSQLO.js";
+import "./chunks/chunk-W44MUTZ3.js";
 import {
   seededAvatarDataUrl
-} from "./chunks/chunk-4RHK4XWQ.js";
+} from "./chunks/chunk-3RWQBTGN.js";
 import {
   fetchLatestProfile,
   fetchRelayListEvent,
@@ -49,7 +49,7 @@ import {
   subscribe2 as subscribe,
   transferBunkerSecret,
   update
-} from "./chunks/chunk-GUYFWDAK.js";
+} from "./chunks/chunk-D6BLQV4I.js";
 import {
   defineLocales,
   getT,
@@ -75,18 +75,10 @@ async function rehydrateAll() {
 }
 async function rehydrateOne(account) {
   const patch = {};
-  if (account.type === "bunker" && account.bunker) {
-    const handle = getBunkerHandle(account.pubkey);
-    if (!handle) {
+  if (account.type === "bunker") {
+    const liveBunkerPubkey = await probeBunkerAccount(account);
+    if (!liveBunkerPubkey) {
       return { updated: false };
-    }
-    let liveBunkerPubkey;
-    try {
-      liveBunkerPubkey = await handle.getPublicKey();
-      clearError(account.pubkey);
-    } catch (err) {
-      setError(account.pubkey, String(err?.message ?? err));
-      throw err;
     }
     if (liveBunkerPubkey !== account.pubkey) {
       if (get(liveBunkerPubkey)) {
@@ -145,6 +137,20 @@ async function rehydrateOne(account) {
   }
   if (Object.keys(patch).length) await update(account.pubkey, patch);
   return { updated: Object.keys(patch).length > 0 };
+}
+async function probeBunkerAccount(account, {
+  _getHandle = getBunkerHandle
+} = {}) {
+  const handle = _getHandle(account.pubkey);
+  if (!handle) return null;
+  try {
+    const pubkey = await handle.getPublicKey();
+    clearError(account.pubkey);
+    return pubkey;
+  } catch (err) {
+    setError(account.pubkey, String(err?.message ?? err));
+    throw err;
+  }
 }
 function scheduleRetry() {
   if (stopOnlineWatcher) return;
@@ -207,15 +213,15 @@ function initShellI18n() {
 // src/index.js
 await initializeStorage();
 await Promise.all([
-  import("./chunks/account-list-BSYOHHDX.js"),
-  import("./chunks/account-add-JKVVWNJ6.js"),
-  import("./chunks/sync-panel-JEWBHVUM.js"),
-  import("./chunks/trusted-signers-panel-EKCUZ32I.js"),
+  import("./chunks/account-list-W26P2LFM.js"),
+  import("./chunks/account-add-IAUMV77R.js"),
+  import("./chunks/sync-panel-3V3D5PGV.js"),
+  import("./chunks/trusted-signers-panel-CN7VNWKG.js"),
   import("./chunks/accordion-panel-AGHO422R.js"),
   import("./chunks/toast-VTWQ4NKU.js"),
-  import("./chunks/activity-log-LGBR65W4.js"),
-  import("./chunks/lock-overlay-4OOMSRJJ.js"),
-  import("./chunks/create-overlay-WAE5WMEJ.js")
+  import("./chunks/activity-log-CJLJ7RUW.js"),
+  import("./chunks/lock-overlay-WQN6C4WB.js"),
+  import("./chunks/create-overlay-RU6TR6VN.js")
 ]);
 document.getElementById("vault").style.visibility = "visible";
 var list2 = document.querySelector("account-list");
@@ -292,7 +298,7 @@ startRevocationRotation().catch((err) => {
 });
 if (window === window.top) {
   document.body.classList.add("dev");
-  import("./chunks/dev-panel-AQCFAZID.js").then(() => {
+  import("./chunks/dev-panel-YGLFEG2M.js").then(() => {
     document.querySelector(".diagnostics-section")?.append(document.createElement("dev-panel"));
   });
 }

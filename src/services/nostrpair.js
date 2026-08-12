@@ -6,9 +6,9 @@ import { freeRelays, relayPool } from 'libp2r2p/relay'
 import {
   buildNostrpairUrl,
   parseNostrpairInput,
-  extractBunkerClientKey,
-  buildBunkerUrlWithClientKey
+  extractBunkerClientKey
 } from '../helpers/nostrpair-url.js'
+import { buildBunkerBackupUrl } from './bunker.js'
 
 export { buildNostrpairUrl, parseNostrpairInput, extractBunkerClientKey }
 
@@ -359,10 +359,8 @@ export class JoinerSession {
 // local-only, so it only packages the account and its client key for transfer.
 function buildSyncAccountEntries (accounts, secretEntries, { nsecFromHex, npubFromPubkey }) {
   const nsecByPubkey = new Map()
-  const clientKeyByPubkey = new Map()
   for (const entry of secretEntries) {
     if (entry.type === 'nsec') nsecByPubkey.set(entry.pubkey, entry.seckey)
-    else if (entry.type === 'bunker') clientKeyByPubkey.set(entry.pubkey, entry.clientKey)
   }
   const out = []
   for (const account of accounts) {
@@ -383,11 +381,13 @@ function buildSyncAccountEntries (accounts, secretEntries, { nsecFromHex, npubFr
         profile: profileForAccount(account)
       })
     } else if (account.type === 'bunker') {
-      const clientKey = clientKeyByPubkey.get(account.pubkey)
-      if (!clientKey) continue
+      const secret = secretEntries.find(entry => entry.type === 'bunker' && entry.pubkey === account.pubkey)
+      if (!secret?.clientKey) continue
+      let value
+      try { value = buildBunkerBackupUrl({ account, secretEntry: secret }) } catch { continue }
       out.push({
         type: 'bunker',
-        value: buildBunkerUrlWithClientKey(account.bunker, clientKey),
+        value,
         pubkey: account.pubkey,
         profile: profileForAccount(account)
       })

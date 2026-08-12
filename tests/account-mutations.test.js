@@ -73,8 +73,8 @@ async function beginMutation ({ operation = 'test', beforeAccounts, afterAccount
   })
 }
 
-async function setBunkerSecret (pubkey) {
-  await secrets.adoptBunkerHandle(pubkey, { close () {} }, seckey())
+async function setBunkerSecret (pubkey, { handlerPubkey = pubkey, clientKey = seckey() } = {}) {
+  await secrets.adoptBunkerHandle(pubkey, { close () {} }, handlerPubkey, clientKey)
 }
 
 test('recovery removes a created account when the secret blob stayed before-state', async () => {
@@ -253,6 +253,38 @@ test('recovery finishes bunker drift when the secret blob reached after-state', 
   assert.equal(store.get(oldPubkey), null)
   assert.deepEqual(store.get(newPubkey), after)
   assert.equal(secrets.hasSecretRef(bunkerRef(newPubkey)), true)
+})
+
+test('recovery fingerprints distinguish bunker capabilities with the same account pubkey', async () => {
+  unlockVault()
+  const pubkey = '4'.repeat(64)
+  const before = bunkerRecord(pubkey, { name: 'Before' })
+  const after = bunkerRecord(pubkey, { name: 'After' })
+  const beforeSecret = { handlerPubkey: '5'.repeat(64), clientKey: '6'.repeat(64) }
+  const afterSecret = { handlerPubkey: '7'.repeat(64), clientKey: '8'.repeat(64) }
+
+  await store.add(after)
+  await setBunkerSecret(pubkey, beforeSecret)
+  const beforeSecretFingerprint = secrets.secretStateFingerprint([pubkey])
+  await journal.begin({
+    operation: 'replace-bunker',
+    affectedPubkeys: [pubkey],
+    beforeAccounts: [before],
+    afterAccounts: [after],
+    beforeSecretRefs: [bunkerRef(pubkey)],
+    afterSecretRefs: [bunkerRef(pubkey)],
+    beforeSecretFingerprint
+  })
+  await setBunkerSecret(pubkey, afterSecret)
+  const afterSecretFingerprint = secrets.secretStateFingerprint([pubkey])
+  assert.notEqual(afterSecretFingerprint, beforeSecretFingerprint)
+  await journal.setAfterSecretFingerprint(afterSecretFingerprint)
+
+  await setBunkerSecret(pubkey, beforeSecret)
+  const result = await recoverPendingMutation()
+
+  assert.deepEqual(result, { recovered: true, outcome: 'before' })
+  assert.deepEqual(store.get(pubkey), before)
 })
 
 test('pending accounts are hidden and keep locked recovery visible', async () => {

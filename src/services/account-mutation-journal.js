@@ -27,6 +27,10 @@ function normalizeSecretRefs (refs) {
     : []
 }
 
+function normalizeFingerprint (value) {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/i.test(value) ? value.toLowerCase() : ''
+}
+
 function uniquePubkeys (...groups) {
   const out = []
   const seen = new Set()
@@ -63,6 +67,8 @@ export function read () {
       afterAccounts,
       beforeSecretRefs,
       afterSecretRefs,
+      beforeSecretFingerprint: normalizeFingerprint(parsed.beforeSecretFingerprint),
+      afterSecretFingerprint: normalizeFingerprint(parsed.afterSecretFingerprint),
       createdAt: Math.max(0, Math.floor(Number(parsed.createdAt) || 0))
     }
   } catch {
@@ -76,7 +82,8 @@ export async function begin ({
   beforeAccounts = [],
   afterAccounts = [],
   beforeSecretRefs = [],
-  afterSecretRefs = []
+  afterSecretRefs = [],
+  beforeSecretFingerprint = ''
 }) {
   if (read()) throw new Error('ACCOUNT_MUTATION_IN_PROGRESS')
   const tx = {
@@ -93,10 +100,20 @@ export async function begin ({
     afterAccounts: normalizeAccountList(afterAccounts),
     beforeSecretRefs: normalizeSecretRefs(beforeSecretRefs),
     afterSecretRefs: normalizeSecretRefs(afterSecretRefs),
+    beforeSecretFingerprint: normalizeFingerprint(beforeSecretFingerprint),
+    afterSecretFingerprint: '',
     createdAt: Math.floor(Date.now() / 1000)
   }
   await setState(KEY, tx)
   notify()
+  return tx
+}
+
+export async function setAfterSecretFingerprint (fingerprint) {
+  const tx = read()
+  if (!tx) throw new Error('ACCOUNT_MUTATION_NOT_FOUND')
+  tx.afterSecretFingerprint = normalizeFingerprint(fingerprint)
+  await setState(KEY, tx)
   return tx
 }
 

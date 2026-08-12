@@ -29,25 +29,25 @@ export function parseNostrpairInput (input) {
 // fragment is local-only — relays don't transmit URL fragments — so it's
 // just a convenient way to pack two values into one string.
 export function extractBunkerClientKey (input) {
-  try {
-    const url = new URL(input)
-    if (url.protocol !== 'bunker:') return { url: input, clientKey: null }
-    const fragment = url.hash.replace(/^#/, '')
-    if (!fragment) return { url: input, clientKey: null }
-    const params = new URLSearchParams(fragment)
-    const clientKey = params.get('client_key')
-    if (!clientKey || !/^[0-9a-f]{64}$/i.test(clientKey)) {
-      return { url: input, clientKey: null }
-    }
-    url.hash = ''
-    return { url: url.toString(), clientKey: clientKey.toLowerCase() }
-  } catch {
-    return { url: input, clientKey: null }
+  let url
+  try { url = new URL(input) } catch { throw new Error('INVALID_BUNKER_URL') }
+  if (url.protocol !== 'bunker:') return { url: input, clientKey: null }
+  const fragment = url.hash.replace(/^#/, '')
+  if (!fragment) return { url: url.toString(), clientKey: null }
+  const params = new URLSearchParams(fragment)
+  const keys = [...params.keys()]
+  const values = params.getAll('client_key')
+  if (keys.some(key => key !== 'client_key') || values.length !== 1 || !/^[0-9a-f]{64}$/i.test(values[0])) {
+    throw new Error('INVALID_BUNKER_CLIENT_KEY')
   }
+  url.hash = ''
+  return { url: url.toString(), clientKey: values[0].toLowerCase() }
 }
 
 export function buildBunkerUrlWithClientKey (bunkerUrl, clientKey) {
+  if (!/^[0-9a-f]{64}$/i.test(clientKey || '')) throw new Error('INVALID_BUNKER_CLIENT_KEY')
   const url = new URL(bunkerUrl)
-  url.hash = `client_key=${clientKey}`
+  if (url.protocol !== 'bunker:') throw new Error('INVALID_BUNKER_URL')
+  url.hash = new URLSearchParams({ client_key: clientKey.toLowerCase() }).toString()
   return url.toString()
 }
