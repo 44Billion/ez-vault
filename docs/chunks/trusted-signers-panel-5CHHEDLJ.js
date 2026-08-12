@@ -9,7 +9,7 @@ import {
   flushPendingIconUpdate,
   hasPasskey,
   unlock
-} from "./chunk-YCKEL573.js";
+} from "./chunk-IXU3T4GE.js";
 import {
   getDeviceSignerPubkey,
   isUnlocked,

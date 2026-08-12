@@ -97,6 +97,7 @@ var textDecoder = new TextDecoder();
 var PRF_SALT_BYTES = textEncoder.encode(PRF_SALT);
 var pendingIconUpdate = null;
 var registrationPromise = null;
+var requiredPasskeyPromise = null;
 var fallbackDecisionOverride = null;
 function bufferToUint8(value) {
   if (!value) return null;
@@ -241,7 +242,7 @@ async function discardCredential(rawId) {
 function hasPasskey() {
   return hasState(CRED_ID_KEY);
 }
-function eligibleForLocalFallback(err) {
+function isExpectedPasskeyRegistrationFailure(err) {
   if (err?.message === "PASSKEY_PRF_REQUIRED" || err?.message === "PASSKEY_API_UNAVAILABLE") return true;
   return ["NotAllowedError", "NotSupportedError", "ConstraintError", "SecurityError"].includes(err?.name);
 }
@@ -288,7 +289,7 @@ async function ensureRegisteredOnce() {
       else await register();
       return;
     } catch (err) {
-      if (!eligibleForLocalFallback(err) || hasPasskey()) throw err;
+      if (!isExpectedPasskeyRegistrationFailure(err) || hasPasskey()) throw err;
       const choice = await chooseRegistrationFallback(err);
       if (choice === "retry") continue;
       if (choice === "local") return enableLocalVault();
@@ -303,6 +304,20 @@ function ensureRegistered() {
     });
   }
   return registrationPromise;
+}
+async function requirePasskeyOnce() {
+  if (hasPasskey() && isUnlocked() && !hasPendingUpgrade()) return;
+  if (hasPasskey()) return unlock2();
+  if (hasLocalVault()) return promoteLocalVault();
+  return register();
+}
+function requirePasskey() {
+  if (!requiredPasskeyPromise) {
+    requiredPasskeyPromise = requirePasskeyOnce().finally(() => {
+      requiredPasskeyPromise = null;
+    });
+  }
+  return requiredPasskeyPromise;
 }
 async function initializeVaultProtection() {
   const localKey = readLocalKey();
@@ -842,7 +857,9 @@ export {
   detectPlatform,
   isUnprotectedLocalVault,
   hasPasskey,
+  isExpectedPasskeyRegistrationFailure,
   ensureRegistered,
+  requirePasskey,
   initializeVaultProtection,
   unlock2 as unlock,
   persistSecretsBlob,

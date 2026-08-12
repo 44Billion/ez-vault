@@ -1,23 +1,25 @@
 import {
   applySwUpdate,
   isUpdateAvailable,
-  requestVaultClose,
   subscribeSwUpdate,
   swUpdateLocales
-} from "./chunk-6555WJ4D.js";
-import "./chunk-NDSARXZJ.js";
+} from "./chunk-3UMXSOTO.js";
+import {
+  requestVaultClose
+} from "./chunk-MPD2ENSA.js";
+import "./chunk-5QIL4A6S.js";
 import "./chunk-JDLAFNFY.js";
-import "./chunk-VQVK5FPU.js";
+import "./chunk-4W5XMQY3.js";
 import {
   filterVisibleAccounts,
   pendingMutationNeedsUnlock,
   subscribePendingMutations
-} from "./chunk-7O7SSKHM.js";
+} from "./chunk-YSUPLM3X.js";
 import "./chunk-AZYRZ53H.js";
 import {
   flushPendingIconUpdate,
   unlock
-} from "./chunk-YCKEL573.js";
+} from "./chunk-IXU3T4GE.js";
 import {
   isUnlocked,
   list,

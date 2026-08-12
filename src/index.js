@@ -27,6 +27,7 @@ await Promise.all([
   import('./components/shared/accordion-panel.js'),
   import('./components/shared/toast.js'),
   import('./components/activity-log.js'),
+  import('./components/vault-lock-button.js'),
   import('./components/lock-overlay.js'),
   import('./components/create-overlay.js')
 ])
@@ -41,6 +42,7 @@ const syncPanel = document.querySelector('sync-panel')
 const createBtn = document.getElementById('create-account-btn')
 const addBtn = document.getElementById('add-account-btn')
 const syncBtn = document.getElementById('sync-devices-btn')
+const lockButton = document.querySelector('vault-lock-button')
 
 initShellI18n()
 
@@ -60,25 +62,25 @@ translateUpdateBanner()
 subscribeLocaleChanged(translateUpdateBanner)
 initSwManager()
 
-// Each toolbar button represents one mutually-exclusive feature. The
-// owning component disables the *other* two while its feature is open,
-// and flips its own button to .is-active so the user can tell which
-// feature owns the screen (we deliberately don't have sub-routes).
-list.toolbarButtons = [addBtn, syncBtn]
+// Each toolbar button represents one mutually-exclusive feature. The owning
+// component disables its sibling actions (including manual lock) while its
+// feature is open, and flips its own button to .is-active so the user can tell
+// which feature owns the screen (we deliberately don't have sub-routes).
+list.toolbarButtons = [addBtn, syncBtn, lockButton]
 list.createButton = createBtn
 
-addPanel.toolbarButtons = [createBtn, syncBtn]
+addPanel.toolbarButtons = [createBtn, syncBtn, lockButton]
 addPanel.activeButton = addBtn
 
 syncPanel.list = list
-syncPanel.toolbarButtons = [createBtn, addBtn]
+syncPanel.toolbarButtons = [createBtn, addBtn, lockButton]
 syncPanel.activeButton = syncBtn
 
 setVaultViewShell({
   list,
   addPanel,
   syncPanel,
-  toolbarButtons: [createBtn, addBtn, syncBtn]
+  toolbarButtons: [createBtn, addBtn, syncBtn, lockButton]
 })
 
 // When the button is already active, route the click to the feature's own

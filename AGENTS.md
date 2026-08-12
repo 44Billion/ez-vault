@@ -35,7 +35,7 @@ Because the signer custodies private keys, the overriding design principle is **
 
 ## Communication Model
 
-The vault is am iframe signer that talks to the parent window (app launcher) directly using `window.postMessage`. An app requests a permission to the app launcher that, if granted, talks to the vault on behalf of the app.
+The vault is an iframe signer that talks to the parent window (app launcher) directly using `window.postMessage`. An app requests a permission to the app launcher that, if granted, talks to the vault on behalf of the app. Manual locking must call `secrets.lock()`, immediately publish `SET_ACCOUNTS_STATE` with locked account snapshots, and only then request `CLOSE_VAULT_VIEW`; do not add a separate protocol message for locking.
 
 ## Nostr Relays & Event Discovery (NIP-65)
 
@@ -116,7 +116,10 @@ When in doubt about a layout decision, ask: "does this still work as a tall vert
   one `state` + `messengerLog` transaction, then removes the local key.
   `ez-vault:passkey:upgrade-pending` makes the short staged window recoverable;
   once present it must be completed with that passkey and must not fall back
-  to local unlock.
+  to local unlock. Manual locking is unavailable until local mode is promoted:
+  use the strict passkey requirement path, never show the local-fallback dialog,
+  and leave the vault open and unlocked when registration is cancelled or
+  unsupported.
 - Raw `nsec`, bunker handler pubkeys, bunker client keys, content-key secret
   keys and decrypted activity payloads must never be persisted literally in
   plaintext. The explicit local mode is the sole equivalent-security

@@ -7,7 +7,7 @@ import {
 } from "./chunk-JDLAFNFY.js";
 import {
   claimSigner
-} from "./chunk-VQVK5FPU.js";
+} from "./chunk-4W5XMQY3.js";
 import {
   publishAccountBootstrap,
   randomAccountName
@@ -17,12 +17,12 @@ import {
 } from "./chunk-3RWQBTGN.js";
 import {
   runSecretAccountMutation
-} from "./chunk-7O7SSKHM.js";
+} from "./chunk-YSUPLM3X.js";
 import {
   ensureRegistered,
   isUnprotectedLocalVault,
   openSecrets
-} from "./chunk-YCKEL573.js";
+} from "./chunk-IXU3T4GE.js";
 import {
   add,
   applyRecords,

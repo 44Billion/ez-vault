@@ -91,6 +91,7 @@ const PRF_SALT_BYTES = textEncoder.encode(PRF_SALT)
 // fully silent.
 let pendingIconUpdate = null
 let registrationPromise = null
+let requiredPasskeyPromise = null
 let fallbackDecisionOverride = null
 
 function bufferToUint8 (value) {
@@ -295,7 +296,7 @@ export function hasPasskey () {
 // new account — without this branch, the silent "VAULT_LOCKED" throw
 // dead-ends the create flow even though we still hold a perfectly good
 // passkey credential.
-function eligibleForLocalFallback (err) {
+export function isExpectedPasskeyRegistrationFailure (err) {
   if (err?.message === 'PASSKEY_PRF_REQUIRED' || err?.message === 'PASSKEY_API_UNAVAILABLE') return true
   return ['NotAllowedError', 'NotSupportedError', 'ConstraintError', 'SecurityError'].includes(err?.name)
 }
@@ -351,7 +352,7 @@ async function ensureRegisteredOnce () {
       else await register()
       return
     } catch (err) {
-      if (!eligibleForLocalFallback(err) || hasPasskey()) throw err
+      if (!isExpectedPasskeyRegistrationFailure(err) || hasPasskey()) throw err
       const choice = await chooseRegistrationFallback(err)
       if (choice === 'retry') continue
       if (choice === 'local') return enableLocalVault()
@@ -365,6 +366,26 @@ export function ensureRegistered () {
     registrationPromise = ensureRegisteredOnce().finally(() => { registrationPromise = null })
   }
   return registrationPromise
+}
+
+// Require actual passkey protection without offering the deliberately weaker
+// local fallback. Manual locking uses this path because a vault whose key is
+// still present in local IndexedDB has not meaningfully been locked. Keep this
+// operation separately single-flight from the opt-in fallback flow: normal UI
+// coordination prevents the two entry points from racing, while callers of
+// this stricter operation always share one registration/promotion ceremony.
+async function requirePasskeyOnce () {
+  if (hasPasskey() && secrets.isUnlocked() && !hasPendingUpgrade()) return
+  if (hasPasskey()) return unlock()
+  if (hasLocalVault()) return promoteLocalVault()
+  return register()
+}
+
+export function requirePasskey () {
+  if (!requiredPasskeyPromise) {
+    requiredPasskeyPromise = requirePasskeyOnce().finally(() => { requiredPasskeyPromise = null })
+  }
+  return requiredPasskeyPromise
 }
 
 // Restore the deliberately-unprotected local mode before components decide

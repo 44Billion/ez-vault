@@ -1,17 +1,19 @@
 import {
   applySwUpdate,
-  initMessenger,
   initSwManager,
   isUpdateAvailable,
-  setVaultViewShell,
   subscribeSwUpdate,
   swUpdateLocales
-} from "./chunks/chunk-6555WJ4D.js";
+} from "./chunks/chunk-3UMXSOTO.js";
+import {
+  initMessenger,
+  setVaultViewShell
+} from "./chunks/chunk-MPD2ENSA.js";
 import {
   init,
   startDeviceRelayListRefresh,
   startRevocationRotation
-} from "./chunks/chunk-NDSARXZJ.js";
+} from "./chunks/chunk-5QIL4A6S.js";
 import {
   clearError,
   setError
@@ -21,7 +23,7 @@ import {
   isOnline,
   onOnline,
   startContentKeyEventRefresh
-} from "./chunks/chunk-VQVK5FPU.js";
+} from "./chunks/chunk-4W5XMQY3.js";
 import {
   seededAvatarDataUrl
 } from "./chunks/chunk-3RWQBTGN.js";
@@ -29,13 +31,13 @@ import {
   filterVisibleAccounts,
   recoverPendingMutation,
   runSecretAccountMutation
-} from "./chunks/chunk-7O7SSKHM.js";
+} from "./chunks/chunk-YSUPLM3X.js";
 import "./chunks/chunk-AZYRZ53H.js";
 import {
   checkForIconUpdate,
   hasPasskey,
   initializeVaultProtection
-} from "./chunks/chunk-YCKEL573.js";
+} from "./chunks/chunk-IXU3T4GE.js";
 import {
   fetchLatestProfile,
   fetchRelayListEvent,
@@ -215,15 +217,16 @@ function initShellI18n() {
 await initializeStorage();
 await initializeVaultProtection();
 await Promise.all([
-  import("./chunks/account-list-Q2C464ZZ.js"),
-  import("./chunks/account-add-53WCERG4.js"),
-  import("./chunks/sync-panel-TID5ZIGI.js"),
-  import("./chunks/trusted-signers-panel-ADCJA7NW.js"),
+  import("./chunks/account-list-SO4BUBQQ.js"),
+  import("./chunks/account-add-DIG5DCLR.js"),
+  import("./chunks/sync-panel-BG5Z73IY.js"),
+  import("./chunks/trusted-signers-panel-5CHHEDLJ.js"),
   import("./chunks/accordion-panel-AGHO422R.js"),
   import("./chunks/toast-VTWQ4NKU.js"),
   import("./chunks/activity-log-M76CTKGL.js"),
-  import("./chunks/lock-overlay-UGBYO2HB.js"),
-  import("./chunks/create-overlay-7OUTYFC4.js")
+  import("./chunks/vault-lock-button-YVPDKBFG.js"),
+  import("./chunks/lock-overlay-J24DE2XN.js"),
+  import("./chunks/create-overlay-6KEPU7XI.js")
 ]);
 document.getElementById("vault").style.visibility = "visible";
 var list2 = document.querySelector("account-list");
@@ -232,6 +235,7 @@ var syncPanel = document.querySelector("sync-panel");
 var createBtn = document.getElementById("create-account-btn");
 var addBtn = document.getElementById("add-account-btn");
 var syncBtn = document.getElementById("sync-devices-btn");
+var lockButton = document.querySelector("vault-lock-button");
 initShellI18n();
 var updateBanner = document.getElementById("update-banner");
 var updateBannerText = updateBanner.querySelector(".update-banner-text");
@@ -246,18 +250,18 @@ updateBannerButton.addEventListener("click", applySwUpdate);
 translateUpdateBanner();
 subscribeLocaleChanged(translateUpdateBanner);
 initSwManager();
-list2.toolbarButtons = [addBtn, syncBtn];
+list2.toolbarButtons = [addBtn, syncBtn, lockButton];
 list2.createButton = createBtn;
-addPanel.toolbarButtons = [createBtn, syncBtn];
+addPanel.toolbarButtons = [createBtn, syncBtn, lockButton];
 addPanel.activeButton = addBtn;
 syncPanel.list = list2;
-syncPanel.toolbarButtons = [createBtn, addBtn];
+syncPanel.toolbarButtons = [createBtn, addBtn, lockButton];
 syncPanel.activeButton = syncBtn;
 setVaultViewShell({
   list: list2,
   addPanel,
   syncPanel,
-  toolbarButtons: [createBtn, addBtn, syncBtn]
+  toolbarButtons: [createBtn, addBtn, syncBtn, lockButton]
 });
 createBtn.addEventListener("click", () => {
   if (createBtn.classList.contains("is-active")) {
@@ -300,7 +304,7 @@ startRevocationRotation().catch((err) => {
 });
 if (window === window.top) {
   document.body.classList.add("dev");
-  import("./chunks/dev-panel-XTIUTX4F.js").then(() => {
+  import("./chunks/dev-panel-QI6JNAOE.js").then(() => {
     document.querySelector(".diagnostics-section")?.append(document.createElement("dev-panel"));
   });
 }

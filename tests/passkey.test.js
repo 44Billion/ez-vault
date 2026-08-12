@@ -453,6 +453,72 @@ test('a refused registration can be retried without entering local mode', async 
   assert.equal(getState('ez-vault:passkey:storage-policy').mode, 'idb')
 })
 
+test('mandatory passkey protection never offers the local fallback', async () => {
+  await enterLocalMode()
+  let fallbackChoices = 0
+  passkey.setFallbackDecisionForTests(() => {
+    fallbackChoices++
+    return 'local'
+  })
+  installCredentialMocks({
+    prfBytes: null,
+    createPrfBytes: null,
+    onCreate: () => { throw Object.assign(new Error('Cancelled'), { name: 'NotAllowedError' }) }
+  })
+
+  await assert.rejects(passkey.requirePasskey(), { name: 'NotAllowedError' })
+
+  assert.equal(fallbackChoices, 0)
+  assert.equal(passkey.isUnprotectedLocalVault(), true)
+  assert.equal(secrets.isUnlocked(), true)
+})
+
+test('mandatory passkey protection is a no-op for an unlocked protected vault', async () => {
+  const prfBytes = new Uint8Array(32)
+  prfBytes[0] = 33
+  let createCalls = 0
+  let getCalls = 0
+  installCredentialMocks({
+    prfBytes,
+    onCreate: () => { createCalls++ },
+    onGet: async () => {
+      getCalls++
+      return { getClientExtensionResults: () => ({ prf: { results: { first: prfBytes } } }) }
+    }
+  })
+
+  await passkey.ensureRegistered()
+  await passkey.requirePasskey()
+
+  assert.equal(createCalls, 1)
+  assert.equal(getCalls, 1)
+})
+
+test('concurrent mandatory protection requests share one promotion ceremony', async () => {
+  await enterLocalMode()
+  const prfBytes = new Uint8Array(32)
+  prfBytes[0] = 34
+  let createCalls = 0
+  installCredentialMocks({
+    prfBytes,
+    onCreate: () => { createCalls++ }
+  })
+
+  await Promise.all([passkey.requirePasskey(), passkey.requirePasskey()])
+
+  assert.equal(createCalls, 1)
+  assert.equal(passkey.hasPasskey(), true)
+  assert.equal(getState('ez-vault:passkey:local-key'), null)
+})
+
+test('expected lock-time registration failures are classified narrowly', () => {
+  assert.equal(passkey.isExpectedPasskeyRegistrationFailure(new Error('PASSKEY_API_UNAVAILABLE')), true)
+  assert.equal(passkey.isExpectedPasskeyRegistrationFailure(new Error('PASSKEY_PRF_REQUIRED')), true)
+  assert.equal(passkey.isExpectedPasskeyRegistrationFailure(Object.assign(new Error(), { name: 'NotAllowedError' })), true)
+  assert.equal(passkey.isExpectedPasskeyRegistrationFailure(new Error('PASSKEY_PRF_MISMATCH')), false)
+  assert.equal(passkey.isExpectedPasskeyRegistrationFailure(new Error('IDB_WRITE_FAILED')), false)
+})
+
 test('local mode opens current secrets without WebAuthn', async () => {
   await enterLocalMode()
   assert.equal(passkey.isUnprotectedLocalVault(), true)

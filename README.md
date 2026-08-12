@@ -26,7 +26,17 @@ changes retry passkey registration; copying or removing an existing account
 does not. A successful retry reciphers the vault blob, content
 keys, trusted signers and sealed activity-log fields under PRF before deleting
 the local key. `ez-vault:passkey:upgrade-pending` makes an interrupted upgrade
-recoverable, but the staged credential must then be used to finish it.
+recoverable, but the staged credential must then be used to finish it. Manual
+locking also requires this promotion: a local-only vault cannot meaningfully
+be locked while its key remains beside its ciphertext. If passkey creation is
+cancelled or unsupported, the vault stays open and unlocked.
+
+The unlocked main view provides a floating Lock action. For an already
+protected vault it clears vault keys, account signers, content keys and bunker
+handles from memory without another WebAuthn ceremony. It then publishes the
+locked account snapshot to the launcher before requesting that the launcher
+close the vault drawer. A close acknowledgement failure never restores those
+secrets to memory.
 
 Pairing (`nostrpair://`) is the supported recovery and cross-device transfer
 mechanism. WebAuthn does not give a relying party a way to prohibit vendor
