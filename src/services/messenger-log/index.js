@@ -55,6 +55,7 @@ export function subscribe (fn) {
 
 export async function append (entry) {
   try {
+    await secrets.waitForVaultTransition()
     const { params, result, ...rest } = entry
     const sealedFields = {}
     if (params !== undefined) sealedFields.params = params

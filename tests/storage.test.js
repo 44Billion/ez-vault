@@ -5,10 +5,13 @@ import * as messengerLog from '../src/services/messenger-log/index.js'
 import * as secrets from '../src/services/secrets.js'
 import {
   appendMessengerLog,
+  commitVaultProtectionUpgrade,
+  getState,
   initializeStorage,
   listMessengerLogs,
   mutateAccounts,
-  resetStorageForTests
+  resetStorageForTests,
+  setState
 } from '../src/services/storage/index.js'
 
 const ACCOUNT_A = { pubkey: 'a'.repeat(64), type: 'npub', name: 'A' }
@@ -122,6 +125,19 @@ test('activity-log serialization failures remain advisory', async () => {
 
   assert.equal((await listMessengerLogs()).length, 0)
   assert.match(String(warnings[0]?.[0]), /messenger-log write failed/)
+})
+
+test('vault upgrade staging survives a failure before the final commit', async () => {
+  await setState('local-key', 'still-recoverable')
+
+  await assert.rejects(commitVaultProtectionUpgrade(async () => ({
+    stageSet: { 'upgrade-pending': { target: 'passkey' } },
+    set: { impossible: () => {} }
+  })))
+
+  assert.equal(getState('local-key'), 'still-recoverable')
+  assert.deepEqual(getState('upgrade-pending'), { target: 'passkey' })
+  assert.equal(getState('impossible'), null)
 })
 
 test('storage initialization fails closed when IndexedDB is unavailable', async () => {

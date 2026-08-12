@@ -1,11 +1,15 @@
 import {
   base64ToBytes,
   base64UrlToBytes,
+  beginVaultTransition,
   bytesToBase64,
   bytesToBase64Url,
   bytesToHex,
+  commitVaultProtectionUpgrade,
+  createVaultRekeyer,
   decodeSecretEntries,
   decryptWithConversationKey,
+  discloseCurrentEntries,
   encodeSecretEntries,
   encryptWithConversationKey,
   getPublicKey,
@@ -13,13 +17,15 @@ import {
   hasState,
   hexToBytes,
   isUnlocked,
+  lock,
   removeState,
   requestPersistentStorage,
   sealCurrentEntries,
   sharedXOnlySecret,
   unlock,
-  updateState
-} from "./chunk-D6BLQV4I.js";
+  updateState,
+  waitForVaultTransition
+} from "./chunk-2IRIIQPD.js";
 
 // src/helpers/platform.js
 function detectPlatform() {
@@ -74,6 +80,10 @@ var ICON_KEY = "ez-vault:passkey:icon";
 var PRF_BACKUP_KEY = "ez-vault:passkey:prf";
 var SECRETS_BLOB_KEY = "ez-vault:passkey:blob";
 var STORAGE_POLICY_KEY = "ez-vault:passkey:storage-policy";
+var LOCAL_KEY = "ez-vault:passkey:local-key";
+var UPGRADE_PENDING_KEY = "ez-vault:passkey:upgrade-pending";
+var CONTENT_KEYS_KEY = "ez-vault:content-keys";
+var TRUSTED_SIGNERS_KEY = "ez-vault:trusted-signers";
 var MODE_IDB = "idb";
 var MODE_LARGE_BLOB = "largeblob";
 var MODE_IDB_COMPAT = "idb-compat";
@@ -86,6 +96,8 @@ var textEncoder = new TextEncoder();
 var textDecoder = new TextDecoder();
 var PRF_SALT_BYTES = textEncoder.encode(PRF_SALT);
 var pendingIconUpdate = null;
+var registrationPromise = null;
+var fallbackDecisionOverride = null;
 function bufferToUint8(value) {
   if (!value) return null;
   if (value instanceof Uint8Array) return new Uint8Array(value);
@@ -124,6 +136,29 @@ function readStoragePolicy() {
   if (![MODE_IDB, MODE_LARGE_BLOB, MODE_IDB_COMPAT].includes(policy.mode)) return null;
   if (![SUPPORT_SUPPORTED, SUPPORT_UNSUPPORTED, SUPPORT_UNKNOWN].includes(policy.largeBlobSupport)) return null;
   return storagePolicy(policy.mode, policy.largeBlobSupport, policy.cleanupPending);
+}
+function readLocalKey() {
+  const stored = getState(LOCAL_KEY, "");
+  if (!stored) return null;
+  if (!/^[0-9a-f]{64}$/.test(stored)) throw new Error("LOCAL_VAULT_KEY_INVALID");
+  return hexToBytes(stored);
+}
+function readUpgradePending() {
+  const pending = getState(UPGRADE_PENDING_KEY);
+  if (!pending || typeof pending !== "object") return null;
+  const policy = pending.targetPolicy;
+  if (!policy || ![MODE_IDB, MODE_LARGE_BLOB, MODE_IDB_COMPAT].includes(policy.mode)) return null;
+  if (![SUPPORT_SUPPORTED, SUPPORT_UNSUPPORTED, SUPPORT_UNKNOWN].includes(policy.largeBlobSupport)) return null;
+  return { targetPolicy: storagePolicy(policy.mode, policy.largeBlobSupport, policy.cleanupPending) };
+}
+function hasLocalVault() {
+  return hasState(LOCAL_KEY);
+}
+function hasPendingUpgrade() {
+  return hasState(UPGRADE_PENDING_KEY);
+}
+function isUnprotectedLocalVault() {
+  return hasLocalVault() && !hasPasskey() && !hasPendingUpgrade();
 }
 function normalizeTransports(transports) {
   if (!Array.isArray(transports)) return [];
@@ -206,15 +241,90 @@ async function discardCredential(rawId) {
 function hasPasskey() {
   return hasState(CRED_ID_KEY);
 }
-async function ensureRegistered() {
-  if (hasPasskey() && isUnlocked()) return;
-  if (hasPasskey()) {
-    await unlock2();
+function eligibleForLocalFallback(err) {
+  if (err?.message === "PASSKEY_PRF_REQUIRED" || err?.message === "PASSKEY_API_UNAVAILABLE") return true;
+  return ["NotAllowedError", "NotSupportedError", "ConstraintError", "SecurityError"].includes(err?.name);
+}
+function cancelledRegistrationError() {
+  try {
+    return new DOMException("PASSKEY_REGISTRATION_CANCELLED", "NotAllowedError");
+  } catch {
+    return Object.assign(new Error("PASSKEY_REGISTRATION_CANCELLED"), { name: "NotAllowedError" });
+  }
+}
+async function chooseRegistrationFallback(err) {
+  if (fallbackDecisionOverride) return fallbackDecisionOverride(err);
+  const { requestPasskeyFallback } = await import("./passkey-fallback-dialog-BVOQKFDL.js");
+  return requestPasskeyFallback(err);
+}
+async function enableLocalVault() {
+  const existing = readLocalKey();
+  if (existing) {
+    if (!isUnlocked()) unlock(existing, getState(SECRETS_BLOB_KEY, "") || null);
     return;
   }
-  await register();
+  const localKey = crypto.getRandomValues(new Uint8Array(32));
+  const ciphertext = sealEmptyVault(localKey);
+  try {
+    await updateState({
+      set: {
+        [LOCAL_KEY]: bytesToHex(localKey),
+        [SECRETS_BLOB_KEY]: ciphertext
+      },
+      remove: [UPGRADE_PENDING_KEY, STORAGE_POLICY_KEY, PRF_BACKUP_KEY]
+    });
+    unlock(localKey, ciphertext);
+    await requestPersistentStorage();
+  } finally {
+    localKey.fill(0);
+  }
 }
-async function register() {
+async function ensureRegisteredOnce() {
+  if (hasPasskey() && isUnlocked() && !hasPendingUpgrade()) return;
+  if (hasPasskey()) return unlock2();
+  while (true) {
+    try {
+      if (hasLocalVault()) await promoteLocalVault();
+      else await register();
+      return;
+    } catch (err) {
+      if (!eligibleForLocalFallback(err) || hasPasskey()) throw err;
+      const choice = await chooseRegistrationFallback(err);
+      if (choice === "retry") continue;
+      if (choice === "local") return enableLocalVault();
+      throw cancelledRegistrationError();
+    }
+  }
+}
+function ensureRegistered() {
+  if (!registrationPromise) {
+    registrationPromise = ensureRegisteredOnce().finally(() => {
+      registrationPromise = null;
+    });
+  }
+  return registrationPromise;
+}
+async function initializeVaultProtection() {
+  const localKey = readLocalKey();
+  const pending = readUpgradePending();
+  if (pending) {
+    if (!localKey || !hasPasskey()) throw new Error("PASSKEY_UPGRADE_STATE_INVALID");
+    return;
+  }
+  if (!localKey) return;
+  if (hasPasskey()) throw new Error("PASSKEY_LOCAL_STATE_INVALID");
+  let ciphertext = getState(SECRETS_BLOB_KEY, "");
+  if (!ciphertext) {
+    ciphertext = sealEmptyVault(localKey);
+    await updateState({ set: { [SECRETS_BLOB_KEY]: ciphertext } });
+  }
+  unlock(localKey, ciphertext);
+  localKey.fill(0);
+}
+async function createPasskeyMaterial() {
+  if (!(globalThis.PublicKeyCredential || globalThis.window?.PublicKeyCredential) || !globalThis.navigator?.credentials?.create) {
+    throw new Error("PASSKEY_API_UNAVAILABLE");
+  }
   const userId = generateUserId();
   const iconURL = await fetchFaviconBase64();
   const userEntity = {
@@ -278,21 +388,38 @@ async function register() {
   }
   const credentialId = bytesToBase64Url(new Uint8Array(credential.rawId));
   const policy = prfFromAssertion?.length ? storagePolicy(MODE_IDB, largeBlobSupport) : largeBlobSupport === SUPPORT_SUPPORTED ? storagePolicy(MODE_LARGE_BLOB, SUPPORT_SUPPORTED) : storagePolicy(MODE_IDB_COMPAT, largeBlobSupport);
-  await updateState({
-    set: {
+  return {
+    rawId: credential.rawId,
+    prfBytes,
+    prfFromAssertion: Boolean(prfFromAssertion?.length),
+    policy,
+    metadata: {
       [CRED_ID_KEY]: credentialId,
       [TRANSPORTS_KEY]: transports,
       [USER_ID_KEY]: bytesToBase64Url(userId),
-      ...!prfFromAssertion?.length && { [PRF_BACKUP_KEY]: bytesToHex(prfBytes) },
-      [STORAGE_POLICY_KEY]: policy,
       ...iconURL ? { [ICON_KEY]: iconURL } : {}
-    },
-    // Avoid even a transient plaintext IDB copy when the assertion path is
-    // already known to provide PRF. Also clears debris from an interrupted
-    // prior registration attempt.
-    remove: prfFromAssertion?.length ? [PRF_BACKUP_KEY] : []
-  });
-  unlock(prfBytes, null);
+    }
+  };
+}
+async function register() {
+  if (hasLocalVault()) return promoteLocalVault();
+  const material = await createPasskeyMaterial();
+  const ciphertext = sealEmptyVault(material.prfBytes);
+  try {
+    await updateState({
+      set: {
+        ...material.metadata,
+        ...!material.prfFromAssertion && { [PRF_BACKUP_KEY]: bytesToHex(material.prfBytes) },
+        [STORAGE_POLICY_KEY]: material.policy,
+        ...material.policy.mode !== MODE_LARGE_BLOB && { [SECRETS_BLOB_KEY]: ciphertext }
+      },
+      remove: [LOCAL_KEY, UPGRADE_PENDING_KEY, ...material.prfFromAssertion ? [PRF_BACKUP_KEY] : []]
+    });
+  } catch (err) {
+    await discardCredential(material.rawId);
+    throw err;
+  }
+  unlock(material.prfBytes, material.policy.mode === MODE_LARGE_BLOB ? null : ciphertext);
   await requestPersistentStorage();
 }
 function sealEmptyVault(prfBytes) {
@@ -303,6 +430,120 @@ function sealEmptyVault(prfBytes) {
     VAULT_SECRETS_SCOPE,
     bytesToBase64(encodeSecretEntries([]))
   );
+}
+function upgradeStageState(material) {
+  return {
+    ...material.metadata,
+    ...!material.prfFromAssertion && { [PRF_BACKUP_KEY]: bytesToHex(material.prfBytes) },
+    [UPGRADE_PENDING_KEY]: { targetPolicy: material.policy }
+  };
+}
+async function recipherLocalVault(material, { stage = true } = {}) {
+  const localKey = readLocalKey();
+  if (!localKey) throw new Error("LOCAL_VAULT_KEY_MISSING");
+  const oldMainOverride = isUnlocked() ? sealCurrentEntries() : null;
+  const releaseTransition = beginVaultTransition();
+  let committed = false;
+  try {
+    const result = await commitVaultProtectionUpgrade(async (snapshot) => {
+      const rekeyer = createVaultRekeyer(localKey, material.prfBytes);
+      try {
+        const oldMain = oldMainOverride || snapshot.state[SECRETS_BLOB_KEY] || sealEmptyVault(localKey);
+        const newMain = rekeyer.secrets(oldMain);
+        const set = {
+          [SECRETS_BLOB_KEY]: newMain,
+          [STORAGE_POLICY_KEY]: material.policy
+        };
+        if (snapshot.state[CONTENT_KEYS_KEY]) {
+          set[CONTENT_KEYS_KEY] = rekeyer.contentKeys(snapshot.state[CONTENT_KEYS_KEY]);
+        }
+        if (snapshot.state[TRUSTED_SIGNERS_KEY]) {
+          set[TRUSTED_SIGNERS_KEY] = rekeyer.localState(snapshot.state[TRUSTED_SIGNERS_KEY], (parsed) => {
+            if (!Array.isArray(parsed)) throw new Error("INVALID_TRUSTED_SIGNERS");
+          });
+        }
+        const messengerLogs = [];
+        for (const record of snapshot.messengerLogs) {
+          if (!record?.sealed) {
+            messengerLogs.push(record);
+            continue;
+          }
+          try {
+            messengerLogs.push({
+              ...record,
+              sealed: rekeyer.localState(record.sealed, (parsed) => {
+                if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("INVALID_ACTIVITY_LOG");
+              })
+            });
+          } catch {
+            console.warn("dropping corrupt activity-log entry during passkey promotion", record.id);
+          }
+        }
+        return {
+          ...stage && {
+            stageSet: upgradeStageState(material),
+            stageRemove: material.prfFromAssertion ? [PRF_BACKUP_KEY] : []
+          },
+          set,
+          remove: [
+            LOCAL_KEY,
+            UPGRADE_PENDING_KEY,
+            ...material.policy.mode === MODE_IDB ? [PRF_BACKUP_KEY] : []
+          ],
+          messengerLogs,
+          result: { ciphertext: newMain }
+        };
+      } finally {
+        rekeyer.destroy();
+      }
+    });
+    committed = true;
+    unlock(material.prfBytes, result.ciphertext);
+    releaseTransition();
+    await requestPersistentStorage();
+  } catch (err) {
+    if (hasPendingUpgrade()) lock();
+    else if (!committed && material.rawId) await discardCredential(material.rawId);
+    else if (committed) lock();
+    throw err;
+  } finally {
+    localKey.fill(0);
+    releaseTransition();
+    if (!committed && hasPendingUpgrade() && isUnlocked()) lock();
+  }
+}
+async function promoteLocalVault() {
+  if (!hasLocalVault()) throw new Error("LOCAL_VAULT_KEY_MISSING");
+  const material = await createPasskeyMaterial();
+  return recipherLocalVault(material);
+}
+async function resumePendingUpgrade({ freshVerification = false } = {}) {
+  const pending = readUpgradePending();
+  if (!pending || !hasPasskey() || !hasLocalVault()) throw new Error("PASSKEY_UPGRADE_STATE_INVALID");
+  const credentialId = getState(CRED_ID_KEY, "");
+  const credential = await navigator.credentials.get({
+    publicKey: {
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      rpId: window.location.hostname,
+      allowCredentials: [descriptorFromCredentialId(credentialId)],
+      userVerification: "required",
+      extensions: { prf: { eval: { first: PRF_SALT_BYTES } } }
+    },
+    ...freshVerification && { mediation: "required" }
+  });
+  if (!credential) throw new Error("PASSKEY_GET_FAILED");
+  const extensions = extractExtensions(credential);
+  const resolved = resolvePrfMaterial(extensions, {
+    assertionRequired: pending.targetPolicy.mode === MODE_IDB
+  });
+  const policy = resolved.assertion?.length ? storagePolicy(MODE_IDB, pending.targetPolicy.largeBlobSupport) : pending.targetPolicy;
+  return recipherLocalVault({
+    rawId: null,
+    prfBytes: resolved.selected,
+    prfFromAssertion: Boolean(resolved.assertion?.length),
+    policy,
+    metadata: {}
+  }, { stage: false });
 }
 function readPrfBackup() {
   const stored = getState(PRF_BACKUP_KEY, "");
@@ -452,6 +693,7 @@ async function obtainVaultMaterial({ freshVerification = false } = {}) {
   return resolveVaultMaterial(policy, extractExtensions(credential), localCiphertext, action);
 }
 async function unlock2() {
+  if (hasPendingUpgrade()) return resumePendingUpgrade();
   const { prfBytes, ciphertext } = await obtainVaultMaterial();
   unlock(prfBytes, ciphertext);
   await requestPersistentStorage();
@@ -530,9 +772,15 @@ async function writeLargeBlob(ciphertext, policy) {
   await updateState({ set: { [SECRETS_BLOB_KEY]: ciphertext } });
 }
 async function persistSecretsBlob(ciphertext = null) {
+  await waitForVaultTransition();
   if (!isUnlocked()) throw new Error("VAULT_LOCKED");
-  if (!hasPasskey()) throw new Error("PASSKEY_NOT_REGISTERED");
   const sealed = ciphertext ?? sealCurrentEntries();
+  if (!hasPasskey()) {
+    if (!hasLocalVault()) throw new Error("PASSKEY_NOT_REGISTERED");
+    await updateState({ set: { [SECRETS_BLOB_KEY]: sealed } });
+    return;
+  }
+  if (hasPendingUpgrade()) throw new Error("PASSKEY_UPGRADE_PENDING");
   const policy = readStoragePolicy();
   if (!policy) throw new Error("PASSKEY_STORAGE_POLICY_MISSING");
   if (policy.mode === MODE_LARGE_BLOB) return writeLargeBlob(sealed, policy);
@@ -550,6 +798,14 @@ function unsealEntries(prfBytes, ciphertext) {
   return decodeSecretEntries(base64ToBytes(plaintextBase64));
 }
 async function openSecrets() {
+  if (!hasPasskey()) {
+    if (!hasLocalVault()) throw new Error("PASSKEY_NOT_REGISTERED");
+    return discloseCurrentEntries();
+  }
+  if (hasPendingUpgrade()) {
+    await resumePendingUpgrade({ freshVerification: true });
+    return discloseCurrentEntries();
+  }
   const { prfBytes, ciphertext } = await obtainVaultMaterial({ freshVerification: true });
   return unsealEntries(prfBytes, ciphertext);
 }
@@ -584,8 +840,10 @@ async function flushPendingIconUpdate() {
 
 export {
   detectPlatform,
+  isUnprotectedLocalVault,
   hasPasskey,
   ensureRegistered,
+  initializeVaultProtection,
   unlock2 as unlock,
   persistSecretsBlob,
   snapshotSecretsBlob,

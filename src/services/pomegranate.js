@@ -6,6 +6,7 @@ import { generateSecretKey, getPublicKey } from 'libp2r2p/key'
 import { randomAccountName } from './account-names.js'
 import { publishAccountBootstrap } from './account-bootstrap.js'
 import { seededNeutralAvatarDataUrl } from './avatar.js'
+import * as passkey from './passkey.js'
 import {
   abortIntake,
   commitPrepared,
@@ -287,10 +288,12 @@ export async function resolvePomegranateAccount ({
   email,
   fetchImpl = fetch,
   onStep,
-  _createAccount = createPomegranateAccount
+  _createAccount = createPomegranateAccount,
+  beforeCreate
 }) {
   const existing = await getAccount(token, fetchImpl)
   if (existing) return { account: validatePomegranateAccount(existing), bootstrap: null, created: false }
+  await beforeCreate?.()
   const created = await _createAccount({ token, email, fetchImpl, onStep })
   return { ...created, created: true }
 }
@@ -303,17 +306,28 @@ export async function runPomegranateFlow ({
   _resolveAccount = resolvePomegranateAccount,
   _getProfile = getDefaultPomegranateProfile,
   _prepareBunker = prepareBunker,
-  _commitPrepared = commitPrepared
+  _commitPrepared = commitPrepared,
+  _ensureRegistered = passkey.ensureRegistered
 } = {}) {
   const auth = await authenticate()
   const { token, email } = decodePomegranateToken(auth.token)
+  let protectionReady = false
+  const ensureProtection = async () => {
+    if (protectionReady) return
+    await _ensureRegistered()
+    protectionReady = true
+  }
   const { account, bootstrap } = await _resolveAccount({
     token,
     email,
     fetchImpl,
     onStep,
-    _createAccount
+    _createAccount,
+    beforeCreate: ensureProtection
   })
+  // Existing accounts need no remote creation, so settle protection here,
+  // before profile creation or the bunker connection can change state.
+  await ensureProtection()
   const profile = await _getProfile(token, fetchImpl)
   const bunkerUrl = `bunker://${profile.handler_pubkey}?relay=${encodeURIComponent(CENTRAL_RELAY)}`
   const intake = createIntakeToken()
@@ -321,7 +335,7 @@ export async function runPomegranateFlow ({
     const prepared = await _prepareBunker(bunkerUrl, intake, { neutralAvatar: true })
     if (prepared.pubkey !== account.pubkey) throw pomegranateError('POMEGRANATE_ACCOUNT_MISMATCH')
     if (bootstrap && !prepared.skipped) prepared.record = { ...prepared.record, ...bootstrap }
-    if (!prepared.skipped) await _commitPrepared([prepared])
+    if (!prepared.skipped) await _commitPrepared([prepared], { protectionReady })
     return { pubkey: account.pubkey, skipped: Boolean(prepared.skipped) }
   } catch (err) {
     abortIntake(intake)

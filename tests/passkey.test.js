@@ -6,10 +6,12 @@ import * as passkey from '../src/services/passkey.js'
 import * as secrets from '../src/services/secrets.js'
 import * as store from '../src/services/accounts-store.js'
 import * as journal from '../src/services/account-mutation-journal.js'
+import * as messengerLog from '../src/services/messenger-log/index.js'
+import * as trustedSigners from '../src/services/trusted-signers.js'
 import { filterVisibleAccounts, runSecretAccountMutation } from '../src/services/account-mutations.js'
 import { bytesToHex, hexToBytes } from 'libp2r2p/base16'
 import { bytesToBase64Url } from 'libp2r2p/base64'
-import { getState, updateState } from '../src/services/storage/index.js'
+import { appendMessengerLog, getState, updateState } from '../src/services/storage/index.js'
 
 const data = new Map()
 
@@ -26,6 +28,7 @@ if (!globalThis.atob) globalThis.atob = s => Buffer.from(s, 'base64').toString('
 
 afterEach(() => {
   secrets.lock()
+  passkey.setFallbackDecisionForTests(null)
   globalThis.localStorage.clear()
 })
 
@@ -90,6 +93,17 @@ function installCredentialMocks ({
       }
     }
   })
+}
+
+async function enterLocalMode () {
+  passkey.setFallbackDecisionForTests(() => 'local')
+  installCredentialMocks({
+    prfBytes: null,
+    createPrfBytes: null,
+    onCreate: () => { throw Object.assign(new Error('Unavailable'), { name: 'NotAllowedError' }) }
+  })
+  await passkey.ensureRegistered()
+  passkey.setFallbackDecisionForTests(null)
 }
 
 test('empty vault can register passkey and derive a device signer pubkey', async () => {
@@ -369,18 +383,299 @@ test('assertion-only PRF registration succeeds without a plaintext backup', asyn
   assert.equal(secrets.isUnlocked(), true)
 })
 
-test('registration fails when neither create nor the follow-up assertion yields PRF', async () => {
+test('registration without either PRF offers and can enter local mode', async () => {
+  let fallbackError
+  passkey.setFallbackDecisionForTests(err => {
+    fallbackError = err
+    return 'local'
+  })
   installCredentialMocks({
     prfBytes: new Uint8Array(32),
     createPrfBytes: null,
     onGet: async () => ({ getClientExtensionResults: () => ({}) })
   })
 
-  await assert.rejects(passkey.ensureRegistered(), /PASSKEY_PRF_REQUIRED/)
+  await passkey.ensureRegistered()
 
+  assert.match(fallbackError.message, /PASSKEY_PRF_REQUIRED/)
   assert.equal(getState('ez-vault:passkey:credential-id'), null)
   assert.equal(getState('ez-vault:passkey:prf'), null)
+  assert.match(getState('ez-vault:passkey:local-key'), /^[0-9a-f]{64}$/)
+  assert.ok(getState('ez-vault:passkey:blob'))
+  assert.equal(secrets.isUnlocked(), true)
+})
+
+test('missing WebAuthn API offers local mode', async () => {
+  Object.defineProperty(globalThis, 'PublicKeyCredential', { configurable: true, value: undefined })
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: { location: { hostname: 'localhost' } }
+  })
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: { userAgent: 'Node Test', storage: { persist: async () => true } }
+  })
+  let fallbackError
+  passkey.setFallbackDecisionForTests(err => {
+    fallbackError = err
+    return 'local'
+  })
+
+  await passkey.ensureRegistered()
+
+  assert.match(fallbackError.message, /PASSKEY_API_UNAVAILABLE/)
+  assert.match(getState('ez-vault:passkey:local-key'), /^[0-9a-f]{64}$/)
+  assert.equal(secrets.isUnlocked(), true)
+})
+
+test('a refused registration can be retried without entering local mode', async () => {
+  const prfBytes = new Uint8Array(32)
+  prfBytes[0] = 27
+  let creates = 0
+  let choices = 0
+  passkey.setFallbackDecisionForTests(() => {
+    choices++
+    return 'retry'
+  })
+  installCredentialMocks({
+    prfBytes,
+    onCreate: () => {
+      creates++
+      if (creates === 1) throw Object.assign(new Error('Cancelled'), { name: 'NotAllowedError' })
+    }
+  })
+
+  await passkey.ensureRegistered()
+
+  assert.equal(creates, 2)
+  assert.equal(choices, 1)
+  assert.equal(getState('ez-vault:passkey:local-key'), null)
+  assert.equal(getState('ez-vault:passkey:storage-policy').mode, 'idb')
+})
+
+test('local mode opens current secrets without WebAuthn', async () => {
+  await enterLocalMode()
+  assert.equal(passkey.isUnprotectedLocalVault(), true)
+  const seckey = bytesToHex(generateSecretKey())
+  const pubkey = getPublicKey(hexToBytes(seckey))
+  await secrets.setNsecSecret(pubkey, seckey)
+  await passkey.persistSecretsBlob()
+  let gets = 0
+  navigator.credentials.get = async () => { gets++; throw new Error('must not prompt') }
+
+  const entries = await passkey.openSecrets()
+
+  assert.equal(gets, 0)
+  assert.equal(entries.find(entry => entry.pubkey === pubkey)?.seckey, seckey)
+})
+
+test('local mode restores automatically on a later startup', async () => {
+  await enterLocalMode()
+  const seckey = bytesToHex(generateSecretKey())
+  const pubkey = getPublicKey(hexToBytes(seckey))
+  await secrets.setNsecSecret(pubkey, seckey)
+  await passkey.persistSecretsBlob()
+  secrets.lock()
+
+  await passkey.initializeVaultProtection()
+
+  assert.equal(secrets.isUnlocked(), true)
+  assert.deepEqual(secrets.listSecretRefs(), [{ type: 'nsec', pubkey }])
+})
+
+test('local mode promotion reciphers every durable sensitive payload', async () => {
+  await enterLocalMode()
+  const seckey = bytesToHex(generateSecretKey())
+  const pubkey = getPublicKey(hexToBytes(seckey))
+  const contentSeckey = bytesToHex(generateSecretKey())
+  const trustedPubkey = getPublicKey(generateSecretKey())
+  await secrets.setNsecSecret(pubkey, seckey)
+  await secrets.setContentKeySecret(pubkey, contentSeckey, 123)
+  await trustedSigners.add({ pubkey: trustedPubkey, platform: 'Test device' })
+  await messengerLog.append({ method: 'sign_event', status: 'success', params: ['sensitive'] })
+  await appendMessengerLog({
+    ts: 1,
+    appKey: 'launcher',
+    method: 'corrupt',
+    status: 'failure',
+    sealed: 'not-a-valid-ciphertext'
+  })
+  await passkey.persistSecretsBlob()
+
+  const prfBytes = new Uint8Array(32)
+  prfBytes[0] = 28
+  installCredentialMocks({ prfBytes })
+  await passkey.ensureRegistered()
+
+  assert.equal(getState('ez-vault:passkey:local-key'), null)
+  assert.equal(getState('ez-vault:passkey:upgrade-pending'), null)
+  assert.equal(getState('ez-vault:passkey:storage-policy').mode, 'idb')
+  assert.equal(getState('ez-vault:passkey:prf'), null)
+
+  secrets.lock()
+  await passkey.unlock()
+  assert.deepEqual(secrets.listSecretRefs(), [{ type: 'nsec', pubkey }])
+  assert.equal(secrets.listContentKeys(pubkey).length, 1)
+  assert.equal(trustedSigners.list()[0].pubkey, trustedPubkey)
+  const logs = await messengerLog.list()
+  assert.equal(logs.some(entry => entry.method === 'corrupt'), false)
+  assert.deepEqual(logs.find(entry => entry.method === 'sign_event')?.params, ['sensitive'])
+})
+
+test('create-only promotion keeps a reciphered IDB fallback until largeBlob sync', async () => {
+  await enterLocalMode()
+  const seckey = bytesToHex(generateSecretKey())
+  const pubkey = getPublicKey(hexToBytes(seckey))
+  await secrets.setNsecSecret(pubkey, seckey)
+  await passkey.persistSecretsBlob()
+
+  const prfBytes = new Uint8Array(32)
+  prfBytes[0] = 29
+  let getCalls = 0
+  let remoteCiphertext = ''
+  installCredentialMocks({
+    prfBytes,
+    onGet: async options => {
+      getCalls++
+      const write = options.publicKey.extensions.largeBlob?.write
+      if (write) remoteCiphertext = new TextDecoder().decode(write)
+      return {
+        getClientExtensionResults: () => write ? { largeBlob: { written: true } } : {}
+      }
+    }
+  })
+
+  await passkey.ensureRegistered()
+  assert.equal(getCalls, 1)
+  assert.equal(getState('ez-vault:passkey:storage-policy').mode, 'largeblob')
+  assert.equal(getState('ez-vault:passkey:prf'), bytesToHex(prfBytes))
+  assert.ok(getState('ez-vault:passkey:blob'))
+  assert.equal(getState('ez-vault:passkey:local-key'), null)
+
+  secrets.lock()
+  await passkey.unlock()
+  assert.equal(getCalls, 2)
+  assert.ok(remoteCiphertext)
+  assert.equal(getState('ez-vault:passkey:blob'), null)
+  assert.deepEqual(secrets.listSecretRefs(), [{ type: 'nsec', pubkey }])
+})
+
+test('create-only promotion uses IDB compatibility mode without largeBlob support', async () => {
+  await enterLocalMode()
+  const seckey = bytesToHex(generateSecretKey())
+  const pubkey = getPublicKey(hexToBytes(seckey))
+  await secrets.setNsecSecret(pubkey, seckey)
+  await passkey.persistSecretsBlob()
+
+  const prfBytes = new Uint8Array(32)
+  prfBytes[0] = 32
+  installCredentialMocks({
+    prfBytes,
+    largeBlobSupported: false,
+    onGet: async () => ({ getClientExtensionResults: () => ({}) })
+  })
+
+  await passkey.ensureRegistered()
+
+  assert.equal(getState('ez-vault:passkey:storage-policy').mode, 'idb-compat')
+  assert.equal(getState('ez-vault:passkey:prf'), bytesToHex(prfBytes))
+  assert.ok(getState('ez-vault:passkey:blob'))
+  assert.equal(getState('ez-vault:passkey:local-key'), null)
+  assert.deepEqual(secrets.listSecretRefs(), [{ type: 'nsec', pubkey }])
+})
+
+test('essential sidecar corruption aborts promotion before staging', async () => {
+  await enterLocalMode()
+  const priorLocalKey = getState('ez-vault:passkey:local-key')
+  await updateState({ set: { 'ez-vault:trusted-signers': 'corrupt' } })
+  const prfBytes = new Uint8Array(32)
+  prfBytes[0] = 31
+  installCredentialMocks({ prfBytes })
+
+  await assert.rejects(passkey.ensureRegistered())
+
+  assert.equal(getState('ez-vault:passkey:local-key'), priorLocalKey)
+  assert.equal(getState('ez-vault:passkey:credential-id'), null)
+  assert.equal(getState('ez-vault:passkey:upgrade-pending'), null)
+  assert.equal(secrets.isUnlocked(), true)
+})
+
+test('vault transition barrier delays activity-log encryption until release', async () => {
+  await enterLocalMode()
+  const release = secrets.beginVaultTransition()
+  let completed = false
+  const pending = messengerLog.append({ method: 'barrier', params: ['secret'] }).then(() => { completed = true })
+  await Promise.resolve()
+  assert.equal(completed, false)
+
+  release()
+  await pending
+
+  assert.equal(completed, true)
+  assert.deepEqual((await messengerLog.list())[0].params, ['secret'])
+})
+
+test('vault transition barrier delays the main secrets ciphertext write', async () => {
+  await enterLocalMode()
+  const release = secrets.beginVaultTransition()
+  let completed = false
+  const pending = passkey.persistSecretsBlob().then(() => { completed = true })
+  await Promise.resolve()
+  assert.equal(completed, false)
+
+  release()
+  await pending
+
+  assert.equal(completed, true)
+  assert.ok(getState('ez-vault:passkey:blob'))
+})
+
+test('vault transition barrier delays secret account mutation snapshots', async () => {
+  await enterLocalMode()
+  const release = secrets.beginVaultTransition()
+  let applied = false
+  const pending = runSecretAccountMutation({
+    operation: 'barrier-test',
+    apply: async () => { applied = true },
+    finalize: async () => {}
+  })
+  await Promise.resolve()
+  assert.equal(applied, false)
+
+  release()
+  await pending
+
+  assert.equal(applied, true)
+})
+
+test('a staged promotion stays locked on reload and resumes with its passkey', async () => {
+  await enterLocalMode()
+  const seckey = bytesToHex(generateSecretKey())
+  const pubkey = getPublicKey(hexToBytes(seckey))
+  await secrets.setNsecSecret(pubkey, seckey)
+  await passkey.persistSecretsBlob()
+  await updateState({
+    set: {
+      'ez-vault:passkey:credential-id': 'AQIDBA',
+      'ez-vault:passkey:transports': [],
+      'ez-vault:passkey:upgrade-pending': {
+        targetPolicy: { mode: 'idb', largeBlobSupport: 'supported', cleanupPending: false }
+      }
+    }
+  })
+  secrets.lock()
+
+  await passkey.initializeVaultProtection()
   assert.equal(secrets.isUnlocked(), false)
+
+  const prfBytes = new Uint8Array(32)
+  prfBytes[0] = 30
+  installCredentialMocks({ prfBytes })
+  await passkey.unlock()
+
+  assert.equal(getState('ez-vault:passkey:local-key'), null)
+  assert.equal(getState('ez-vault:passkey:upgrade-pending'), null)
+  assert.deepEqual(secrets.listSecretRefs(), [{ type: 'nsec', pubkey }])
 })
 
 test('registration rejects inconsistent PRF outputs from create and get', async () => {
@@ -388,6 +683,11 @@ test('registration rejects inconsistent PRF outputs from create and get', async 
   createPrfBytes[0] = 13
   const assertionPrfBytes = new Uint8Array(32)
   assertionPrfBytes[0] = 14
+  let fallbackOffered = false
+  passkey.setFallbackDecisionForTests(() => {
+    fallbackOffered = true
+    return 'local'
+  })
   installCredentialMocks({ prfBytes: assertionPrfBytes, createPrfBytes })
 
   await assert.rejects(passkey.ensureRegistered(), /PASSKEY_PRF_MISMATCH/)
@@ -395,6 +695,7 @@ test('registration rejects inconsistent PRF outputs from create and get', async 
   assert.equal(getState('ez-vault:passkey:credential-id'), null)
   assert.equal(getState('ez-vault:passkey:prf'), null)
   assert.equal(secrets.isUnlocked(), false)
+  assert.equal(fallbackOffered, false)
 })
 
 test('secret account mutation in IDB mode persists without another WebAuthn ceremony', async () => {
@@ -555,6 +856,35 @@ test('failed finalization restores accounts, memory, and prior IndexedDB ciphert
     },
     finalize: () => { throw new Error('finalize failed') }
   }), /finalize failed/)
+
+  assert.equal(store.get(record.pubkey), null)
+  assert.equal(secrets.hasSecretRef({ type: 'nsec', pubkey: record.pubkey }), false)
+  assert.equal(getState('ez-vault:passkey:blob'), priorCiphertext)
+  assert.equal(journal.read(), null)
+})
+
+test('failed local-mode mutation restores memory and its prior IDB ciphertext', async () => {
+  await enterLocalMode()
+  await passkey.persistSecretsBlob()
+  const priorCiphertext = getState('ez-vault:passkey:blob')
+  const secret = bytesToHex(generateSecretKey())
+  const record = {
+    type: 'nsec',
+    pubkey: getPublicKey(hexToBytes(secret)),
+    name: 'Local rollback account',
+    picture: ''
+  }
+
+  await assert.rejects(runSecretAccountMutation({
+    operation: 'create-account-local',
+    beforeAccounts: [],
+    afterAccounts: [record],
+    apply: async () => {
+      await store.add(record)
+      await secrets.setNsecSecret(record.pubkey, secret)
+    },
+    finalize: () => { throw new Error('local finalize failed') }
+  }), /local finalize failed/)
 
   assert.equal(store.get(record.pubkey), null)
   assert.equal(secrets.hasSecretRef({ type: 'nsec', pubkey: record.pubkey }), false)

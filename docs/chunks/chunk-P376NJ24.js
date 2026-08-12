@@ -1,19 +1,19 @@
 import {
   publishAccountBootstrap,
   randomAccountName
-} from "./chunk-335NQKAM.js";
+} from "./chunk-6JMWJLON.js";
 import {
   abortIntake,
   commitPrepared,
   createIntakeToken,
   prepareBunker
-} from "./chunk-764TZ7DR.js";
-import {
-  error
-} from "./chunk-BDYCOPAX.js";
+} from "./chunk-4GCI2XUV.js";
 import {
   seededNeutralAvatarDataUrl
 } from "./chunk-3RWQBTGN.js";
+import {
+  ensureRegistered
+} from "./chunk-YCKEL573.js";
 import {
   bytesToHex,
   finalizeEvent,
@@ -21,7 +21,10 @@ import {
   getPublicKey,
   isValidEvent,
   sha256
-} from "./chunk-D6BLQV4I.js";
+} from "./chunk-2IRIIQPD.js";
+import {
+  error
+} from "./chunk-BDYCOPAX.js";
 import {
   defineLocales,
   getT,
@@ -5557,10 +5560,12 @@ async function resolvePomegranateAccount({
   email,
   fetchImpl = fetch,
   onStep,
-  _createAccount = createPomegranateAccount
+  _createAccount = createPomegranateAccount,
+  beforeCreate
 }) {
   const existing = await getAccount(token, fetchImpl);
   if (existing) return { account: validatePomegranateAccount(existing), bootstrap: null, created: false };
+  await beforeCreate?.();
   const created = await _createAccount({ token, email, fetchImpl, onStep });
   return { ...created, created: true };
 }
@@ -5572,17 +5577,26 @@ async function runPomegranateFlow({
   _resolveAccount = resolvePomegranateAccount,
   _getProfile = getDefaultPomegranateProfile,
   _prepareBunker = prepareBunker,
-  _commitPrepared = commitPrepared
+  _commitPrepared = commitPrepared,
+  _ensureRegistered = ensureRegistered
 } = {}) {
   const auth = await authenticate();
   const { token, email } = decodePomegranateToken(auth.token);
+  let protectionReady = false;
+  const ensureProtection = async () => {
+    if (protectionReady) return;
+    await _ensureRegistered();
+    protectionReady = true;
+  };
   const { account, bootstrap } = await _resolveAccount({
     token,
     email,
     fetchImpl,
     onStep,
-    _createAccount
+    _createAccount,
+    beforeCreate: ensureProtection
   });
+  await ensureProtection();
   const profile = await _getProfile(token, fetchImpl);
   const bunkerUrl = `bunker://${profile.handler_pubkey}?relay=${encodeURIComponent(CENTRAL_RELAY)}`;
   const intake = createIntakeToken();
@@ -5590,7 +5604,7 @@ async function runPomegranateFlow({
     const prepared = await _prepareBunker(bunkerUrl, intake, { neutralAvatar: true });
     if (prepared.pubkey !== account.pubkey) throw pomegranateError("POMEGRANATE_ACCOUNT_MISMATCH");
     if (bootstrap && !prepared.skipped) prepared.record = { ...prepared.record, ...bootstrap };
-    if (!prepared.skipped) await _commitPrepared([prepared]);
+    if (!prepared.skipped) await _commitPrepared([prepared], { protectionReady });
     return { pubkey: account.pubkey, skipped: Boolean(prepared.skipped) };
   } catch (err) {
     abortIntake(intake);

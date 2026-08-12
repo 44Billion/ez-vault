@@ -11,6 +11,7 @@ import * as toast from './shared/toast.js'
 import { injectComponentStyles } from '../helpers/dom.js'
 import { defineLocales, getT, subscribeLocaleChanged } from '../i18n/index.js'
 import { subscribePomegranateBusy } from '../services/pomegranate.js'
+import * as passkey from '../services/passkey.js'
 import './google-login-button.js'
 
 const ICON_X = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6l-12 12" /><path d="M6 6l12 12" /></svg>'
@@ -25,6 +26,7 @@ export const accountAddLocales = defineLocales({
   'Add a private key, public key, or bunker URL': ['Ajouter une clé privée, une clé publique ou une URL bunker', 'Aggiungi una chiave privata, pubblica o un URL bunker', 'Privaten Schlüssel, öffentlichen Schlüssel oder Bunker-URL hinzufügen', 'Añadir una clave privada, pública o una URL bunker', 'Adicionar uma chave privada, pública ou URL bunker', 'Добавить закрытый ключ, открытый ключ или URL bunker', '添加私钥、公钥或 bunker URL', '新增私鑰、公鑰或 bunker URL', '秘密鍵、公開鍵、または bunker URL を追加', '개인 키, 공개 키 또는 bunker URL 추가'],
   'Scan QR': ['Scanner le QR', 'Scansiona QR', 'QR scannen', 'Escanear QR', 'Ler QR', 'Сканировать QR', '扫描二维码', '掃描 QR 碼', 'QR をスキャン', 'QR 스캔'],
   Add: ['Ajouter', 'Aggiungi', 'Hinzufügen', 'Añadir', 'Adicionar', 'Добавить', '添加', '新增', '追加', '추가'],
+  Or: ['Ou', 'Oppure', 'Oder', 'O', 'Ou', 'Или', '或', '或', 'または', '또는'],
   'Stop scanning': ['Arrêter le scan', 'Interrompi scansione', 'Scannen beenden', 'Detener escaneo', 'Parar leitura', 'Остановить сканирование', '停止扫描', '停止掃描', 'スキャンを停止', '스캔 중지'],
   'Use "Sync Devices" for nostrpair URLs.': ['Utilisez « Synchroniser les appareils » pour les URL nostrpair.', 'Usa "Sincronizza dispositivi" per gli URL nostrpair.', 'Verwende „Geräte synchronisieren“ für nostrpair-URLs.', 'Usa «Sincronizar dispositivos» para las URL nostrpair.', 'Use “Sincronizar dispositivos” para URLs nostrpair.', 'Для URL nostrpair используйте «Синхронизировать устройства».', '请使用“同步设备”处理 nostrpair URL。', '請使用「同步裝置」處理 nostrpair URL。', 'nostrpair URL には「デバイスを同期」を使用してください。', 'nostrpair URL에는 “기기 동기화”를 사용하세요.']
 })
@@ -39,7 +41,7 @@ const STYLES = /* css */`
     transition: max-height 280ms ease-out;
   }
   account-add[open] {
-    max-height: 112px;
+    max-height: 152px;
   }
   /* Scan flow swaps the input row out for a camera preview + Stop button.
      Drop the height cap entirely so the video gets its natural box. */
@@ -127,10 +129,26 @@ const STYLES = /* css */`
     width: 16px;
     height: 16px;
   }
+  account-add .add-method-separator {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 10px 0;
+    color: var(--fg-faint);
+    font-size: 11rem;
+    line-height: 1;
+    text-transform: lowercase;
+  }
+  account-add .add-method-separator::before,
+  account-add .add-method-separator::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background-color: var(--border);
+  }
   account-add .google-login-row {
     display: flex;
     justify-content: center;
-    margin-top: 8px;
   }
   account-add .google-login-row .google-login-button {
     width: 100%;
@@ -194,6 +212,7 @@ const TEMPLATE = /* html */`
         <span class="add-btn-icon">${ICON_CHECK}</span>
       </button>
     </div>
+    <div class="add-method-separator" role="separator"><span></span></div>
     <div class="google-login-row"><google-login-button></google-login-button></div>
   </form>
   <div class="scan-overlay">
@@ -210,6 +229,7 @@ export class AccountAdd extends HTMLElement {
   #scanBtn
   #confirmBtn
   #confirmIcon
+  #methodSeparator
   #scanWrap
   #scanStopBtn
   #errorTimer = null
@@ -236,6 +256,7 @@ export class AccountAdd extends HTMLElement {
     this.#scanBtn = this.querySelector('button[data-action="scan"]')
     this.#confirmBtn = this.querySelector('button[data-action="confirm"]')
     this.#confirmIcon = this.#confirmBtn.querySelector('.add-btn-icon')
+    this.#methodSeparator = this.querySelector('.add-method-separator')
     this.#scanWrap = this.querySelector('.scan-video-wrap')
     this.#scanStopBtn = this.querySelector('.scan-stop')
 
@@ -345,11 +366,16 @@ export class AccountAdd extends HTMLElement {
 
   async #dispatch (raw, token) {
     let prepared
-    if (raw.startsWith('bunker://')) prepared = await prepareBunker(raw, token)
-    else if (raw.startsWith('npub1')) prepared = await prepareNpub(raw)
+    let protectionReady = false
+    if (raw.startsWith('bunker://')) {
+      // Register/promote before a one-use bunker secret can be consumed.
+      await passkey.ensureRegistered()
+      protectionReady = true
+      prepared = await prepareBunker(raw, token)
+    } else if (raw.startsWith('npub1')) prepared = await prepareNpub(raw)
     else prepared = await prepareSeckey(raw)
     if (prepared.skipped) throw new Error(prepared.reason)
-    await commitPrepared([prepared])
+    await commitPrepared([prepared], { protectionReady })
   }
 
   #setBusy (on) {
@@ -432,6 +458,8 @@ export class AccountAdd extends HTMLElement {
     this.#input.placeholder = t('Add a private key, public key, or bunker URL')
     this.#scanBtn.title = t('Scan QR')
     this.#confirmBtn.title = t('Add')
+    this.#methodSeparator.setAttribute('aria-label', t('Or'))
+    this.#methodSeparator.querySelector('span').textContent = t('Or')
     this.#scanStopBtn.title = t('Stop scanning')
   }
 }

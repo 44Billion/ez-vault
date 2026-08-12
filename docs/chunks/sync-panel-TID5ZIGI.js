@@ -7,21 +7,15 @@ import {
   commitPrepared,
   createIntakeToken,
   prepareBareKey
-} from "./chunk-764TZ7DR.js";
-import "./chunk-RRGKXN3E.js";
-import "./chunk-KFD6KK7E.js";
+} from "./chunk-4GCI2XUV.js";
+import "./chunk-3RWQBTGN.js";
+import "./chunk-7O7SSKHM.js";
+import "./chunk-AZYRZ53H.js";
 import {
   detectPlatform,
   ensureRegistered,
   openSecrets
-} from "./chunk-AQSHSQLO.js";
-import {
-  error,
-  info,
-  success,
-  warning
-} from "./chunk-BDYCOPAX.js";
-import "./chunk-3RWQBTGN.js";
+} from "./chunk-YCKEL573.js";
 import {
   Nip46Client,
   Nip46ServerSession,
@@ -38,7 +32,13 @@ import {
   nsecFromHex,
   parseNostrpairInput,
   relayPool
-} from "./chunk-D6BLQV4I.js";
+} from "./chunk-2IRIIQPD.js";
+import {
+  error,
+  info,
+  success,
+  warning
+} from "./chunk-BDYCOPAX.js";
 import {
   defineLocales,
   getT,
@@ -2370,6 +2370,7 @@ var SyncHost = class extends HTMLElement {
   #resetTimer = null;
   #session = null;
   #openToken = null;
+  #protectionReady = false;
   // Peer signer announced over `register_trusted_signer`; folded into the
   // commit when the exchange request lands so trust + secrets persist
   // (or roll back) together.
@@ -2406,6 +2407,7 @@ var SyncHost = class extends HTMLElement {
     if (this.#codeCopyTimer) clearTimeout(this.#codeCopyTimer);
     this.#clearResetTimer();
     this.#openToken = null;
+    this.#protectionReady = false;
     this.#session?.close();
     this.#unsubscribeLocale?.();
     this.#unsubscribeLocale = null;
@@ -2420,6 +2422,7 @@ var SyncHost = class extends HTMLElement {
     const wasPreparing = Boolean(this.#openToken);
     if (!wasOpen && !wasPreparing && !this.#session && !this.#intakeToken) return;
     this.#openToken = null;
+    this.#protectionReady = false;
     this.removeAttribute("open");
     if (wasOpen) {
       this.list?.exitSelectionMode();
@@ -2477,6 +2480,7 @@ var SyncHost = class extends HTMLElement {
     try {
       await ensureRegistered();
       if (this.#openToken !== token) return;
+      this.#protectionReady = true;
       await this.#startSession();
     } catch (err) {
       if (this.#openToken !== token) return;
@@ -2507,7 +2511,10 @@ var SyncHost = class extends HTMLElement {
       // symmetric `register_trusted_signer` back to the joiner.
       onTrustedSignerReceived: async ({ platform, signerPubkey }) => {
         this.#peerSigner = { pubkey: signerPubkey, platform };
-        await ensureRegistered();
+        if (!this.#protectionReady) {
+          await ensureRegistered();
+          this.#protectionReady = true;
+        }
         const ourSignerPubkey = await getDeviceSignerPubkey();
         return { signerPubkey: ourSignerPubkey, platform: detectPlatform() };
       },
@@ -2570,7 +2577,10 @@ var SyncHost = class extends HTMLElement {
       }
       if (token.cancelled) throw new Error("IMPORT_CANCELLED");
       const peerSigner = this.#peerSigner ? { pubkey: this.#peerSigner.pubkey, platform: peerPlatform || this.#peerSigner.platform } : null;
-      await commitPrepared(prepared, { peerSigner });
+      await commitPrepared(prepared, {
+        peerSigner,
+        protectionReady: this.#protectionReady
+      });
       const summary = peerAccounts.length === 0 ? t("Devices synced") : t("Synced: imported {{count}} accounts", { count: prepared.length });
       if (errors.length) warning(t("{{summary}} ({{count}} failed)", { summary, count: errors.length }), errors.join("\n"));
       else success(summary);
@@ -3185,7 +3195,8 @@ var SyncJoiner = class extends HTMLElement {
       }
       if (token.cancelled) throw new Error("IMPORT_CANCELLED");
       await commitPrepared(prepared, {
-        peerSigner: { pubkey: peer.signerPubkey, platform: peer.platform || reply.platform }
+        peerSigner: { pubkey: peer.signerPubkey, platform: peer.platform || reply.platform },
+        protectionReady: true
       });
       const summary = reply.accounts.length === 0 ? t2("Devices synced") : t2("Synced: imported {{count}} accounts", { count: prepared.length });
       if (errors.length) warning(t2("{{summary}} ({{count}} failed)", { summary, count: errors.length }), errors.join("\n"));

@@ -104,8 +104,23 @@ When in doubt about a layout decision, ask: "does this still work as a tall vert
   means both values in IDB because `largeBlob` was unavailable. In `largeblob`
   mode, a local ciphertext is a newer write fallback and always wins until it
   is synced to the authenticator.
+- If registration is unavailable or refused before any passkey exists, the
+  user may explicitly enter an unprotected local mode. A random vault key is
+  stored in clear at `ez-vault:passkey:local-key` beside the ordinary
+  ciphertexts; this is equivalent to plaintext against an IndexedDB reader.
+  User-initiated account creation/import and trusted-device mutations retry
+  registration. Copying or removing an existing account, plus frequent
+  background writes such as activity logs, content-key rotation and bunker
+  drift, do not open WebAuthn. Promotion reciphers the vault blob,
+  content keys, trusted signers and sealed activity-log fields under PRF in
+  one `state` + `messengerLog` transaction, then removes the local key.
+  `ez-vault:passkey:upgrade-pending` makes the short staged window recoverable;
+  once present it must be completed with that passkey and must not fall back
+  to local unlock.
 - Raw `nsec`, bunker handler pubkeys, bunker client keys, content-key secret
-  keys and decrypted activity payloads must never be persisted in plaintext.
+  keys and decrypted activity payloads must never be persisted literally in
+  plaintext. The explicit local mode is the sole equivalent-security
+  exception because its decryption key is co-resident in IndexedDB.
   Bunker account records keep only normalized relay URLs publicly; the
   encrypted TLV repeats the account pubkey as its deterministic local index
   and carries `handlerPubkey || clientKey`. The create-time PRF
@@ -145,7 +160,9 @@ When in doubt about a layout decision, ask: "does this still work as a tall vert
 - Bunker backup URLs use a strictly validated local
   `#client_key=<64 lowercase hex>` fragment. Strip the fragment before any
   NIP-46 connection, never retain a consumed one-use `secret`, and require a
-  fresh `passkey.openSecrets()` before copying the backup. New encrypted bunker
+  fresh `passkey.openSecrets()` before copying the backup in passkey-backed
+  modes; local mode deliberately discloses its already-unlocked entry without
+  registering a passkey. New encrypted bunker
   TLVs are 96 bytes (`accountPubkey || handlerPubkey || clientKey`); continue to
   decode legacy 64-byte (`accountPubkey || clientKey`) records and migrate them
   only after a normal secret write has committed. `switch_relays` changes only

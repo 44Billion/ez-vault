@@ -2,6 +2,7 @@ import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { webcrypto } from 'node:crypto'
 import * as secrets from '../src/services/secrets.js'
+import * as passkey from '../src/services/passkey.js'
 
 const storage = new Map()
 const styles = new Map()
@@ -252,6 +253,7 @@ test('sync-host returns to picker and shows toast when passkey prompt is cancell
       }
     }
   })
+  passkey.setFallbackDecisionForTests(() => 'cancel')
 
   let closed = 0
   const host = mountHost()
@@ -270,6 +272,7 @@ test('sync-host returns to picker and shows toast when passkey prompt is cancell
     })
     assert.deepEqual(errors, [])
   } finally {
+    passkey.setFallbackDecisionForTests(null)
     console.error = originalError
   }
 })

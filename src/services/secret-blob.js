@@ -4,8 +4,9 @@ import { encodeTlv, decodeTlv } from '../helpers/tlv.js'
 
 // Wire format for the encrypted secret blob persisted through passkey.js's
 // adaptive IDB/largeBlob policy. The bytes here are the *plaintext* — the
-// surrounding NIP-44 self-encryption (with the PRF-derived vault key) lives in
-// secrets.js (seal-time) and passkey.js (open-time).
+// surrounding NIP-44 self-encryption lives in secrets.js (seal-time) and
+// passkey.js (open-time). Its active key is normally PRF-derived; the explicit
+// unprotected mode instead stores that key beside the ciphertext in IDB.
 //
 // Forward compatibility: the decoder ignores any type tag it doesn't
 // recognize, so future record kinds can be added without breaking older

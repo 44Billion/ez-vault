@@ -3,28 +3,26 @@ import {
   subscribe
 } from "./chunk-OQVZFKQZ.js";
 import {
+  removeForPubkey
+} from "./chunk-JDLAFNFY.js";
+import {
   claimSigner
-} from "./chunk-K4MQVI3L.js";
+} from "./chunk-VQVK5FPU.js";
 import {
   publishAccountBootstrap,
   randomAccountName
-} from "./chunk-335NQKAM.js";
-import {
-  runSecretAccountMutation
-} from "./chunk-RRGKXN3E.js";
-import {
-  ensureRegistered,
-  openSecrets
-} from "./chunk-AQSHSQLO.js";
-import {
-  error
-} from "./chunk-BDYCOPAX.js";
-import {
-  removeForPubkey
-} from "./chunk-W44MUTZ3.js";
+} from "./chunk-6JMWJLON.js";
 import {
   seededAvatarDataUrl
 } from "./chunk-3RWQBTGN.js";
+import {
+  runSecretAccountMutation
+} from "./chunk-7O7SSKHM.js";
+import {
+  ensureRegistered,
+  isUnprotectedLocalVault,
+  openSecrets
+} from "./chunk-YCKEL573.js";
 import {
   add,
   applyRecords,
@@ -40,7 +38,10 @@ import {
   resolveWriteRelays,
   setNsecSecret,
   update
-} from "./chunk-D6BLQV4I.js";
+} from "./chunk-2IRIIQPD.js";
+import {
+  error
+} from "./chunk-BDYCOPAX.js";
 import {
   defineLocales,
   getT,
@@ -671,12 +672,12 @@ var AccountAvatar = class extends HTMLElement {
     icon?.classList.add("pulsate");
     try {
       const name = this.#readNameValue();
+      await ensureRegistered();
       const bootstrap = await publishAccountBootstrap({
         secretKey: draft.secretKey,
         name,
         picture: draft.picture
       });
-      await ensureRegistered();
       const record = {
         type: "nsec",
         pubkey: draft.pubkey,
@@ -727,6 +728,7 @@ var AccountAvatar = class extends HTMLElement {
       if (btn) btn.disabled = true;
       icon?.classList.add("pulsate");
       try {
+        if (!isUnprotectedLocalVault()) await ensureRegistered();
         await runSecretAccountMutation({
           operation: "delete-account",
           beforeAccounts: [account],

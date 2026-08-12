@@ -598,7 +598,8 @@ export class SyncJoiner extends HTMLElement {
       if (token.cancelled) throw new Error('IMPORT_CANCELLED')
 
       await commitPrepared(prepared, {
-        peerSigner: { pubkey: peer.signerPubkey, platform: peer.platform || reply.platform }
+        peerSigner: { pubkey: peer.signerPubkey, platform: peer.platform || reply.platform },
+        protectionReady: true
       })
 
       const summary = reply.accounts.length === 0

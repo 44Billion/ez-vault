@@ -4,8 +4,9 @@ import {
   isUnlocked,
   updateState,
   vaultDecrypt,
-  vaultEncrypt
-} from "./chunk-D6BLQV4I.js";
+  vaultEncrypt,
+  waitForVaultTransition
+} from "./chunk-2IRIIQPD.js";
 import {
   __export
 } from "./chunk-NZLE2WMY.js";
@@ -152,6 +153,7 @@ function readRecords() {
   return decodeRecords(getState(KEY));
 }
 async function writeRecords(records, detail = {}) {
+  await waitForVaultTransition();
   if (!isUnlocked()) throw new Error("VAULT_LOCKED");
   const pruned = pruneTombstones(records);
   if (!pruned.length) {

@@ -18,6 +18,7 @@ import { setVaultViewShell } from './services/view-state.js'
 // while IndexedDB is still opening. Initialization fails closed when IDB is
 // unavailable.
 await initializeStorage()
+await passkey.initializeVaultProtection()
 await Promise.all([
   import('./components/account-list.js'),
   import('./components/account-add.js'),

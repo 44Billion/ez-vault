@@ -260,17 +260,23 @@ export async function prepareBunker (bunkerUrlInput, token, options = {}) {
 // and ciphertext from a snapshot taken just before commit, and restore local
 // encrypted sidecars such as content keys and trusted signers.
 //
+// `options.protectionReady` means the caller already completed
+// `ensureRegistered()` earlier in this same user operation, before an
+// irreversible remote step (for example consuming a bunker secret). It avoids
+// immediately asking a local-mode user for the same decision again; a later,
+// independent mutation still retries promotion normally.
+//
 // `options.peerSigner` is `{ pubkey, platform }` — the single device
 // signer pubkey the peer announced in `register_trusted_signer`. We
 // fold it into the trusted-signers write so the trust + the secrets
 // land (or roll back) together.
 export async function commitPrepared (prepared, options = {}) {
-  const { peerSigner = null } = options
+  const { peerSigner = null, protectionReady = false } = options
   if (!prepared.length && !peerSigner) return
   const needsSecretsPersist = prepared.some(p => p.type !== 'npub')
   // ensureRegistered if EITHER we'll persist secrets OR encrypt
   // the trusted-signers list (vault-key encryption).
-  if (needsSecretsPersist || peerSigner) await passkey.ensureRegistered()
+  if ((needsSecretsPersist || peerSigner) && !protectionReady) await passkey.ensureRegistered()
   const peerSignerActorPubkey = peerSigner ? await secrets.getDeviceSignerPubkey().catch(() => '') : ''
 
   // Store/trusted-signer snapshots are taken AFTER ensureRegistered so a

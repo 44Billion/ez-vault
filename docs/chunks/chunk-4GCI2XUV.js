@@ -1,18 +1,18 @@
 import {
+  seededAvatarDataUrl,
+  seededNeutralAvatarDataUrl
+} from "./chunk-3RWQBTGN.js";
+import {
   runSecretAccountMutation
-} from "./chunk-RRGKXN3E.js";
+} from "./chunk-7O7SSKHM.js";
 import {
   add as add2,
   restore,
   snapshot
-} from "./chunk-KFD6KK7E.js";
+} from "./chunk-AZYRZ53H.js";
 import {
   ensureRegistered
-} from "./chunk-AQSHSQLO.js";
-import {
-  seededAvatarDataUrl,
-  seededNeutralAvatarDataUrl
-} from "./chunk-3RWQBTGN.js";
+} from "./chunk-YCKEL573.js";
 import {
   add,
   extractBunkerClientKey,
@@ -30,7 +30,7 @@ import {
   remove,
   replace,
   setNsecSecret
-} from "./chunk-D6BLQV4I.js";
+} from "./chunk-2IRIIQPD.js";
 
 // src/services/account-intake.js
 function createIntakeToken() {
@@ -227,10 +227,10 @@ async function prepareBunker(bunkerUrlInput, token, options = {}) {
   }
 }
 async function commitPrepared(prepared, options = {}) {
-  const { peerSigner = null } = options;
+  const { peerSigner = null, protectionReady = false } = options;
   if (!prepared.length && !peerSigner) return;
   const needsSecretsPersist = prepared.some((p) => p.type !== "npub");
-  if (needsSecretsPersist || peerSigner) await ensureRegistered();
+  if ((needsSecretsPersist || peerSigner) && !protectionReady) await ensureRegistered();
   const peerSignerActorPubkey = peerSigner ? await getDeviceSignerPubkey().catch(() => "") : "";
   const priorStoreRecords = /* @__PURE__ */ new Map();
   for (const p of prepared) priorStoreRecords.set(p.pubkey, get(p.pubkey));

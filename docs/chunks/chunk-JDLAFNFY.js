@@ -5,8 +5,9 @@ import {
   removeMessengerLogsForPubkey,
   updateMessengerLogAppMetadata,
   vaultDecrypt,
-  vaultEncrypt
-} from "./chunk-D6BLQV4I.js";
+  vaultEncrypt,
+  waitForVaultTransition
+} from "./chunk-2IRIIQPD.js";
 
 // src/services/messenger-log/index.js
 var MAX_ENTRIES_PER_APP = 500;
@@ -48,6 +49,7 @@ function subscribe(fn) {
 }
 async function append(entry) {
   try {
+    await waitForVaultTransition();
     const { params, result, ...rest } = entry;
     const sealedFields = {};
     if (params !== void 0) sealedFields.params = params;

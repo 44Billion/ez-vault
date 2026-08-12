@@ -265,6 +265,56 @@ async function updateState({ set = {}, remove: remove2 = [] } = {}) {
     for (const [key, value] of entries) stateCache.set(key, clone(value));
   });
 }
+async function commitVaultProtectionUpgrade(prepare) {
+  if (typeof prepare !== "function") throw new TypeError("VAULT_UPGRADE_PREPARE_REQUIRED");
+  await initializeStorage();
+  return enqueueMutation(async () => {
+    const snapshot = await transaction([STATE_STORE, MESSENGER_LOG_STORE], "readonly", async (tx) => {
+      const state = (await run("getAll", [], STATE_STORE, null, { tx })).result;
+      const messengerLogs = (await run("getAll", [], MESSENGER_LOG_STORE, null, { tx })).result;
+      return {
+        state: Object.fromEntries(state.map((record) => [record.key, clone(record.value)])),
+        messengerLogs: clone(messengerLogs)
+      };
+    });
+    const prepared = await prepare(snapshot);
+    if (!prepared || typeof prepared !== "object") throw new Error("VAULT_UPGRADE_INVALID_RESULT");
+    const stageEntries = Object.entries(prepared.stageSet || {}).map(([key, value]) => [String(key), clone(value)]);
+    const stageRemovals = [...new Set((prepared.stageRemove || []).map(String))];
+    if (stageEntries.length || stageRemovals.length) {
+      await transaction([STATE_STORE], "readwrite", async (tx) => {
+        for (const key of stageRemovals) await run("delete", [key], STATE_STORE, null, { tx });
+        for (const [key, value] of stageEntries) await run("put", [{ key, value }], STATE_STORE, null, { tx });
+      });
+      for (const key of stageRemovals) stateCache.delete(key);
+      for (const [key, value] of stageEntries) stateCache.set(key, clone(value));
+    }
+    const entries = Object.entries(prepared.set || {}).map(([key, value]) => [String(key), clone(value)]);
+    const removals = [...new Set((prepared.remove || []).map(String))];
+    const logs = Array.isArray(prepared.messengerLogs) ? clone(prepared.messengerLogs) : snapshot.messengerLogs;
+    let usage = 0;
+    for (const record of logs) {
+      record.byteSize = 0;
+      while (true) {
+        const nextSize = byteLength(record);
+        if (nextSize === record.byteSize) break;
+        record.byteSize = nextSize;
+      }
+      usage += record.byteSize;
+    }
+    await transaction([STATE_STORE, MESSENGER_LOG_STORE], "readwrite", async (tx) => {
+      for (const key of removals) await run("delete", [key], STATE_STORE, null, { tx });
+      for (const [key, value] of entries) await run("put", [{ key, value }], STATE_STORE, null, { tx });
+      await run("put", [{ key: LOG_USAGE_KEY, value: usage }], STATE_STORE, null, { tx });
+      await run("clear", [], MESSENGER_LOG_STORE, null, { tx });
+      for (const record of logs) await run("put", [record], MESSENGER_LOG_STORE, null, { tx });
+    });
+    for (const key of removals) stateCache.delete(key);
+    for (const [key, value] of entries) stateCache.set(key, clone(value));
+    stateCache.set(LOG_USAGE_KEY, usage);
+    return prepared.result;
+  });
+}
 function setState(key, value) {
   return updateState({ set: { [key]: value } });
 }
@@ -516,7 +566,10 @@ async function applyRecords(affectedPubkeys, records) {
 var secrets_exports = {};
 __export(secrets_exports, {
   adoptBunkerHandle: () => adoptBunkerHandle,
+  beginVaultTransition: () => beginVaultTransition,
+  createVaultRekeyer: () => createVaultRekeyer,
   deleteSecret: () => deleteSecret,
+  discloseCurrentEntries: () => discloseCurrentEntries,
   finalizeLegacyBunkerMigrations: () => finalizeLegacyBunkerMigrations,
   getBunkerHandle: () => getBunkerHandle,
   getContentKeySigner: () => getContentKeySigner,
@@ -544,6 +597,7 @@ __export(secrets_exports, {
   unlock: () => unlock,
   vaultDecrypt: () => vaultDecrypt,
   vaultEncrypt: () => vaultEncrypt,
+  waitForVaultTransition: () => waitForVaultTransition,
   withDeviceSignerSeckey: () => withDeviceSignerSeckey
 });
 
@@ -13614,8 +13668,8 @@ function splitJsonl2(jsonl) {
 // src/helpers/signer-key.js
 var SIGNER_KEY_SALT = "nostr-device-signer-v1";
 var SIGNER_KEY_INFO = "";
-async function deriveSignerSeckey(prfBytes) {
-  return bytesToHex3(await deriveSecretKey(prfBytes, SIGNER_KEY_INFO, SIGNER_KEY_SALT));
+async function deriveSignerSeckey(vaultKeyBytes) {
+  return bytesToHex3(await deriveSecretKey(vaultKeyBytes, SIGNER_KEY_INFO, SIGNER_KEY_SALT));
 }
 
 // src/services/secrets.js
@@ -13627,6 +13681,7 @@ var VAULT_CONTENT_KEYS_SCOPE = "vault-content-keys-v1";
 var VAULT_LOCAL_STATE_SCOPE = "vault-local-state-v1";
 var vaultPrivkey = null;
 var vaultConversationKey = null;
+var vaultTransition = null;
 var nsecSignersByPubkey = /* @__PURE__ */ new Map();
 var bunkerHandlesByPubkey = /* @__PURE__ */ new Map();
 var accountTypeByPubkey = /* @__PURE__ */ new Map();
@@ -13663,13 +13718,76 @@ function nowSeconds6() {
 function deriveVaultConversationKey(vaultKeyBytes) {
   return sharedXOnlySecret(vaultKeyBytes, getPublicKey(vaultKeyBytes));
 }
+function encryptWithConversationKey2(conversationKey2, plaintext, scope) {
+  return encryptWithConversationKey(conversationKey2, VAULT_NIP44_KIND, scope, plaintext);
+}
+function decryptWithConversationKey2(conversationKey2, ciphertext, scope) {
+  return decryptWithConversationKey(conversationKey2, VAULT_NIP44_KIND, scope, ciphertext);
+}
 function vaultEncryptWithScope(plaintext, scope) {
   if (!vaultConversationKey) throw new Error("VAULT_LOCKED");
-  return encryptWithConversationKey(vaultConversationKey, VAULT_NIP44_KIND, scope, plaintext);
+  return encryptWithConversationKey2(vaultConversationKey, plaintext, scope);
 }
 function vaultDecryptWithScope(ciphertext, scope) {
   if (!vaultConversationKey) throw new Error("VAULT_LOCKED");
-  return decryptWithConversationKey(vaultConversationKey, VAULT_NIP44_KIND, scope, ciphertext);
+  return decryptWithConversationKey2(vaultConversationKey, ciphertext, scope);
+}
+function beginVaultTransition() {
+  if (vaultTransition) throw new Error("VAULT_TRANSITION_IN_PROGRESS");
+  let resolve;
+  const promise = new Promise((_resolve) => {
+    resolve = _resolve;
+  });
+  vaultTransition = { promise, resolve };
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const active = vaultTransition;
+    vaultTransition = null;
+    active?.resolve();
+  };
+}
+function waitForVaultTransition() {
+  return vaultTransition?.promise || Promise.resolve();
+}
+function createVaultRekeyer(fromKeyBytes, toKeyBytes) {
+  if (!(fromKeyBytes instanceof Uint8Array) || fromKeyBytes.length !== 32) throw new Error("INVALID_OLD_VAULT_KEY");
+  if (!(toKeyBytes instanceof Uint8Array) || toKeyBytes.length !== 32) throw new Error("INVALID_NEW_VAULT_KEY");
+  const fromConversationKey = deriveVaultConversationKey(fromKeyBytes);
+  const toConversationKey = deriveVaultConversationKey(toKeyBytes);
+  let destroyed = false;
+  const transform = (ciphertext, scope, validate) => {
+    if (destroyed) throw new Error("VAULT_REKEYER_DESTROYED");
+    const plaintext = decryptWithConversationKey2(fromConversationKey, ciphertext, scope);
+    validate?.(plaintext);
+    return encryptWithConversationKey2(toConversationKey, plaintext, scope);
+  };
+  return {
+    secrets(ciphertext) {
+      return transform(ciphertext, VAULT_SECRETS_SCOPE, (plaintext) => {
+        decodeSecretEntries(base64ToBytes(plaintext));
+      });
+    },
+    contentKeys(ciphertext) {
+      return transform(ciphertext, VAULT_CONTENT_KEYS_SCOPE, (plaintext) => {
+        const parsed = JSON.parse(plaintext);
+        if (!Array.isArray(parsed)) throw new Error("INVALID_CONTENT_KEYS");
+        if (parsed.some((entry) => !normalizeContentKeyEntry(entry))) throw new Error("INVALID_CONTENT_KEYS");
+      });
+    },
+    localState(ciphertext, validate) {
+      return transform(ciphertext, VAULT_LOCAL_STATE_SCOPE, (plaintext) => {
+        const parsed = JSON.parse(plaintext);
+        validate?.(parsed);
+      });
+    },
+    destroy() {
+      destroyed = true;
+      fromConversationKey.fill?.(0);
+      toConversationKey.fill?.(0);
+    }
+  };
 }
 function dropPriorEntry(pubkey) {
   const t = accountTypeByPubkey.get(pubkey);
@@ -13849,8 +13967,8 @@ function isUnlocked() {
   return vaultPrivkey !== null;
 }
 function unlock(vaultKeyBytes, ciphertext) {
-  vaultPrivkey = vaultKeyBytes;
-  vaultConversationKey = deriveVaultConversationKey(vaultKeyBytes);
+  vaultPrivkey = new Uint8Array(vaultKeyBytes);
+  vaultConversationKey = deriveVaultConversationKey(vaultPrivkey);
   loadEntries(ciphertext);
   notify2();
 }
@@ -13928,12 +14046,15 @@ async function restoreContentKeySecrets(priorCiphertext) {
   notify2();
 }
 function lock() {
+  vaultPrivkey?.fill?.(0);
+  vaultConversationKey?.fill?.(0);
   vaultPrivkey = null;
   vaultConversationKey = null;
   clearAll();
   notify2();
 }
 async function setNsecSecret(pubkey, seckey) {
+  await waitForVaultTransition();
   if (!isUnlocked()) throw new Error("VAULT_LOCKED");
   const priorContentKeys = snapshotContentKeySecrets();
   const contentKeysChanged = adoptNsec(pubkey, seckey);
@@ -13964,6 +14085,7 @@ function adoptContentKey(ownerPubkey, seckey, createdAt = Math.floor(Date.now() 
   return signer;
 }
 async function setContentKeySecret(ownerPubkey, seckey, createdAt = Math.floor(Date.now() / 1e3)) {
+  await waitForVaultTransition();
   if (!isUnlocked()) throw new Error("VAULT_LOCKED");
   const prior = listRawContentKeyEntriesInternal();
   try {
@@ -13979,6 +14101,7 @@ async function setContentKeySecret(ownerPubkey, seckey, createdAt = Math.floor(D
   }
 }
 async function replaceContentKeySecret(ownerPubkey, seckey, createdAt = Math.floor(Date.now() / 1e3)) {
+  await waitForVaultTransition();
   if (!isUnlocked()) throw new Error("VAULT_LOCKED");
   const prior = listRawContentKeyEntriesInternal();
   try {
@@ -14038,6 +14161,7 @@ async function replyWithContentKeySecrets({ ownerPubkey, pubkeys, send }) {
   return send({ ownerPubkey, keys });
 }
 async function adoptBunkerHandle(pubkey, handle, handlerPubkey, clientKey) {
+  await waitForVaultTransition();
   if (!isUnlocked()) throw new Error("VAULT_LOCKED");
   if (!HEX32.test(handlerPubkey || "")) throw new Error("INVALID_BUNKER_HANDLER");
   const priorContentKeys = snapshotContentKeySecrets();
@@ -14068,6 +14192,7 @@ async function withDeviceSignerSeckey(fn) {
   return fn(hexToBytes3(seckey));
 }
 async function deleteSecret(pubkey) {
+  await waitForVaultTransition();
   const priorContentKeys = snapshotContentKeySecrets();
   let contentKeysChanged = false;
   if (!accountTypeByPubkey.has(pubkey)) {
@@ -14091,6 +14216,7 @@ async function deleteSecret(pubkey) {
   notify2();
 }
 async function transferBunkerSecret(oldPubkey, newPubkey) {
+  await waitForVaultTransition();
   if (!isUnlocked()) throw new Error("VAULT_LOCKED");
   if (accountTypeByPubkey.get(oldPubkey) !== "bunker") return;
   const clientKey = rawClientKeyHexByPubkey.get(oldPubkey);
@@ -14182,6 +14308,10 @@ function listRawContentKeyEntriesInternal() {
   }
   return out;
 }
+function discloseCurrentEntries() {
+  if (!isUnlocked()) throw new Error("VAULT_LOCKED");
+  return structuredClone(listRawEntriesInternal());
+}
 function vaultEncrypt(plaintext) {
   return vaultEncryptWithScope(plaintext, VAULT_LOCAL_STATE_SCOPE);
 }
@@ -14229,6 +14359,7 @@ export {
   getState,
   hasState,
   updateState,
+  commitVaultProtectionUpgrade,
   setState,
   removeState,
   appendMessengerLog,
@@ -14264,6 +14395,9 @@ export {
   getIykcProofs,
   createEventReplyPacker,
   PrivateMessenger,
+  beginVaultTransition,
+  waitForVaultTransition,
+  createVaultRekeyer,
   subscribe3 as subscribe2,
   subscribeContentKeys,
   isUnlocked,
@@ -14271,6 +14405,7 @@ export {
   reload,
   snapshotContentKeySecrets,
   restoreContentKeySecrets,
+  lock,
   setNsecSecret,
   setContentKeySecret,
   replaceContentKeySecret,
@@ -14288,6 +14423,7 @@ export {
   secretStateFingerprint,
   finalizeLegacyBunkerMigrations,
   sealCurrentEntries,
+  discloseCurrentEntries,
   vaultEncrypt,
   vaultDecrypt,
   secrets_exports

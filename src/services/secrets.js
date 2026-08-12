@@ -13,7 +13,9 @@ import * as nip44v3 from 'libp2r2p/nip44-v3'
 import { getState, removeState, setState } from './storage/index.js'
 
 // In-memory home for every account's secret material plus the deterministic
-// vault key derived from the passkey PRF extension. Account secrets live in
+// vault key. It normally comes from the passkey PRF extension; the explicit
+// unprotected mode supplies a random key that is also stored in IndexedDB.
+// Account secrets live in
 // this module while the vault is unlocked, and are otherwise sealed into the
 // ciphertext destination selected by passkey.js's adaptive storage policy.
 //
@@ -29,9 +31,10 @@ import { getState, removeState, setState } from './storage/index.js'
 // - The raw account hex strings are also kept in module-private Maps that
 //   the sealing path (TLV encode → encrypt → adaptive persistence) reads.
 //   Those maps are not exported. There is no `getSeckey` / `getClientKey` /
-//   `exportEntries` surface — the export and copy-nsec flows reach the
-//   raw bytes by going through `passkey.openSecrets()`, which prompts the
-//   user for fresh verification and decrypts the selected ciphertext ad-hoc.
+//   general `getSeckey` / `getClientKey` surface. Passkey-backed export and
+//   copy flows go through a freshly verified `passkey.openSecrets()`; the
+//   deliberate local mode may clone the already-unlocked entries because its
+//   IDB data provides no authentication boundary to preserve.
 //
 // The vault key doubles as a NIP-44 v3 self-encryption key; messenger-log and
 // content-key persistence use it to seal sensitive IndexedDB payloads
@@ -46,6 +49,7 @@ const VAULT_LOCAL_STATE_SCOPE = 'vault-local-state-v1'
 
 let vaultPrivkey = null
 let vaultConversationKey = null
+let vaultTransition = null
 
 const nsecSignersByPubkey = new Map()
 const bunkerHandlesByPubkey = new Map()
@@ -61,15 +65,14 @@ const rawHandlerPubkeyByPubkey = new Map()
 const legacyBunkerPubkeys = new Set()
 const rawContentKeyHexByOwnerPubkey = new Map()
 
-// Single device-level signer seckey. Deterministically derived from the
-// passkey PRF via HKDF — see helpers/signer-key.js. We persist the result
-// in the same TLV blob (rather than re-deriving on every unlock) so it
+// Single device-level signer seckey. Initially derived from the active vault
+// key via HKDF — see helpers/signer-key.js. We persist the result in the same
+// TLV blob (rather than re-deriving on every unlock) so it
 // shares the encrypted-at-rest property of the nsec/bunker secrets and so
 // the signer pubkey remains stable across any future change to the
-// derivation function. The blob's NIP-44 envelope is keyed on the vault
-// PRF, so a passkey re-create takes both the blob AND any chance of
-// re-deriving the same signer key with it — recovery in that case means
-// re-pairing devices.
+// derivation function and across local-to-passkey promotion. In local mode the
+// envelope key is co-resident in IDB and provides no storage protection. Once
+// promoted, losing/re-creating the passkey requires pairing for recovery.
 let deviceSignerSeckey = null
 
 const listeners = new Set()
@@ -95,14 +98,88 @@ function deriveVaultConversationKey (vaultKeyBytes) {
   return sharedXOnlySecret(vaultKeyBytes, getPublicKey(vaultKeyBytes))
 }
 
+function encryptWithConversationKey (conversationKey, plaintext, scope) {
+  return nip44v3.encryptWithConversationKey(conversationKey, VAULT_NIP44_KIND, scope, plaintext)
+}
+
+function decryptWithConversationKey (conversationKey, ciphertext, scope) {
+  return nip44v3.decryptWithConversationKey(conversationKey, VAULT_NIP44_KIND, scope, ciphertext)
+}
+
 function vaultEncryptWithScope (plaintext, scope) {
   if (!vaultConversationKey) throw new Error('VAULT_LOCKED')
-  return nip44v3.encryptWithConversationKey(vaultConversationKey, VAULT_NIP44_KIND, scope, plaintext)
+  return encryptWithConversationKey(vaultConversationKey, plaintext, scope)
 }
 
 function vaultDecryptWithScope (ciphertext, scope) {
   if (!vaultConversationKey) throw new Error('VAULT_LOCKED')
-  return nip44v3.decryptWithConversationKey(vaultConversationKey, VAULT_NIP44_KIND, scope, ciphertext)
+  return decryptWithConversationKey(vaultConversationKey, ciphertext, scope)
+}
+
+// A passkey promotion briefly freezes vault-key-encrypted writers while all
+// durable payloads are reciphered and committed together. Reads and signing
+// remain available; writers await the release and then use the new key.
+export function beginVaultTransition () {
+  if (vaultTransition) throw new Error('VAULT_TRANSITION_IN_PROGRESS')
+  let resolve
+  const promise = new Promise(_resolve => { resolve = _resolve })
+  vaultTransition = { promise, resolve }
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    const active = vaultTransition
+    vaultTransition = null
+    active?.resolve()
+  }
+}
+
+export function waitForVaultTransition () {
+  return vaultTransition?.promise || Promise.resolve()
+}
+
+// Produce pure reciphering helpers without changing the live in-memory vault.
+// This lets passkey.js prepare an all-or-nothing IDB upgrade and switch the
+// live key only after that transaction has committed.
+export function createVaultRekeyer (fromKeyBytes, toKeyBytes) {
+  if (!(fromKeyBytes instanceof Uint8Array) || fromKeyBytes.length !== 32) throw new Error('INVALID_OLD_VAULT_KEY')
+  if (!(toKeyBytes instanceof Uint8Array) || toKeyBytes.length !== 32) throw new Error('INVALID_NEW_VAULT_KEY')
+  const fromConversationKey = deriveVaultConversationKey(fromKeyBytes)
+  const toConversationKey = deriveVaultConversationKey(toKeyBytes)
+  let destroyed = false
+
+  const transform = (ciphertext, scope, validate) => {
+    if (destroyed) throw new Error('VAULT_REKEYER_DESTROYED')
+    const plaintext = decryptWithConversationKey(fromConversationKey, ciphertext, scope)
+    validate?.(plaintext)
+    return encryptWithConversationKey(toConversationKey, plaintext, scope)
+  }
+
+  return {
+    secrets (ciphertext) {
+      return transform(ciphertext, VAULT_SECRETS_SCOPE, plaintext => {
+        decodeSecretEntries(base64ToBytes(plaintext))
+      })
+    },
+    contentKeys (ciphertext) {
+      return transform(ciphertext, VAULT_CONTENT_KEYS_SCOPE, plaintext => {
+        const parsed = JSON.parse(plaintext)
+        if (!Array.isArray(parsed)) throw new Error('INVALID_CONTENT_KEYS')
+        if (parsed.some(entry => !normalizeContentKeyEntry(entry))) throw new Error('INVALID_CONTENT_KEYS')
+      })
+    },
+    localState (ciphertext, validate) {
+      return transform(ciphertext, VAULT_LOCAL_STATE_SCOPE, plaintext => {
+        const parsed = JSON.parse(plaintext)
+        validate?.(parsed)
+      })
+    },
+    destroy () {
+      destroyed = true
+      fromConversationKey.fill?.(0)
+      toConversationKey.fill?.(0)
+    }
+  }
 }
 
 function dropPriorEntry (pubkey) {
@@ -312,8 +389,8 @@ export function isUnlocked () {
 // adaptive persistence layer, or null on a fresh registration where there is
 // nothing to load yet.
 export function unlock (vaultKeyBytes, ciphertext) {
-  vaultPrivkey = vaultKeyBytes
-  vaultConversationKey = deriveVaultConversationKey(vaultKeyBytes)
+  vaultPrivkey = new Uint8Array(vaultKeyBytes)
+  vaultConversationKey = deriveVaultConversationKey(vaultPrivkey)
   loadEntries(ciphertext)
   notify()
 }
@@ -407,6 +484,8 @@ export async function restoreContentKeySecrets (priorCiphertext) {
 }
 
 export function lock () {
+  vaultPrivkey?.fill?.(0)
+  vaultConversationKey?.fill?.(0)
   vaultPrivkey = null
   vaultConversationKey = null
   clearAll()
@@ -414,6 +493,7 @@ export function lock () {
 }
 
 export async function setNsecSecret (pubkey, seckey) {
+  await waitForVaultTransition()
   if (!isUnlocked()) throw new Error('VAULT_LOCKED')
   const priorContentKeys = snapshotContentKeySecrets()
   const contentKeysChanged = adoptNsec(pubkey, seckey)
@@ -446,6 +526,7 @@ function adoptContentKey (ownerPubkey, seckey, createdAt = Math.floor(Date.now()
 }
 
 export async function setContentKeySecret (ownerPubkey, seckey, createdAt = Math.floor(Date.now() / 1000)) {
+  await waitForVaultTransition()
   if (!isUnlocked()) throw new Error('VAULT_LOCKED')
   const prior = listRawContentKeyEntriesInternal()
   try {
@@ -464,6 +545,7 @@ export async function setContentKeySecret (ownerPubkey, seckey, createdAt = Math
 }
 
 export async function replaceContentKeySecret (ownerPubkey, seckey, createdAt = Math.floor(Date.now() / 1000)) {
+  await waitForVaultTransition()
   if (!isUnlocked()) throw new Error('VAULT_LOCKED')
   const prior = listRawContentKeyEntriesInternal()
   try {
@@ -537,6 +619,7 @@ export async function replyWithContentKeySecrets ({ ownerPubkey, pubkeys, send }
 // Called by `BunkerHandle.commit()` from inside bunker.js, which extracts
 // the clientKey from its module-private WeakMap and threads it in here.
 export async function adoptBunkerHandle (pubkey, handle, handlerPubkey, clientKey) {
+  await waitForVaultTransition()
   if (!isUnlocked()) throw new Error('VAULT_LOCKED')
   if (!HEX32.test(handlerPubkey || '')) throw new Error('INVALID_BUNKER_HANDLER')
   const priorContentKeys = snapshotContentKeySecrets()
@@ -584,6 +667,7 @@ export async function withDeviceSignerSeckey (fn) {
 }
 
 export async function deleteSecret (pubkey) {
+  await waitForVaultTransition()
   const priorContentKeys = snapshotContentKeySecrets()
   let contentKeysChanged = false
   if (!accountTypeByPubkey.has(pubkey)) {
@@ -613,6 +697,7 @@ export async function deleteSecret (pubkey) {
 // account-independent so it stays put across drift; trusted-signers are
 // stored at device level too, so no per-account cleanup is needed.
 export async function transferBunkerSecret (oldPubkey, newPubkey) {
+  await waitForVaultTransition()
   if (!isUnlocked()) throw new Error('VAULT_LOCKED')
   if (accountTypeByPubkey.get(oldPubkey) !== 'bunker') return
   const clientKey = rawClientKeyHexByPubkey.get(oldPubkey)
@@ -735,6 +820,14 @@ function listRawContentKeyEntriesInternal () {
     }
   }
   return out
+}
+
+// Deliberate disclosure surface used only by passkey.openSecrets() when the
+// user chose the unprotected local mode. Passkey-backed modes continue to
+// decrypt a freshly authenticated ciphertext instead of calling this.
+export function discloseCurrentEntries () {
+  if (!isUnlocked()) throw new Error('VAULT_LOCKED')
+  return structuredClone(listRawEntriesInternal())
 }
 
 export function vaultEncrypt (plaintext) {

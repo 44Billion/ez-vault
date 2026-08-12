@@ -1,7 +1,7 @@
 import {
   subscribePomegranateBusy
-} from "./chunk-Q6UP2N5V.js";
-import "./chunk-335NQKAM.js";
+} from "./chunk-P376NJ24.js";
+import "./chunk-6JMWJLON.js";
 import {
   QrScanner,
   isCameraSupported
@@ -13,15 +13,17 @@ import {
   prepareBunker,
   prepareNpub,
   prepareSeckey
-} from "./chunk-764TZ7DR.js";
-import "./chunk-RRGKXN3E.js";
-import "./chunk-KFD6KK7E.js";
-import "./chunk-AQSHSQLO.js";
+} from "./chunk-4GCI2XUV.js";
+import "./chunk-3RWQBTGN.js";
+import "./chunk-7O7SSKHM.js";
+import "./chunk-AZYRZ53H.js";
+import {
+  ensureRegistered
+} from "./chunk-YCKEL573.js";
+import "./chunk-2IRIIQPD.js";
 import {
   info
 } from "./chunk-BDYCOPAX.js";
-import "./chunk-3RWQBTGN.js";
-import "./chunk-D6BLQV4I.js";
 import {
   defineLocales,
   getT,
@@ -43,6 +45,7 @@ var accountAddLocales = defineLocales({
   "Add a private key, public key, or bunker URL": ["Ajouter une cl\xE9 priv\xE9e, une cl\xE9 publique ou une URL bunker", "Aggiungi una chiave privata, pubblica o un URL bunker", "Privaten Schl\xFCssel, \xF6ffentlichen Schl\xFCssel oder Bunker-URL hinzuf\xFCgen", "A\xF1adir una clave privada, p\xFAblica o una URL bunker", "Adicionar uma chave privada, p\xFAblica ou URL bunker", "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u0437\u0430\u043A\u0440\u044B\u0442\u044B\u0439 \u043A\u043B\u044E\u0447, \u043E\u0442\u043A\u0440\u044B\u0442\u044B\u0439 \u043A\u043B\u044E\u0447 \u0438\u043B\u0438 URL bunker", "\u6DFB\u52A0\u79C1\u94A5\u3001\u516C\u94A5\u6216 bunker URL", "\u65B0\u589E\u79C1\u9470\u3001\u516C\u9470\u6216 bunker URL", "\u79D8\u5BC6\u9375\u3001\u516C\u958B\u9375\u3001\u307E\u305F\u306F bunker URL \u3092\u8FFD\u52A0", "\uAC1C\uC778 \uD0A4, \uACF5\uAC1C \uD0A4 \uB610\uB294 bunker URL \uCD94\uAC00"],
   "Scan QR": ["Scanner le QR", "Scansiona QR", "QR scannen", "Escanear QR", "Ler QR", "\u0421\u043A\u0430\u043D\u0438\u0440\u043E\u0432\u0430\u0442\u044C QR", "\u626B\u63CF\u4E8C\u7EF4\u7801", "\u6383\u63CF QR \u78BC", "QR \u3092\u30B9\u30AD\u30E3\u30F3", "QR \uC2A4\uCE94"],
   Add: ["Ajouter", "Aggiungi", "Hinzuf\xFCgen", "A\xF1adir", "Adicionar", "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C", "\u6DFB\u52A0", "\u65B0\u589E", "\u8FFD\u52A0", "\uCD94\uAC00"],
+  Or: ["Ou", "Oppure", "Oder", "O", "Ou", "\u0418\u043B\u0438", "\u6216", "\u6216", "\u307E\u305F\u306F", "\uB610\uB294"],
   "Stop scanning": ["Arr\xEAter le scan", "Interrompi scansione", "Scannen beenden", "Detener escaneo", "Parar leitura", "\u041E\u0441\u0442\u0430\u043D\u043E\u0432\u0438\u0442\u044C \u0441\u043A\u0430\u043D\u0438\u0440\u043E\u0432\u0430\u043D\u0438\u0435", "\u505C\u6B62\u626B\u63CF", "\u505C\u6B62\u6383\u63CF", "\u30B9\u30AD\u30E3\u30F3\u3092\u505C\u6B62", "\uC2A4\uCE94 \uC911\uC9C0"],
   'Use "Sync Devices" for nostrpair URLs.': ["Utilisez \xAB Synchroniser les appareils \xBB pour les URL nostrpair.", 'Usa "Sincronizza dispositivi" per gli URL nostrpair.', "Verwende \u201EGer\xE4te synchronisieren\u201C f\xFCr nostrpair-URLs.", "Usa \xABSincronizar dispositivos\xBB para las URL nostrpair.", "Use \u201CSincronizar dispositivos\u201D para URLs nostrpair.", "\u0414\u043B\u044F URL nostrpair \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u0443\u0439\u0442\u0435 \xAB\u0421\u0438\u043D\u0445\u0440\u043E\u043D\u0438\u0437\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0443\u0441\u0442\u0440\u043E\u0439\u0441\u0442\u0432\u0430\xBB.", "\u8BF7\u4F7F\u7528\u201C\u540C\u6B65\u8BBE\u5907\u201D\u5904\u7406 nostrpair URL\u3002", "\u8ACB\u4F7F\u7528\u300C\u540C\u6B65\u88DD\u7F6E\u300D\u8655\u7406 nostrpair URL\u3002", "nostrpair URL \u306B\u306F\u300C\u30C7\u30D0\u30A4\u30B9\u3092\u540C\u671F\u300D\u3092\u4F7F\u7528\u3057\u3066\u304F\u3060\u3055\u3044\u3002", "nostrpair URL\uC5D0\uB294 \u201C\uAE30\uAE30 \uB3D9\uAE30\uD654\u201D\uB97C \uC0AC\uC6A9\uD558\uC138\uC694."]
 });
@@ -57,7 +60,7 @@ var STYLES = (
     transition: max-height 280ms ease-out;
   }
   account-add[open] {
-    max-height: 112px;
+    max-height: 152px;
   }
   /* Scan flow swaps the input row out for a camera preview + Stop button.
      Drop the height cap entirely so the video gets its natural box. */
@@ -145,10 +148,26 @@ var STYLES = (
     width: 16px;
     height: 16px;
   }
+  account-add .add-method-separator {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 10px 0;
+    color: var(--fg-faint);
+    font-size: 11rem;
+    line-height: 1;
+    text-transform: lowercase;
+  }
+  account-add .add-method-separator::before,
+  account-add .add-method-separator::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background-color: var(--border);
+  }
   account-add .google-login-row {
     display: flex;
     justify-content: center;
-    margin-top: 8px;
   }
   account-add .google-login-row .google-login-button {
     width: 100%;
@@ -214,6 +233,7 @@ var TEMPLATE = (
         <span class="add-btn-icon">${ICON_CHECK}</span>
       </button>
     </div>
+    <div class="add-method-separator" role="separator"><span></span></div>
     <div class="google-login-row"><google-login-button></google-login-button></div>
   </form>
   <div class="scan-overlay">
@@ -230,6 +250,7 @@ var AccountAdd = class extends HTMLElement {
   #scanBtn;
   #confirmBtn;
   #confirmIcon;
+  #methodSeparator;
   #scanWrap;
   #scanStopBtn;
   #errorTimer = null;
@@ -254,6 +275,7 @@ var AccountAdd = class extends HTMLElement {
     this.#scanBtn = this.querySelector('button[data-action="scan"]');
     this.#confirmBtn = this.querySelector('button[data-action="confirm"]');
     this.#confirmIcon = this.#confirmBtn.querySelector(".add-btn-icon");
+    this.#methodSeparator = this.querySelector(".add-method-separator");
     this.#scanWrap = this.querySelector(".scan-video-wrap");
     this.#scanStopBtn = this.querySelector(".scan-stop");
     this.#form.addEventListener("submit", this.#onSubmit);
@@ -345,11 +367,15 @@ var AccountAdd = class extends HTMLElement {
   }
   async #dispatch(raw, token) {
     let prepared;
-    if (raw.startsWith("bunker://")) prepared = await prepareBunker(raw, token);
-    else if (raw.startsWith("npub1")) prepared = await prepareNpub(raw);
+    let protectionReady = false;
+    if (raw.startsWith("bunker://")) {
+      await ensureRegistered();
+      protectionReady = true;
+      prepared = await prepareBunker(raw, token);
+    } else if (raw.startsWith("npub1")) prepared = await prepareNpub(raw);
     else prepared = await prepareSeckey(raw);
     if (prepared.skipped) throw new Error(prepared.reason);
-    await commitPrepared([prepared]);
+    await commitPrepared([prepared], { protectionReady });
   }
   #setBusy(on) {
     this.#busy = on;
@@ -426,6 +452,8 @@ var AccountAdd = class extends HTMLElement {
     this.#input.placeholder = t("Add a private key, public key, or bunker URL");
     this.#scanBtn.title = t("Scan QR");
     this.#confirmBtn.title = t("Add");
+    this.#methodSeparator.setAttribute("aria-label", t("Or"));
+    this.#methodSeparator.querySelector("span").textContent = t("Or");
     this.#scanStopBtn.title = t("Stop scanning");
   }
 };

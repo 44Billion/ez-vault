@@ -237,6 +237,67 @@ export async function updateState ({ set = {}, remove = [] } = {}) {
   })
 }
 
+// Atomically replace every vault-key-encrypted IDB payload while a passkey
+// promotion changes the vault key. `prepare` runs after a coherent snapshot
+// has been read and after the prior transaction has completed, so it may do
+// crypto without risking IndexedDB's eager auto-commit. The global mutation
+// queue remains held throughout, preventing a normal state/log write from
+// landing between the snapshot and the final commit.
+export async function commitVaultProtectionUpgrade (prepare) {
+  if (typeof prepare !== 'function') throw new TypeError('VAULT_UPGRADE_PREPARE_REQUIRED')
+  await initializeStorage()
+  return enqueueMutation(async () => {
+    const snapshot = await transaction([STATE_STORE, MESSENGER_LOG_STORE], 'readonly', async tx => {
+      const state = (await run('getAll', [], STATE_STORE, null, { tx })).result
+      const messengerLogs = (await run('getAll', [], MESSENGER_LOG_STORE, null, { tx })).result
+      return {
+        state: Object.fromEntries(state.map(record => [record.key, clone(record.value)])),
+        messengerLogs: clone(messengerLogs)
+      }
+    })
+
+    const prepared = await prepare(snapshot)
+    if (!prepared || typeof prepared !== 'object') throw new Error('VAULT_UPGRADE_INVALID_RESULT')
+    const stageEntries = Object.entries(prepared.stageSet || {}).map(([key, value]) => [String(key), clone(value)])
+    const stageRemovals = [...new Set((prepared.stageRemove || []).map(String))]
+    if (stageEntries.length || stageRemovals.length) {
+      await transaction([STATE_STORE], 'readwrite', async tx => {
+        for (const key of stageRemovals) await run('delete', [key], STATE_STORE, null, { tx })
+        for (const [key, value] of stageEntries) await run('put', [{ key, value }], STATE_STORE, null, { tx })
+      })
+      for (const key of stageRemovals) stateCache.delete(key)
+      for (const [key, value] of stageEntries) stateCache.set(key, clone(value))
+    }
+    const entries = Object.entries(prepared.set || {}).map(([key, value]) => [String(key), clone(value)])
+    const removals = [...new Set((prepared.remove || []).map(String))]
+    const logs = Array.isArray(prepared.messengerLogs) ? clone(prepared.messengerLogs) : snapshot.messengerLogs
+
+    let usage = 0
+    for (const record of logs) {
+      record.byteSize = 0
+      while (true) {
+        const nextSize = byteLength(record)
+        if (nextSize === record.byteSize) break
+        record.byteSize = nextSize
+      }
+      usage += record.byteSize
+    }
+
+    await transaction([STATE_STORE, MESSENGER_LOG_STORE], 'readwrite', async tx => {
+      for (const key of removals) await run('delete', [key], STATE_STORE, null, { tx })
+      for (const [key, value] of entries) await run('put', [{ key, value }], STATE_STORE, null, { tx })
+      await run('put', [{ key: LOG_USAGE_KEY, value: usage }], STATE_STORE, null, { tx })
+      await run('clear', [], MESSENGER_LOG_STORE, null, { tx })
+      for (const record of logs) await run('put', [record], MESSENGER_LOG_STORE, null, { tx })
+    })
+
+    for (const key of removals) stateCache.delete(key)
+    for (const [key, value] of entries) stateCache.set(key, clone(value))
+    stateCache.set(LOG_USAGE_KEY, usage)
+    return prepared.result
+  })
+}
+
 export function setState (key, value) {
   return updateState({ set: { [key]: value } })
 }

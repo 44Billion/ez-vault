@@ -668,15 +668,14 @@ export class AccountAvatar extends HTMLElement {
     icon?.classList.add('pulsate')
     try {
       const name = this.#readNameValue()
+      // Protection is settled before publishing an account that we might
+      // otherwise be unable to persist locally.
+      await passkey.ensureRegistered()
       const bootstrap = await publishAccountBootstrap({
         secretKey: draft.secretKey,
         name,
         picture: draft.picture
       })
-
-      // Register the vault's passkey on the first non-npub account; no-op
-      // when the vault is already unlocked.
-      await passkey.ensureRegistered()
 
       const record = {
         type: 'nsec',
@@ -740,6 +739,11 @@ export class AccountAvatar extends HTMLElement {
       if (btn) btn.disabled = true
       icon?.classList.add('pulsate')
       try {
+        // Deletion, like deliberate secret copying, is allowed to remain a
+        // purely local operation after the user chose unprotected mode. A
+        // passkey-backed or staged-upgrade vault still follows the normal
+        // unlock/recovery path.
+        if (!passkey.isUnprotectedLocalVault()) await passkey.ensureRegistered()
         await runSecretAccountMutation({
           operation: 'delete-account',
           beforeAccounts: [account],

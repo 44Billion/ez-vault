@@ -11,6 +11,8 @@ test('both account entry surfaces include the shared Google action', () => {
   const createOverlay = source('src/components/create-overlay.js')
 
   assert.match(accountAdd, /<google-login-button><\/google-login-button>/)
+  assert.match(accountAdd, /class="add-method-separator"/)
+  assert.match(accountAdd, /t\('Or'\)/)
   assert.match(createOverlay, /<google-login-button><\/google-login-button>/)
   assert.match(createOverlay, /bottom:\s*16px/)
   assert.match(createOverlay, /subscribePomegranateBusy/)
@@ -34,7 +36,7 @@ test('Google action uses the Tabler component, shared busy pulse and toast path'
   assert.match(button, /POMEGRANATE_CANCELLED/)
 })
 
-test('bunker copy stays behind fresh passkey verification and uses the pairing constructor', () => {
+test('bunker copy stays behind the vault disclosure gate and uses the pairing constructor', () => {
   const avatar = source('src/components/account-avatar.js')
   const pairing = source('src/services/nostrpair.js')
 

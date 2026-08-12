@@ -140,6 +140,7 @@ function readRecords () {
 }
 
 async function writeRecords (records, detail = {}) {
+  await secrets.waitForVaultTransition()
   if (!secrets.isUnlocked()) throw new Error('VAULT_LOCKED')
   const pruned = pruneTombstones(records)
   if (!pruned.length) {

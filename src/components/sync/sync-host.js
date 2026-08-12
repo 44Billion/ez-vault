@@ -252,6 +252,7 @@ export class SyncHost extends HTMLElement {
   #resetTimer = null
   #session = null
   #openToken = null
+  #protectionReady = false
   // Peer signer announced over `register_trusted_signer`; folded into the
   // commit when the exchange request lands so trust + secrets persist
   // (or roll back) together.
@@ -292,6 +293,7 @@ export class SyncHost extends HTMLElement {
     if (this.#codeCopyTimer) clearTimeout(this.#codeCopyTimer)
     this.#clearResetTimer()
     this.#openToken = null
+    this.#protectionReady = false
     this.#session?.close()
     this.#unsubscribeLocale?.()
     this.#unsubscribeLocale = null
@@ -308,6 +310,7 @@ export class SyncHost extends HTMLElement {
     const wasPreparing = Boolean(this.#openToken)
     if (!wasOpen && !wasPreparing && !this.#session && !this.#intakeToken) return
     this.#openToken = null
+    this.#protectionReady = false
     this.removeAttribute('open')
     if (wasOpen) {
       this.list?.exitSelectionMode()
@@ -367,6 +370,7 @@ export class SyncHost extends HTMLElement {
     try {
       await passkey.ensureRegistered()
       if (this.#openToken !== token) return
+      this.#protectionReady = true
       await this.#startSession()
     } catch (err) {
       if (this.#openToken !== token) return
@@ -398,7 +402,10 @@ export class SyncHost extends HTMLElement {
       // symmetric `register_trusted_signer` back to the joiner.
       onTrustedSignerReceived: async ({ platform, signerPubkey }) => {
         this.#peerSigner = { pubkey: signerPubkey, platform }
-        await passkey.ensureRegistered()
+        if (!this.#protectionReady) {
+          await passkey.ensureRegistered()
+          this.#protectionReady = true
+        }
         const ourSignerPubkey = await secrets.getDeviceSignerPubkey()
         return { signerPubkey: ourSignerPubkey, platform: detectPlatform() }
       },
@@ -471,7 +478,10 @@ export class SyncHost extends HTMLElement {
       const peerSigner = this.#peerSigner
         ? { pubkey: this.#peerSigner.pubkey, platform: peerPlatform || this.#peerSigner.platform }
         : null
-      await commitPrepared(prepared, { peerSigner })
+      await commitPrepared(prepared, {
+        peerSigner,
+        protectionReady: this.#protectionReady
+      })
 
       // Success toast — varies by what arrived.
       const summary = peerAccounts.length === 0

@@ -2,7 +2,7 @@ import {
   persistSecretsBlob,
   restoreSecretsBlobSnapshot,
   snapshotSecretsBlob
-} from "./chunk-AQSHSQLO.js";
+} from "./chunk-YCKEL573.js";
 import {
   applyRecords,
   finalizeLegacyBunkerMigrations,
@@ -16,8 +16,9 @@ import {
   sealCurrentEntries,
   secretStateFingerprint,
   setState,
-  snapshotContentKeySecrets
-} from "./chunk-D6BLQV4I.js";
+  snapshotContentKeySecrets,
+  waitForVaultTransition
+} from "./chunk-2IRIIQPD.js";
 
 // src/services/account-mutation-journal.js
 var KEY = "account-mutation";
@@ -233,6 +234,7 @@ async function runSecretAccountMutation({
   apply,
   finalize
 }) {
+  await waitForVaultTransition();
   const cleanBefore = cleanAccounts(beforeAccounts);
   const cleanAfter = cleanAccounts(afterAccounts);
   const affectedPubkeys2 = affectedFromAccounts(cleanBefore, cleanAfter);

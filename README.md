@@ -6,15 +6,27 @@ It is designed to be embedded as an iframe by a host app launcher and talks to c
 
 The project is intentionally simple: vanilla JavaScript, no bundler, and a small set of explicit browser dependencies, so that anyone can read the source and verify what it does with their keys.
 
-Account secrets are NIP-44 encrypted under a key derived from the passkey PRF
-extension. The passkey unlocks that encryption key; it does not itself hold
-the account secrets. EZ Vault keeps PRF and ciphertext in separate storage
+Account secrets are normally NIP-44 encrypted under a key derived from the
+passkey PRF extension. The passkey unlocks that encryption key; it does not
+itself hold the account secrets. EZ Vault keeps PRF and ciphertext in separate storage
 whenever the authenticator permits it: if assertions return PRF, the
 authoritative ciphertext is `ez-vault:passkey:blob` in IndexedDB and no PRF
 backup is kept; if PRF is available only during credential creation, its
 compatibility backup is stored in IndexedDB while the ciphertext is held by
 the credential's `largeBlob`. Authenticators without `largeBlob` use an
 explicit compatibility mode in which both values are stored in IndexedDB.
+
+When no passkey exists and registration is unavailable or refused, the user
+may explicitly continue in an unprotected local mode. The vault still uses
+the same ciphertext formats, but its random 32-byte key is stored beside them
+at `ez-vault:passkey:local-key`. Anyone able to copy the site's IndexedDB can
+therefore recover every secret; this is cryptographically equivalent to
+plaintext storage. User-initiated account creation/import and trusted-device
+changes retry passkey registration; copying or removing an existing account
+does not. A successful retry reciphers the vault blob, content
+keys, trusted signers and sealed activity-log fields under PRF before deleting
+the local key. `ez-vault:passkey:upgrade-pending` makes an interrupted upgrade
+recoverable, but the staged credential must then be used to finish it.
 
 Pairing (`nostrpair://`) is the supported recovery and cross-device transfer
 mechanism. WebAuthn does not give a relying party a way to prohibit vendor
@@ -43,7 +55,9 @@ do not accidentally restrict it to the `internal` transport; credentials
 created by older platform-only releases keep their legacy `internal` hint.
 
 The activity log keeps at most 500 entries per app and 64 MiB globally;
-sensitive request and result fields remain encrypted while at rest.
+sensitive request and result fields use the same encrypted-at-rest envelope.
+In explicit local mode its key is stored beside it, so that envelope provides
+no protection to anyone who can read the site's IndexedDB.
 
 ## Bunker accounts and pairing
 
@@ -53,7 +67,9 @@ the account pubkey again as its local index, the secret NIP-46 handler pubkey
 and the persistent client key. A one-use `secret` from an imported pointer is
 consumed during the first connection and is never persisted afterward.
 
-Copying a bunker URL requires a fresh passkey verification. The exported URL
+Copying a bunker URL requires a fresh passkey verification when the vault is
+passkey-backed. In the explicitly unprotected local mode, copying does not
+create a passkey or add a verification prompt. The exported URL
 contains `#client_key=<64 hex>` so a restored or paired device reuses the same
 NIP-46 client identity. The fragment is removed before the pointer is sent to
 the bunker. Pairing uses that same self-contained form. Older 64-byte bunker

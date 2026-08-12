@@ -95,6 +95,9 @@ export async function runSecretAccountMutation ({
   apply,
   finalize
 }) {
+  // Do not snapshot or mutate under the old vault key while a local-to-passkey
+  // promotion is preparing its atomic reciphering transaction.
+  await secrets.waitForVaultTransition()
   const cleanBefore = cleanAccounts(beforeAccounts)
   const cleanAfter = cleanAccounts(afterAccounts)
   const affectedPubkeys = affectedFromAccounts(cleanBefore, cleanAfter)

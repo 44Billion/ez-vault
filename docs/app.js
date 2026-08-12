@@ -6,35 +6,36 @@ import {
   setVaultViewShell,
   subscribeSwUpdate,
   swUpdateLocales
-} from "./chunks/chunk-DPEURHLC.js";
+} from "./chunks/chunk-6555WJ4D.js";
 import {
   init,
   startDeviceRelayListRefresh,
   startRevocationRotation
-} from "./chunks/chunk-CDRD3SIJ.js";
+} from "./chunks/chunk-NDSARXZJ.js";
 import {
   clearError,
   setError
 } from "./chunks/chunk-OQVZFKQZ.js";
+import "./chunks/chunk-JDLAFNFY.js";
 import {
   isOnline,
   onOnline,
   startContentKeyEventRefresh
-} from "./chunks/chunk-K4MQVI3L.js";
+} from "./chunks/chunk-VQVK5FPU.js";
+import {
+  seededAvatarDataUrl
+} from "./chunks/chunk-3RWQBTGN.js";
 import {
   filterVisibleAccounts,
   recoverPendingMutation,
   runSecretAccountMutation
-} from "./chunks/chunk-RRGKXN3E.js";
-import "./chunks/chunk-KFD6KK7E.js";
+} from "./chunks/chunk-7O7SSKHM.js";
+import "./chunks/chunk-AZYRZ53H.js";
 import {
   checkForIconUpdate,
-  hasPasskey
-} from "./chunks/chunk-AQSHSQLO.js";
-import "./chunks/chunk-W44MUTZ3.js";
-import {
-  seededAvatarDataUrl
-} from "./chunks/chunk-3RWQBTGN.js";
+  hasPasskey,
+  initializeVaultProtection
+} from "./chunks/chunk-YCKEL573.js";
 import {
   fetchLatestProfile,
   fetchRelayListEvent,
@@ -49,7 +50,7 @@ import {
   subscribe2 as subscribe,
   transferBunkerSecret,
   update
-} from "./chunks/chunk-D6BLQV4I.js";
+} from "./chunks/chunk-2IRIIQPD.js";
 import {
   defineLocales,
   getT,
@@ -212,16 +213,17 @@ function initShellI18n() {
 
 // src/index.js
 await initializeStorage();
+await initializeVaultProtection();
 await Promise.all([
-  import("./chunks/account-list-W26P2LFM.js"),
-  import("./chunks/account-add-IAUMV77R.js"),
-  import("./chunks/sync-panel-3V3D5PGV.js"),
-  import("./chunks/trusted-signers-panel-CN7VNWKG.js"),
+  import("./chunks/account-list-Q2C464ZZ.js"),
+  import("./chunks/account-add-53WCERG4.js"),
+  import("./chunks/sync-panel-TID5ZIGI.js"),
+  import("./chunks/trusted-signers-panel-ADCJA7NW.js"),
   import("./chunks/accordion-panel-AGHO422R.js"),
   import("./chunks/toast-VTWQ4NKU.js"),
-  import("./chunks/activity-log-CJLJ7RUW.js"),
-  import("./chunks/lock-overlay-WQN6C4WB.js"),
-  import("./chunks/create-overlay-RU6TR6VN.js")
+  import("./chunks/activity-log-M76CTKGL.js"),
+  import("./chunks/lock-overlay-UGBYO2HB.js"),
+  import("./chunks/create-overlay-7OUTYFC4.js")
 ]);
 document.getElementById("vault").style.visibility = "visible";
 var list2 = document.querySelector("account-list");
@@ -298,7 +300,7 @@ startRevocationRotation().catch((err) => {
 });
 if (window === window.top) {
   document.body.classList.add("dev");
-  import("./chunks/dev-panel-YGLFEG2M.js").then(() => {
+  import("./chunks/dev-panel-XTIUTX4F.js").then(() => {
     document.querySelector(".diagnostics-section")?.append(document.createElement("dev-panel"));
   });
 }

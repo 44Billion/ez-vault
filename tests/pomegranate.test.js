@@ -218,11 +218,14 @@ test('the completed flow persists bootstrap metadata only for a newly created ac
     writeRelays: ['wss://write.example']
   }
   const committed = []
+  let commitOptions
+  let protectionCalls = 0
 
   const result = await runPomegranateFlow({
     authenticate: async () => ({ token }),
-    _resolveAccount: async ({ email }) => {
+    _resolveAccount: async ({ email, beforeCreate }) => {
       assert.equal(email, 'alice@example.test')
+      await beforeCreate()
       return { account: { pubkey }, bootstrap, created: true }
     },
     _getProfile: async () => ({ handler_pubkey: handlerPubkey }),
@@ -231,11 +234,17 @@ test('the completed flow persists bootstrap metadata only for a newly created ac
       assert.deepEqual(options, { neutralAvatar: true })
       return { pubkey, record: { type: 'bunker', pubkey } }
     },
-    _commitPrepared: async prepared => committed.push(...prepared)
+    _ensureRegistered: async () => { protectionCalls++ },
+    _commitPrepared: async (prepared, options) => {
+      committed.push(...prepared)
+      commitOptions = options
+    }
   })
 
   assert.deepEqual(result, { pubkey, skipped: false })
+  assert.equal(protectionCalls, 1)
   assert.deepEqual(committed[0].record, { type: 'bunker', pubkey, ...bootstrap })
+  assert.deepEqual(commitOptions, { protectionReady: true })
 })
 
 test('the completed flow leaves an existing account record metadata unchanged', async () => {
@@ -248,6 +257,7 @@ test('the completed flow leaves an existing account record metadata unchanged', 
     _resolveAccount: async () => ({ account: { pubkey }, bootstrap: null, created: false }),
     _getProfile: async () => ({ handler_pubkey: 'b'.repeat(64) }),
     _prepareBunker: async () => ({ pubkey, record: originalRecord }),
+    _ensureRegistered: async () => {},
     _commitPrepared: async prepared => { committed = prepared }
   })
 

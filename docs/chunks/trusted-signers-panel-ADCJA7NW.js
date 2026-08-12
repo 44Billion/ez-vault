@@ -3,21 +3,22 @@ import {
   list,
   remove,
   subscribe as subscribe2
-} from "./chunk-KFD6KK7E.js";
+} from "./chunk-AZYRZ53H.js";
 import {
+  ensureRegistered,
   flushPendingIconUpdate,
   hasPasskey,
   unlock
-} from "./chunk-AQSHSQLO.js";
-import {
-  error,
-  success
-} from "./chunk-BDYCOPAX.js";
+} from "./chunk-YCKEL573.js";
 import {
   getDeviceSignerPubkey,
   isUnlocked,
   subscribe2 as subscribe
-} from "./chunk-D6BLQV4I.js";
+} from "./chunk-2IRIIQPD.js";
+import {
+  error,
+  success
+} from "./chunk-BDYCOPAX.js";
 import {
   defineLocales,
   getLocale,
@@ -232,6 +233,7 @@ var TrustedSignersPanel = class extends HTMLElement {
     if (!ok) return;
     button.disabled = true;
     try {
+      await ensureRegistered();
       const actorPubkey = await getDeviceSignerPubkey();
       await remove(pubkey, { actorPubkey });
       success(t("Trusted device removed"));
