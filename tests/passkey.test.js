@@ -519,6 +519,18 @@ test('expected lock-time registration failures are classified narrowly', () => {
   assert.equal(passkey.isExpectedPasskeyRegistrationFailure(new Error('IDB_WRITE_FAILED')), false)
 })
 
+test('explicit local continuation never downgrades a passkey vault', async () => {
+  await passkey.continueWithoutPasskey()
+  assert.equal(passkey.isUnprotectedLocalVault(), true)
+
+  const prfBytes = new Uint8Array(32)
+  prfBytes[0] = 35
+  installCredentialMocks({ prfBytes })
+  await passkey.requirePasskey()
+
+  assert.throws(() => passkey.continueWithoutPasskey(), /PASSKEY_DOWNGRADE_FORBIDDEN/)
+})
+
 test('local mode opens current secrets without WebAuthn', async () => {
   await enterLocalMode()
   assert.equal(passkey.isUnprotectedLocalVault(), true)

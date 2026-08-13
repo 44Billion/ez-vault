@@ -30,6 +30,8 @@ recoverable, but the staged credential must then be used to finish it. Manual
 locking also requires this promotion: a local-only vault cannot meaningfully
 be locked while its key remains beside its ciphertext. If passkey creation is
 cancelled or unsupported, the vault stays open and unlocked.
+Closing either passkey/local choice with Escape or a backdrop click selects
+local mode; explicit page teardown still cancels without changing storage.
 
 The unlocked main view provides a floating Lock action. For an already
 protected vault it clears vault keys, account signers, content keys and bunker
@@ -96,8 +98,14 @@ it to authenticate the correct Google account and mint its signed short-lived
 token. EZ Vault keeps that token and the verified e-mail only in memory. It
 closes its Google login popup and cancels the shared operation if no response
 arrives within 10 minutes, so a hidden or forgotten window cannot leave the UI
-busy indefinitely. It
-reuses an existing Pomegranate account when present; otherwise it creates a
+busy indefinitely. Because OAuth returns after the initiating click's WebAuthn
+activation has expired, an unprotected vault then presents an explicit second
+step: creating a passkey is the recommended action, while continuing in local
+mode remains a secondary choice. Escape or a backdrop click also selects local
+mode. The passkey click invokes WebAuthn
+directly; no account/profile creation or bunker connection happens before that
+choice is settled. An existing passkey bypasses this step. The flow then reuses
+an existing Pomegranate account when present; otherwise it creates a
 FROST 2-of-4 account using these fixed operators:
 
 - `https://po.coracle.social`

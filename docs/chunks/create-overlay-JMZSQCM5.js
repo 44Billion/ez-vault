@@ -6,24 +6,24 @@ import {
 } from "./chunk-3UMXSOTO.js";
 import {
   requestVaultClose
-} from "./chunk-J2FW6PU5.js";
-import "./chunk-5QIL4A6S.js";
-import "./chunk-FHQXEYZ3.js";
+} from "./chunk-RE3N5ASP.js";
+import "./chunk-2G6OKGLI.js";
+import "./chunk-VG63FEXD.js";
 import "./chunk-OQVZFKQZ.js";
 import "./chunk-JDLAFNFY.js";
-import "./chunk-4W5XMQY3.js";
+import "./chunk-SCLRGSUQ.js";
 import {
   subscribePomegranateBusy
-} from "./chunk-N2FTTLIY.js";
+} from "./chunk-TXLSUVPE.js";
 import "./chunk-6JMWJLON.js";
-import "./chunk-IHWA5BCE.js";
+import "./chunk-UMP4LHVT.js";
 import "./chunk-3RWQBTGN.js";
 import {
   pendingMutationNeedsUnlock,
   subscribePendingMutations
-} from "./chunk-YSUPLM3X.js";
+} from "./chunk-7VBC3JAI.js";
 import "./chunk-AZYRZ53H.js";
-import "./chunk-IXU3T4GE.js";
+import "./chunk-4QDFHAFY.js";
 import {
   isUnlocked,
   list,
@@ -145,6 +145,8 @@ var STYLES = (
     position: absolute;
     top: 16px;
     left: 50%;
+    width: max-content;
+    max-width: calc(100% - 32px);
     transform: translateX(-50%);
     display: inline-flex;
     align-items: center;

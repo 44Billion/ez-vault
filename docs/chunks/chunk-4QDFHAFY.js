@@ -99,6 +99,8 @@ var pendingIconUpdate = null;
 var registrationPromise = null;
 var requiredPasskeyPromise = null;
 var fallbackDecisionOverride = null;
+var preparedRegistrationIconURL;
+var registrationIconPreparation = null;
 function bufferToUint8(value) {
   if (!value) return null;
   if (value instanceof Uint8Array) return new Uint8Array(value);
@@ -255,8 +257,20 @@ function cancelledRegistrationError() {
 }
 async function chooseRegistrationFallback(err) {
   if (fallbackDecisionOverride) return fallbackDecisionOverride(err);
-  const { requestPasskeyFallback } = await import("./passkey-fallback-dialog-BVOQKFDL.js");
+  const { requestPasskeyFallback } = await import("./passkey-fallback-dialog-IXSLPTIB.js");
   return requestPasskeyFallback(err);
+}
+function preparePasskeyRegistration() {
+  if (preparedRegistrationIconURL !== void 0) return Promise.resolve(preparedRegistrationIconURL);
+  if (!registrationIconPreparation) {
+    registrationIconPreparation = fetchFaviconBase64().then((iconURL) => {
+      preparedRegistrationIconURL = iconURL || null;
+      return preparedRegistrationIconURL;
+    }).finally(() => {
+      registrationIconPreparation = null;
+    });
+  }
+  return registrationIconPreparation;
 }
 async function enableLocalVault() {
   const existing = readLocalKey();
@@ -279,6 +293,10 @@ async function enableLocalVault() {
   } finally {
     localKey.fill(0);
   }
+}
+function continueWithoutPasskey() {
+  if (hasPasskey() || hasPendingUpgrade()) throw new Error("PASSKEY_DOWNGRADE_FORBIDDEN");
+  return enableLocalVault();
 }
 async function ensureRegisteredOnce() {
   if (hasPasskey() && isUnlocked() && !hasPendingUpgrade()) return;
@@ -341,7 +359,7 @@ async function createPasskeyMaterial() {
     throw new Error("PASSKEY_API_UNAVAILABLE");
   }
   const userId = generateUserId();
-  const iconURL = await fetchFaviconBase64();
+  const iconURL = preparedRegistrationIconURL || null;
   const userEntity = {
     id: userId,
     name: buildUserName(userId),
@@ -858,6 +876,8 @@ export {
   isUnprotectedLocalVault,
   hasPasskey,
   isExpectedPasskeyRegistrationFailure,
+  preparePasskeyRegistration,
+  continueWithoutPasskey,
   ensureRegistered,
   requirePasskey,
   initializeVaultProtection,

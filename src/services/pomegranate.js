@@ -302,6 +302,56 @@ export async function resolvePomegranateAccount ({
   return { ...created, created: true }
 }
 
+async function defaultProtectionChoice ({ afterPasskeyFailure = false } = {}) {
+  const {
+    requestPasskeyFallback,
+    requestPomegranateProtectionChoice
+  } = await import('../components/passkey-fallback-dialog.js')
+  return afterPasskeyFailure
+    ? requestPasskeyFallback()
+    : requestPomegranateProtectionChoice()
+}
+
+// OAuth returns through postMessage, after the click's transient activation
+// has expired. Ask for a fresh, explicit click before WebAuthn instead of
+// calling it automatically and falling into the generic failure dialog.
+// Read-only Central queries happen before this; account/profile creation and
+// the first bunker connection remain strictly after protection is settled.
+export async function settlePomegranateProtection ({
+  choose = defaultProtectionChoice,
+  hasPasskey = passkey.hasPasskey,
+  prepareRegistration = passkey.preparePasskeyRegistration,
+  requirePasskey = passkey.requirePasskey,
+  continueLocal = passkey.continueWithoutPasskey,
+  expectedFailure = passkey.isExpectedPasskeyRegistrationFailure
+} = {}) {
+  if (hasPasskey()) {
+    await requirePasskey()
+    return 'passkey'
+  }
+
+  await prepareRegistration()
+  let afterPasskeyFailure = false
+  while (true) {
+    const choice = await choose({ afterPasskeyFailure })
+    if (choice === 'local') {
+      await continueLocal()
+      return 'local'
+    }
+    if (choice !== 'retry') throw pomegranateError('POMEGRANATE_CANCELLED')
+    try {
+      await requirePasskey()
+      return 'passkey'
+    } catch (err) {
+      // Cancellation/unavailability simply returns to the same explicit
+      // choice using its retry wording. Integrity, crypto and storage failures
+      // still abort the flow.
+      if (!expectedFailure(err) || hasPasskey()) throw err
+      afterPasskeyFailure = true
+    }
+  }
+}
+
 export async function runPomegranateFlow ({
   authenticate = authenticateWithGoogle,
   fetchImpl = fetch,
@@ -311,14 +361,14 @@ export async function runPomegranateFlow ({
   _getProfile = getDefaultPomegranateProfile,
   _prepareBunker = prepareBunker,
   _commitPrepared = commitPrepared,
-  _ensureRegistered = passkey.ensureRegistered
+  _settleProtection = settlePomegranateProtection
 } = {}) {
   const auth = await authenticate()
   const { token, email } = decodePomegranateToken(auth.token)
   let protectionReady = false
   const ensureProtection = async () => {
     if (protectionReady) return
-    await _ensureRegistered()
+    await _settleProtection()
     protectionReady = true
   }
   const { account, bootstrap } = await _resolveAccount({

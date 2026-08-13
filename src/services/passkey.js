@@ -93,6 +93,8 @@ let pendingIconUpdate = null
 let registrationPromise = null
 let requiredPasskeyPromise = null
 let fallbackDecisionOverride = null
+let preparedRegistrationIconURL
+let registrationIconPreparation = null
 
 function bufferToUint8 (value) {
   if (!value) return null
@@ -319,6 +321,23 @@ export function setFallbackDecisionForTests (fn = null) {
   fallbackDecisionOverride = typeof fn === 'function' ? fn : null
 }
 
+// Warm the only network-derived registration field before UI presents a
+// button whose click must reach `navigator.credentials.create()` while its
+// transient activation is still alive. Pomegranate calls this after OAuth and
+// before showing its protection choice. `null` is a completed best-effort miss.
+export function preparePasskeyRegistration () {
+  if (preparedRegistrationIconURL !== undefined) return Promise.resolve(preparedRegistrationIconURL)
+  if (!registrationIconPreparation) {
+    registrationIconPreparation = fetchFaviconBase64()
+      .then(iconURL => {
+        preparedRegistrationIconURL = iconURL || null
+        return preparedRegistrationIconURL
+      })
+      .finally(() => { registrationIconPreparation = null })
+  }
+  return registrationIconPreparation
+}
+
 async function enableLocalVault () {
   const existing = readLocalKey()
   if (existing) {
@@ -340,6 +359,14 @@ async function enableLocalVault () {
   } finally {
     localKey.fill(0)
   }
+}
+
+// Explicit opt-in used by a UI that has already explained the local mode.
+// This must never turn an existing or staged passkey vault back into local
+// storage; local-to-passkey promotion remains monotonic.
+export function continueWithoutPasskey () {
+  if (hasPasskey() || hasPendingUpgrade()) throw new Error('PASSKEY_DOWNGRADE_FORBIDDEN')
+  return enableLocalVault()
 }
 
 async function ensureRegisteredOnce () {
@@ -415,7 +442,10 @@ async function createPasskeyMaterial () {
     throw new Error('PASSKEY_API_UNAVAILABLE')
   }
   const userId = generateUserId()
-  const iconURL = await fetchFaviconBase64()
+  // This value was prepared before the user-facing action when possible.
+  // Do not await network work here: cross-origin iframe registration requires
+  // transient activation from the click that selected passkey protection.
+  const iconURL = preparedRegistrationIconURL || null
   const userEntity = {
     id: userId,
     name: buildUserName(userId),

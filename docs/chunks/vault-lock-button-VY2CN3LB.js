@@ -1,19 +1,19 @@
 import {
   requestVaultClose,
   setAccountsState
-} from "./chunk-J2FW6PU5.js";
-import "./chunk-5QIL4A6S.js";
+} from "./chunk-RE3N5ASP.js";
+import "./chunk-2G6OKGLI.js";
 import "./chunk-JDLAFNFY.js";
-import "./chunk-4W5XMQY3.js";
+import "./chunk-SCLRGSUQ.js";
 import {
   hasPendingMutation,
   subscribePendingMutations
-} from "./chunk-YSUPLM3X.js";
+} from "./chunk-7VBC3JAI.js";
 import "./chunk-AZYRZ53H.js";
 import {
   isExpectedPasskeyRegistrationFailure,
   requirePasskey
-} from "./chunk-IXU3T4GE.js";
+} from "./chunk-4QDFHAFY.js";
 import {
   isUnlocked,
   lock,
@@ -50,7 +50,7 @@ var ICON_LOCK = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fil
 var vaultLockLocales = defineLocales({
   Lock: ["Verrouiller", "Blocca", "Sperren", "Bloquear", "Bloquear", "\u0417\u0430\u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u0430\u0442\u044C", "\u9501\u5B9A", "\u9396\u5B9A", "\u30ED\u30C3\u30AF", "\uC7A0\uADF8\uAE30"],
   "Could not lock vault": ["Impossible de verrouiller le coffre", "Impossibile bloccare il vault", "Tresor konnte nicht gesperrt werden", "No se pudo bloquear la b\xF3veda", "N\xE3o foi poss\xEDvel bloquear o cofre", "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0437\u0430\u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0445\u0440\u0430\u043D\u0438\u043B\u0438\u0449\u0435", "\u65E0\u6CD5\u9501\u5B9A\u4FDD\u9669\u5E93", "\u7121\u6CD5\u9396\u5B9A\u4FDD\u96AA\u5EAB", "\u30DC\u30FC\u30EB\u30C8\u3092\u30ED\u30C3\u30AF\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F", "\uBCFC\uD2B8\uB97C \uC7A0\uAE00 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4"],
-  "A passkey is required to lock the vault.": ["Une cl\xE9 d\u2019acc\xE8s est n\xE9cessaire pour verrouiller le coffre.", "Per bloccare il vault \xE8 necessaria una passkey.", "Zum Sperren des Tresors ist ein Passkey erforderlich.", "Se necesita una passkey para bloquear la b\xF3veda.", "Uma passkey \xE9 obrigat\xF3ria para bloquear o cofre.", "\u0414\u043B\u044F \u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u043A\u0438 \u0445\u0440\u0430\u043D\u0438\u043B\u0438\u0449\u0430 \u0442\u0440\u0435\u0431\u0443\u0435\u0442\u0441\u044F \u043A\u043B\u044E\u0447 \u0434\u043E\u0441\u0442\u0443\u043F\u0430.", "\u9501\u5B9A\u4FDD\u9669\u5E93\u9700\u8981\u901A\u884C\u5BC6\u94A5\u3002", "\u9396\u5B9A\u4FDD\u96AA\u5EAB\u9700\u8981\u901A\u884C\u91D1\u9470\u3002", "\u30DC\u30FC\u30EB\u30C8\u3092\u30ED\u30C3\u30AF\u3059\u308B\u306B\u306F\u30D1\u30B9\u30AD\u30FC\u304C\u5FC5\u8981\u3067\u3059\u3002", "\uBCFC\uD2B8\uB97C \uC7A0\uADF8\uB824\uBA74 \uD328\uC2A4\uD0A4\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4."]
+  "A passkey is required to lock the vault.": ["Une cl\xE9 d\u2019acc\xE8s est n\xE9cessaire pour verrouiller le coffre.", "Per bloccare il vault \xE8 necessaria una passkey.", "Zum Sperren des Tresors ist ein Passkey erforderlich.", "Se necesita una llave de acceso para bloquear la b\xF3veda.", "Uma chave de acesso \xE9 obrigat\xF3ria para bloquear o cofre.", "\u0414\u043B\u044F \u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u043A\u0438 \u0445\u0440\u0430\u043D\u0438\u043B\u0438\u0449\u0430 \u0442\u0440\u0435\u0431\u0443\u0435\u0442\u0441\u044F \u043A\u043B\u044E\u0447 \u0434\u043E\u0441\u0442\u0443\u043F\u0430.", "\u9501\u5B9A\u4FDD\u9669\u5E93\u9700\u8981\u901A\u884C\u5BC6\u94A5\u3002", "\u9396\u5B9A\u4FDD\u96AA\u5EAB\u9700\u8981\u901A\u884C\u5BC6\u9470\u3002", "\u30DC\u30FC\u30EB\u30C8\u3092\u30ED\u30C3\u30AF\u3059\u308B\u306B\u306F\u30D1\u30B9\u30AD\u30FC\u304C\u5FC5\u8981\u3067\u3059\u3002", "\uBCFC\uD2B8\uB97C \uC7A0\uADF8\uB824\uBA74 \uD328\uC2A4\uD0A4\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4."]
 });
 var t = getT(vaultLockLocales);
 var STYLES = (

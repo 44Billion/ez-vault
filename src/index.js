@@ -19,6 +19,10 @@ import { setVaultViewShell } from './services/view-state.js'
 // unavailable.
 await initializeStorage()
 await passkey.initializeVaultProtection()
+// Best-effort warmup keeps favicon I/O outside a later WebAuthn click. A
+// registration that happens before it resolves simply omits the optional icon
+// and can update it through signalCurrentUserDetails on a future unlock.
+if (!passkey.hasPasskey()) passkey.preparePasskeyRegistration().catch(() => {})
 await Promise.all([
   import('./components/account-list.js'),
   import('./components/account-add.js'),

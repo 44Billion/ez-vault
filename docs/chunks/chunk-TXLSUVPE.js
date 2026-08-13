@@ -7,13 +7,17 @@ import {
   commitPrepared,
   createIntakeToken,
   prepareBunker
-} from "./chunk-IHWA5BCE.js";
+} from "./chunk-UMP4LHVT.js";
 import {
   seededNeutralAvatarDataUrl
 } from "./chunk-3RWQBTGN.js";
 import {
-  ensureRegistered
-} from "./chunk-IXU3T4GE.js";
+  continueWithoutPasskey,
+  hasPasskey,
+  isExpectedPasskeyRegistrationFailure,
+  preparePasskeyRegistration,
+  requirePasskey
+} from "./chunk-4QDFHAFY.js";
 import {
   bytesToHex,
   finalizeEvent,
@@ -5569,6 +5573,43 @@ async function resolvePomegranateAccount({
   const created = await _createAccount({ token, email, fetchImpl, onStep });
   return { ...created, created: true };
 }
+async function defaultProtectionChoice({ afterPasskeyFailure = false } = {}) {
+  const {
+    requestPasskeyFallback,
+    requestPomegranateProtectionChoice
+  } = await import("./passkey-fallback-dialog-IXSLPTIB.js");
+  return afterPasskeyFailure ? requestPasskeyFallback() : requestPomegranateProtectionChoice();
+}
+async function settlePomegranateProtection({
+  choose = defaultProtectionChoice,
+  hasPasskey: hasPasskey2 = hasPasskey,
+  prepareRegistration = preparePasskeyRegistration,
+  requirePasskey: requirePasskey2 = requirePasskey,
+  continueLocal = continueWithoutPasskey,
+  expectedFailure = isExpectedPasskeyRegistrationFailure
+} = {}) {
+  if (hasPasskey2()) {
+    await requirePasskey2();
+    return "passkey";
+  }
+  await prepareRegistration();
+  let afterPasskeyFailure = false;
+  while (true) {
+    const choice = await choose({ afterPasskeyFailure });
+    if (choice === "local") {
+      await continueLocal();
+      return "local";
+    }
+    if (choice !== "retry") throw pomegranateError("POMEGRANATE_CANCELLED");
+    try {
+      await requirePasskey2();
+      return "passkey";
+    } catch (err) {
+      if (!expectedFailure(err) || hasPasskey2()) throw err;
+      afterPasskeyFailure = true;
+    }
+  }
+}
 async function runPomegranateFlow({
   authenticate = authenticateWithGoogle,
   fetchImpl = fetch,
@@ -5578,14 +5619,14 @@ async function runPomegranateFlow({
   _getProfile = getDefaultPomegranateProfile,
   _prepareBunker = prepareBunker,
   _commitPrepared = commitPrepared,
-  _ensureRegistered = ensureRegistered
+  _settleProtection = settlePomegranateProtection
 } = {}) {
   const auth = await authenticate();
   const { token, email } = decodePomegranateToken(auth.token);
   let protectionReady = false;
   const ensureProtection = async () => {
     if (protectionReady) return;
-    await _ensureRegistered();
+    await _settleProtection();
     protectionReady = true;
   };
   const { account, bootstrap } = await _resolveAccount({

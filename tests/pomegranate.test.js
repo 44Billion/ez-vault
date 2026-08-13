@@ -14,6 +14,7 @@ import {
   getDefaultPomegranateProfile,
   resolvePomegranateAccount,
   runPomegranateFlow,
+  settlePomegranateProtection,
   subscribePomegranateBusy,
   validatePomegranateAccount
 } from '../src/services/pomegranate.js'
@@ -233,6 +234,62 @@ test('an existing Pomegranate account never enters creation or bootstrap', async
   assert.deepEqual(result, { account, bootstrap: null, created: false })
 })
 
+test('post-OAuth protection uses an explicit fresh choice and retries expected passkey failures', async () => {
+  const steps = []
+  let passkeyAttempts = 0
+  const choices = ['retry', 'retry']
+
+  const result = await settlePomegranateProtection({
+    hasPasskey: () => false,
+    prepareRegistration: async () => { steps.push('prepare') },
+    choose: async ({ afterPasskeyFailure }) => {
+      steps.push(`choose:${afterPasskeyFailure}`)
+      return choices.shift()
+    },
+    requirePasskey: async () => {
+      passkeyAttempts++
+      steps.push(`passkey:${passkeyAttempts}`)
+      if (passkeyAttempts === 1) {
+        throw Object.assign(new Error('cancelled'), { name: 'NotAllowedError' })
+      }
+    },
+    continueLocal: async () => { throw new Error('must not use local mode') },
+    expectedFailure: err => err.name === 'NotAllowedError'
+  })
+
+  assert.equal(result, 'passkey')
+  assert.deepEqual(steps, ['prepare', 'choose:false', 'passkey:1', 'choose:true', 'passkey:2'])
+})
+
+test('post-OAuth protection can explicitly continue locally or cancel the whole flow', async () => {
+  let localCalls = 0
+  assert.equal(await settlePomegranateProtection({
+    hasPasskey: () => false,
+    prepareRegistration: async () => {},
+    choose: async () => 'local',
+    requirePasskey: async () => { throw new Error('must not create passkey') },
+    continueLocal: async () => { localCalls++ }
+  }), 'local')
+  assert.equal(localCalls, 1)
+
+  await assert.rejects(settlePomegranateProtection({
+    hasPasskey: () => false,
+    prepareRegistration: async () => {},
+    choose: async () => 'cancel'
+  }), err => err.code === 'POMEGRANATE_CANCELLED')
+})
+
+test('an existing passkey bypasses the post-OAuth choice', async () => {
+  let required = 0
+  assert.equal(await settlePomegranateProtection({
+    hasPasskey: () => true,
+    prepareRegistration: async () => { throw new Error('must not prepare') },
+    choose: async () => { throw new Error('must not choose') },
+    requirePasskey: async () => { required++ }
+  }), 'passkey')
+  assert.equal(required, 1)
+})
+
 test('the completed flow persists bootstrap metadata only for a newly created account', async () => {
   const pubkey = 'a'.repeat(64)
   const handlerPubkey = 'b'.repeat(64)
@@ -261,7 +318,7 @@ test('the completed flow persists bootstrap metadata only for a newly created ac
       assert.deepEqual(options, { neutralAvatar: true })
       return { pubkey, record: { type: 'bunker', pubkey } }
     },
-    _ensureRegistered: async () => { protectionCalls++ },
+    _settleProtection: async () => { protectionCalls++ },
     _commitPrepared: async (prepared, options) => {
       committed.push(...prepared)
       commitOptions = options
@@ -284,7 +341,7 @@ test('the completed flow leaves an existing account record metadata unchanged', 
     _resolveAccount: async () => ({ account: { pubkey }, bootstrap: null, created: false }),
     _getProfile: async () => ({ handler_pubkey: 'b'.repeat(64) }),
     _prepareBunker: async () => ({ pubkey, record: originalRecord }),
-    _ensureRegistered: async () => {},
+    _settleProtection: async () => {},
     _commitPrepared: async prepared => { committed = prepared }
   })
 

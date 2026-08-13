@@ -116,6 +116,8 @@ const STYLES = /* css */`
     position: absolute;
     top: 16px;
     left: 50%;
+    width: max-content;
+    max-width: calc(100% - 32px);
     transform: translateX(-50%);
     display: inline-flex;
     align-items: center;

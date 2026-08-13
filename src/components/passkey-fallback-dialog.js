@@ -2,12 +2,17 @@ import { injectComponentStyles } from '../helpers/dom.js'
 import { defineLocales, getT, subscribeLocaleChanged } from '../i18n/index.js'
 
 const ICON_WARNING = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4" /><path d="M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0z" /><path d="M12 16h.01" /></svg>'
+const ICON_LOCK = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13a2 2 0 0 1 2 -2h10a2 2 0 0 1 2 2v6a2 2 0 0 1 -2 2h-10a2 2 0 0 1 -2 -2z" /><path d="M8 11v-4a4 4 0 0 1 8 0v4" /><path d="M12 16v.01" /></svg>'
 
 export const passkeyFallbackLocales = defineLocales({
-  'Continue without a passkey?': ['Continuer sans clé d’accès ?', 'Continuare senza passkey?', 'Ohne Passkey fortfahren?', '¿Continuar sin passkey?', 'Prosseguir sem passkey?', 'Продолжить без ключа доступа?', '不使用通行密钥继续？', '不使用通行金鑰繼續？', 'パスキーなしで続行しますか？', '패스키 없이 계속할까요?'],
-  'Anyone who can read this device’s site data will be able to recover your account secrets. You can try creating a passkey again later.': ['Toute personne pouvant lire les données de ce site sur cet appareil pourra récupérer les secrets de vos comptes. Vous pourrez réessayer de créer une clé d’accès plus tard.', 'Chiunque possa leggere i dati del sito su questo dispositivo potrà recuperare i segreti degli account. Potrai riprovare a creare una passkey in seguito.', 'Jeder, der die Websitedaten dieses Geräts lesen kann, kann Ihre Kontogeheimnisse wiederherstellen. Sie können später erneut einen Passkey erstellen.', 'Cualquiera que pueda leer los datos de este sitio en el dispositivo podrá recuperar los secretos de tus cuentas. Podrás volver a intentar crear una passkey más adelante.', 'Qualquer pessoa que consiga ler os dados deste site no dispositivo poderá recuperar os segredos das suas contas. Você poderá tentar criar uma passkey novamente mais tarde.', 'Любой, кто сможет прочитать данные этого сайта на устройстве, сможет восстановить секреты ваших учётных записей. Позже можно снова попробовать создать ключ доступа.', '任何能够读取此设备网站数据的人都能恢复你的账户机密。你可以稍后再次尝试创建通行密钥。', '任何能夠讀取此裝置網站資料的人都能復原你的帳戶機密。你可以稍後再次嘗試建立通行金鑰。', 'この端末のサイトデータを読める人は、アカウントの秘密情報を復元できます。パスキーの作成は後でもう一度試せます。', '이 기기의 사이트 데이터를 읽을 수 있는 사람은 계정 비밀을 복구할 수 있습니다. 나중에 패스키 생성을 다시 시도할 수 있습니다.'],
-  'Try passkey again': ['Réessayer la clé d’accès', 'Riprova la passkey', 'Passkey erneut versuchen', 'Volver a intentar la passkey', 'Tentar passkey novamente', 'Повторить попытку с ключом доступа', '重试通行密钥', '重試通行金鑰', 'パスキーを再試行', '패스키 다시 시도'],
-  'Continue without passkey': ['Continuer sans clé d’accès', 'Continua senza passkey', 'Ohne Passkey fortfahren', 'Continuar sin passkey', 'Continuar sem passkey', 'Продолжить без ключа доступа', '不使用通行密钥继续', '不使用通行金鑰繼續', 'パスキーなしで続行', '패스키 없이 계속']
+  'Continue without a passkey?': ['Continuer sans clé d’accès ?', 'Continuare senza passkey?', 'Ohne Passkey fortfahren?', '¿Continuar sin llave de acceso?', 'Prosseguir sem chave de acesso?', 'Продолжить без ключа доступа?', '不使用通行密钥继续？', '不使用通行密鑰繼續？', 'パスキーなしで続行しますか？', '패스키 없이 계속할까요?'],
+  'If you plan to share this device, we recommend protecting your data with a passkey.': ['Si vous prévoyez de partager cet appareil, nous vous recommandons de protéger vos données avec une clé d’accès.', 'Se prevedi di condividere questo dispositivo, ti consigliamo di proteggere i tuoi dati con una passkey.', 'Wenn Sie dieses Gerät gemeinsam nutzen möchten, empfehlen wir, Ihre Daten mit einem Passkey zu schützen.', 'Si piensas compartir este dispositivo, te recomendamos proteger tus datos con una llave de acceso.', 'Se você pretende compartilhar este dispositivo, é recomendável proteger seus dados com uma chave de acesso.', 'Если вы планируете делиться этим устройством, рекомендуется защитить данные с помощью ключа доступа.', '如果您打算与他人共用此设备，建议使用通行密钥保护您的数据。', '如果您打算與他人共用此裝置，建議使用通行密鑰保護您的資料。', 'この端末を他の人と共有する場合は、パスキーでデータを保護することをおすすめします。', '이 기기를 다른 사람과 공유할 계획이라면 패스키로 데이터를 보호하는 것이 좋습니다.'],
+  'Try passkey again': ['Réessayer', 'Riprova', 'Erneut versuchen', 'Volver a intentar', 'Tentar novamente', 'Повторить', '重试', '重試', '再試行', '다시 시도'],
+  'Continue without passkey': ['Continuer sans clé d’accès', 'Continua senza passkey', 'Ohne Passkey fortfahren', 'Continuar sin llave de acceso', 'Continuar sem chave de acesso', 'Продолжить без ключа доступа', '不使用通行密钥继续', '不使用通行密鑰繼續', 'パスキーなしで続行', '패스키 없이 계속'],
+  'Protect your account on this device': ['Protégez votre compte sur cet appareil', 'Proteggi il tuo account su questo dispositivo', 'Schützen Sie Ihr Konto auf diesem Gerät', 'Protege tu cuenta en este dispositivo', 'Proteja sua conta neste dispositivo', 'Защитите свою учётную запись на этом устройстве', '保护您在此设备上的账户', '保護您在此裝置上的帳戶', 'この端末上のアカウントを保護', '이 기기에서 계정 보호'],
+  'A passkey usually uses biometrics or your device PIN to protect your account.': ['Une clé d’accès utilise généralement la biométrie ou le code PIN de votre appareil pour protéger votre compte.', 'Una passkey usa solitamente i dati biometrici o il PIN del dispositivo per proteggere il tuo account.', 'Ein Passkey verwendet normalerweise biometrische Daten oder die Geräte-PIN, um Ihr Konto zu schützen.', 'Una llave de acceso suele usar datos biométricos o el PIN de tu dispositivo para proteger tu cuenta.', 'Uma chave de acesso normalmente usa biometria ou o PIN do dispositivo para proteger sua conta.', 'Ключ доступа обычно использует биометрию или PIN-код устройства для защиты вашей учётной записи.', '通行密钥通常使用生物识别或设备 PIN 码来保护您的账户。', '通行密鑰通常使用生物辨識或裝置 PIN 碼來保護您的帳戶。', 'パスキーは通常、生体認証または端末の PIN を使ってアカウントを保護します。', '패스키는 일반적으로 생체 인식 또는 기기 PIN을 사용해 계정을 보호합니다.'],
+  'Create passkey': ['Créer une clé d’accès', 'Crea una passkey', 'Passkey erstellen', 'Crear llave de acceso', 'Criar chave de acesso', 'Создать ключ доступа', '创建通行密钥', '建立通行密鑰', 'パスキーを作成', '패스키 만들기'],
+  Recommended: ['Recommandé', 'Consigliato', 'Empfohlen', 'Recomendado', 'Recomendado', 'Рекомендуется', '推荐', '建議', '推奨', '권장']
 })
 
 const t = getT(passkeyFallbackLocales)
@@ -68,6 +73,22 @@ const STYLES = /* css */`
   passkey-fallback-dialog [data-choice="retry"]:active {
     background-color: var(--accent-active);
   }
+  passkey-fallback-dialog .passkey-recommended-badge {
+    display: none;
+    margin-left: 8px;
+    padding: 2px 7px;
+    border-radius: 9999px;
+    background-color: var(--accent-soft);
+    color: var(--accent-fg);
+    font-size: 11rem;
+    font-weight: 600;
+  }
+  passkey-fallback-dialog[data-purpose="pomegranate"] .passkey-recommended-badge {
+    display: inline-flex;
+  }
+  passkey-fallback-dialog[data-purpose="pomegranate"] .passkey-fallback-icon {
+    color: var(--accent-fg);
+  }
   passkey-fallback-dialog [data-choice="local"] {
     border: 1px solid var(--warning-fg);
     background-color: transparent;
@@ -76,12 +97,17 @@ const STYLES = /* css */`
   passkey-fallback-dialog [data-choice="local"]:active {
     background-color: var(--surface-interactive-active);
   }
+  passkey-fallback-dialog[data-purpose="pomegranate"] [data-choice="local"] {
+    border-color: var(--border);
+    color: var(--fg-muted);
+  }
 `
 
 export class PasskeyFallbackDialog extends HTMLElement {
   #dialog = null
   #resolve = null
   #unsubscribeLocale = null
+  #purpose = 'fallback'
 
   connectedCallback () {
     injectComponentStyles('passkey-fallback-dialog', STYLES)
@@ -91,7 +117,10 @@ export class PasskeyFallbackDialog extends HTMLElement {
         <h2 id="passkey-fallback-title"></h2>
         <p id="passkey-fallback-description"></p>
         <div class="passkey-fallback-actions">
-          <button type="button" data-choice="retry"></button>
+          <button type="button" data-choice="retry">
+            <span class="passkey-primary-label"></span>
+            <span class="passkey-recommended-badge"></span>
+          </button>
           <button type="button" data-choice="local"></button>
         </div>
       </dialog>
@@ -111,8 +140,11 @@ export class PasskeyFallbackDialog extends HTMLElement {
     this.#settle('cancel')
   }
 
-  request () {
+  request ({ purpose = 'fallback' } = {}) {
     if (this.#resolve) return Promise.reject(new Error('PASSKEY_FALLBACK_DIALOG_BUSY'))
+    this.#purpose = purpose === 'pomegranate' ? 'pomegranate' : 'fallback'
+    this.dataset.purpose = this.#purpose
+    this.#translate()
     return new Promise(resolve => {
       this.#resolve = resolve
       this.#dialog.showModal()
@@ -121,9 +153,12 @@ export class PasskeyFallbackDialog extends HTMLElement {
   }
 
   #translate () {
-    this.querySelector('#passkey-fallback-title')?.replaceChildren(t('Continue without a passkey?'))
-    this.querySelector('#passkey-fallback-description')?.replaceChildren(t('Anyone who can read this device’s site data will be able to recover your account secrets. You can try creating a passkey again later.'))
-    this.querySelector('[data-choice="retry"]')?.replaceChildren(t('Try passkey again'))
+    const pomegranate = this.#purpose === 'pomegranate'
+    this.querySelector('.passkey-fallback-icon').innerHTML = pomegranate ? ICON_LOCK : ICON_WARNING
+    this.querySelector('#passkey-fallback-title')?.replaceChildren(t(pomegranate ? 'Protect your account on this device' : 'Continue without a passkey?'))
+    this.querySelector('#passkey-fallback-description')?.replaceChildren(t(pomegranate ? 'A passkey usually uses biometrics or your device PIN to protect your account.' : 'If you plan to share this device, we recommend protecting your data with a passkey.'))
+    this.querySelector('.passkey-primary-label')?.replaceChildren(t(pomegranate ? 'Create passkey' : 'Try passkey again'))
+    this.querySelector('.passkey-recommended-badge')?.replaceChildren(t('Recommended'))
     this.querySelector('[data-choice="local"]')?.replaceChildren(t('Continue without passkey'))
   }
 
@@ -137,12 +172,12 @@ export class PasskeyFallbackDialog extends HTMLElement {
     const rect = this.#dialog.getBoundingClientRect()
     const outside = event.clientX < rect.left || event.clientX > rect.right ||
       event.clientY < rect.top || event.clientY > rect.bottom
-    if (outside) this.#settle('cancel')
+    if (outside) this.#settle('local')
   }
 
   #onCancel = event => {
     event.preventDefault()
-    this.#settle('cancel')
+    this.#settle('local')
   }
 
   #settle (choice) {
@@ -166,4 +201,12 @@ export function requestPasskeyFallback () {
     document.body.append(instance)
   }
   return instance.request()
+}
+
+export function requestPomegranateProtectionChoice () {
+  if (!instance?.isConnected) {
+    instance = document.createElement('passkey-fallback-dialog')
+    document.body.append(instance)
+  }
+  return instance.request({ purpose: 'pomegranate' })
 }

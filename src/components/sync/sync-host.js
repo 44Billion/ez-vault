@@ -43,7 +43,7 @@ export const syncHostLocales = defineLocales({
   'Sync failed': ['Échec de la synchronisation', 'Sincronizzazione non riuscita', 'Synchronisierung fehlgeschlagen', 'Error de sincronización', 'Falha na sincronização', 'Ошибка синхронизации', '同步失败', '同步失敗', '同期に失敗しました', '동기화 실패'],
   'Sync cancelled': ['Synchronisation annulée', 'Sincronizzazione annullata', 'Synchronisierung abgebrochen', 'Sincronización cancelada', 'Sincronização cancelada', 'Синхронизация отменена', '同步已取消', '同步已取消', '同期をキャンセルしました', '동기화 취소됨'],
   'Pairing cancelled': ['Association annulée', 'Associazione annullata', 'Kopplung abgebrochen', 'Emparejamiento cancelado', 'Pareamento cancelado', 'Сопряжение отменено', '配对已取消', '配對已取消', 'ペアリングをキャンセルしました', '페어링 취소됨'],
-  'The passkey prompt was cancelled.': ['L’invite de clé d’accès a été annulée.', 'La richiesta della passkey è stata annullata.', 'Die Passkey-Abfrage wurde abgebrochen.', 'Se canceló la solicitud de passkey.', 'A solicitação de passkey foi cancelada.', 'Запрос ключа доступа отменён.', '通行密钥提示已取消。', '通行金鑰提示已取消。', 'パスキーの確認がキャンセルされました。', '패스키 요청이 취소되었습니다.'],
+  'The passkey prompt was cancelled.': ['L’invite de clé d’accès a été annulée.', 'La richiesta della passkey è stata annullata.', 'Die Passkey-Abfrage wurde abgebrochen.', 'Se canceló la solicitud de llave de acceso.', 'A solicitação da chave de acesso foi cancelada.', 'Запрос ключа доступа отменён.', '通行密钥提示已取消。', '通行密鑰提示已取消。', 'パスキーの確認がキャンセルされました。', '패스키 요청이 취소되었습니다.'],
   'Pairing failed': ['Échec de l’association', 'Associazione non riuscita', 'Kopplung fehlgeschlagen', 'Error de emparejamiento', 'Falha no pareamento', 'Ошибка сопряжения', '配对失败', '配對失敗', 'ペアリングに失敗しました', '페어링 실패']
 })
 

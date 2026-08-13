@@ -16,7 +16,7 @@ const ICON_LOCK = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" f
 export const vaultLockLocales = defineLocales({
   Lock: ['Verrouiller', 'Blocca', 'Sperren', 'Bloquear', 'Bloquear', 'Заблокировать', '锁定', '鎖定', 'ロック', '잠그기'],
   'Could not lock vault': ['Impossible de verrouiller le coffre', 'Impossibile bloccare il vault', 'Tresor konnte nicht gesperrt werden', 'No se pudo bloquear la bóveda', 'Não foi possível bloquear o cofre', 'Не удалось заблокировать хранилище', '无法锁定保险库', '無法鎖定保險庫', 'ボールトをロックできませんでした', '볼트를 잠글 수 없습니다'],
-  'A passkey is required to lock the vault.': ['Une clé d’accès est nécessaire pour verrouiller le coffre.', 'Per bloccare il vault è necessaria una passkey.', 'Zum Sperren des Tresors ist ein Passkey erforderlich.', 'Se necesita una passkey para bloquear la bóveda.', 'Uma passkey é obrigatória para bloquear o cofre.', 'Для блокировки хранилища требуется ключ доступа.', '锁定保险库需要通行密钥。', '鎖定保險庫需要通行金鑰。', 'ボールトをロックするにはパスキーが必要です。', '볼트를 잠그려면 패스키가 필요합니다.']
+  'A passkey is required to lock the vault.': ['Une clé d’accès est nécessaire pour verrouiller le coffre.', 'Per bloccare il vault è necessaria una passkey.', 'Zum Sperren des Tresors ist ein Passkey erforderlich.', 'Se necesita una llave de acceso para bloquear la bóveda.', 'Uma chave de acesso é obrigatória para bloquear o cofre.', 'Для блокировки хранилища требуется ключ доступа.', '锁定保险库需要通行密钥。', '鎖定保險庫需要通行密鑰。', 'ボールトをロックするにはパスキーが必要です。', '볼트를 잠그려면 패스키가 필요합니다.']
 })
 
 const t = getT(vaultLockLocales)

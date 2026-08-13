@@ -124,6 +124,9 @@ When in doubt about a layout decision, ask: "does this still work as a tall vert
   use the strict passkey requirement path, never show the local-fallback dialog,
   and leave the vault open and unlocked when registration is cancelled or
   unsupported.
+  In both the generic fallback and Pomegranate protection-choice dialogs,
+  Escape or a backdrop click selects local mode; component teardown must still
+  cancel without starting persistence work.
 - Raw `nsec`, bunker handler pubkeys, bunker client keys, content-key secret
   keys and decrypted activity payloads must never be persisted literally in
   plaintext. The explicit local mode is the sole equivalent-security
@@ -183,6 +186,11 @@ When in doubt about a layout decision, ask: "does this still work as a tall vert
   OAuth intermediary and trusts that fewer than two operators collude. The
   OAuth popup has a 10-minute deadline; on expiry, close the script-opened
   window, release the shared busy operation and show the localized timeout.
+  OAuth completion has no usable transient activation for cross-origin iframe
+  WebAuthn: after read-only Central lookup, an unprotected vault must show the
+  explicit passkey-recommended/local choice and use its fresh click directly
+  for `credentials.create()`. Do not perform account/profile creation or the
+  first bunker connection before that choice has settled.
 - IndexedDB database `ez-vault` is the durable store for account records,
   encrypted vault/sidecars, passkey metadata, sync state and the bounded
   activity log. Do not add new `localStorage` or `sessionStorage` persistence.
