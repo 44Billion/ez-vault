@@ -7,15 +7,15 @@ import {
   commitPrepared,
   createIntakeToken,
   prepareBareKey
-} from "./chunk-UMP4LHVT.js";
+} from "./chunk-7LLYVM4A.js";
 import "./chunk-3RWQBTGN.js";
-import "./chunk-7VBC3JAI.js";
+import "./chunk-3P7U4I6T.js";
 import "./chunk-AZYRZ53H.js";
 import {
   detectPlatform,
   ensureRegistered,
   openSecrets
-} from "./chunk-4QDFHAFY.js";
+} from "./chunk-TPNQ3INA.js";
 import {
   Nip46Client,
   Nip46ServerSession,

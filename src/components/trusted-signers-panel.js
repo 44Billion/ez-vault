@@ -14,6 +14,7 @@ export const trustedSignersLocales = defineLocales({
   'trusted {{time}}': ['approuvé {{time}}', 'attendibile {{time}}', 'vertraut {{time}}', 'de confianza {{time}}', 'confiável {{time}}', 'доверено {{time}}', '受信任于 {{time}}', '信任於 {{time}}', '信頼日時 {{time}}', '신뢰됨 {{time}}'],
   'Remove trusted device': ['Supprimer l’appareil de confiance', 'Rimuovi dispositivo attendibile', 'Vertrauenswürdiges Gerät entfernen', 'Eliminar dispositivo de confianza', 'Remover dispositivo confiável', 'Удалить доверенное устройство', '移除受信任的设备', '移除受信任的裝置', '信頼済みデバイスを削除', '신뢰할 수 있는 기기 삭제'],
   'Remove this trusted device? Future sync will stop, but data already synced to it cannot be removed.': ['Supprimer cet appareil de confiance ? La synchronisation future s’arrêtera, mais les données déjà synchronisées ne pourront pas être supprimées.', 'Rimuovere questo dispositivo attendibile? La sincronizzazione futura si interromperà, ma i dati già sincronizzati non potranno essere rimossi.', 'Dieses vertrauenswürdige Gerät entfernen? Künftige Synchronisierung wird beendet, bereits synchronisierte Daten können jedoch nicht entfernt werden.', '¿Eliminar este dispositivo de confianza? La sincronización futura se detendrá, pero los datos ya sincronizados no se pueden eliminar.', 'Remover este dispositivo confiável? Sincronizações futuras serão interrompidas, mas os dados já sincronizados não poderão ser removidos.', 'Удалить это доверенное устройство? Дальнейшая синхронизация прекратится, но уже синхронизированные данные удалить нельзя.', '要移除此受信任的设备吗？之后将停止同步，但已同步到该设备的数据无法移除。', '要移除此受信任的裝置嗎？之後將停止同步，但已同步到該裝置的資料無法移除。', 'この信頼済みデバイスを削除しますか？今後の同期は停止しますが、すでに同期されたデータは削除できません。', '이 신뢰할 수 있는 기기를 삭제할까요? 향후 동기화는 중지되지만 이미 동기화된 데이터는 삭제할 수 없습니다.'],
+  'Authentication failed': ['Échec de l’authentification', 'Autenticazione non riuscita', 'Authentifizierung fehlgeschlagen', 'Error de autenticación', 'Falha na autenticação', 'Ошибка аутентификации', '身份验证失败', '驗證失敗', '認証に失敗しました', '인증 실패'],
   'Trusted device removed': ['Appareil de confiance supprimé', 'Dispositivo attendibile rimosso', 'Vertrauenswürdiges Gerät entfernt', 'Dispositivo de confianza eliminado', 'Dispositivo confiável removido', 'Доверенное устройство удалено', '已移除受信任的设备', '已移除受信任的裝置', '信頼済みデバイスを削除しました', '신뢰할 수 있는 기기 삭제됨'],
   'Could not remove device': ['Impossible de supprimer l’appareil', 'Impossibile rimuovere il dispositivo', 'Gerät konnte nicht entfernt werden', 'No se pudo eliminar el dispositivo', 'Não foi possível remover o dispositivo', 'Не удалось удалить устройство', '无法移除设备', '無法移除裝置', 'デバイスを削除できませんでした', '기기를 삭제하지 못했습니다'],
   'Could not unlock': ['Impossible de déverrouiller', 'Impossibile sbloccare', 'Entsperren nicht möglich', 'No se pudo desbloquear', 'Não foi possível desbloquear', 'Не удалось разблокировать', '无法解锁', '無法解鎖', 'ロックを解除できませんでした', '잠금을 해제하지 못했습니다']
@@ -216,17 +217,26 @@ export class TrustedSignersPanel extends HTMLElement {
   }
 
   async #removeSigner (pubkey, button) {
-    const ok = window.confirm(t('Remove this trusted device? Future sync will stop, but data already synced to it cannot be removed.'))
-    if (!ok) return
+    const protectedByPasskey = passkey.hasPasskey()
+    if (!protectedByPasskey && !window.confirm(t('Remove this trusted device? Future sync will stop, but data already synced to it cannot be removed.'))) return
     button.disabled = true
     try {
-      await passkey.ensureRegistered()
+      if (protectedByPasskey) {
+        try {
+          await passkey.openSecrets()
+        } catch (err) {
+          console.warn('remove-trusted-device auth failed', err?.message ?? err)
+          toast.error(t('Authentication failed'))
+          return
+        }
+      }
       const actorPubkey = await secrets.getDeviceSignerPubkey()
       await trustedSigners.remove(pubkey, { actorPubkey })
       toast.success(t('Trusted device removed'))
     } catch (err) {
-      button.disabled = false
       toast.error(t('Could not remove device'), err?.message ?? String(err))
+    } finally {
+      button.disabled = false
     }
   }
 

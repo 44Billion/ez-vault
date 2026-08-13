@@ -8,12 +8,12 @@ import {
 import {
   initMessenger,
   setVaultViewShell
-} from "./chunks/chunk-RE3N5ASP.js";
+} from "./chunks/chunk-NVZGJ2GG.js";
 import {
   init,
   startDeviceRelayListRefresh,
   startRevocationRotation
-} from "./chunks/chunk-2G6OKGLI.js";
+} from "./chunks/chunk-K7RWYLU3.js";
 import {
   clearError,
   setError
@@ -23,7 +23,7 @@ import {
   isOnline,
   onOnline,
   startContentKeyEventRefresh
-} from "./chunks/chunk-SCLRGSUQ.js";
+} from "./chunks/chunk-2RF63PFL.js";
 import {
   seededAvatarDataUrl
 } from "./chunks/chunk-3RWQBTGN.js";
@@ -31,14 +31,14 @@ import {
   filterVisibleAccounts,
   recoverPendingMutation,
   runSecretAccountMutation
-} from "./chunks/chunk-7VBC3JAI.js";
+} from "./chunks/chunk-3P7U4I6T.js";
 import "./chunks/chunk-AZYRZ53H.js";
 import {
   checkForIconUpdate,
   hasPasskey,
   initializeVaultProtection,
   preparePasskeyRegistration
-} from "./chunks/chunk-4QDFHAFY.js";
+} from "./chunks/chunk-TPNQ3INA.js";
 import {
   fetchLatestProfile,
   fetchRelayListEvent,
@@ -220,16 +220,16 @@ await initializeVaultProtection();
 if (!hasPasskey()) preparePasskeyRegistration().catch(() => {
 });
 await Promise.all([
-  import("./chunks/account-list-TF5TS355.js"),
-  import("./chunks/account-add-7H4DDFLM.js"),
-  import("./chunks/sync-panel-EBZLBRPK.js"),
-  import("./chunks/trusted-signers-panel-KQZOGJVF.js"),
+  import("./chunks/account-list-ZEXB2OIZ.js"),
+  import("./chunks/account-add-2DNRL4T4.js"),
+  import("./chunks/sync-panel-2HJ5E5T7.js"),
+  import("./chunks/trusted-signers-panel-YR7XA7DN.js"),
   import("./chunks/accordion-panel-AGHO422R.js"),
   import("./chunks/toast-VTWQ4NKU.js"),
   import("./chunks/activity-log-M76CTKGL.js"),
-  import("./chunks/vault-lock-button-VY2CN3LB.js"),
-  import("./chunks/lock-overlay-RNVDV6HL.js"),
-  import("./chunks/create-overlay-JMZSQCM5.js")
+  import("./chunks/vault-lock-button-FIDT7TRA.js"),
+  import("./chunks/lock-overlay-R42BQZXE.js"),
+  import("./chunks/create-overlay-EJPRSJG5.js")
 ]);
 document.getElementById("vault").style.visibility = "visible";
 var list2 = document.querySelector("account-list");
@@ -307,7 +307,7 @@ startRevocationRotation().catch((err) => {
 });
 if (window === window.top) {
   document.body.classList.add("dev");
-  import("./chunks/dev-panel-STILYMPK.js").then(() => {
+  import("./chunks/dev-panel-TJUM5QPN.js").then(() => {
     document.querySelector(".diagnostics-section")?.append(document.createElement("dev-panel"));
   });
 }

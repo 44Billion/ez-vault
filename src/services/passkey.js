@@ -168,8 +168,8 @@ export function hasPendingUpgrade () {
 }
 
 // Stable explicit local mode: there is no passkey credential and no staged
-// promotion that must remain fail-closed. Copy and account-removal flows use
-// this distinction to avoid offering an immediate security upgrade.
+// promotion that must remain fail-closed. This distinction lets local-only
+// operations avoid offering an immediate security upgrade.
 export function isUnprotectedLocalVault () {
   return hasLocalVault() && !hasPasskey() && !hasPendingUpgrade()
 }

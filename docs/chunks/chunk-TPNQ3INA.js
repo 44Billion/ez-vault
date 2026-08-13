@@ -160,9 +160,6 @@ function hasLocalVault() {
 function hasPendingUpgrade() {
   return hasState(UPGRADE_PENDING_KEY);
 }
-function isUnprotectedLocalVault() {
-  return hasLocalVault() && !hasPasskey() && !hasPendingUpgrade();
-}
 function normalizeTransports(transports) {
   if (!Array.isArray(transports)) return [];
   return [...new Set(transports.filter((transport) => typeof transport === "string" && transport))];
@@ -873,7 +870,6 @@ async function flushPendingIconUpdate() {
 
 export {
   detectPlatform,
-  isUnprotectedLocalVault,
   hasPasskey,
   isExpectedPasskeyRegistrationFailure,
   preparePasskeyRegistration,

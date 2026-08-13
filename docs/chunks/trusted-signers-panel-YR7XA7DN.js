@@ -5,11 +5,11 @@ import {
   subscribe as subscribe2
 } from "./chunk-AZYRZ53H.js";
 import {
-  ensureRegistered,
   flushPendingIconUpdate,
   hasPasskey,
+  openSecrets,
   unlock
-} from "./chunk-4QDFHAFY.js";
+} from "./chunk-TPNQ3INA.js";
 import {
   getDeviceSignerPubkey,
   isUnlocked,
@@ -40,6 +40,7 @@ var trustedSignersLocales = defineLocales({
   "trusted {{time}}": ["approuv\xE9 {{time}}", "attendibile {{time}}", "vertraut {{time}}", "de confianza {{time}}", "confi\xE1vel {{time}}", "\u0434\u043E\u0432\u0435\u0440\u0435\u043D\u043E {{time}}", "\u53D7\u4FE1\u4EFB\u4E8E {{time}}", "\u4FE1\u4EFB\u65BC {{time}}", "\u4FE1\u983C\u65E5\u6642 {{time}}", "\uC2E0\uB8B0\uB428 {{time}}"],
   "Remove trusted device": ["Supprimer l\u2019appareil de confiance", "Rimuovi dispositivo attendibile", "Vertrauensw\xFCrdiges Ger\xE4t entfernen", "Eliminar dispositivo de confianza", "Remover dispositivo confi\xE1vel", "\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u0434\u043E\u0432\u0435\u0440\u0435\u043D\u043D\u043E\u0435 \u0443\u0441\u0442\u0440\u043E\u0439\u0441\u0442\u0432\u043E", "\u79FB\u9664\u53D7\u4FE1\u4EFB\u7684\u8BBE\u5907", "\u79FB\u9664\u53D7\u4FE1\u4EFB\u7684\u88DD\u7F6E", "\u4FE1\u983C\u6E08\u307F\u30C7\u30D0\u30A4\u30B9\u3092\u524A\u9664", "\uC2E0\uB8B0\uD560 \uC218 \uC788\uB294 \uAE30\uAE30 \uC0AD\uC81C"],
   "Remove this trusted device? Future sync will stop, but data already synced to it cannot be removed.": ["Supprimer cet appareil de confiance ? La synchronisation future s\u2019arr\xEAtera, mais les donn\xE9es d\xE9j\xE0 synchronis\xE9es ne pourront pas \xEAtre supprim\xE9es.", "Rimuovere questo dispositivo attendibile? La sincronizzazione futura si interromper\xE0, ma i dati gi\xE0 sincronizzati non potranno essere rimossi.", "Dieses vertrauensw\xFCrdige Ger\xE4t entfernen? K\xFCnftige Synchronisierung wird beendet, bereits synchronisierte Daten k\xF6nnen jedoch nicht entfernt werden.", "\xBFEliminar este dispositivo de confianza? La sincronizaci\xF3n futura se detendr\xE1, pero los datos ya sincronizados no se pueden eliminar.", "Remover este dispositivo confi\xE1vel? Sincroniza\xE7\xF5es futuras ser\xE3o interrompidas, mas os dados j\xE1 sincronizados n\xE3o poder\xE3o ser removidos.", "\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u044D\u0442\u043E \u0434\u043E\u0432\u0435\u0440\u0435\u043D\u043D\u043E\u0435 \u0443\u0441\u0442\u0440\u043E\u0439\u0441\u0442\u0432\u043E? \u0414\u0430\u043B\u044C\u043D\u0435\u0439\u0448\u0430\u044F \u0441\u0438\u043D\u0445\u0440\u043E\u043D\u0438\u0437\u0430\u0446\u0438\u044F \u043F\u0440\u0435\u043A\u0440\u0430\u0442\u0438\u0442\u0441\u044F, \u043D\u043E \u0443\u0436\u0435 \u0441\u0438\u043D\u0445\u0440\u043E\u043D\u0438\u0437\u0438\u0440\u043E\u0432\u0430\u043D\u043D\u044B\u0435 \u0434\u0430\u043D\u043D\u044B\u0435 \u0443\u0434\u0430\u043B\u0438\u0442\u044C \u043D\u0435\u043B\u044C\u0437\u044F.", "\u8981\u79FB\u9664\u6B64\u53D7\u4FE1\u4EFB\u7684\u8BBE\u5907\u5417\uFF1F\u4E4B\u540E\u5C06\u505C\u6B62\u540C\u6B65\uFF0C\u4F46\u5DF2\u540C\u6B65\u5230\u8BE5\u8BBE\u5907\u7684\u6570\u636E\u65E0\u6CD5\u79FB\u9664\u3002", "\u8981\u79FB\u9664\u6B64\u53D7\u4FE1\u4EFB\u7684\u88DD\u7F6E\u55CE\uFF1F\u4E4B\u5F8C\u5C07\u505C\u6B62\u540C\u6B65\uFF0C\u4F46\u5DF2\u540C\u6B65\u5230\u8A72\u88DD\u7F6E\u7684\u8CC7\u6599\u7121\u6CD5\u79FB\u9664\u3002", "\u3053\u306E\u4FE1\u983C\u6E08\u307F\u30C7\u30D0\u30A4\u30B9\u3092\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F\u4ECA\u5F8C\u306E\u540C\u671F\u306F\u505C\u6B62\u3057\u307E\u3059\u304C\u3001\u3059\u3067\u306B\u540C\u671F\u3055\u308C\u305F\u30C7\u30FC\u30BF\u306F\u524A\u9664\u3067\u304D\u307E\u305B\u3093\u3002", "\uC774 \uC2E0\uB8B0\uD560 \uC218 \uC788\uB294 \uAE30\uAE30\uB97C \uC0AD\uC81C\uD560\uAE4C\uC694? \uD5A5\uD6C4 \uB3D9\uAE30\uD654\uB294 \uC911\uC9C0\uB418\uC9C0\uB9CC \uC774\uBBF8 \uB3D9\uAE30\uD654\uB41C \uB370\uC774\uD130\uB294 \uC0AD\uC81C\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4."],
+  "Authentication failed": ["\xC9chec de l\u2019authentification", "Autenticazione non riuscita", "Authentifizierung fehlgeschlagen", "Error de autenticaci\xF3n", "Falha na autentica\xE7\xE3o", "\u041E\u0448\u0438\u0431\u043A\u0430 \u0430\u0443\u0442\u0435\u043D\u0442\u0438\u0444\u0438\u043A\u0430\u0446\u0438\u0438", "\u8EAB\u4EFD\u9A8C\u8BC1\u5931\u8D25", "\u9A57\u8B49\u5931\u6557", "\u8A8D\u8A3C\u306B\u5931\u6557\u3057\u307E\u3057\u305F", "\uC778\uC99D \uC2E4\uD328"],
   "Trusted device removed": ["Appareil de confiance supprim\xE9", "Dispositivo attendibile rimosso", "Vertrauensw\xFCrdiges Ger\xE4t entfernt", "Dispositivo de confianza eliminado", "Dispositivo confi\xE1vel removido", "\u0414\u043E\u0432\u0435\u0440\u0435\u043D\u043D\u043E\u0435 \u0443\u0441\u0442\u0440\u043E\u0439\u0441\u0442\u0432\u043E \u0443\u0434\u0430\u043B\u0435\u043D\u043E", "\u5DF2\u79FB\u9664\u53D7\u4FE1\u4EFB\u7684\u8BBE\u5907", "\u5DF2\u79FB\u9664\u53D7\u4FE1\u4EFB\u7684\u88DD\u7F6E", "\u4FE1\u983C\u6E08\u307F\u30C7\u30D0\u30A4\u30B9\u3092\u524A\u9664\u3057\u307E\u3057\u305F", "\uC2E0\uB8B0\uD560 \uC218 \uC788\uB294 \uAE30\uAE30 \uC0AD\uC81C\uB428"],
   "Could not remove device": ["Impossible de supprimer l\u2019appareil", "Impossibile rimuovere il dispositivo", "Ger\xE4t konnte nicht entfernt werden", "No se pudo eliminar el dispositivo", "N\xE3o foi poss\xEDvel remover o dispositivo", "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0443\u0434\u0430\u043B\u0438\u0442\u044C \u0443\u0441\u0442\u0440\u043E\u0439\u0441\u0442\u0432\u043E", "\u65E0\u6CD5\u79FB\u9664\u8BBE\u5907", "\u7121\u6CD5\u79FB\u9664\u88DD\u7F6E", "\u30C7\u30D0\u30A4\u30B9\u3092\u524A\u9664\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F", "\uAE30\uAE30\uB97C \uC0AD\uC81C\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4"],
   "Could not unlock": ["Impossible de d\xE9verrouiller", "Impossibile sbloccare", "Entsperren nicht m\xF6glich", "No se pudo desbloquear", "N\xE3o foi poss\xEDvel desbloquear", "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0440\u0430\u0437\u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u0430\u0442\u044C", "\u65E0\u6CD5\u89E3\u9501", "\u7121\u6CD5\u89E3\u9396", "\u30ED\u30C3\u30AF\u3092\u89E3\u9664\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F", "\uC7A0\uAE08\uC744 \uD574\uC81C\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4"]
@@ -229,17 +230,26 @@ var TrustedSignersPanel = class extends HTMLElement {
     return row;
   }
   async #removeSigner(pubkey, button) {
-    const ok = window.confirm(t("Remove this trusted device? Future sync will stop, but data already synced to it cannot be removed."));
-    if (!ok) return;
+    const protectedByPasskey = hasPasskey();
+    if (!protectedByPasskey && !window.confirm(t("Remove this trusted device? Future sync will stop, but data already synced to it cannot be removed."))) return;
     button.disabled = true;
     try {
-      await ensureRegistered();
+      if (protectedByPasskey) {
+        try {
+          await openSecrets();
+        } catch (err) {
+          console.warn("remove-trusted-device auth failed", err?.message ?? err);
+          error(t("Authentication failed"));
+          return;
+        }
+      }
       const actorPubkey = await getDeviceSignerPubkey();
       await remove(pubkey, { actorPubkey });
       success(t("Trusted device removed"));
     } catch (err) {
-      button.disabled = false;
       error(t("Could not remove device"), err?.message ?? String(err));
+    } finally {
+      button.disabled = false;
     }
   }
   async #unlock(button) {

@@ -36,6 +36,7 @@ export const accountAvatarLocales = defineLocales({
   unnamed: ['sans nom', 'senza nome', 'unbenannt', 'sin nombre', 'sem nome', 'без имени', '未命名', '未命名', '名前なし', '이름 없음'],
   'Name update failed': ['Échec de la mise à jour du nom', 'Aggiornamento del nome non riuscito', 'Namensänderung fehlgeschlagen', 'No se pudo actualizar el nombre', 'Falha ao atualizar o nome', 'Не удалось изменить имя', '名称更新失败', '名稱更新失敗', '名前の更新に失敗しました', '이름 업데이트 실패'],
   'Authentication failed': ['Échec de l’authentification', 'Autenticazione non riuscita', 'Authentifizierung fehlgeschlagen', 'Error de autenticación', 'Falha na autenticação', 'Ошибка аутентификации', '身份验证失败', '驗證失敗', '認証に失敗しました', '인증 실패'],
+  'Remove this account from this device? Make sure you have a backup before continuing.': ['Supprimer ce compte de cet appareil ? Assurez-vous d’avoir une sauvegarde avant de continuer.', 'Rimuovere questo account dal dispositivo? Assicurati di avere un backup prima di continuare.', 'Dieses Konto von diesem Gerät entfernen? Stelle sicher, dass du ein Backup hast, bevor du fortfährst.', '¿Eliminar esta cuenta de este dispositivo? Asegúrate de tener una copia de seguridad antes de continuar.', 'Remover esta conta deste dispositivo? Confirme que você tem um backup antes de continuar.', 'Удалить эту учётную запись с устройства? Перед продолжением убедитесь, что у вас есть резервная копия.', '要从此设备移除该账户吗？继续前请确保已有备份。', '要從此裝置移除該帳戶嗎？繼續前請確認已有備份。', 'このデバイスからアカウントを削除しますか？続行する前にバックアップがあることを確認してください。', '이 기기에서 계정을 삭제할까요? 계속하기 전에 백업이 있는지 확인하세요.'],
   'Delete failed': ['Échec de la suppression', 'Eliminazione non riuscita', 'Löschen fehlgeschlagen', 'No se pudo eliminar', 'Falha ao excluir', 'Не удалось удалить', '删除失败', '刪除失敗', '削除に失敗しました', '삭제 실패']
 })
 
@@ -565,9 +566,7 @@ export class AccountAvatar extends HTMLElement {
       if (!entry?.clientKey) return this.#flashError(btn)
       return this.#copy(btn, buildBunkerBackupUrl({ account: acc, secretEntry: entry }))
     } catch (err) {
-      console.warn('copy-secret auth failed', err?.message ?? err)
-      toast.error(t('Authentication failed'))
-      this.#flashError(btn)
+      this.#reportAuthenticationFailure(btn, 'copy-secret', err)
     } finally {
       btn.disabled = false
       icon?.classList.remove('pulsate')
@@ -730,43 +729,58 @@ export class AccountAvatar extends HTMLElement {
     const account = this.#account
     const pubkey = this.#account.pubkey
     const wasNonReadOnly = this.#account.type !== 'npub'
-    if (wasNonReadOnly) {
+    const icon = btn?.querySelector('.avatar-btn-icon')
+    const protectedByPasskey = passkey.hasPasskey()
+    if (!protectedByPasskey && !window.confirm(t('Remove this account from this device? Make sure you have a backup before continuing.'))) return
+    if (btn) btn.disabled = true
+    icon?.classList.add('pulsate')
+    try {
+      // A protected vault requires the same fresh assertion used by deliberate
+      // secret copying. Local mode remains deliberately prompt-free and must
+      // not turn account removal into an implicit registration attempt.
+      if (protectedByPasskey) {
+        try {
+          await passkey.openSecrets()
+        } catch (err) {
+          this.#reportAuthenticationFailure(btn, 'delete-account', err)
+          return
+        }
+      }
+
+      if (!wasNonReadOnly) {
+        await messengerLog.removeForPubkey(pubkey)
+        await store.remove(pubkey)
+        return
+      }
+
       // Re-seal the vault *before* dropping the tile from the DOM.
       // secrets.deleteSecret also closes any pooled BunkerHandle and
       // releases the cached NsecSigner, so there's no separate
       // signer-cleanup call.
-      const icon = btn?.querySelector('.avatar-btn-icon')
-      if (btn) btn.disabled = true
-      icon?.classList.add('pulsate')
-      try {
-        // Deletion, like deliberate secret copying, is allowed to remain a
-        // purely local operation after the user chose unprotected mode. A
-        // passkey-backed or staged-upgrade vault still follows the normal
-        // unlock/recovery path.
-        if (!passkey.isUnprotectedLocalVault()) await passkey.ensureRegistered()
-        await runSecretAccountMutation({
-          operation: 'delete-account',
-          beforeAccounts: [account],
-          afterAccounts: [],
-          apply: () => secrets.deleteSecret(pubkey),
-          finalize: async () => {
-            await messengerLog.removeForPubkey(pubkey)
-            await store.applyRecords([pubkey], [])
-          }
-        })
-      } catch (err) {
-        console.warn('failed to update vault blob after delete', err?.message ?? err)
-        toast.error(t('Delete failed'))
-        this.#flashError(btn)
-        return
-      } finally {
-        if (btn) btn.disabled = false
-        icon?.classList.remove('pulsate')
-      }
-      return
+      await runSecretAccountMutation({
+        operation: 'delete-account',
+        beforeAccounts: [account],
+        afterAccounts: [],
+        apply: () => secrets.deleteSecret(pubkey),
+        finalize: async () => {
+          await messengerLog.removeForPubkey(pubkey)
+          await store.applyRecords([pubkey], [])
+        }
+      })
+    } catch (err) {
+      console.warn('failed to delete account', err?.message ?? err)
+      toast.error(t('Delete failed'))
+      this.#flashError(btn)
+    } finally {
+      if (btn) btn.disabled = false
+      icon?.classList.remove('pulsate')
     }
-    await messengerLog.removeForPubkey(pubkey)
-    await store.remove(pubkey)
+  }
+
+  #reportAuthenticationFailure (btn, operation, err) {
+    console.warn(`${operation} auth failed`, err?.message ?? err)
+    toast.error(t('Authentication failed'))
+    this.#flashError(btn)
   }
 
   async #copy (btn, value) {

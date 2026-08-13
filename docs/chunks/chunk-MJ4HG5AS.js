@@ -7,7 +7,7 @@ import {
 } from "./chunk-JDLAFNFY.js";
 import {
   claimSigner
-} from "./chunk-SCLRGSUQ.js";
+} from "./chunk-2RF63PFL.js";
 import {
   publishAccountBootstrap,
   randomAccountName
@@ -17,12 +17,12 @@ import {
 } from "./chunk-3RWQBTGN.js";
 import {
   runSecretAccountMutation
-} from "./chunk-7VBC3JAI.js";
+} from "./chunk-3P7U4I6T.js";
 import {
   ensureRegistered,
-  isUnprotectedLocalVault,
+  hasPasskey,
   openSecrets
-} from "./chunk-4QDFHAFY.js";
+} from "./chunk-TPNQ3INA.js";
 import {
   add,
   applyRecords,
@@ -72,6 +72,7 @@ var accountAvatarLocales = defineLocales({
   unnamed: ["sans nom", "senza nome", "unbenannt", "sin nombre", "sem nome", "\u0431\u0435\u0437 \u0438\u043C\u0435\u043D\u0438", "\u672A\u547D\u540D", "\u672A\u547D\u540D", "\u540D\u524D\u306A\u3057", "\uC774\uB984 \uC5C6\uC74C"],
   "Name update failed": ["\xC9chec de la mise \xE0 jour du nom", "Aggiornamento del nome non riuscito", "Namens\xE4nderung fehlgeschlagen", "No se pudo actualizar el nombre", "Falha ao atualizar o nome", "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0438\u0437\u043C\u0435\u043D\u0438\u0442\u044C \u0438\u043C\u044F", "\u540D\u79F0\u66F4\u65B0\u5931\u8D25", "\u540D\u7A31\u66F4\u65B0\u5931\u6557", "\u540D\u524D\u306E\u66F4\u65B0\u306B\u5931\u6557\u3057\u307E\u3057\u305F", "\uC774\uB984 \uC5C5\uB370\uC774\uD2B8 \uC2E4\uD328"],
   "Authentication failed": ["\xC9chec de l\u2019authentification", "Autenticazione non riuscita", "Authentifizierung fehlgeschlagen", "Error de autenticaci\xF3n", "Falha na autentica\xE7\xE3o", "\u041E\u0448\u0438\u0431\u043A\u0430 \u0430\u0443\u0442\u0435\u043D\u0442\u0438\u0444\u0438\u043A\u0430\u0446\u0438\u0438", "\u8EAB\u4EFD\u9A8C\u8BC1\u5931\u8D25", "\u9A57\u8B49\u5931\u6557", "\u8A8D\u8A3C\u306B\u5931\u6557\u3057\u307E\u3057\u305F", "\uC778\uC99D \uC2E4\uD328"],
+  "Remove this account from this device? Make sure you have a backup before continuing.": ["Supprimer ce compte de cet appareil ? Assurez-vous d\u2019avoir une sauvegarde avant de continuer.", "Rimuovere questo account dal dispositivo? Assicurati di avere un backup prima di continuare.", "Dieses Konto von diesem Ger\xE4t entfernen? Stelle sicher, dass du ein Backup hast, bevor du fortf\xE4hrst.", "\xBFEliminar esta cuenta de este dispositivo? Aseg\xFArate de tener una copia de seguridad antes de continuar.", "Remover esta conta deste dispositivo? Confirme que voc\xEA tem um backup antes de continuar.", "\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u044D\u0442\u0443 \u0443\u0447\u0451\u0442\u043D\u0443\u044E \u0437\u0430\u043F\u0438\u0441\u044C \u0441 \u0443\u0441\u0442\u0440\u043E\u0439\u0441\u0442\u0432\u0430? \u041F\u0435\u0440\u0435\u0434 \u043F\u0440\u043E\u0434\u043E\u043B\u0436\u0435\u043D\u0438\u0435\u043C \u0443\u0431\u0435\u0434\u0438\u0442\u0435\u0441\u044C, \u0447\u0442\u043E \u0443 \u0432\u0430\u0441 \u0435\u0441\u0442\u044C \u0440\u0435\u0437\u0435\u0440\u0432\u043D\u0430\u044F \u043A\u043E\u043F\u0438\u044F.", "\u8981\u4ECE\u6B64\u8BBE\u5907\u79FB\u9664\u8BE5\u8D26\u6237\u5417\uFF1F\u7EE7\u7EED\u524D\u8BF7\u786E\u4FDD\u5DF2\u6709\u5907\u4EFD\u3002", "\u8981\u5F9E\u6B64\u88DD\u7F6E\u79FB\u9664\u8A72\u5E33\u6236\u55CE\uFF1F\u7E7C\u7E8C\u524D\u8ACB\u78BA\u8A8D\u5DF2\u6709\u5099\u4EFD\u3002", "\u3053\u306E\u30C7\u30D0\u30A4\u30B9\u304B\u3089\u30A2\u30AB\u30A6\u30F3\u30C8\u3092\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F\u7D9A\u884C\u3059\u308B\u524D\u306B\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u304C\u3042\u308B\u3053\u3068\u3092\u78BA\u8A8D\u3057\u3066\u304F\u3060\u3055\u3044\u3002", "\uC774 \uAE30\uAE30\uC5D0\uC11C \uACC4\uC815\uC744 \uC0AD\uC81C\uD560\uAE4C\uC694? \uACC4\uC18D\uD558\uAE30 \uC804\uC5D0 \uBC31\uC5C5\uC774 \uC788\uB294\uC9C0 \uD655\uC778\uD558\uC138\uC694."],
   "Delete failed": ["\xC9chec de la suppression", "Eliminazione non riuscita", "L\xF6schen fehlgeschlagen", "No se pudo eliminar", "Falha ao excluir", "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0443\u0434\u0430\u043B\u0438\u0442\u044C", "\u5220\u9664\u5931\u8D25", "\u522A\u9664\u5931\u6557", "\u524A\u9664\u306B\u5931\u6557\u3057\u307E\u3057\u305F", "\uC0AD\uC81C \uC2E4\uD328"]
 });
 var t = getT(accountAvatarLocales);
@@ -568,9 +569,7 @@ var AccountAvatar = class extends HTMLElement {
       if (!entry?.clientKey) return this.#flashError(btn);
       return this.#copy(btn, buildBunkerBackupUrl({ account: acc, secretEntry: entry }));
     } catch (err) {
-      console.warn("copy-secret auth failed", err?.message ?? err);
-      error(t("Authentication failed"));
-      this.#flashError(btn);
+      this.#reportAuthenticationFailure(btn, "copy-secret", err);
     } finally {
       btn.disabled = false;
       icon?.classList.remove("pulsate");
@@ -723,35 +722,48 @@ var AccountAvatar = class extends HTMLElement {
     const account = this.#account;
     const pubkey = this.#account.pubkey;
     const wasNonReadOnly = this.#account.type !== "npub";
-    if (wasNonReadOnly) {
-      const icon = btn?.querySelector(".avatar-btn-icon");
-      if (btn) btn.disabled = true;
-      icon?.classList.add("pulsate");
-      try {
-        if (!isUnprotectedLocalVault()) await ensureRegistered();
-        await runSecretAccountMutation({
-          operation: "delete-account",
-          beforeAccounts: [account],
-          afterAccounts: [],
-          apply: () => deleteSecret(pubkey),
-          finalize: async () => {
-            await removeForPubkey(pubkey);
-            await applyRecords([pubkey], []);
-          }
-        });
-      } catch (err) {
-        console.warn("failed to update vault blob after delete", err?.message ?? err);
-        error(t("Delete failed"));
-        this.#flashError(btn);
-        return;
-      } finally {
-        if (btn) btn.disabled = false;
-        icon?.classList.remove("pulsate");
+    const icon = btn?.querySelector(".avatar-btn-icon");
+    const protectedByPasskey = hasPasskey();
+    if (!protectedByPasskey && !window.confirm(t("Remove this account from this device? Make sure you have a backup before continuing."))) return;
+    if (btn) btn.disabled = true;
+    icon?.classList.add("pulsate");
+    try {
+      if (protectedByPasskey) {
+        try {
+          await openSecrets();
+        } catch (err) {
+          this.#reportAuthenticationFailure(btn, "delete-account", err);
+          return;
+        }
       }
-      return;
+      if (!wasNonReadOnly) {
+        await removeForPubkey(pubkey);
+        await remove(pubkey);
+        return;
+      }
+      await runSecretAccountMutation({
+        operation: "delete-account",
+        beforeAccounts: [account],
+        afterAccounts: [],
+        apply: () => deleteSecret(pubkey),
+        finalize: async () => {
+          await removeForPubkey(pubkey);
+          await applyRecords([pubkey], []);
+        }
+      });
+    } catch (err) {
+      console.warn("failed to delete account", err?.message ?? err);
+      error(t("Delete failed"));
+      this.#flashError(btn);
+    } finally {
+      if (btn) btn.disabled = false;
+      icon?.classList.remove("pulsate");
     }
-    await removeForPubkey(pubkey);
-    await remove(pubkey);
+  }
+  #reportAuthenticationFailure(btn, operation, err) {
+    console.warn(`${operation} auth failed`, err?.message ?? err);
+    error(t("Authentication failed"));
+    this.#flashError(btn);
   }
   async #copy(btn, value) {
     if (!value) return this.#flashError(btn);

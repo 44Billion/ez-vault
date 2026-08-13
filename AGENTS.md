@@ -112,10 +112,15 @@ When in doubt about a layout decision, ask: "does this still work as a tall vert
   user may explicitly enter an unprotected local mode. A random vault key is
   stored in clear at `ez-vault:passkey:local-key` beside the ordinary
   ciphertexts; this is equivalent to plaintext against an IndexedDB reader.
-  User-initiated account creation/import and trusted-device mutations retry
-  registration. Copying or removing an existing account, plus frequent
-  background writes such as activity logs, content-key rotation and bunker
-  drift, do not open WebAuthn. Promotion reciphers the vault blob,
+  User-initiated account creation/import and trusted-device creation retry
+  registration. In local mode, copying or removing an existing account, and
+  removing a trusted device, do not retry registration. Destructive local
+  removals use a textual browser confirmation. Once a passkey exists,
+  deliberate secret copying, account removal and trusted-device removal
+  require a fresh assertion instead.
+  Frequent background writes such
+  as activity logs, content-key rotation and bunker drift do not open WebAuthn.
+  Promotion reciphers the vault blob,
   content keys, trusted signers and sealed activity-log fields under PRF in
   one `state` + `messengerLog` transaction, then removes the local key.
   `ez-vault:passkey:upgrade-pending` makes the short staged window recoverable;

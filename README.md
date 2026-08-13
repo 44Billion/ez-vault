@@ -22,8 +22,12 @@ the same ciphertext formats, but its random 32-byte key is stored beside them
 at `ez-vault:passkey:local-key`. Anyone able to copy the site's IndexedDB can
 therefore recover every secret; this is cryptographically equivalent to
 plaintext storage. User-initiated account creation/import and trusted-device
-changes retry passkey registration; copying or removing an existing account
-does not. A successful retry reciphers the vault blob, content
+creation retry passkey registration; copying or removing an existing account,
+and removing a trusted device, do not retry registration while the vault
+remains local. Destructive local removals use a textual browser confirmation.
+Once a passkey exists, deliberate secret copying, account removal and
+trusted-device removal require a fresh assertion instead. A successful retry
+reciphers the vault blob, content
 keys, trusted signers and sealed activity-log fields under PRF before deleting
 the local key. `ez-vault:passkey:upgrade-pending` makes an interrupted upgrade
 recoverable, but the staged credential must then be used to finish it. Manual

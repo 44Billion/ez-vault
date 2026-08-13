@@ -7,7 +7,7 @@ import {
   commitPrepared,
   createIntakeToken,
   prepareBunker
-} from "./chunk-UMP4LHVT.js";
+} from "./chunk-7LLYVM4A.js";
 import {
   seededNeutralAvatarDataUrl
 } from "./chunk-3RWQBTGN.js";
@@ -17,7 +17,7 @@ import {
   isExpectedPasskeyRegistrationFailure,
   preparePasskeyRegistration,
   requirePasskey
-} from "./chunk-4QDFHAFY.js";
+} from "./chunk-TPNQ3INA.js";
 import {
   bytesToHex,
   finalizeEvent,

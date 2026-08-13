@@ -28,14 +28,30 @@ test('passkey fallback is a native modal with explicit security choices', () => 
   assert.doesNotMatch(dialog, /f-svg/)
 })
 
-test('local copy and frequent background writes do not initiate passkey registration', () => {
+test('destructive removals use local confirmation or fresh passkey verification', () => {
   const passkey = source('src/services/passkey.js')
   const accountAvatar = source('src/components/account-avatar.js')
+  const trustedPanel = source('src/components/trusted-signers-panel.js')
+  const deleteMethod = accountAvatar.slice(
+    accountAvatar.indexOf('async #deleteAccount'),
+    accountAvatar.indexOf('  async #copy (')
+  )
+  const removeSignerMethod = trustedPanel.slice(
+    trustedPanel.indexOf('async #removeSigner'),
+    trustedPanel.indexOf('  async #unlock')
+  )
   const messengerLog = source('src/services/messenger-log/index.js')
   const contentKeys = source('src/services/secrets.js')
 
   assert.match(passkey, /return secrets\.discloseCurrentEntries\(\)/)
-  assert.match(accountAvatar, /if \(!passkey\.isUnprotectedLocalVault\(\)\) await passkey\.ensureRegistered\(\)/)
+  assert.match(deleteMethod, /!protectedByPasskey && !window\.confirm/)
+  assert.match(deleteMethod, /if \(protectedByPasskey\)[\s\S]*await passkey\.openSecrets\(\)/)
+  assert.doesNotMatch(deleteMethod, /passkey\.ensureRegistered\(\)/)
+  assert.match(deleteMethod, /reportAuthenticationFailure\(btn, 'delete-account'/)
+  assert.match(removeSignerMethod, /!protectedByPasskey && !window\.confirm/)
+  assert.match(removeSignerMethod, /if \(protectedByPasskey\)[\s\S]*await passkey\.openSecrets\(\)/)
+  assert.doesNotMatch(removeSignerMethod, /passkey\.ensureRegistered\(\)/)
+  assert.match(removeSignerMethod, /toast\.error\(t\('Authentication failed'\)\)/)
   assert.doesNotMatch(messengerLog, /ensureRegistered/)
   assert.doesNotMatch(contentKeys, /ensureRegistered/)
 })
