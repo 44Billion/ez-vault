@@ -8,7 +8,7 @@ import {
 import {
   initMessenger,
   setVaultViewShell
-} from "./chunks/chunk-MPD2ENSA.js";
+} from "./chunks/chunk-J2FW6PU5.js";
 import {
   init,
   startDeviceRelayListRefresh,
@@ -224,9 +224,9 @@ await Promise.all([
   import("./chunks/accordion-panel-AGHO422R.js"),
   import("./chunks/toast-VTWQ4NKU.js"),
   import("./chunks/activity-log-M76CTKGL.js"),
-  import("./chunks/vault-lock-button-YVPDKBFG.js"),
-  import("./chunks/lock-overlay-J24DE2XN.js"),
-  import("./chunks/create-overlay-LQLZNEC6.js")
+  import("./chunks/vault-lock-button-GQ7UY5EH.js"),
+  import("./chunks/lock-overlay-E2I2Q4XC.js"),
+  import("./chunks/create-overlay-3DUG6XRO.js")
 ]);
 document.getElementById("vault").style.visibility = "visible";
 var list2 = document.querySelector("account-list");

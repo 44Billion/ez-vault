@@ -178,6 +178,7 @@ let unsubscribeStore = null
 let unsubscribeSecrets = null
 let unsubscribeJournal = null
 let accountsStateQueued = false
+let lastAccountsStateFingerprint = null
 const pendingTranslateMessages = []
 
 export function setAccountsState () {
@@ -187,10 +188,18 @@ export function setAccountsState () {
   // the user aborts the passkey prompt) — journal.clear() re-triggers this
   // with the final state, so the launcher never sees an uncommitted change.
   if (accountMutationJournal.read()) return
+  const accounts = snapshotAccounts()
+  const fingerprint = JSON.stringify(accounts)
+  // VAULT_READY already carries the complete initial snapshot. Secret-pool
+  // notifications are intentionally broad because lock/unlock changes each
+  // account's `isLocked`, but an identical launcher-facing payload conveys no
+  // new state (notably when a freshly registered empty vault unlocks).
+  if (fingerprint === lastAccountsStateFingerprint) return
   tell(launcherPort, {
     code: 'SET_ACCOUNTS_STATE',
-    payload: { accounts: snapshotAccounts() }
+    payload: { accounts }
   })
+  lastAccountsStateFingerprint = fingerprint
 }
 
 // Ask the launcher to close the vault drawer. Resolves when the launcher
@@ -198,6 +207,12 @@ export function setAccountsState () {
 // immediately when the vault is not embedded (no trusted launcher port).
 export async function requestVaultClose (timeoutMs = 1500) {
   if (!handshakeComplete || !launcherPort) return
+  // Flush the latest committed snapshot synchronously before CLOSE. Store,
+  // secrets and journal subscriptions normally coalesce through a microtask;
+  // without this flush an overlay reacting to journal.clear() can post CLOSE
+  // first and leave the launcher applying the new account after the drawer is
+  // already gone. Deduplication makes this a no-op when nothing changed.
+  setAccountsState()
   await ask(launcherPort, {
     code: 'CLOSE_VAULT_VIEW',
     payload: null
@@ -244,9 +259,11 @@ export async function initMessenger () {
   // lives). We validate origin against the allowlist before flipping the
   // gate; a malicious parent that grabbed the port via the "*" fallback
   // can't fake a trusted e.origin on the reply.
+  const accounts = snapshotAccounts()
+  const accountsFingerprint = JSON.stringify(accounts)
   const { error, origin } = await ask(window.parent, {
     code: 'VAULT_READY',
-    payload: { accounts: snapshotAccounts() }
+    payload: { accounts }
   }, { targetOrigin, transfer: [port2] })
   if (error || !isTrustedOrigin(origin)) {
     // Disentangle the channel — port2 may be held by an untrusted parent via
@@ -255,13 +272,18 @@ export async function initMessenger () {
     try { port1.close() } catch { /* noop */ }
     nostrdb.disconnect(port1)
     launcherPort = null
+    lastAccountsStateFingerprint = null
     return
   }
   launcherOrigin ??= origin
   handshakeComplete = true
+  lastAccountsStateFingerprint = accountsFingerprint
   pendingTranslateMessages.splice(0).forEach(handleTranslate)
   nostrdb.connect(launcherPort)
   startAccountStateSubscriptions()
+  // Recheck after the handshake so a state change that happened while
+  // VAULT_READY was awaiting its acknowledgement cannot be missed.
+  scheduleAccountsState()
 }
 
 function onPortMessage (e) {

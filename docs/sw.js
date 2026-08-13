@@ -1,7 +1,7 @@
 (() => {
   // src/sw.src.js
   var VERSION = "060fadd6fc";
-  var DEPLOY_VERSION = "6a005777c5";
+  var DEPLOY_VERSION = "89559b788d";
   var APP_PREFIX = "ez-vault-sw";
   var CACHE_KEY = `${APP_PREFIX}:${VERSION}`;
   var BASE = self.location.pathname.replace(/\/[^/]*$/, "/");

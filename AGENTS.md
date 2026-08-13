@@ -36,6 +36,10 @@ Because the signer custodies private keys, the overriding design principle is **
 ## Communication Model
 
 The vault is an iframe signer that talks to the parent window (app launcher) directly using `window.postMessage`. An app requests a permission to the app launcher that, if granted, talks to the vault on behalf of the app. Manual locking must call `secrets.lock()`, immediately publish `SET_ACCOUNTS_STATE` with locked account snapshots, and only then request `CLOSE_VAULT_VIEW`; do not add a separate protocol message for locking.
+`VAULT_READY` carries the complete initial account snapshot. Subsequent
+`SET_ACCOUNTS_STATE` messages are deduplicated by their launcher-facing
+payload, and every vault-requested close synchronously flushes the latest
+committed snapshot before posting `CLOSE_VAULT_VIEW`.
 
 ## Nostr Relays & Event Discovery (NIP-65)
 

@@ -197,17 +197,23 @@ var unsubscribeStore = null;
 var unsubscribeSecrets = null;
 var unsubscribeJournal = null;
 var accountsStateQueued = false;
+var lastAccountsStateFingerprint = null;
 var pendingTranslateMessages = [];
 function setAccountsState() {
   if (!handshakeComplete || !launcherPort) return;
   if (read()) return;
+  const accounts = snapshotAccounts();
+  const fingerprint = JSON.stringify(accounts);
+  if (fingerprint === lastAccountsStateFingerprint) return;
   tell(launcherPort, {
     code: "SET_ACCOUNTS_STATE",
-    payload: { accounts: snapshotAccounts() }
+    payload: { accounts }
   });
+  lastAccountsStateFingerprint = fingerprint;
 }
 async function requestVaultClose(timeoutMs = 1500) {
   if (!handshakeComplete || !launcherPort) return;
+  setAccountsState();
   await ask(launcherPort, {
     code: "CLOSE_VAULT_VIEW",
     payload: null
@@ -237,9 +243,11 @@ async function initMessenger() {
   port1.addEventListener("message", onPortMessage);
   port1.start();
   launcherPort = port1;
+  const accounts = snapshotAccounts();
+  const accountsFingerprint = JSON.stringify(accounts);
   const { error, origin } = await ask(window.parent, {
     code: "VAULT_READY",
-    payload: { accounts: snapshotAccounts() }
+    payload: { accounts }
   }, { targetOrigin, transfer: [port2] });
   if (error || !isTrustedOrigin(origin)) {
     try {
@@ -248,13 +256,16 @@ async function initMessenger() {
     }
     disconnect(port1);
     launcherPort = null;
+    lastAccountsStateFingerprint = null;
     return;
   }
   launcherOrigin ??= origin;
   handshakeComplete = true;
+  lastAccountsStateFingerprint = accountsFingerprint;
   pendingTranslateMessages.splice(0).forEach(handleTranslate);
   connect(launcherPort);
   startAccountStateSubscriptions();
+  scheduleAccountsState();
 }
 function onPortMessage(e) {
   if (!e.data || typeof e.data !== "object") return;
