@@ -7,15 +7,15 @@ import {
   commitPrepared,
   createIntakeToken,
   prepareBareKey
-} from "./chunk-7LLYVM4A.js";
+} from "./chunk-PI57XA4E.js";
 import "./chunk-3RWQBTGN.js";
-import "./chunk-3P7U4I6T.js";
-import "./chunk-AZYRZ53H.js";
+import "./chunk-MKIFRTGJ.js";
+import "./chunk-YJOGHQ2B.js";
 import {
   detectPlatform,
   ensureRegistered,
   openSecrets
-} from "./chunk-TPNQ3INA.js";
+} from "./chunk-YIXC4UXQ.js";
 import {
   Nip46Client,
   Nip46ServerSession,
@@ -32,7 +32,7 @@ import {
   nsecFromHex,
   parseNostrpairInput,
   relayPool
-} from "./chunk-2IRIIQPD.js";
+} from "./chunk-NHHPGB6R.js";
 import {
   error,
   info,

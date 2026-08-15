@@ -7,7 +7,7 @@ import {
   vaultDecrypt,
   vaultEncrypt,
   waitForVaultTransition
-} from "./chunk-2IRIIQPD.js";
+} from "./chunk-NHHPGB6R.js";
 
 // src/services/messenger-log/index.js
 var MAX_ENTRIES_PER_APP = 500;

@@ -5,8 +5,8 @@ import {
   fetchRelayListEvent,
   freeRelays,
   parseRelayListEvent,
-  resolveWriteRelays,
-  seedRelays
+  RELAY_URL_POLICY,
+  resolveWriteRelays
 } from '../src/services/relay.js'
 
 function event (overrides = {}) {
@@ -21,25 +21,29 @@ function event (overrides = {}) {
   }
 }
 
-test('relay-list lookup uses RelayPool timing and selects the newest event', async () => {
-  const calls = []
-  const older = event({ created_at: 10 })
+test('relay-list lookup asks the shared helper for the event and returns it', async () => {
   const newer = event({ id: 'c'.repeat(64), created_at: 20 })
-  const result = await fetchRelayListEvent(older.pubkey, {
-    _relayPool: {
-      async getEvents (filter, relays, options) {
-        calls.push({ filter, relays, options })
-        return { result: [older, newer], errors: [], success: true }
-      }
+  const result = await fetchRelayListEvent(newer.pubkey, {
+    _getRelaysByPubkey: async (pubkeys, options) => {
+      assert.deepEqual(pubkeys, [newer.pubkey])
+      assert.deepEqual(options, {
+        includeEvents: true,
+        forceRefresh: true,
+        relayUrlPolicy: RELAY_URL_POLICY
+      })
+      return { [newer.pubkey]: { read: [], write: [], event: newer } }
     }
   })
 
   assert.equal(result, newer)
-  assert.deepEqual(calls, [{
-    filter: { kinds: [10002], authors: [older.pubkey], limit: 1 },
-    relays: seedRelays,
-    options: { timeout: 5000, timeoutAfterFirstEose: 500 }
-  }])
+})
+
+test('relay-list lookup returns null when no relay-list event exists', async () => {
+  const pubkey = 'b'.repeat(64)
+  const result = await fetchRelayListEvent(pubkey, {
+    _getRelaysByPubkey: async () => ({ [pubkey]: { read: [], write: [], event: null } })
+  })
+  assert.equal(result, null)
 })
 
 test('relay-list parsing preserves NIP-65 read/write markers without duplicates', () => {
@@ -53,6 +57,22 @@ test('relay-list parsing preserves NIP-65 read/write markers without duplicates'
   })), {
     read: ['wss://both.example', 'wss://read.example'],
     write: ['wss://both.example', 'wss://write.example']
+  })
+})
+
+test('relay-list parsing normalizes URLs and applies the vault relay URL policy', () => {
+  const onion = 'ws://oxtrdevav64z64yb7x6rjg4ntzqjhedm5b5zjqulugknhzr46ny2qbad.onion'
+  assert.deepEqual(parseRelayListEvent(event({
+    tags: [
+      ['r', 'HTTPS://Both.Example/'],
+      ['r', onion, 'write'],
+      ['r', 'ws://localhost:4869'],
+      ['r', 'ws://localhost:8080', 'write'],
+      ['r', 'wss://npub1example.com', 'read']
+    ]
+  })), {
+    read: ['wss://both.example', 'ws://localhost:4869', 'wss://npub1example.com'],
+    write: ['wss://both.example', onion, 'ws://localhost:4869']
   })
 })
 

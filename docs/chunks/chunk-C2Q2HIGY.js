@@ -48,7 +48,10 @@ function createSwManager() {
     if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
     let registration;
     try {
-      registration = await navigator.serviceWorker.register("./sw.js", { updateViaCache: "none" });
+      registration = await navigator.serviceWorker.getRegistration();
+      if (!registration) {
+        registration = await navigator.serviceWorker.register("./sw.js", { updateViaCache: "none" });
+      }
     } catch (err) {
       console.warn("Failed to register service worker", err?.message ?? err);
       return;

@@ -62,11 +62,18 @@ export function createSwManager () {
 
     let registration
     try {
-      // Relative path: works on GitHub Pages (/ez-vault/sw.js) and on the
-      // vault subdomain (/sw.js). updateViaCache: 'none' forces the browser
-      // to bypass its HTTP cache for the worker script so a new deploy is
-      // detected even behind the 10-minute GitHub Pages cache.
-      registration = await navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' })
+      // index.html registers ./sw.js inline before the module graph loads;
+      // reuse that registration instead of registering a second time. The
+      // relative path works on GitHub Pages (/ez-vault/sw.js) and on the
+      // vault subdomain (/sw.js), and updateViaCache: 'none' forces the
+      // browser to bypass its HTTP cache for the worker script so a new
+      // deploy is detected even behind the 10-minute GitHub Pages cache.
+      registration = await navigator.serviceWorker.getRegistration()
+      if (!registration) {
+        // Fallback for hosts where the inline early registration was skipped
+        // (e.g. a future non-https host); normally this never runs.
+        registration = await navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' })
+      }
     } catch (err) {
       console.warn('Failed to register service worker', err?.message ?? err)
       return

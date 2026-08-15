@@ -1,7 +1,8 @@
 import esbuild from 'esbuild'
 import { createHash } from 'node:crypto'
-import { copyFile, mkdir, readdir, readFile, rm } from 'node:fs/promises'
+import { copyFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import { inlineBootFiles, loadBootFiles } from './inline-boot-files.js'
 
 const { dirname } = import.meta
 const srcDir = path.join(dirname, '..', 'src')
@@ -81,9 +82,16 @@ const swContext = await esbuild.context({
   define
 })
 
-// Copy the authored HTML entry and CSS (referenced via <link>, not bundled).
-// Copied once at build start; rebuild (or rerun the build) picks up edits.
-await copyFile(path.join(srcDir, 'index.html'), path.join(outDir, 'index.html'))
+// Copy the authored HTML entry and CSS (referenced via <link>, not bundled),
+// inlining the boot failsafe/style and the early SW bootstrap from their
+// authored files (bin/inline-boot-files.js) so the deployed index.html stays
+// self-contained. Rebuilt once at build start; rebuild (or rerun the build)
+// picks up edits.
+const indexHtml = inlineBootFiles(
+  await readFile(path.join(srcDir, 'index.html'), 'utf8'),
+  await loadBootFiles(srcDir)
+)
+await writeFile(path.join(outDir, 'index.html'), indexHtml)
 const stylesDir = path.join(outDir, 'styles')
 await mkdir(stylesDir, { recursive: true })
 for (const entry of await readdir(path.join(srcDir, 'styles'))) {

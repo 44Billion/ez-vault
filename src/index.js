@@ -38,6 +38,13 @@ await Promise.all([
 
 // The overlay components were upgraded during the imports above and already
 // decided their visibility; the main interface can now be revealed.
+// A successful boot also re-arms the inline boot failsafe's single automatic
+// reload for a future failure (see index.html).
+try {
+  sessionStorage.removeItem('ezVaultBootAutoReloaded')
+} catch {
+  // ignore: the failsafe already handles unavailable sessionStorage
+}
 document.getElementById('vault').style.visibility = 'visible'
 
 const list = document.querySelector('account-list')

@@ -57,6 +57,15 @@
     </div>
     <lock-overlay hidden></lock-overlay>
     <create-overlay hidden></create-overlay>
+    <div id="boot-failed-overlay" hidden>
+      <!-- inject:boot-failsafe-css -->
+      <div class="boot-failed-card">
+        <p data-boot-failed-message>Vault failed to load. Reload?</p>
+        <button type="button" data-boot-failed-reload>Reload</button>
+      </div>
+    </div>
+    <!-- inject:boot-failsafe-js -->
+    <!-- inject:sw-bootstrap-js -->
   </body>
 <script type="module" src="./app.js"></script>
 </html>

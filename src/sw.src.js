@@ -11,6 +11,12 @@
 // revalidation request header (the 44b-vault legacy mitigation); a first
 // load shortly after a deploy may still serve the previous — coherent —
 // version for up to ~10 minutes, which is accepted.
+// If a stale index.html instead references chunks that no longer exist (404),
+// the module graph fails: the inline boot failsafe in index.html logs,
+// reloads once per session and then shows a manual reload overlay, and the
+// early inline SW registration makes the next reload already controlled
+// (network-first revalidation bypasses the stale browser cache). See README
+// "Hosting and deploy coherence (GitHub Pages)".
 //
 // Updates are never applied automatically. A new worker installs and waits;
 // the vault shows a non-dismissible update banner/indicator until the user
@@ -50,6 +56,9 @@ const isCacheable = response =>
 
 // Bypass the 10-minute GitHub Pages browser cache by revalidating on every
 // fetch (request header + cache mode), mirroring the 44b-vault legacy SW.
+// GitHub Pages does not support custom headers, so this revalidation plus the
+// early inline registration in index.html is what keeps a deploy coherent on
+// the next controlled reload.
 const networkOptions = {
   cache: 'no-cache',
   headers: { 'Cache-Control': 'no-cache' }

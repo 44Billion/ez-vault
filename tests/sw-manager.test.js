@@ -10,7 +10,7 @@ import {
 const originalSetInterval = globalThis.setInterval
 const timers = []
 
-function installGlobals ({ waiting = null, controller = true } = {}) {
+function installGlobals ({ waiting = null, controller = true, existingRegistration = true } = {}) {
   const controllerChangeListeners = []
   const newWorker = {
     state: 'installing',
@@ -29,6 +29,7 @@ function installGlobals ({ waiting = null, controller = true } = {}) {
   }
   const serviceWorker = {
     controller: controller ? {} : null,
+    getRegistration: async () => (existingRegistration ? registration : null),
     register: async (url, options) => {
       registration.registerCall = { url, options }
       return registration
@@ -90,7 +91,7 @@ test('isUpdateAvailable only treats the available state as truthy', () => {
 
 test('registers ./sw.js with updateViaCache none and reports an already-waiting worker', async () => {
   const worker = { postMessage: () => {} }
-  const { registration } = installGlobals({ waiting: worker })
+  const { registration } = installGlobals({ waiting: worker, existingRegistration: false })
   const manager = createSwManager()
   const seen = []
   const unsubscribe = manager.subscribe(state => seen.push(state))
@@ -130,6 +131,17 @@ test('in dev, unregisters stale service workers and never registers', async () =
   } finally {
     delete globalThis.IS_DEVELOPMENT
   }
+})
+
+test('reuses an existing registration without registering again', async () => {
+  const worker = { postMessage: () => {} }
+  const { registration } = installGlobals({ waiting: worker })
+  const manager = createSwManager()
+
+  await manager.init()
+
+  assert.equal(registration.registerCall, undefined)
+  assert.equal(manager.getState(), STATE_AVAILABLE)
 })
 
 test('marks update available when a new worker installs and waits', async () => {
@@ -188,7 +200,7 @@ test('applySwUpdate falls back to a plain reload when no worker is waiting', asy
 })
 
 test('subscribe receives the current state immediately and unsubscribes cleanly', async () => {
-  const { registration } = installGlobals({ waiting: { postMessage: () => {} } })
+  const { registration } = installGlobals({ waiting: { postMessage: () => {} }, existingRegistration: false })
   const manager = createSwManager()
   const seen = []
   const unsubscribe = manager.subscribe(state => seen.push(state))

@@ -4723,12 +4723,23 @@ var freeRelays = [
 
 // node_modules/libp2r2p/relay/helpers/routing.js
 var DEFAULT_RELAYS_PER_PUBKEY = 2;
-function pickRelaysForPubkeys(pubkeys, relaysByPubkey2, { maxPerPubkey = DEFAULT_RELAYS_PER_PUBKEY, relayType = "write" } = {}) {
+function excludedRelaysFor(excludeRelaysByPubkey, pubkey) {
+  if (!excludeRelaysByPubkey) return [];
+  return excludeRelaysByPubkey instanceof Map ? excludeRelaysByPubkey.get(pubkey) || [] : excludeRelaysByPubkey[pubkey] || [];
+}
+function pickRelaysForPubkeys(pubkeys, relaysByPubkey2, {
+  maxPerPubkey = DEFAULT_RELAYS_PER_PUBKEY,
+  relayType = "write",
+  excludeRelaysByPubkey,
+  emptyRelaysFallback = freeRelays.slice(0, DEFAULT_RELAYS_PER_PUBKEY)
+} = {}) {
   const type = relayType === "read" ? "read" : "write";
   const pkToPossibleRelays = /* @__PURE__ */ new Map();
   for (const pk of pubkeys) {
     const relays = relaysByPubkey2[pk]?.[type] || [];
-    pkToPossibleRelays.set(pk, new Set(relays.length ? relays : freeRelays.slice(0, DEFAULT_RELAYS_PER_PUBKEY)));
+    const excluded = new Set(excludedRelaysFor(excludeRelaysByPubkey, pk));
+    const candidates = (relays.length ? relays : emptyRelaysFallback).filter((relay) => !excluded.has(relay));
+    pkToPossibleRelays.set(pk, new Set(candidates));
   }
   const relayCounts = /* @__PURE__ */ new Map();
   for (const relays of pkToPossibleRelays.values()) {
@@ -4892,11 +4903,70 @@ function publishSummary(settlements, relays, { includeSucceededRelays = false } 
 }
 
 // node_modules/libp2r2p/url/index.js
+function isIpv4Address(hostname) {
+  const parts = hostname.split(".");
+  return parts.length === 4 && parts.every(
+    (part) => /^(?:0|[1-9][0-9]{0,2})$/.test(part) && Number(part) <= 255
+  );
+}
+function isPublicIpv4Address(hostname) {
+  const [a, b, c] = hostname.split(".").map(Number);
+  if (a === 0 || a === 10 || a === 127 || a >= 224) return false;
+  if (a === 100 && b >= 64 && b <= 127) return false;
+  if (a === 169 && b === 254) return false;
+  if (a === 172 && b >= 16 && b <= 31) return false;
+  if (a === 192 && b === 168) return false;
+  if (a === 192 && b === 0 && (c === 0 || c === 2)) return false;
+  if (a === 192 && b === 88 && c === 99) return false;
+  if (a === 198 && (b === 18 || b === 19 || b === 51 && c === 100)) return false;
+  if (a === 203 && b === 0 && c === 113) return false;
+  return true;
+}
+function parseIpv6Words(hostname) {
+  const value = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (!/^[0-9a-f:]+$/.test(value) || value.split("::").length > 2) return null;
+  const [left = "", right = ""] = value.split("::");
+  const leftWords = left ? left.split(":") : [];
+  const rightWords = right ? right.split(":") : [];
+  const missing = 8 - leftWords.length - rightWords.length;
+  if (value.includes("::") && missing < 1 || !value.includes("::") && missing !== 0) return null;
+  const words = [...leftWords, ...Array(missing).fill("0"), ...rightWords];
+  if (words.length !== 8 || words.some((word) => !/^[0-9a-f]{1,4}$/.test(word))) return null;
+  return words.map((word) => Number.parseInt(word, 16));
+}
+function isPublicIpv6Address(hostname) {
+  const words = parseIpv6Words(hostname);
+  if (!words) return false;
+  const first = words[0];
+  if (first === 0) return false;
+  if ((first & 65024) === 64512) return false;
+  if ((first & 65472) === 65152) return false;
+  if ((first & 65280) === 65280) return false;
+  if (first === 8193 && words[1] === 3512) return false;
+  return true;
+}
 function removeEmptyQuerySegments(url) {
   const entries = [...url.searchParams];
   url.search = "";
   for (const [key, value] of entries) url.searchParams.append(key, value);
   url.searchParams.sort();
+}
+function publicHostError(url, {
+  invalidHostCode,
+  nonPublicHostCode,
+  nonPublicIpCode
+}) {
+  const hostname = url.hostname.toLowerCase().replace(/\.+$/, "");
+  if (hostname === "localhost" || hostname.endsWith(".localhost") || hostname.endsWith(".local") || hostname.endsWith(".onion")) return nonPublicHostCode;
+  const unwrappedHostname = hostname.replace(/^\[|\]$/g, "");
+  if (isIpv4Address(unwrappedHostname)) {
+    if (!isPublicIpv4Address(unwrappedHostname)) return nonPublicIpCode;
+  } else if (unwrappedHostname.includes(":")) {
+    if (!isPublicIpv6Address(unwrappedHostname)) return nonPublicIpCode;
+  } else if (!hostname.includes(".")) {
+    return invalidHostCode;
+  }
+  return null;
 }
 function normalizeRelayUrl(value) {
   if (typeof value !== "string" || value.trim().length === 0) {
@@ -4919,6 +4989,48 @@ function normalizeRelayUrl(value) {
   removeEmptyQuerySegments(url);
   url.hash = "";
   return url.toString().replace(/^(wss?:\/\/[^/?#]+)\/(?=[?#]|$)/, "$1");
+}
+function isPolicyRelayUrl(url, policy) {
+  const hostname = url.hostname.toLowerCase().replace(/\.+$/, "");
+  if (policy?.onion && hostname.endsWith(".onion")) return true;
+  if (policy?.localRelay && hostname === "localhost" && url.port === "4869" && (url.pathname === "/" || url.pathname === "")) return true;
+  return false;
+}
+function publicRelayUrlError(value, policy = {}) {
+  if (typeof value !== "string" || value.trim().length === 0) return "INVALID_RELAY_URL";
+  let input = value.trim();
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(input)) input = `wss://${input}`;
+  try {
+    if (decodeURIComponent(new URL(input).pathname).includes("://")) return "RELAY_URL_NESTED_SCHEME";
+  } catch {
+    return "INVALID_RELAY_URL";
+  }
+  let normalized;
+  try {
+    normalized = normalizeRelayUrl(value);
+  } catch (error) {
+    return error instanceof ValidationError ? error.code : "INVALID_RELAY_URL";
+  }
+  const url = new URL(normalized);
+  const policyRelay = isPolicyRelayUrl(url, policy);
+  if (url.protocol !== "wss:" && !policyRelay) return "INSECURE_RELAY_URL";
+  if (url.username || url.password) return "RELAY_URL_CREDENTIALS_NOT_ALLOWED";
+  if (!policyRelay) {
+    const hostError = publicHostError(url, {
+      invalidHostCode: "INVALID_RELAY_HOST",
+      nonPublicHostCode: "NON_PUBLIC_RELAY_HOST",
+      nonPublicIpCode: "NON_PUBLIC_RELAY_IP"
+    });
+    if (hostError) return hostError;
+  }
+  if (!policy?.nostrEntityUrls) {
+    const lowerValue = normalized.toLowerCase();
+    if (lowerValue.includes("npub1") || lowerValue.includes("nprofile1")) return "RELAY_URL_NOSTR_ENTITY_NOT_ALLOWED";
+  }
+  return null;
+}
+function isValidPublicRelayUrl(value, policy) {
+  return publicRelayUrlError(value, policy) === null;
 }
 
 // node_modules/libp2r2p/relay/services/relay-connection.js
@@ -5931,8 +6043,13 @@ var relaysByPubkey = /* @__PURE__ */ Object.create(null);
 var relayCacheTimersByPubkey = /* @__PURE__ */ Object.create(null);
 var relayCacheAddedAtByPubkey = /* @__PURE__ */ Object.create(null);
 var relayCacheEventCreatedAtByPubkey = /* @__PURE__ */ Object.create(null);
+var relayCacheEventIdByPubkey = /* @__PURE__ */ Object.create(null);
+var relayCacheEventByPubkey = /* @__PURE__ */ Object.create(null);
+var relayRequestsByPubkey = /* @__PURE__ */ new Map();
 var getEvents = (...args) => relayPool.getEvents(...args);
 var getEventsFeedGenerator = (...args) => relayPool.getEventsFeedGenerator(...args);
+var RELAY_LIST_QUERY_TIMEOUT_MS = 5e3;
+var RELAY_LIST_QUERY_TIMEOUT_AFTER_FIRST_EOSE_MS = 500;
 function hasCachedKey(cache, key) {
   return Object.prototype.hasOwnProperty.call(cache, key);
 }
@@ -5946,16 +6063,27 @@ function cloneRelays(relays) {
     write: [...relays?.write || []]
   };
 }
-function parseRelayListEvent(event) {
+function cloneRelayListEvent(event) {
+  if (!event) return null;
+  return { ...event, tags: [...event.tags || []] };
+}
+function parseRelayListEvent(event, relayUrlPolicy) {
   const out = { read: [], write: [] };
   if (!event || event.kind !== 10002) return out;
-  for (const tag of event.tags) {
+  for (const tag of event.tags || []) {
     if (tag[0] !== "r" || typeof tag[1] !== "string") continue;
-    if (tag[2] === "read") out.read.push(tag[1]);
-    else if (tag[2] === "write") out.write.push(tag[1]);
+    let relay;
+    try {
+      relay = normalizeRelayUrl(tag[1]);
+    } catch {
+      continue;
+    }
+    if (!isValidPublicRelayUrl(relay, relayUrlPolicy)) continue;
+    if (tag[2] === "read") out.read.push(relay);
+    else if (tag[2] === "write") out.write.push(relay);
     else {
-      out.read.push(tag[1]);
-      out.write.push(tag[1]);
+      out.read.push(relay);
+      out.write.push(relay);
     }
   }
   out.read = [...new Set(out.read)];
@@ -5968,6 +6096,15 @@ function uniquePubkeys(pubkeys, { requireHex = false } = {}) {
 }
 function relayListCreatedAt(event) {
   return Number.isFinite(event?.created_at) ? event.created_at : 0;
+}
+function isNewerRelayListEvent(candidate, current) {
+  if (!candidate) return false;
+  if (!current) return true;
+  const candidateCreatedAt = relayListCreatedAt(candidate);
+  const currentCreatedAt = relayListCreatedAt(current);
+  if (candidateCreatedAt !== currentCreatedAt) return candidateCreatedAt > currentCreatedAt;
+  if (typeof candidate.id !== "string") return false;
+  return typeof current.id !== "string" || candidate.id < current.id;
 }
 function areRelaySetsEqual(a, b) {
   const left = new Set(a || []);
@@ -5996,11 +6133,15 @@ function deleteCachedRelay(pubkey) {
   delete relayCacheTimersByPubkey[pubkey];
   delete relayCacheAddedAtByPubkey[pubkey];
   delete relayCacheEventCreatedAtByPubkey[pubkey];
+  delete relayCacheEventIdByPubkey[pubkey];
+  delete relayCacheEventByPubkey[pubkey];
 }
-function setCachedRelays(pubkey, relays, createdAt, cacheMs) {
+function setCachedRelays(pubkey, relays, event, cacheMs) {
   relaysByPubkey[pubkey] = cloneRelays(relays);
   relayCacheAddedAtByPubkey[pubkey] = Date.now();
-  relayCacheEventCreatedAtByPubkey[pubkey] = createdAt;
+  relayCacheEventCreatedAtByPubkey[pubkey] = relayListCreatedAt(event);
+  relayCacheEventIdByPubkey[pubkey] = typeof event?.id === "string" ? event.id : null;
+  relayCacheEventByPubkey[pubkey] = event || null;
   clearTimeout(relayCacheTimersByPubkey[pubkey]);
   if (cacheMs > 0) {
     relayCacheTimersByPubkey[pubkey] = maybeUnref2(setTimeout(() => {
@@ -6015,15 +6156,15 @@ function pruneRelayCache() {
   if (keys.length <= RELAY_CACHE_MAX_ITEMS) return;
   keys.sort((a, b) => (relayCacheAddedAtByPubkey[a] || 0) - (relayCacheAddedAtByPubkey[b] || 0)).slice(0, keys.length - RELAY_CACHE_MAX_ITEMS).forEach(deleteCachedRelay);
 }
-function cacheRelayListEvent(event, { cacheMs = QUERY_CACHE_MS } = {}) {
+function cacheRelayListEvent(event, { cacheMs = QUERY_CACHE_MS, relayUrlPolicy } = {}) {
   if (!event || event.kind !== 10002 || !event.pubkey) return null;
-  const createdAt = relayListCreatedAt(event);
   const previousCreatedAt = relayCacheEventCreatedAtByPubkey[event.pubkey];
-  if (previousCreatedAt != null && createdAt <= previousCreatedAt) return null;
+  const previousEvent = previousCreatedAt == null ? null : { created_at: previousCreatedAt, id: relayCacheEventIdByPubkey[event.pubkey] };
+  if (!isNewerRelayListEvent(event, previousEvent)) return null;
   const previousRelays = hasCachedKey(relaysByPubkey, event.pubkey) ? cloneRelays(relaysByPubkey[event.pubkey]) : null;
-  const relays = parseRelayListEvent(event);
+  const relays = parseRelayListEvent(event, relayUrlPolicy);
   const changes = relaySetChanges(previousRelays, relays);
-  setCachedRelays(event.pubkey, relays, createdAt, cacheMs);
+  setCachedRelays(event.pubkey, relays, event, cacheMs);
   pruneRelayCache();
   return {
     pubkey: event.pubkey,
@@ -6038,6 +6179,7 @@ function subscribeRelayListUpdates(pubkeys, {
   onChange,
   relays = seedRelays,
   cacheMs = QUERY_CACHE_MS,
+  relayUrlPolicy,
   _eventsFeedGenerator = getEventsFeedGenerator
 } = {}) {
   const authors = uniquePubkeys(pubkeys, { requireHex: _eventsFeedGenerator === getEventsFeedGenerator });
@@ -6056,7 +6198,7 @@ function subscribeRelayListUpdates(pubkeys, {
         timeoutAfterFirstEose: null
       })) {
         if (closed || !authors.includes(event.pubkey)) continue;
-        const update2 = cacheRelayListEvent(event, { cacheMs });
+        const update2 = cacheRelayListEvent(event, { cacheMs, relayUrlPolicy });
         if (!update2 || !relayTypeChanged(update2.changes, relayType)) continue;
         onChange?.({
           ...update2,
@@ -6073,43 +6215,83 @@ function subscribeRelayListUpdates(pubkeys, {
     controller.abort();
   };
 }
-async function getRelaysByPubkey(pubkeys, { _getEvents = getEvents, cacheMs = QUERY_CACHE_MS } = {}) {
-  const pubkeyList = uniquePubkeys(pubkeys, { requireHex: _getEvents === getEvents });
-  if (!pubkeyList.length) return {};
-  const out = {};
-  const missingPubkeys = [];
-  for (const pubkey of pubkeyList) {
-    if (hasCachedKey(relaysByPubkey, pubkey)) out[pubkey] = cloneRelays(relaysByPubkey[pubkey]);
-    else missingPubkeys.push(pubkey);
-  }
-  if (!missingPubkeys.length) return out;
-  const { result: events } = await _getEvents({
+async function loadMissingRelays(missingPubkeys, {
+  getEvents: getEvents4,
+  cacheMs,
+  timeout = RELAY_LIST_QUERY_TIMEOUT_MS,
+  timeoutAfterFirstEose = RELAY_LIST_QUERY_TIMEOUT_AFTER_FIRST_EOSE_MS,
+  relayUrlPolicy,
+  emptyRelaysFallback = freeRelays.slice(0, 2)
+}) {
+  const { result: events } = await getEvents4({
     kinds: [10002],
     authors: missingPubkeys,
     limit: missingPubkeys.length
   }, seedRelays, {
-    timeout: 5e3,
-    timeoutAfterFirstEose: null
+    timeout,
+    timeoutAfterFirstEose
   });
   const latestByPubkey = {};
-  for (const event of events) {
+  for (const event of events || []) {
     if (!missingPubkeys.includes(event.pubkey)) continue;
-    if (!latestByPubkey[event.pubkey] || event.created_at > latestByPubkey[event.pubkey].created_at) {
-      latestByPubkey[event.pubkey] = event;
-    }
+    if (isNewerRelayListEvent(event, latestByPubkey[event.pubkey])) latestByPubkey[event.pubkey] = event;
   }
   for (const pubkey of missingPubkeys) {
-    const relays = latestByPubkey[pubkey] ? parseRelayListEvent(latestByPubkey[pubkey]) : { read: freeRelays.slice(0, 2), write: freeRelays.slice(0, 2) };
-    setCachedRelays(pubkey, relays, relayListCreatedAt(latestByPubkey[pubkey]), cacheMs);
-    out[pubkey] = relays;
+    const fetchedEvent = latestByPubkey[pubkey];
+    const cachedEvent = relayCacheEventByPubkey[pubkey] || null;
+    const event = isNewerRelayListEvent(fetchedEvent, cachedEvent) ? fetchedEvent : cachedEvent;
+    const relays = event ? parseRelayListEvent(event, relayUrlPolicy) : { read: [...emptyRelaysFallback], write: [...emptyRelaysFallback] };
+    setCachedRelays(pubkey, relays, event, cacheMs);
   }
   pruneRelayCache();
-  return out;
+}
+async function getRelaysByPubkey(pubkeys, {
+  _getEvents = getEvents,
+  cacheMs = QUERY_CACHE_MS,
+  includeEvents = false,
+  forceRefresh = false,
+  timeout = RELAY_LIST_QUERY_TIMEOUT_MS,
+  timeoutAfterFirstEose = RELAY_LIST_QUERY_TIMEOUT_AFTER_FIRST_EOSE_MS,
+  relayUrlPolicy,
+  emptyRelaysFallback = freeRelays.slice(0, 2)
+} = {}) {
+  const pubkeyList = uniquePubkeys(pubkeys, { requireHex: _getEvents === getEvents });
+  if (!pubkeyList.length) return {};
+  const loadPubkeys = forceRefresh ? pubkeyList : pubkeyList.filter((pubkey) => !hasCachedKey(relaysByPubkey, pubkey));
+  const pubkeysToLoad = loadPubkeys.filter((pubkey) => !relayRequestsByPubkey.has(pubkey));
+  if (pubkeysToLoad.length) {
+    const request = loadMissingRelays(pubkeysToLoad, {
+      getEvents: _getEvents,
+      cacheMs,
+      timeout,
+      timeoutAfterFirstEose,
+      relayUrlPolicy,
+      emptyRelaysFallback
+    }).finally(() => {
+      for (const pubkey of pubkeysToLoad) {
+        if (relayRequestsByPubkey.get(pubkey) === request) relayRequestsByPubkey.delete(pubkey);
+      }
+    });
+    for (const pubkey of pubkeysToLoad) relayRequestsByPubkey.set(pubkey, request);
+  }
+  await Promise.all([...new Set(
+    loadPubkeys.map((pubkey) => relayRequestsByPubkey.get(pubkey)).filter(Boolean)
+  )]);
+  return Object.fromEntries(pubkeyList.filter((pubkey) => hasCachedKey(relaysByPubkey, pubkey)).map((pubkey) => {
+    const entry = cloneRelays(relaysByPubkey[pubkey]);
+    if (includeEvents) entry.event = cloneRelayListEvent(relayCacheEventByPubkey[pubkey]);
+    return [pubkey, entry];
+  }));
 }
 
 // src/services/relay.js
 var READ_TIMEOUT_MS = 5e3;
 var READ_TIMEOUT_AFTER_FIRST_EOSE_MS = 500;
+var RELAY_URL_POLICY = {
+  onion: true,
+  localRelay: true,
+  nostrEntityUrls: true
+};
 function latestEvent(events) {
   let latest = null;
   for (const event of events) {
@@ -6124,25 +6306,20 @@ async function fetchLatestEvent(filter, relays, { _relayPool = relayPool } = {})
   });
   return latestEvent(result);
 }
-function fetchRelayListEvent(pubkey, options) {
-  return fetchLatestEvent({ kinds: [10002], authors: [pubkey], limit: 1 }, seedRelays, options);
+async function fetchRelayListEvent(pubkey, {
+  _getRelaysByPubkey = getRelaysByPubkey,
+  forceRefresh = true,
+  relayUrlPolicy = RELAY_URL_POLICY
+} = {}) {
+  const relaysByPubkey2 = await _getRelaysByPubkey([pubkey], {
+    includeEvents: true,
+    forceRefresh,
+    relayUrlPolicy
+  });
+  return relaysByPubkey2[pubkey]?.event ?? null;
 }
-function parseRelayListEvent2(event) {
-  const out = { read: [], write: [] };
-  if (!event || event.kind !== 10002) return out;
-  for (const tag of event.tags) {
-    if (tag[0] !== "r" || typeof tag[1] !== "string") continue;
-    const marker = tag[2];
-    if (marker === "read") out.read.push(tag[1]);
-    else if (marker === "write") out.write.push(tag[1]);
-    else {
-      out.read.push(tag[1]);
-      out.write.push(tag[1]);
-    }
-  }
-  out.read = [...new Set(out.read)];
-  out.write = [...new Set(out.write)];
-  return out;
+function parseRelayListEvent2(event, { relayUrlPolicy = RELAY_URL_POLICY } = {}) {
+  return parseRelayListEvent(event, relayUrlPolicy);
 }
 async function resolveWriteRelays(pubkey, { _fetchRelayListEvent = fetchRelayListEvent } = {}) {
   try {

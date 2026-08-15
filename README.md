@@ -6,6 +6,37 @@ It is designed to be embedded as an iframe by a host app launcher and talks to c
 
 The project is intentionally simple: vanilla JavaScript, no bundler, and a small set of explicit browser dependencies, so that anyone can read the source and verify what it does with their keys.
 
+## Hosting and deploy coherence (GitHub Pages)
+
+The vault is served from the committed `docs/` directory on GitHub Pages
+(`https://44billion.github.io/ez-vault`). GitHub Pages serves every file with
+`Cache-Control: max-age=600` and does not support custom headers, so a reload
+shortly after a deploy can pair a stale `index.html` with chunk URLs that no
+longer exist — a 404 inside the module graph leaves a blank page while the
+CSS still paints.
+
+Three mechanisms keep this self-healing:
+
+- `bin/build.js` inlines `src/sw-bootstrap.js` into `index.html`, so the
+  deployed page registers the service worker before `app.js` loads, with
+  `updateViaCache: 'none'`. Once it controls the page, network-first
+  revalidation (with a `Cache-Control: no-cache` request header) bypasses the
+  10-minute browser cache for `index.html`/`app.js`, and hashed chunks are
+  immutable URLs.
+- `bin/build.js` also inlines `src/boot-failsafe.js` and
+  `src/boot-failsafe.css` into `index.html`; the deployed page ships a small
+  boot failsafe: if `#vault` is not revealed within 12s it logs the failure
+  and reloads once per session; if that also fails it shows a manual reload
+  overlay instead of a blank page. A successful boot re-arms the automatic
+  attempt. The authored HTML stays minimal — these blocks are kept as build
+  markers so the deployed page remains fully self-contained.
+- The launcher (44billion) independently times out `VAULT_READY`, reloads the
+  iframe once, and offers a manual retry dialog when the vault stays
+  unreachable or never signals ready.
+
+The vault is also served by the 44billion server at `vault.44billion.net`,
+which sends proper cache headers; GitHub Pages remains the default host.
+
 Account secrets are normally NIP-44 encrypted under a key derived from the
 passkey PRF extension. The passkey unlocks that encryption key; it does not
 itself hold the account secrets. EZ Vault keeps PRF and ciphertext in separate storage
