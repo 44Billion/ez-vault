@@ -61,7 +61,11 @@ var accountAvatarLocales = defineLocales({
   "Change image and name": ["Changer l\u2019image et le nom", "Cambia immagine e nome", "Bild und Namen \xE4ndern", "Cambiar imagen y nombre", "Alterar imagem e nome", "\u0418\u0437\u043C\u0435\u043D\u0438\u0442\u044C \u0438\u0437\u043E\u0431\u0440\u0430\u0436\u0435\u043D\u0438\u0435 \u0438 \u0438\u043C\u044F", "\u66F4\u6539\u56FE\u7247\u548C\u540D\u79F0", "\u8B8A\u66F4\u5716\u7247\u548C\u540D\u7A31", "\u753B\u50CF\u3068\u540D\u524D\u3092\u5909\u66F4", "\uC774\uBBF8\uC9C0\uC640 \uC774\uB984 \uBCC0\uACBD"],
   Edit: ["Modifier", "Modifica", "Bearbeiten", "Editar", "Editar", "\u0418\u0437\u043C\u0435\u043D\u0438\u0442\u044C", "\u7F16\u8F91", "\u7DE8\u8F2F", "\u7DE8\u96C6", "\uD3B8\uC9D1"],
   "Read-only account": ["Compte en lecture seule", "Account di sola lettura", "Schreibgesch\xFCtztes Konto", "Cuenta de solo lectura", "Conta somente leitura", "\u0423\u0447\u0451\u0442\u043D\u0430\u044F \u0437\u0430\u043F\u0438\u0441\u044C \u0442\u043E\u043B\u044C\u043A\u043E \u0434\u043B\u044F \u0447\u0442\u0435\u043D\u0438\u044F", "\u53EA\u8BFB\u8D26\u6237", "\u552F\u8B80\u5E33\u6236", "\u8AAD\u307F\u53D6\u308A\u5C02\u7528\u30A2\u30AB\u30A6\u30F3\u30C8", "\uC77D\uAE30 \uC804\uC6A9 \uACC4\uC815"],
-  "read-only": ["lecture seule", "sola lettura", "schreibgesch\xFCtzt", "solo lectura", "somente leitura", "\u0442\u043E\u043B\u044C\u043A\u043E \u0447\u0442\u0435\u043D\u0438\u0435", "\u53EA\u8BFB", "\u552F\u8B80", "\u8AAD\u307F\u53D6\u308A\u5C02\u7528", "\uC77D\uAE30 \uC804\uC6A9"],
+  // NOTE: \u2011 is the NON-BREAKING HYPHEN (U+2011), intentionally used so
+  // "READ-ONLY" never breaks after the hyphen in the badge layout. Keep the
+  // escape as-is; replacing it with a regular ASCII hyphen ("read-only")
+  // changes the lookup key and re-enables the break.
+  "read\u2011only": ["lecture seule", "sola lettura", "schreibgesch\xFCtzt", "solo lectura", "somente leitura", "\u0442\u043E\u043B\u044C\u043A\u043E \u0447\u0442\u0435\u043D\u0438\u0435", "\u53EA\u8BFB", "\u552F\u8B80", "\u8AAD\u307F\u53D6\u308A\u5C02\u7528", "\uC77D\uAE30 \uC804\uC6A9"],
   Close: ["Fermer", "Chiudi", "Schlie\xDFen", "Cerrar", "Fechar", "\u0417\u0430\u043A\u0440\u044B\u0442\u044C", "\u5173\u95ED", "\u95DC\u9589", "\u9589\u3058\u308B", "\uB2EB\uAE30"],
   "Copy nsec": ["Copier le nsec", "Copia nsec", "nsec kopieren", "Copiar nsec", "Copiar nsec", "\u041A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u0442\u044C nsec", "\u590D\u5236 nsec", "\u8907\u88FD nsec", "nsec \u3092\u30B3\u30D4\u30FC", "nsec \uBCF5\uC0AC"],
   "Copy bunker URL": ["Copier l\u2019URL bunker", "Copia URL bunker", "Bunker-URL kopieren", "Copiar URL bunker", "Copiar URL bunker", "\u041A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u0442\u044C URL bunker", "\u590D\u5236 bunker URL", "\u8907\u88FD bunker URL", "bunker URL \u3092\u30B3\u30D4\u30FC", "bunker URL \uBCF5\uC0AC"],
@@ -206,18 +210,27 @@ var STYLES = (
     display: none;
     align-items: center;
     justify-content: center;
-    padding: 0 8px;
-    height: 18px;
+    padding: 2px 8px;
+    min-height: 18px;
+    width: min-content; /* hug the wrapped lines instead of stretching across the avatar */
+    max-width: calc(100% - 8px); /* keep long single words from overflowing the avatar */
     border-radius: 9999px;
     background-color: oklch(from var(--surface) l c h / 0.82);
     color: var(--fg-strong);
     font-size: 9rem;
     font-weight: 600;
     letter-spacing: 0.05em;
+    line-height: 1.2;
+    text-align: center;
     text-transform: uppercase;
     box-shadow: 0 0 0 2px var(--accent);
     pointer-events: none;
     z-index: 2;
+  }
+  account-avatar .avatar-readonly-label-inner {
+    min-width: 0; /* allow shrinking so overflow-wrap can break long words */
+    overflow-wrap: break-word; /* undo global anywhere: break only when a word doesn't fit */
+    word-break: keep-all; /* keep CJK scripts from collapsing to one character per line */
   }
   account-avatar[mode="normal"][data-type="npub"] .avatar-readonly-label {
     display: inline-flex;
@@ -348,7 +361,7 @@ var TEMPLATE = `
   <button class="avatar-btn at-top-left" data-action="delete" title="Remove account" type="button"><span class="avatar-btn-icon">${ICON_TRASH}</span></button>
   <button class="avatar-btn at-top-center" data-action="cycle" title="Change image and name" type="button"><span class="avatar-btn-icon">${ICON_REFRESH}</span></button>
   <button class="avatar-btn at-top-right" data-action="edit" title="Edit" type="button"><span class="avatar-btn-icon">${ICON_PENCIL}</span></button>
-  <span class="avatar-readonly-label" aria-label="Read-only account">read-only</span>
+  <span class="avatar-readonly-label" aria-label="Read-only account"><span class="avatar-readonly-label-inner">read\u2011only</span></span>
   <button class="avatar-btn at-top-right" data-action="cancel-edit" title="Close" type="button"><span class="avatar-btn-icon">${ICON_X}</span></button>
   <button class="avatar-btn at-middle-left" data-action="copy-nsec" title="Copy nsec" type="button"><span class="avatar-btn-icon">${ICON_KEY}</span></button>
   <button class="avatar-btn at-top-right at-primary" data-action="save" title="Save" type="button"><span class="avatar-btn-icon">${ICON_CHECK}</span></button>
@@ -822,8 +835,9 @@ var AccountAvatar = class extends HTMLElement {
     }
     const readonly = this.querySelector(".avatar-readonly-label");
     if (readonly) {
-      readonly.textContent = t("read-only");
+      readonly.querySelector(".avatar-readonly-label-inner").textContent = t("read\u2011only");
       readonly.setAttribute("aria-label", t("Read-only account"));
+      this.#fitReadonlyLabel();
     }
     if (this.#nameField) {
       this.#nameField.setAttribute("aria-label", t("Account name"));
@@ -831,6 +845,48 @@ var AccountAvatar = class extends HTMLElement {
       this.#syncNameFieldWidth();
     }
     this.#updateCopyKeyButton();
+  }
+  // Short labels should stay on a single line; only texts that would not fit
+  // should wrap and hug the widest line. The width is set explicitly so the
+  // pill never stretches to the available space. The label may be
+  // display:none here, so measure a detached clone with the same styles.
+  #fitReadonlyLabel() {
+    const readonly = this.querySelector(".avatar-readonly-label");
+    const inner = readonly?.querySelector(".avatar-readonly-label-inner");
+    if (!readonly || !inner || !inner.textContent) return;
+    const maxWidth = this.clientWidth - 8;
+    if (maxWidth <= 0) return;
+    const computed = getComputedStyle(readonly);
+    const clone = readonly.cloneNode(true);
+    clone.style.cssText = `
+      position: fixed;
+      visibility: hidden;
+      display: inline-block;
+      white-space: nowrap;
+      width: max-content;
+      max-width: none;
+      box-sizing: border-box;
+      font: ${computed.font};
+      letter-spacing: ${computed.letterSpacing};
+      text-transform: ${computed.textTransform};
+      padding-left: ${computed.paddingLeft};
+      padding-right: ${computed.paddingRight};
+    `;
+    document.body.appendChild(clone);
+    clone.textContent = inner.textContent;
+    const naturalWidth = clone.getBoundingClientRect().width;
+    if (naturalWidth <= maxWidth) {
+      readonly.style.width = `${naturalWidth}px`;
+    } else {
+      let widest = 0;
+      for (const word of inner.textContent.split(/\s+/)) {
+        if (!word) continue;
+        clone.textContent = word;
+        widest = Math.max(widest, clone.getBoundingClientRect().width);
+      }
+      readonly.style.width = `${Math.min(widest, maxWidth)}px`;
+    }
+    clone.remove();
   }
 };
 customElements.define("account-avatar", AccountAvatar);

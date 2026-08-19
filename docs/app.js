@@ -220,7 +220,7 @@ await initializeVaultProtection();
 if (!hasPasskey()) preparePasskeyRegistration().catch(() => {
 });
 await Promise.all([
-  import("./chunks/account-list-3AT42MUI.js"),
+  import("./chunks/account-list-CIRY6Y3N.js"),
   import("./chunks/account-add-FDGC3HGN.js"),
   import("./chunks/sync-panel-D4LZ3L2B.js"),
   import("./chunks/trusted-signers-panel-G56CWYRK.js"),
@@ -229,7 +229,7 @@ await Promise.all([
   import("./chunks/activity-log-W62PR36M.js"),
   import("./chunks/vault-lock-button-PLCLXGZS.js"),
   import("./chunks/lock-overlay-VAMCVAVP.js"),
-  import("./chunks/create-overlay-R3JSIH53.js")
+  import("./chunks/create-overlay-2BEKKEFC.js")
 ]);
 try {
   sessionStorage.removeItem("ezVaultBootAutoReloaded");

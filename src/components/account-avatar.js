@@ -25,7 +25,11 @@ export const accountAvatarLocales = defineLocales({
   'Change image and name': ['Changer l’image et le nom', 'Cambia immagine e nome', 'Bild und Namen ändern', 'Cambiar imagen y nombre', 'Alterar imagem e nome', 'Изменить изображение и имя', '更改图片和名称', '變更圖片和名稱', '画像と名前を変更', '이미지와 이름 변경'],
   Edit: ['Modifier', 'Modifica', 'Bearbeiten', 'Editar', 'Editar', 'Изменить', '编辑', '編輯', '編集', '편집'],
   'Read-only account': ['Compte en lecture seule', 'Account di sola lettura', 'Schreibgeschütztes Konto', 'Cuenta de solo lectura', 'Conta somente leitura', 'Учётная запись только для чтения', '只读账户', '唯讀帳戶', '読み取り専用アカウント', '읽기 전용 계정'],
-  'read-only': ['lecture seule', 'sola lettura', 'schreibgeschützt', 'solo lectura', 'somente leitura', 'только чтение', '只读', '唯讀', '読み取り専用', '읽기 전용'],
+  // NOTE: \u2011 is the NON-BREAKING HYPHEN (U+2011), intentionally used so
+  // "READ-ONLY" never breaks after the hyphen in the badge layout. Keep the
+  // escape as-is; replacing it with a regular ASCII hyphen ("read-only")
+  // changes the lookup key and re-enables the break.
+  'read\u2011only': ['lecture seule', 'sola lettura', 'schreibgeschützt', 'solo lectura', 'somente leitura', 'только чтение', '只读', '唯讀', '読み取り専用', '읽기 전용'],
   Close: ['Fermer', 'Chiudi', 'Schließen', 'Cerrar', 'Fechar', 'Закрыть', '关闭', '關閉', '閉じる', '닫기'],
   'Copy nsec': ['Copier le nsec', 'Copia nsec', 'nsec kopieren', 'Copiar nsec', 'Copiar nsec', 'Копировать nsec', '复制 nsec', '複製 nsec', 'nsec をコピー', 'nsec 복사'],
   'Copy bunker URL': ['Copier l’URL bunker', 'Copia URL bunker', 'Bunker-URL kopieren', 'Copiar URL bunker', 'Copiar URL bunker', 'Копировать URL bunker', '复制 bunker URL', '複製 bunker URL', 'bunker URL をコピー', 'bunker URL 복사'],
@@ -174,18 +178,27 @@ const STYLES = /* css */`
     display: none;
     align-items: center;
     justify-content: center;
-    padding: 0 8px;
-    height: 18px;
+    padding: 2px 8px;
+    min-height: 18px;
+    width: min-content; /* hug the wrapped lines instead of stretching across the avatar */
+    max-width: calc(100% - 8px); /* keep long single words from overflowing the avatar */
     border-radius: 9999px;
     background-color: oklch(from var(--surface) l c h / 0.82);
     color: var(--fg-strong);
     font-size: 9rem;
     font-weight: 600;
     letter-spacing: 0.05em;
+    line-height: 1.2;
+    text-align: center;
     text-transform: uppercase;
     box-shadow: 0 0 0 2px var(--accent);
     pointer-events: none;
     z-index: 2;
+  }
+  account-avatar .avatar-readonly-label-inner {
+    min-width: 0; /* allow shrinking so overflow-wrap can break long words */
+    overflow-wrap: break-word; /* undo global anywhere: break only when a word doesn't fit */
+    word-break: keep-all; /* keep CJK scripts from collapsing to one character per line */
   }
   account-avatar[mode="normal"][data-type="npub"] .avatar-readonly-label {
     display: inline-flex;
@@ -316,7 +329,7 @@ const TEMPLATE = `
   <button class="avatar-btn at-top-left" data-action="delete" title="Remove account" type="button"><span class="avatar-btn-icon">${ICON_TRASH}</span></button>
   <button class="avatar-btn at-top-center" data-action="cycle" title="Change image and name" type="button"><span class="avatar-btn-icon">${ICON_REFRESH}</span></button>
   <button class="avatar-btn at-top-right" data-action="edit" title="Edit" type="button"><span class="avatar-btn-icon">${ICON_PENCIL}</span></button>
-  <span class="avatar-readonly-label" aria-label="Read-only account">read-only</span>
+  <span class="avatar-readonly-label" aria-label="Read-only account"><span class="avatar-readonly-label-inner">read\u2011only</span></span>
   <button class="avatar-btn at-top-right" data-action="cancel-edit" title="Close" type="button"><span class="avatar-btn-icon">${ICON_X}</span></button>
   <button class="avatar-btn at-middle-left" data-action="copy-nsec" title="Copy nsec" type="button"><span class="avatar-btn-icon">${ICON_KEY}</span></button>
   <button class="avatar-btn at-top-right at-primary" data-action="save" title="Save" type="button"><span class="avatar-btn-icon">${ICON_CHECK}</span></button>
@@ -844,8 +857,10 @@ export class AccountAvatar extends HTMLElement {
     }
     const readonly = this.querySelector('.avatar-readonly-label')
     if (readonly) {
-      readonly.textContent = t('read-only')
+      // \u2011 = non-breaking hyphen (U+2011); keep it in sync with the key above.
+      readonly.querySelector('.avatar-readonly-label-inner').textContent = t('read\u2011only')
       readonly.setAttribute('aria-label', t('Read-only account'))
+      this.#fitReadonlyLabel()
     }
     if (this.#nameField) {
       this.#nameField.setAttribute('aria-label', t('Account name'))
@@ -853,6 +868,59 @@ export class AccountAvatar extends HTMLElement {
       this.#syncNameFieldWidth()
     }
     this.#updateCopyKeyButton()
+  }
+
+  // Short labels should stay on a single line; only texts that would not fit
+  // should wrap and hug the widest line. The width is set explicitly so the
+  // pill never stretches to the available space. The label may be
+  // display:none here, so measure a detached clone with the same styles.
+  #fitReadonlyLabel () {
+    const readonly = this.querySelector('.avatar-readonly-label')
+    const inner = readonly?.querySelector('.avatar-readonly-label-inner')
+    if (!readonly || !inner || !inner.textContent) return
+
+    const maxWidth = this.clientWidth - 8
+    if (maxWidth <= 0) return // not laid out yet; the CSS min-content fallback still hugs
+
+    // The clone loses styles that only match inside account-avatar
+    // (e.g. `account-avatar .avatar-readonly-label`), so copy every property
+    // that affects the measured width.
+    const computed = getComputedStyle(readonly)
+    const clone = readonly.cloneNode(true)
+    clone.style.cssText = `
+      position: fixed;
+      visibility: hidden;
+      display: inline-block;
+      white-space: nowrap;
+      width: max-content;
+      max-width: none;
+      box-sizing: border-box;
+      font: ${computed.font};
+      letter-spacing: ${computed.letterSpacing};
+      text-transform: ${computed.textTransform};
+      padding-left: ${computed.paddingLeft};
+      padding-right: ${computed.paddingRight};
+    `
+    document.body.appendChild(clone)
+
+    clone.textContent = inner.textContent
+    const naturalWidth = clone.getBoundingClientRect().width
+
+    if (naturalWidth <= maxWidth) {
+      // Fits on one line: pin the natural width so it never wraps.
+      readonly.style.width = `${naturalWidth}px`
+    } else {
+      // It will wrap: hug the widest line (longest unbreakable segment),
+      // capped so single long words stay inside the avatar.
+      let widest = 0
+      for (const word of inner.textContent.split(/\s+/)) {
+        if (!word) continue
+        clone.textContent = word
+        widest = Math.max(widest, clone.getBoundingClientRect().width)
+      }
+      readonly.style.width = `${Math.min(widest, maxWidth)}px`
+    }
+    clone.remove()
   }
 }
 
