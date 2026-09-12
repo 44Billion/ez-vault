@@ -1,3 +1,4 @@
+import { PERSONAL_COPY } from 'libp2r2p/kind'
 import * as store from './accounts-store.js'
 import * as secrets from './secrets.js'
 import * as nip44DoubleDh from './nip44-double-dh.js'
@@ -57,10 +58,11 @@ export function claimSigner (account) {
   }
 }
 
-async function contentSignerForDoubleSign (account, userSigner, internals = {}) {
+async function contentSignerForDoubleSign (account, userSigner, internals = {}, { personalCopy = false } = {}) {
   if (account.type !== 'nsec') throw new Error('OWN_CONTENT_KEY_UNSUPPORTED')
   const warnings = []
-  const signer = await nip44DoubleDh.publishedOwnContentSigner({
+  const resolve = personalCopy ? nip44DoubleDh.localOwnContentSigner : nip44DoubleDh.publishedOwnContentSigner
+  const signer = await resolve({
     account,
     userSigner,
     warnings,
@@ -114,7 +116,7 @@ export async function run ({ pubkey, method, params = [], internals = {}, withSh
     if (account.type === 'bunker') return signer.doubleSignEvent(event)
     return doubleSignEvent({
       userSigner: signer,
-      contentKeySigner: await contentSignerForDoubleSign(account, signer, internals),
+      contentKeySigner: await contentSignerForDoubleSign(account, signer, internals, { personalCopy: event?.kind === PERSONAL_COPY }),
       event
     })
   }

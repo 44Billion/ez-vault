@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import http.server
+from functools import partial
 import socketserver
 import os
 import signal
@@ -47,12 +48,13 @@ if __name__ == "__main__":
     # Serve the requested output directory (docs/ for production, .dev/ for
     # the dev watcher — see bin/dev.js). Defaults to docs/.
     serve_dir = os.environ.get("EZ_VAULT_SERVE_DIR", "docs")
-    os.chdir(serve_dir)
+    serve_dir = os.path.abspath(serve_dir)
+    handler = partial(NoCacheHTTPRequestHandler, directory=serve_dir)
 
     # Allow address reuse to avoid "Address already in use" errors
     socketserver.TCPServer.allow_reuse_address = True
 
-    with socketserver.TCPServer(("", PORT), NoCacheHTTPRequestHandler) as httpd:
+    with socketserver.TCPServer(("", PORT), handler) as httpd:
         print(f"Serving EZ Vault {serve_dir} folder at http://localhost:{PORT}")
         try:
             httpd.serve_forever()

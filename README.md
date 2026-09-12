@@ -176,3 +176,17 @@ profile picture and an existing local picture.
 ## License
 
 MIT
+
+
+Personal-copy (`kind:1006`) double signing for local nsec accounts uses an
+existing or newly persisted encrypted content key without relay discovery or
+publication. This allows offline event-store writes; the ordinary content-key
+sidecar and device synchronization retain the key. Public double-signed events
+still require a published content key. Account locks, read-only restrictions
+and signer permissions are unchanged. Bunker accounts delegate to their remote
+signer and therefore do not gain offline signing.
+
+
+The Python development server resolves its output directory explicitly instead
+of changing its working directory. Rebuilding generated output can replace the
+directory without invalidating the running server's working directory.

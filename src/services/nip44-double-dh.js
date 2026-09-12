@@ -44,6 +44,17 @@ async function createPersistedContentSigner ({ ownerPubkey, warnings }) {
   }
 }
 
+// Personal copies never need a publicly advertised key. Persist the ordinary
+// encrypted content-key sidecar so local signing works before any relay access.
+export async function localOwnContentSigner ({ account, warnings = [] }) {
+  if (account.type !== 'nsec') {
+    warning(warnings, 'OWN_CONTENT_KEY_UNSUPPORTED')
+    return null
+  }
+  return secrets.getLatestContentKeySigner(account.pubkey) ||
+    await createPersistedContentSigner({ ownerPubkey: account.pubkey, warnings })
+}
+
 export async function publishedOwnContentSigner ({ account, userSigner, warnings = [], internals = {} }) {
   if (account.type !== 'nsec') {
     warning(warnings, 'OWN_CONTENT_KEY_UNSUPPORTED')

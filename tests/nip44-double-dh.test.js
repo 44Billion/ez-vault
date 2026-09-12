@@ -492,3 +492,22 @@ test('content key replacement rotates the owner to the new persisted key', async
   assert.equal(secrets.getContentKeySigner(alice.pubkey, oldContent.pubkey), null)
   assert.equal(secrets.getLatestContentKeySigner(alice.pubkey)?.getPublicKey(), newPubkey)
 })
+
+test('personal-copy double signing persists and reuses a local key without any relay work', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const alice = await addNsecAccount()
+  const event = { kind: 1006, created_at: 9, tags: [['k', '9'], ['imkc']], content: 'private ciphertext' }
+  const noNetwork = async () => { assert.fail('Personal copies must not require relay access') }
+  const request = {
+    pubkey: alice.pubkey, method: 'doubleSignEvent', params: [event],
+    internals: { _getIykcProofs: noNetwork, _upsertContentKeyEvent: noNetwork }
+  }
+  const first = await run(request)
+  const second = await run(request)
+  const contentPubkey = first.tags.find(tag => tag[0] === 'imkc')[1]
+  assert.equal(isValidEvent(first), true)
+  assert.equal(isValidEvent(second), true)
+  assert.equal(second.tags.find(tag => tag[0] === 'imkc')[1], contentPubkey)
+  assert.ok(secrets.getContentKeySigner(alice.pubkey, contentPubkey))
+  assert.ok(await getState(CONTENT_KEYS_STORAGE_KEY))
+})
