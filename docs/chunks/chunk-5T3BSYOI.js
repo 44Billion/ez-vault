@@ -1,8 +1,13 @@
 import {
+  arrayBufferBytes
+} from "./chunk-ILFV67WX.js";
+import {
   filterVisibleAccounts
-} from "./chunk-MKIFRTGJ.js";
+} from "./chunk-6CJEW3BF.js";
 import {
   CONTENT_KEY_KIND,
+  PERSONAL_COPY,
+  ValidationError,
   bytesToHex,
   fetchRelayListEvent,
   freeRelays,
@@ -30,29 +35,34 @@ import {
   setState,
   subscribe2 as subscribe,
   update
-} from "./chunk-NHHPGB6R.js";
+} from "./chunk-OCHCEJP4.js";
 
 // node_modules/libp2r2p/network/index.js
-async function isOnline() {
-  if (typeof navigator !== "undefined" && typeof navigator.onLine === "boolean") {
-    if (!navigator.onLine) return false;
-  }
-  return hasInternetConnectivity();
-}
+var RETRY_DELAYS = [5e3, 15e3, 3e4, 6e4];
 var CONNECTIVITY_PROBE_URLS = [
   { url: "https://www.gstatic.com/generate_204" },
   { url: "https://connectivitycheck.gstatic.com/generate_204" },
   { url: "https://captive.apple.com/hotspot-detect.html" },
   { method: "GET", url: "https://connectivity-check.ubuntu.com" }
 ];
-async function hasInternetConnectivity() {
-  const candidates = shuffle(CONNECTIVITY_PROBE_URLS);
-  for (const candidate of candidates) {
+var sharedCheck;
+async function isOnline({ signal } = {}) {
+  if (signal?.aborted) throw signal.reason;
+  if (globalThis.navigator?.onLine === false) return false;
+  if (signal) return hasInternetConnectivity(signal);
+  sharedCheck ??= hasInternetConnectivity().finally(() => {
+    sharedCheck = null;
+  });
+  return sharedCheck;
+}
+async function hasInternetConnectivity(signal) {
+  for (const candidate of shuffle(CONNECTIVITY_PROBE_URLS)) {
+    if (signal?.aborted) throw signal.reason;
     try {
-      await ping(candidate.url, { method: candidate.method });
+      await ping(candidate.url, { method: candidate.method, signal });
       return true;
-    } catch (err) {
-      console.warn("connectivity probe failed", candidate.url, err?.message ?? err);
+    } catch {
+      if (signal?.aborted) throw signal.reason;
     }
   }
   return false;
@@ -65,32 +75,141 @@ function shuffle(list2) {
   }
   return copy;
 }
-async function ping(url, { method = "HEAD", timeout = 5e3 } = {}) {
-  const abortController = typeof AbortController === "function" ? new AbortController() : null;
-  let timerId = null;
-  const fetchPromise = fetch(url, {
-    method,
-    mode: "no-cors",
-    cache: "no-store",
-    redirect: "follow",
-    signal: abortController?.signal
-  });
-  const completionPromise = fetchPromise.finally(() => {
-    if (timerId != null) clearTimeout(timerId);
-  });
-  const timeoutPromise = new Promise((_resolve, reject) => {
-    timerId = setTimeout(() => {
-      if (abortController) abortController.abort();
+async function ping(url, { method = "HEAD", timeout = 5e3, signal } = {}) {
+  const controller = new AbortController();
+  let timer;
+  let onAbort;
+  const stopped = new Promise((_resolve, reject) => {
+    onAbort = () => {
+      controller.abort(signal.reason);
+      reject(signal.reason);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    timer = setTimeout(() => {
+      controller.abort();
       reject(new Error("PING_TIMEOUT"));
     }, timeout);
+    if (signal?.aborted) onAbort();
   });
-  await Promise.race([completionPromise, timeoutPromise]);
-  return true;
+  try {
+    await Promise.race([
+      fetch(url, { method, mode: "no-cors", cache: "no-store", redirect: "follow", signal: controller.signal }),
+      stopped
+    ]);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  }
 }
+function createConnectivityMonitor({
+  check = isOnline,
+  eventTarget = globalThis.window,
+  document = globalThis.document,
+  _setTimeout = globalThis.setTimeout,
+  _clearTimeout = globalThis.clearTimeout,
+  _random = Math.random,
+  reportError = (error) => console.error("Online listener failed", error)
+} = {}) {
+  if (typeof check !== "function") throw new ValidationError("INVALID_CONNECTIVITY_CHECK");
+  const listeners = /* @__PURE__ */ new Set();
+  const setTimer = (...args) => Reflect.apply(_setTimeout, globalThis, args);
+  const clearTimer = (...args) => Reflect.apply(_clearTimeout, globalThis, args);
+  let session;
+  function deliver(entry, current) {
+    if (entry.delivered || !listeners.has(entry) || session !== current) return;
+    entry.delivered = true;
+    try {
+      Promise.resolve(entry.handler()).catch(reportError);
+    } catch (error) {
+      reportError(error);
+    }
+  }
+  function schedule(current) {
+    if (session !== current || !listeners.size) return;
+    const delay = current.online ? 6e4 : RETRY_DELAYS[Math.min(current.retry++, RETRY_DELAYS.length - 1)];
+    current.timer = setTimer(() => {
+      current.timer = null;
+      return probe(current);
+    }, Math.round(delay * (0.8 + _random() * 0.4)));
+    current.timer?.unref?.();
+  }
+  async function probe(current) {
+    if (session !== current || current.pending) return;
+    if (current.timer != null) clearTimer(current.timer);
+    current.timer = null;
+    current.pending = true;
+    try {
+      const online = await check({ signal: current.controller.signal });
+      if (session !== current) return;
+      current.online = online === true && globalThis.navigator?.onLine !== false;
+      if (current.online) {
+        current.retry = 0;
+        for (const entry of [...listeners]) deliver(entry, current);
+      } else {
+        for (const entry of listeners) entry.delivered = false;
+      }
+    } catch {
+      if (session !== current) return;
+      current.online = false;
+      for (const entry of listeners) entry.delivered = false;
+    } finally {
+      current.pending = false;
+      schedule(current);
+    }
+  }
+  function start() {
+    const current = { online: false, retry: 0, timer: null, pending: false, controller: new AbortController() };
+    session = current;
+    current.wake = () => {
+      probe(current);
+    };
+    current.connectionChanged = () => {
+      current.online = false;
+      current.retry = 0;
+      for (const entry of listeners) entry.delivered = false;
+      current.wake();
+    };
+    current.visible = () => {
+      if (document?.visibilityState !== "hidden") current.wake();
+    };
+    eventTarget?.addEventListener("online", current.connectionChanged);
+    eventTarget?.addEventListener("offline", current.connectionChanged);
+    eventTarget?.addEventListener("focus", current.wake);
+    document?.addEventListener("visibilitychange", current.visible);
+    queueMicrotask(current.wake);
+  }
+  function stop() {
+    const current = session;
+    session = null;
+    if (current.timer != null) clearTimer(current.timer);
+    current.controller.abort();
+    eventTarget?.removeEventListener("online", current.connectionChanged);
+    eventTarget?.removeEventListener("offline", current.connectionChanged);
+    eventTarget?.removeEventListener("focus", current.wake);
+    document?.removeEventListener("visibilitychange", current.visible);
+  }
+  function onOnline2(handler) {
+    if (typeof handler !== "function") throw new ValidationError("INVALID_ONLINE_HANDLER");
+    const entry = { handler, delivered: false };
+    listeners.add(entry);
+    if (!session) start();
+    else {
+      const current = session;
+      queueMicrotask(() => {
+        probe(current);
+      });
+    }
+    return () => {
+      if (!listeners.delete(entry)) return;
+      if (!listeners.size) stop();
+    };
+  }
+  return { onOnline: onOnline2 };
+}
+var defaultMonitor;
 function onOnline(handler) {
-  const listener = () => handler();
-  window.addEventListener("online", listener);
-  return () => window.removeEventListener("online", listener);
+  defaultMonitor ??= createConnectivityMonitor();
+  return defaultMonitor.onOnline(handler);
 }
 
 // src/services/content-key/index.js
@@ -520,6 +639,13 @@ async function createPersistedContentSigner({ ownerPubkey, warnings }) {
     return null;
   }
 }
+async function localOwnContentSigner({ account, warnings = [] }) {
+  if (account.type !== "nsec") {
+    warning(warnings, "OWN_CONTENT_KEY_UNSUPPORTED");
+    return null;
+  }
+  return getLatestContentKeySigner(account.pubkey) || await createPersistedContentSigner({ ownerPubkey: account.pubkey, warnings });
+}
 async function publishedOwnContentSigner({ account, userSigner, warnings = [], internals = {} }) {
   if (account.type !== "nsec") {
     warning(warnings, "OWN_CONTENT_KEY_UNSUPPORTED");
@@ -538,25 +664,25 @@ async function publishedOwnContentSigner({ account, userSigner, warnings = [], i
   return await publishLocalContentKey({ userSigner, contentKeySigner: localSigner, warnings, ...internals }) ? localSigner : null;
 }
 function encryptParams(params) {
-  const [peerPubkey, kind, scope = "", plaintextB64, peerContentPubkey = ""] = params || [];
-  return { peerPubkey, kind, scope, plaintextB64, peerContentPubkey };
+  const [peerPubkey, kind, scope = "", plaintextBytes, peerContentPubkey = ""] = params || [];
+  return { peerPubkey, kind, scope, plaintextBytes, peerContentPubkey };
 }
 function decryptParams(params) {
   const [peerPubkey, kind, scope = "", ciphertext, peerContentPubkey = "", ownContentPubkey = ""] = params || [];
   return { peerPubkey, kind, scope, ciphertext, peerContentPubkey, ownContentPubkey };
 }
 async function encrypt({ account, signer, params, internals }) {
-  const { peerPubkey, kind, scope, plaintextB64, peerContentPubkey } = encryptParams(params);
+  const { peerPubkey, kind, scope, plaintextBytes, peerContentPubkey } = encryptParams(params);
   if (!peerPubkey) throw new Error("PEER_PUBKEY_REQUIRED");
-  if (typeof plaintextB64 !== "string") throw new Error("PLAINTEXT_REQUIRED");
+  if (!(plaintextBytes instanceof Uint8Array)) throw new Error("PLAINTEXT_REQUIRED");
   const normalizedKind = normalizeKind(kind);
   const warnings = [];
   await publishedOwnContentSigner({ account, userSigner: signer, warnings, internals });
-  const [ciphertext, senderContentPubkey = ""] = await signer.nip44EncryptDoubleDH(
+  const [ciphertext, senderContentPubkey = ""] = await signer.nip44EncryptDoubleDHBytes(
     peerPubkey,
     normalizedKind,
     scope,
-    plaintextB64,
+    plaintextBytes,
     peerContentPubkey
   );
   return [ciphertext, senderContentPubkey];
@@ -567,7 +693,7 @@ async function decrypt({ account, signer, params }) {
   if (typeof ciphertext !== "string") throw new Error("CIPHERTEXT_REQUIRED");
   const normalizedKind = normalizeKind(kind);
   if (ownContentPubkey && !getContentKeySigner(account.pubkey, ownContentPubkey)) throw new Error("CONTENT_KEY_NOT_FOUND");
-  return signer.nip44DecryptDoubleDH(
+  return signer.nip44DecryptDoubleDHBytes(
     peerPubkey,
     normalizedKind,
     scope,
@@ -577,11 +703,11 @@ async function decrypt({ account, signer, params }) {
   );
 }
 async function nip44EncryptDoubleDH({ account, signer, params = [], internals = {} }) {
-  if (account.type !== "nsec") return signer.nip44EncryptDoubleDH(...params);
+  if (account.type !== "nsec") return signer.nip44EncryptDoubleDHBytes(...params);
   return encrypt({ account, signer, params, internals });
 }
 async function nip44DecryptDoubleDH({ account, signer, params = [] }) {
-  if (account.type !== "nsec") return signer.nip44DecryptDoubleDH(...params);
+  if (account.type !== "nsec") return signer.nip44DecryptDoubleDHBytes(...params);
   return decrypt({ account, signer, params });
 }
 
@@ -630,10 +756,11 @@ function claimSigner(account) {
       throw new Error("UNKNOWN_ACCOUNT_TYPE");
   }
 }
-async function contentSignerForDoubleSign(account, userSigner, internals = {}) {
+async function contentSignerForDoubleSign(account, userSigner, internals = {}, { personalCopy = false } = {}) {
   if (account.type !== "nsec") throw new Error("OWN_CONTENT_KEY_UNSUPPORTED");
   const warnings = [];
-  const signer = await publishedOwnContentSigner({
+  const resolve = personalCopy ? localOwnContentSigner : publishedOwnContentSigner;
+  const signer = await resolve({
     account,
     userSigner,
     warnings,
@@ -662,9 +789,14 @@ async function run({ pubkey, method, params = [], internals = {}, withSharedKey 
   if (!storedAccount) throw new Error("UNKNOWN_ACCOUNT");
   const normalized = normalizeMethod(method);
   if (!SUPPORTED_METHODS.has(normalized)) throw new Error("UNSUPPORTED_METHOD");
+  const ownerSigner = claimSigner(storedAccount);
+  if (normalized === "nip44v3Encrypt" || normalized === "nip44EncryptDoubleDH") {
+    params = [...params];
+    params[3] = arrayBufferBytes(params[3]).slice();
+  }
   const scoped = await applyWithSharedKey({
     account: storedAccount,
-    signer: claimSigner(storedAccount),
+    signer: ownerSigner,
     withSharedKey
   });
   const { account, signer } = scoped;
@@ -672,14 +804,16 @@ async function run({ pubkey, method, params = [], internals = {}, withSharedKey 
     return nip44EncryptDoubleDH({ account, signer, params, internals });
   }
   if (normalized === "nip44DecryptDoubleDH") {
-    return nip44DecryptDoubleDH({ account, signer, params });
+    return (await nip44DecryptDoubleDH({ account, signer, params })).slice().buffer;
   }
+  if (normalized === "nip44v3Encrypt") return signer.nip44v3EncryptBytes(...params);
+  if (normalized === "nip44v3Decrypt") return (await signer.nip44v3DecryptBytes(...params)).slice().buffer;
   if (normalized === "doubleSignEvent") {
     const [event] = params || [];
     if (account.type === "bunker") return signer.doubleSignEvent(event);
     return doubleSignEvent({
       userSigner: signer,
-      contentKeySigner: await contentSignerForDoubleSign(account, signer, internals),
+      contentKeySigner: await contentSignerForDoubleSign(account, signer, internals, { personalCopy: event?.kind === PERSONAL_COPY }),
       event
     });
   }

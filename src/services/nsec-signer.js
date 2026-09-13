@@ -59,9 +59,13 @@ class SharedKeySigner {
   async nip44Decrypt (peerPubkey, ciphertext) { return (await this.#sharedSigner()).nip44Decrypt(peerPubkey, ciphertext) }
   async nip44v3Encrypt (peerPubkey, kind, scope, plaintextB64) { return (await this.#sharedSigner()).nip44v3Encrypt(peerPubkey, kind, scope, plaintextB64) }
   async nip44v3Decrypt (peerPubkey, kind, scope, ciphertext) { return (await this.#sharedSigner()).nip44v3Decrypt(peerPubkey, kind, scope, ciphertext) }
+  async nip44v3EncryptBytes (...params) { return (await this.#sharedSigner()).nip44v3EncryptBytes(...params) }
+  async nip44v3DecryptBytes (...params) { return (await this.#sharedSigner()).nip44v3DecryptBytes(...params) }
   async obfuscate (value, kind, scope) { return this.#signer.obfuscate(value, kind, scope) }
   async nip44EncryptDoubleDH (...params) { return (await this.#sharedSigner()).nip44EncryptDoubleDH(...params) }
   async nip44DecryptDoubleDH (...params) { return (await this.#sharedSigner()).nip44DecryptDoubleDH(...params) }
+  async nip44EncryptDoubleDHBytes (...params) { return (await this.#sharedSigner()).nip44EncryptDoubleDHBytes(...params) }
+  async nip44DecryptDoubleDHBytes (...params) { return (await this.#sharedSigner()).nip44DecryptDoubleDHBytes(...params) }
   withSharedKey (peerPubkey, info = this.#info) { return new SharedKeySigner(this.#signer, peerPubkey, info) }
 }
 
@@ -175,11 +179,21 @@ export default class NsecSigner {
   }
 
   nip44v3Encrypt (peerPubkey, kind, scope, plaintextB64) {
-    return nip44v3.nip07Encrypt(this.#secretKey, peerPubkey, kind, scope, plaintextB64)
+    return this.nip44v3EncryptBytes(peerPubkey, kind, scope, nip44v3.b64decode(plaintextB64))
   }
 
   nip44v3Decrypt (peerPubkey, kind, scope, ciphertext) {
-    return nip44v3.nip07Decrypt(this.#secretKey, peerPubkey, kind, scope, ciphertext)
+    return nip44v3.b64encode(this.nip44v3DecryptBytes(peerPubkey, kind, scope, ciphertext))
+  }
+
+  // Local app requests use bytes directly. The Base64 methods above serve
+  // the existing private-channel/private-messenger signer contract.
+  nip44v3EncryptBytes (peerPubkey, kind, scope, plaintextBytes) {
+    return nip44v3.encryptBytes(this.#secretKey, peerPubkey, kind, nip44v3.toBytes(scope || ''), plaintextBytes)
+  }
+
+  nip44v3DecryptBytes (peerPubkey, kind, scope, ciphertext) {
+    return nip44v3.decryptBytes(this.#secretKey, peerPubkey, kind, nip44v3.toBytes(scope || ''), ciphertext)
   }
 
   obfuscate (value, kind, scope) {
@@ -211,6 +225,10 @@ export default class NsecSigner {
   }
 
   async nip44EncryptDoubleDH (peerPubkey, kind, scope = '', plaintextB64, peerContentPubkey = '') {
+    return this.nip44EncryptDoubleDHBytes(peerPubkey, kind, scope, nip44v3.b64decode(plaintextB64), peerContentPubkey)
+  }
+
+  async nip44EncryptDoubleDHBytes (peerPubkey, kind, scope = '', plaintextBytes, peerContentPubkey = '') {
     const normalizedKind = nip44v3.normalizeKind(kind)
     const { contentPubkey, contentSecretKey } = await this.#latestContentKeyMaterial()
     const { conversationKey } = deriveDoubleDhConversationKey({
@@ -229,13 +247,17 @@ export default class NsecSigner {
         conversationKey,
         normalizedKind,
         nip44v3.toBytes(scope || ''),
-        nip44v3.b64decode(plaintextB64)
+        plaintextBytes
       )
-      : nip44v3.nip07Encrypt(this.#secretKey, peerPubkey, normalizedKind, scope, plaintextB64)
+      : this.nip44v3EncryptBytes(peerPubkey, normalizedKind, scope, plaintextBytes)
     return [ciphertext, contentPubkey]
   }
 
   async nip44DecryptDoubleDH (peerPubkey, kind, scope = '', ciphertext, peerContentPubkey = '', ownContentPubkey = '') {
+    return nip44v3.b64encode(await this.nip44DecryptDoubleDHBytes(peerPubkey, kind, scope, ciphertext, peerContentPubkey, ownContentPubkey))
+  }
+
+  async nip44DecryptDoubleDHBytes (peerPubkey, kind, scope = '', ciphertext, peerContentPubkey = '', ownContentPubkey = '') {
     const normalizedKind = nip44v3.normalizeKind(kind)
     const { contentPubkey, contentSecretKey } = await this.#contentKeyMaterial(null, ownContentPubkey)
     const { conversationKey } = deriveDoubleDhConversationKey({
@@ -250,13 +272,13 @@ export default class NsecSigner {
       scope
     })
     return conversationKey
-      ? nip44v3.b64encode(nip44v3.decryptWithConversationKeyBytes(
+      ? nip44v3.decryptWithConversationKeyBytes(
         conversationKey,
         normalizedKind,
         nip44v3.toBytes(scope || ''),
         ciphertext
-      ))
-      : nip44v3.nip07Decrypt(this.#secretKey, peerPubkey, normalizedKind, scope, ciphertext)
+      )
+      : this.nip44v3DecryptBytes(peerPubkey, normalizedKind, scope, ciphertext)
   }
 
   withSharedKey (peerPubkey, info) {

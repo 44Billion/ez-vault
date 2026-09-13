@@ -4,6 +4,14 @@ A minimal, auditable [Nostr](https://github.com/nostr-protocol/nostr) signer tha
 
 It is designed to be embedded as an iframe by a host app launcher and talks to clients over `window.postMessage` — so the launcher and client apps never touch your private keys directly.
 
+Local NIP-44 v3 commands accept/return `ArrayBuffer` plaintext all the way from
+the app through the launcher to the vault, including Double DH and shared-key
+contexts. Local nsec signers use libp2r2p's byte APIs; bunker adapters convert to
+standard Base64 only for remote NIP-46. Base64 signer methods remain available
+to private-channel/private-messenger consumers. Activity-log buffers retain a
+Base64 representation inside encrypted JSON fields. NIP-04 and NIP-44 v2 keep
+their text contracts; stored ciphertext formats are unchanged.
+
 The project is intentionally simple: vanilla JavaScript, no bundler, and a small set of explicit browser dependencies, so that anyone can read the source and verify what it does with their keys.
 
 ## Hosting and deploy coherence (GitHub Pages)

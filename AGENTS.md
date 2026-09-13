@@ -17,6 +17,13 @@ Because the signer custodies private keys, the overriding design principle is **
   markup directly in their templates.
 - **esbuild bundles the app** (`npm run build`, see [`bin/build.js`](bin/build.js)); the source modules in `src/` remain the audit contract — tests run on the source, and the bundle is unminified so the shipped artifact stays readable.
 - **Nostr primitives come from the sibling [`libp2r2p`](../libp2r2p) package.** Everything else is standard Web APIs or an explicitly listed focused dependency. Do not add new runtime dependencies without explicit approval.
+- Local `nip44v3_*` commands accept/return attached `ArrayBuffer` plaintext,
+  including Double DH and shared-key contexts. Dispatch snapshots input before
+  asynchronous key selection and uses the signers' byte methods. Decrypt returns
+  only the plaintext byte range, never a backing buffer containing padding.
+  Only bunker adapters convert local plaintext to/from standard Base64 for
+  remote NIP-46. Keep Base64 signer methods for private-channel/private-messenger
+  consumers; activity logs represent buffers as Base64 inside sealed JSON.
 - **Small, readable surface area.** Prefer straightforward code over clever abstractions — the code is the documentation for our security claims.
 
 ## Hosting & Entry Point

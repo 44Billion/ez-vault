@@ -1,7 +1,8 @@
 import {
   list,
   subscribe as subscribe3
-} from "./chunk-FOVB2KVB.js";
+} from "./chunk-C3ALDYKF.js";
+import "./chunk-ILFV67WX.js";
 import {
   seededAvatarDataUrl
 } from "./chunk-3RWQBTGN.js";
@@ -9,7 +10,7 @@ import {
   get,
   subscribe,
   subscribe2
-} from "./chunk-NHHPGB6R.js";
+} from "./chunk-OCHCEJP4.js";
 import {
   defineLocales,
   getLocale,

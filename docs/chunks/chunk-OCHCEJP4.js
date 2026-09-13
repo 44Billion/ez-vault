@@ -3001,6 +3001,9 @@ function base16ToBytes(base16) {
 var bytesToHex3 = bytesToBase16;
 var hexToBytes3 = base16ToBytes;
 
+// node_modules/libp2r2p/kind/index.js
+var PERSONAL_COPY = 1006;
+
 // node_modules/libp2r2p/event/helpers/serialize.js
 var HEX_32 = /^[0-9a-f]{64}$/;
 function serializableEventError(event) {
@@ -4694,12 +4697,6 @@ function encryptWithConversationKey(conversationKey2, kind, scope, plaintext) {
 function decryptWithConversationKey(conversationKey2, kind, scope, ciphertext) {
   return textDecoder2.decode(decryptWithConversationKeyBytes(conversationKey2, normalizeKind2(kind), utf8ToBytes(scope || ""), ciphertext));
 }
-function nip07Encrypt(seckey, pubkey, kind, scope, plaintextB64) {
-  return encryptBytes(seckey, pubkey, normalizeKind2(kind), utf8ToBytes(scope || ""), base64ToBytes(plaintextB64));
-}
-function nip07Decrypt(seckey, pubkey, kind, scope, ciphertext) {
-  return bytesToBase64(decryptBytes(seckey, pubkey, normalizeKind2(kind), utf8ToBytes(scope || ""), ciphertext));
-}
 var b64encode = bytesToBase64;
 var b64decode = base64ToBytes;
 var toBytes = utf8ToBytes;
@@ -4707,7 +4704,8 @@ var toBytes = utf8ToBytes;
 // node_modules/libp2r2p/relay/constants/index.js
 var seedRelays = [
   "wss://relay.44billion.net",
-  "wss://purplepag.es",
+  // Disabled 2026-09-08: offline for some days
+  // 'wss://purplepag.es',
   "wss://user.kindpag.es",
   "wss://relay.nos.social",
   // Disabled 2026-08-05: accepted kind:10002 with OK but did not broadcast it
@@ -4718,6 +4716,7 @@ var seedRelays = [
 var freeRelays = [
   "wss://relay.44billion.net",
   "wss://nos.lol",
+  "wss://relay.dreamith.to",
   "wss://relay.primal.net"
 ];
 
@@ -4817,9 +4816,34 @@ function maybeUnref(timer) {
   return timer;
 }
 
+// node_modules/libp2r2p/relay/helpers/error.js
+function categorizeRelayError(reason, category, fallback = "RELAY_OPERATION_FAILED") {
+  const error = reason instanceof Error ? reason : new Error(String(reason || fallback));
+  try {
+    Object.defineProperty(error, "category", { value: category, enumerable: true, configurable: true });
+    return error;
+  } catch {
+    const wrapped = error instanceof AggregateError ? new AggregateError(error.errors, error.message, { cause: error }) : new Error(error.message, { cause: error });
+    wrapped.name = error.name;
+    if (error.code !== void 0) wrapped.code = error.code;
+    wrapped.category = category;
+    return wrapped;
+  }
+}
+function relayTimeoutError(message, cause) {
+  return categorizeRelayError(new Error(message, cause ? { cause } : void 0), "timeout");
+}
+function relayCloseError(event, category, cause) {
+  const error = new Error(event?.reason || "CONNECTION_CLOSED", cause ? { cause } : void 0);
+  if (event?.code !== void 0) error.closeCode = event.code;
+  if (event?.reason !== void 0) error.closeReason = event.reason;
+  if (event?.wasClean !== void 0) error.wasClean = event.wasClean;
+  return categorizeRelayError(error, category);
+}
+
 // node_modules/libp2r2p/relay/helpers/publish.js
 function publishTimeoutError() {
-  return new Error("PUBLISH_TIMEOUT");
+  return relayTimeoutError("PUBLISH_TIMEOUT");
 }
 function firstFulfillment(promises, timeout, { fallback } = {}) {
   return new Promise((resolve) => {
@@ -4900,6 +4924,29 @@ function publishSummary(settlements, relays, { includeSucceededRelays = false } 
   };
   if (includeSucceededRelays) summary.succeededRelays = succeededRelays;
   return summary;
+}
+
+// node_modules/libp2r2p/relay/helpers/drainable-stream.js
+function drainableStream(create, options = {}) {
+  const cancel = new AbortController();
+  const stop = new AbortController();
+  const signal = options.signal ? AbortSignal.any([options.signal, cancel.signal]) : cancel.signal;
+  const stopSignal = options._stopSignal ? AbortSignal.any([options._stopSignal, stop.signal]) : stop.signal;
+  const stream = create({ ...options, signal, _stopSignal: stopSignal });
+  const returnStream = stream.return.bind(stream);
+  const throwStream = stream.throw.bind(stream);
+  Object.defineProperties(stream, {
+    stopAndDrain: { value: () => stop.abort() },
+    return: { value: (value) => {
+      cancel.abort();
+      return returnStream(value);
+    } },
+    throw: { value: (error) => {
+      cancel.abort();
+      return throwStream(error);
+    } }
+  });
+  return stream;
 }
 
 // node_modules/libp2r2p/url/index.js
@@ -5070,6 +5117,7 @@ var RelayConnection = class {
   #connectPromise = null;
   #challenge = null;
   #serial = 0;
+  #lastTransportError = null;
   #subscriptions = /* @__PURE__ */ new Map();
   #publishes = /* @__PURE__ */ new Map();
   #authentications = /* @__PURE__ */ new Map();
@@ -5084,13 +5132,24 @@ var RelayConnection = class {
     this.onclose = null;
     this.onauth = null;
   }
+  // Exposes socket context to the pool's operation-wide publication deadline.
+  get lastTransportError() {
+    return this.#lastTransportError;
+  }
   async connect({ timeout = DEFAULT_CONNECT_TIMEOUT, signal } = {}) {
     if (this.ws?.readyState === 1) return;
     if (this.#connectPromise) return await this.#connectPromise;
     if (signal?.aborted) throw new Error("CONNECT_ABORTED");
-    if (typeof this.#WebSocket !== "function") throw new Error("WEBSOCKET_UNAVAILABLE");
+    if (typeof this.#WebSocket !== "function") throw categorizeRelayError(new Error("WEBSOCKET_UNAVAILABLE"), "connection");
+    this.#lastTransportError = null;
     this.#connectPromise = new Promise((resolve, reject) => {
-      const socket = new this.#WebSocket(this.url);
+      let socket;
+      try {
+        socket = new this.#WebSocket(this.url);
+      } catch (error) {
+        reject(categorizeRelayError(error, "connection"));
+        return;
+      }
       this.ws = socket;
       let settled = false;
       const finish = (reason) => {
@@ -5107,19 +5166,22 @@ var RelayConnection = class {
         } else resolve();
       };
       const onAbort = () => finish(new Error("CONNECT_ABORTED"));
-      const timer = timeout === null ? null : maybeUnref(setTimeout(() => finish(new Error("CONNECT_TIMEOUT")), timeout));
+      const timer = timeout === null ? null : maybeUnref(setTimeout(() => finish(relayTimeoutError("CONNECT_TIMEOUT")), timeout));
       signal?.addEventListener("abort", onAbort, { once: true });
       socket.onopen = () => finish();
       socket.onerror = (event) => {
-        const reason = errorFrom(event?.error, "CONNECTION_ERROR");
+        const reason = categorizeRelayError(event?.error, settled ? "transport" : "connection", "CONNECTION_ERROR");
         if (!settled) finish(reason);
-        else this.onerror?.(reason);
+        else {
+          this.#lastTransportError = reason;
+          this.onerror?.(reason);
+        }
       };
       socket.onmessage = (event) => {
         this.#handleMessage(event).catch((reason) => this.onerror?.(reason));
       };
       socket.onclose = (event) => {
-        if (!settled) finish(new Error("CONNECTION_CLOSED"));
+        if (!settled) finish(relayCloseError(event, "connection"));
         if (this.ws === socket) this.ws = null;
         this.#handleClose(event);
       };
@@ -5129,8 +5191,13 @@ var RelayConnection = class {
     return await this.#connectPromise;
   }
   send(message) {
-    if (this.ws?.readyState !== 1) throw new Error("CONNECTION_CLOSED");
-    this.ws.send(message);
+    if (this.ws?.readyState !== 1) throw relayCloseError(null, "transport", this.#lastTransportError);
+    try {
+      this.ws.send(message);
+    } catch (error) {
+      this.#lastTransportError = categorizeRelayError(error, "transport");
+      throw this.#lastTransportError;
+    }
   }
   subscribe(filters, handlers = {}) {
     if (!Array.isArray(filters) || !filters.length) throw new ValidationError("SUBSCRIPTION_FILTERS_REQUIRED");
@@ -5170,7 +5237,7 @@ var RelayConnection = class {
   #sendEventOperation(type, event, map, timeoutCode) {
     if (map.has(event.id)) return map.get(event.id).promise;
     const deferred6 = Promise.withResolvers();
-    const timer = maybeUnref(setTimeout(() => this.#settleEvent(map, event.id, new Error(timeoutCode)), this.publishTimeout));
+    const timer = maybeUnref(setTimeout(() => this.#settleEvent(map, event.id, relayTimeoutError(timeoutCode, this.#lastTransportError)), this.publishTimeout));
     map.set(event.id, { ...deferred6, timer, promise: deferred6.promise });
     try {
       this.send(JSON.stringify([type, event]));
@@ -5240,7 +5307,7 @@ var RelayConnection = class {
       return;
     }
     if (data[0] === "OK") {
-      const reason = data[2] === true ? null : errorFrom(data[3], "EVENT_REJECTED");
+      const reason = data[2] === true ? null : categorizeRelayError(data[3], "relay", "EVENT_REJECTED");
       this.#settleEvent(this.#publishes, data[1], reason, data[3]);
       this.#settleEvent(this.#authentications, data[1], reason, data[3]);
       return;
@@ -5258,7 +5325,7 @@ var RelayConnection = class {
   }
   #handleClose(event) {
     this.#challenge = null;
-    const reason = errorFrom(event?.reason, "CONNECTION_CLOSED");
+    const reason = relayCloseError(event, "transport", this.#lastTransportError);
     for (const [id, subscription] of this.#subscriptions) {
       this.#subscriptions.delete(id);
       subscription.handlers.onclose?.(reason);
@@ -5272,7 +5339,7 @@ var RelayConnection = class {
     const socket = this.ws;
     this.ws = null;
     this.#challenge = null;
-    const reason = new Error("CONNECTION_CLOSED");
+    const reason = relayCloseError(null, "transport", this.#lastTransportError);
     for (const [id, subscription] of this.#subscriptions) {
       this.#subscriptions.delete(id);
       subscription.handlers.onclose?.();
@@ -5360,6 +5427,8 @@ var Nip42AuthenticationError = class extends Error {
   constructor(reason) {
     super(reason.message, { cause: reason });
     this.name = "Nip42AuthenticationError";
+    if (reason.category) this.category = reason.category;
+    if (reason.code !== void 0) this.code = reason.code;
   }
 };
 var RelayPool = class {
@@ -5398,7 +5467,7 @@ var RelayPool = class {
         await relay.close();
       } catch {
       }
-      throw error;
+      throw categorizeRelayError(error, error?.category ?? "connection");
     }
     if (!this.#liveSubCounts.get(normalizedUrl)) this.#scheduleIdleDisconnect(normalizedUrl);
     return relay;
@@ -5563,8 +5632,10 @@ var RelayPool = class {
   }
   // Collects a one-shot relay read. The first EOSE with events opens a short
   // grace window; null disables that window so callers wait for every relay or
-  // the operation deadline. Event ids are deduplicated across relay responses.
-  async getEvents(filter, relays, { timeout = 5e3, timeoutAfterFirstEose = 500, callback, signal } = {}) {
+  // the operation deadline. Disabling cross-relay deduplication still suppresses
+  // repeated ids from the same relay; callbacks remain immediate in both modes.
+  async getEvents(filter, relays, { timeout = 5e3, timeoutAfterFirstEose = 500, callback, signal, deduplicateAcrossRelays = true } = {}) {
+    if (typeof deduplicateAcrossRelays !== "boolean") throw new ValidationError("INVALID_DEDUPLICATE_ACROSS_RELAYS");
     const urls = normalizedRelayUrls(relays);
     if (!urls.length) return { result: [], errors: [], success: false };
     if (signal?.aborted) throw new Error("Aborted");
@@ -5573,7 +5644,7 @@ var RelayPool = class {
     const normalCloseUrls = /* @__PURE__ */ new Set();
     const errors = [];
     const events = [];
-    const eventIds = /* @__PURE__ */ new Set();
+    const eventIds = deduplicateAcrossRelays ? /* @__PURE__ */ new Set() : null;
     let completed = 0;
     let isResolved = false;
     let eoseTimer = null;
@@ -5629,6 +5700,7 @@ var RelayPool = class {
       signal?.addEventListener("abort", onAbort, { once: true });
       if (timeout !== null) timeoutTimer = maybeUnref(setTimeout(timeoutPending, timeout));
       for (const url of urls) {
+        const seenIds = eventIds ?? /* @__PURE__ */ new Set();
         this.#getRelay(url).then((relay) => {
           if (isResolved || !pending.has(url)) return;
           let hasEvents = false;
@@ -5646,8 +5718,8 @@ var RelayPool = class {
             onevent: (event) => {
               if (isResolved || !pending.has(url)) return;
               hasEvents = true;
-              if (!event?.id || !eventIds.has(event.id)) {
-                if (event?.id) eventIds.add(event.id);
+              if (!event?.id || !seenIds.has(event.id)) {
+                if (event?.id) seenIds.add(event.id);
                 event.meta = { relay: url };
                 events.push(event);
                 if (callback) callback({ type: "event", event, relay: url });
@@ -5683,13 +5755,15 @@ var RelayPool = class {
       p.resolve();
       p = Promise.withResolvers();
     };
-    const methodPromise = this.getEvents(filter, relays, { ...options, callback }).catch((err) => {
+    const networkSignal = options._stopSignal ? AbortSignal.any([options._stopSignal, ...options.signal ? [options.signal] : []]) : options.signal;
+    const methodPromise = this.getEvents(filter, relays, { ...options, signal: networkSignal, callback }).catch((err) => {
       if (err?.message !== "Aborted") console.error("Error in getEvents:", err);
     }).finally(() => {
       isDone = true;
       p.resolve();
     });
     while (!isDone || queue.length > 0) {
+      if (options.signal?.aborted) break;
       if (queue.length > 0) yield queue.shift();
       else await p.promise;
     }
@@ -5700,7 +5774,7 @@ var RelayPool = class {
   getLiveEventsGenerator(filter, relays, options = {}) {
     const ready = Promise.withResolvers();
     const readyRelays = /* @__PURE__ */ new Set();
-    const stream = this.#getLiveEventsGenerator(filter, relays, options, { ready, readyRelays });
+    const stream = drainableStream((options2) => this.#getLiveEventsGenerator(filter, relays, options2, { ready, readyRelays }), options);
     Object.defineProperties(stream, {
       ready: {
         enumerable: false,
@@ -5717,6 +5791,7 @@ var RelayPool = class {
   // suppressing already-live events from another relay.
   async *#getLiveEventsGenerator(filter, relays, {
     signal,
+    _stopSignal,
     timeoutAfterFirstEose = 500,
     timeoutForReconnectGap = 5e3,
     timeoutAfterFirstReconnectGapEose = 500,
@@ -5726,6 +5801,8 @@ var RelayPool = class {
     const queue = [];
     let p = Promise.withResolvers();
     let isDone = false;
+    let draining = false;
+    const gapTasks = /* @__PURE__ */ new Set();
     const liveSubs = /* @__PURE__ */ new Map();
     const retryTimers2 = /* @__PURE__ */ new Map();
     const initialPending = new Set(urls);
@@ -5749,9 +5826,11 @@ var RelayPool = class {
         errors: Object.freeze([...initialErrors])
       }));
     };
-    const teardown = () => {
-      if (isDone) return;
+    const teardown = (drain = false) => {
+      if (isDone && (drain || !draining)) return;
+      draining = drain;
       isDone = true;
+      if (!drain) queue.length = 0;
       clearTimeout(untilTimer);
       finishReady();
       gapAc.abort();
@@ -5761,8 +5840,8 @@ var RelayPool = class {
       liveSubs.clear();
       p.resolve();
     };
-    const pushEvent = (event, url) => {
-      if (isDone || event.id && seenIds.has(event.id)) return;
+    const pushEvent = (event, url, accepted = false) => {
+      if (isDone && !(draining && accepted) || event.id && seenIds.has(event.id)) return;
       if (event.id) {
         if (seenIds.size >= 500) seenIds.delete(seenIds.values().next().value);
         seenIds.add(event.id);
@@ -5773,11 +5852,14 @@ var RelayPool = class {
       p.resolve();
       p = Promise.withResolvers();
     };
-    if (signal?.aborted) {
+    if (signal?.aborted || _stopSignal?.aborted) {
       finishReady();
       return;
     }
-    signal?.addEventListener("abort", teardown, { once: true });
+    const abort = () => teardown();
+    const stop = () => teardown(true);
+    signal?.addEventListener("abort", abort, { once: true });
+    _stopSignal?.addEventListener("abort", stop, { once: true });
     const maybeFinishInitialReady = () => {
       if (initialPending.size === 0) finishReady();
     };
@@ -5806,7 +5888,7 @@ var RelayPool = class {
     };
     if (filterUntil !== null) {
       const msUntil = filterUntil * 1e3 - Date.now();
-      untilTimer = maybeUnref(setTimeout(teardown, Math.max(0, msUntil)));
+      untilTimer = maybeUnref(setTimeout(() => teardown(true), Math.max(0, msUntil)));
     }
     const runReconnectGapFill = (url, gapSince, now) => {
       const gapUntil = filterUntil !== null ? Math.min(now, filterUntil) : now;
@@ -5814,11 +5896,12 @@ var RelayPool = class {
       const gapGen = _gapEventsGenerator(gapFilter, [url], {
         timeout: timeoutForReconnectGap,
         timeoutAfterFirstEose: timeoutAfterFirstReconnectGapEose,
-        signal: gapAc.signal
+        signal,
+        _stopSignal: gapAc.signal
       });
       return (async () => {
         for await (const item of gapGen) {
-          if (item?.type === "event") pushEvent(item.event, url);
+          if (item?.type === "event") pushEvent(item.event, url, true);
         }
       })().catch((err) => {
         if (!isDone) console.error(`Reconnect gap fill error for ${url}:`, err);
@@ -5835,7 +5918,7 @@ var RelayPool = class {
         if (filterUntil !== null) liveFilter.until = filterUntil;
         const liveSub = relay.subscribe([liveFilter], {
           onevent: (event) => {
-            if (!liveEose) return;
+            if (isDone || liveSubs.get(url) !== liveSub || !liveEose) return;
             if (liveBuffer) liveBuffer.push(event);
             else pushEvent(event, url);
           },
@@ -5862,12 +5945,14 @@ var RelayPool = class {
         }
         liveSubs.set(url, liveSub);
         if (gapSince !== null && gapSince > 0) {
-          runReconnectGapFill(url, gapSince, now).then(() => {
-            if (isDone) return;
+          const task = runReconnectGapFill(url, gapSince, now).finally(() => {
             const buf = liveBuffer;
             liveBuffer = null;
-            for (const event of buf) pushEvent(event, url);
+            for (const event of buf) pushEvent(event, url, true);
+            gapTasks.delete(task);
+            p.resolve();
           });
+          gapTasks.add(task);
         }
       }).catch((err) => {
         readyRelays.delete(url);
@@ -5887,12 +5972,17 @@ var RelayPool = class {
       subscribeToRelay(url, null);
     }
     try {
-      while (!isDone || queue.length > 0) {
+      while (!isDone || draining && gapTasks.size > 0 || queue.length > 0) {
+        if (signal?.aborted) break;
         if (queue.length > 0) yield queue.shift();
-        else await p.promise;
+        else {
+          await p.promise;
+          p = Promise.withResolvers();
+        }
       }
     } finally {
-      signal?.removeEventListener("abort", teardown);
+      signal?.removeEventListener("abort", abort);
+      _stopSignal?.removeEventListener("abort", stop);
       for (const url of urls) this.#decrementLiveSub(url);
       teardown();
     }
@@ -5909,34 +5999,42 @@ var RelayPool = class {
   //   relays when null.
   //
   // All underlying generators are injectable for testing.
-  async *getEventsFeedGenerator(filter, relays, {
+  getEventsFeedGenerator(filter, relays, options = {}) {
+    return drainableStream((options2) => this.#getEventsFeedGenerator(filter, relays, options2), options);
+  }
+  async *#getEventsFeedGenerator(filter, relays, {
     signal,
+    _stopSignal,
     live = true,
     timeout = 5e3,
     timeoutAfterFirstEose = 500,
     _liveGenerator = (...args) => this.getLiveEventsGenerator(...args),
     _eventsGenerator = (...args) => this.getEventsGenerator(...args)
   } = {}) {
+    if (signal.aborted || _stopSignal.aborted) return;
     if (!live) {
-      const gen = _eventsGenerator(filter, relays, { timeout, timeoutAfterFirstEose, signal });
+      const gen = _eventsGenerator(filter, relays, { timeout, timeoutAfterFirstEose, signal, _stopSignal });
       for await (const item of gen) {
+        if (signal.aborted) return;
         if (item?.type === "event") yield item.event;
       }
       return;
     }
     if (filter.limit === 0) {
-      for await (const event of _liveGenerator(filter, relays, { signal })) {
+      for await (const event of _liveGenerator(filter, relays, { signal, _stopSignal })) {
+        if (signal.aborted) return;
         yield event;
       }
       return;
     }
-    const liveGen = _liveGenerator(filter, relays, { signal });
+    const liveGen = _liveGenerator(filter, relays, { signal, _stopSignal });
     const liveBuffer = [];
     let liveDone = false;
     let liveWake = Promise.withResolvers();
     const bgLoop = (async () => {
       try {
         for await (const event of liveGen) {
+          if (signal.aborted) break;
           liveBuffer.push(event);
           liveWake.resolve();
           liveWake = Promise.withResolvers();
@@ -5947,15 +6045,17 @@ var RelayPool = class {
       }
     })();
     try {
-      const fetchGen = _eventsGenerator(filter, relays, { timeout, timeoutAfterFirstEose, signal });
+      const fetchGen = _eventsGenerator(filter, relays, { timeout, timeoutAfterFirstEose, signal, _stopSignal });
       const seenIds = /* @__PURE__ */ new Set();
       for await (const item of fetchGen) {
+        if (signal.aborted) return;
         if (item?.type === "event" && !seenIds.has(item.event.id)) {
           seenIds.add(item.event.id);
           yield item.event;
         }
       }
       while (liveBuffer.length > 0) {
+        if (signal.aborted) return;
         const event = liveBuffer.shift();
         if (!seenIds.has(event.id)) {
           seenIds.add(event.id);
@@ -5963,11 +6063,14 @@ var RelayPool = class {
         }
       }
       while (!liveDone || liveBuffer.length > 0) {
-        while (liveBuffer.length > 0) yield liveBuffer.shift();
+        while (liveBuffer.length > 0) {
+          if (signal.aborted) return;
+          yield liveBuffer.shift();
+        }
         if (!liveDone) await liveWake.promise;
       }
     } finally {
-      liveGen.return();
+      await liveGen.return();
       await bgLoop;
     }
   }
@@ -5998,6 +6101,10 @@ var RelayPool = class {
     const sendPromises = sendDeferreds.map(({ promise: promise2 }) => promise2);
     const settlement = createPublishSettlements(sendPromises, timeout, {
       onSettled: (settlement2, index) => {
+        if (settlement2.reason?.category === "timeout" && !settlement2.reason.cause) {
+          const relay = this.#relays.get(normalizeRelayUrl(urls[index]));
+          if (relay?.lastTransportError) settlement2.reason.cause = relay.lastTransportError;
+        }
         notifyRelayResult(onRelayResult, relayResultForSettlement(urls[index], settlement2));
       }
     });
@@ -6391,6 +6498,12 @@ var SharedKeySigner = class _SharedKeySigner {
   async nip44v3Decrypt(peerPubkey, kind, scope, ciphertext) {
     return (await this.#sharedSigner()).nip44v3Decrypt(peerPubkey, kind, scope, ciphertext);
   }
+  async nip44v3EncryptBytes(...params) {
+    return (await this.#sharedSigner()).nip44v3EncryptBytes(...params);
+  }
+  async nip44v3DecryptBytes(...params) {
+    return (await this.#sharedSigner()).nip44v3DecryptBytes(...params);
+  }
   async obfuscate(value, kind, scope) {
     return this.#signer.obfuscate(value, kind, scope);
   }
@@ -6399,6 +6512,12 @@ var SharedKeySigner = class _SharedKeySigner {
   }
   async nip44DecryptDoubleDH(...params) {
     return (await this.#sharedSigner()).nip44DecryptDoubleDH(...params);
+  }
+  async nip44EncryptDoubleDHBytes(...params) {
+    return (await this.#sharedSigner()).nip44EncryptDoubleDHBytes(...params);
+  }
+  async nip44DecryptDoubleDHBytes(...params) {
+    return (await this.#sharedSigner()).nip44DecryptDoubleDHBytes(...params);
   }
   withSharedKey(peerPubkey, info = this.#info) {
     return new _SharedKeySigner(this.#signer, peerPubkey, info);
@@ -6496,10 +6615,18 @@ var NsecSigner = class _NsecSigner {
     return nip44Decrypt(ciphertext, ck);
   }
   nip44v3Encrypt(peerPubkey, kind, scope, plaintextB64) {
-    return nip07Encrypt(this.#secretKey, peerPubkey, kind, scope, plaintextB64);
+    return this.nip44v3EncryptBytes(peerPubkey, kind, scope, b64decode(plaintextB64));
   }
   nip44v3Decrypt(peerPubkey, kind, scope, ciphertext) {
-    return nip07Decrypt(this.#secretKey, peerPubkey, kind, scope, ciphertext);
+    return b64encode(this.nip44v3DecryptBytes(peerPubkey, kind, scope, ciphertext));
+  }
+  // Local app requests use bytes directly. The Base64 methods above serve
+  // the existing private-channel/private-messenger signer contract.
+  nip44v3EncryptBytes(peerPubkey, kind, scope, plaintextBytes) {
+    return encryptBytes(this.#secretKey, peerPubkey, kind, toBytes(scope || ""), plaintextBytes);
+  }
+  nip44v3DecryptBytes(peerPubkey, kind, scope, ciphertext) {
+    return decryptBytes(this.#secretKey, peerPubkey, kind, toBytes(scope || ""), ciphertext);
   }
   obfuscate(value, kind, scope) {
     if (typeof value !== "string") throw new Error("INVALID_OBFUSCATE_VALUE");
@@ -6527,6 +6654,9 @@ var NsecSigner = class _NsecSigner {
     return this.#contentKeyMaterial(contentSigner);
   }
   async nip44EncryptDoubleDH(peerPubkey, kind, scope = "", plaintextB64, peerContentPubkey = "") {
+    return this.nip44EncryptDoubleDHBytes(peerPubkey, kind, scope, b64decode(plaintextB64), peerContentPubkey);
+  }
+  async nip44EncryptDoubleDHBytes(peerPubkey, kind, scope = "", plaintextBytes, peerContentPubkey = "") {
     const normalizedKind = normalizeKind2(kind);
     const { contentPubkey, contentSecretKey } = await this.#latestContentKeyMaterial();
     const { conversationKey: conversationKey2 } = deriveDoubleDhConversationKey({
@@ -6544,11 +6674,14 @@ var NsecSigner = class _NsecSigner {
       conversationKey2,
       normalizedKind,
       toBytes(scope || ""),
-      b64decode(plaintextB64)
-    ) : nip07Encrypt(this.#secretKey, peerPubkey, normalizedKind, scope, plaintextB64);
+      plaintextBytes
+    ) : this.nip44v3EncryptBytes(peerPubkey, normalizedKind, scope, plaintextBytes);
     return [ciphertext, contentPubkey];
   }
   async nip44DecryptDoubleDH(peerPubkey, kind, scope = "", ciphertext, peerContentPubkey = "", ownContentPubkey = "") {
+    return b64encode(await this.nip44DecryptDoubleDHBytes(peerPubkey, kind, scope, ciphertext, peerContentPubkey, ownContentPubkey));
+  }
+  async nip44DecryptDoubleDHBytes(peerPubkey, kind, scope = "", ciphertext, peerContentPubkey = "", ownContentPubkey = "") {
     const normalizedKind = normalizeKind2(kind);
     const { contentPubkey, contentSecretKey } = await this.#contentKeyMaterial(null, ownContentPubkey);
     const { conversationKey: conversationKey2 } = deriveDoubleDhConversationKey({
@@ -6562,12 +6695,12 @@ var NsecSigner = class _NsecSigner {
       kind: normalizedKind,
       scope
     });
-    return conversationKey2 ? b64encode(decryptWithConversationKeyBytes(
+    return conversationKey2 ? decryptWithConversationKeyBytes(
       conversationKey2,
       normalizedKind,
       toBytes(scope || ""),
       ciphertext
-    )) : nip07Decrypt(this.#secretKey, peerPubkey, normalizedKind, scope, ciphertext);
+    ) : this.nip44v3DecryptBytes(peerPubkey, normalizedKind, scope, ciphertext);
   }
   withSharedKey(peerPubkey, info) {
     return new SharedKeySigner(this, peerPubkey, info);
@@ -7613,6 +7746,19 @@ var BunkerHandle = class _BunkerHandle {
   async nip44DecryptDoubleDH(pk, kind, scope = "", ct, peerContentPubkey = "", ownContentPubkey = "") {
     return parseJsonResult(await this.#sendRequest("nip44v3_decrypt_double_dh", [pk, String(kind), scope || "", ct, peerContentPubkey || "", ownContentPubkey || ""]));
   }
+  // Binary local callers reach Base64 only at the remote NIP-46 boundary.
+  async nip44v3EncryptBytes(pk, kind, scope, plaintextBytes) {
+    return this.nip44v3Encrypt(pk, kind, scope, bytesToBase64(plaintextBytes));
+  }
+  async nip44v3DecryptBytes(...params) {
+    return base64ToBytes(await this.nip44v3Decrypt(...params));
+  }
+  async nip44EncryptDoubleDHBytes(pk, kind, scope, plaintextBytes, peerContentPubkey = "") {
+    return this.nip44EncryptDoubleDH(pk, kind, scope, bytesToBase64(plaintextBytes), peerContentPubkey);
+  }
+  async nip44DecryptDoubleDHBytes(...params) {
+    return base64ToBytes(await this.nip44DecryptDoubleDH(...params));
+  }
   async doubleSignEvent(event) {
     return parseJsonResult(await this.#sendRequest("double_sign_event", [JSON.stringify(event || {})]));
   }
@@ -7789,6 +7935,19 @@ var BunkerSharedKeyHandle = class _BunkerSharedKeyHandle {
   }
   async nip44DecryptDoubleDH(pk, kind, scope = "", ct, peerContentPubkey = "", ownContentPubkey = "") {
     return parseJsonResult(await this.#sendRequest("nip44v3_decrypt_double_dh", [pk, String(kind), scope || "", ct, peerContentPubkey || "", ownContentPubkey || ""]));
+  }
+  // Binary local callers reach Base64 only at the remote NIP-46 boundary.
+  async nip44v3EncryptBytes(pk, kind, scope, plaintextBytes) {
+    return this.nip44v3Encrypt(pk, kind, scope, bytesToBase64(plaintextBytes));
+  }
+  async nip44v3DecryptBytes(...params) {
+    return base64ToBytes(await this.nip44v3Decrypt(...params));
+  }
+  async nip44EncryptDoubleDHBytes(pk, kind, scope, plaintextBytes, peerContentPubkey = "") {
+    return this.nip44EncryptDoubleDH(pk, kind, scope, bytesToBase64(plaintextBytes), peerContentPubkey);
+  }
+  async nip44DecryptDoubleDHBytes(...params) {
+    return base64ToBytes(await this.nip44DecryptDoubleDH(...params));
   }
   async doubleSignEvent(event) {
     return parseJsonResult(await this.#sendRequest("double_sign_event", [JSON.stringify(event || {})]));
@@ -14498,8 +14657,10 @@ function vaultDecrypt(ciphertext) {
 
 export {
   sha256,
+  ValidationError,
   bytesToHex3 as bytesToHex,
   hexToBytes3 as hexToBytes,
+  PERSONAL_COPY,
   finalizeEvent,
   isValidEvent,
   generateSecretKey,

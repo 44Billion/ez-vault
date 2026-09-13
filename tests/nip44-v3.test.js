@@ -1,6 +1,7 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { runInNewContext } from 'node:vm'
 import { generateSecretKey, getPublicKey } from 'libp2r2p/key'
 import { extract as hkdfExtract } from '@noble/hashes/hkdf.js'
 import { hmac } from '@noble/hashes/hmac.js'
@@ -145,7 +146,7 @@ test('nip44-v3 service passes the vendored upstream self-test vectors', async ()
   assert.deepEqual(fails, [], `${pass}/${total} checks passed; ${summary}`)
 })
 
-test('NsecSigner exposes NIP-44 v3 byte payload methods', async () => {
+test('NsecSigner preserves Base64 plaintext methods for private channels', async () => {
   const alice = NsecSigner.getOrCreate(seckey())
   const bob = NsecSigner.getOrCreate(seckey())
   const alicePubkey = await alice.getPublicKey()
@@ -180,18 +181,18 @@ test('signer.run normalizes snake_case NIP-44 v3 wire methods', async () => {
   secrets.unlock(generateSecretKey(), null)
   const alice = await addNsecAccount()
   const bob = await addNsecAccount()
-  const plaintextB64 = nip44v3.b64encode(nip44v3.toBytes('hello v3'))
+  const plaintext = nip44v3.toBytes('hello v3').buffer
   const ciphertext = await run({
     pubkey: alice.pubkey,
     method: 'nip44v3_encrypt',
-    params: [bob.pubkey, '1', '', plaintextB64]
+    params: [bob.pubkey, '1', '', plaintext]
   })
 
-  assert.equal(await run({
+  assert.deepEqual(await run({
     pubkey: bob.pubkey,
     method: 'nip44v3_decrypt',
     params: [alice.pubkey, 1, '', ciphertext]
-  }), plaintextB64)
+  }), plaintext)
 })
 
 test('signer.run exposes obfuscate', async () => {
@@ -210,4 +211,51 @@ test('signer.run exposes obfuscate', async () => {
     method: 'obfuscate',
     params: ['dm:alice', 1006, '']
   }), result)
+})
+
+test('local binary dispatch preserves exact bytes, snapshots before shared-key selection and rejects invalid buffers', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const alice = await addNsecAccount()
+  const withSharedKey = [alice.pubkey, 'binary-test']
+  const peer = await secrets.getNsecSigner(alice.pubkey).withSharedKey(...withSharedKey).getPublicKey()
+  for (const original of [new Uint8Array(), new Uint8Array([0, 255, 251, 128, 63])]) {
+    const buffer = runInNewContext('new Uint8Array(' + JSON.stringify([...original]) + ').buffer')
+    const pending = run({
+      pubkey: alice.pubkey,
+      method: 'nip44v3_encrypt',
+      params: [peer, 9, 'scope', buffer],
+      withSharedKey
+    })
+    new Uint8Array(buffer).fill(7)
+    const ciphertext = await pending
+    const result = await run({
+      pubkey: alice.pubkey,
+      method: 'nip44v3_decrypt',
+      params: [peer, 9, 'scope', ciphertext],
+      withSharedKey
+    })
+    assert.ok(result instanceof ArrayBuffer)
+    assert.equal(result.byteLength, original.length, 'no padding or length prefix escapes')
+    assert.deepEqual(new Uint8Array(result), original)
+    assert.equal(buffer.byteLength, original.length, 'caller buffer remains attached')
+    await assert.rejects(run({
+      pubkey: alice.pubkey,
+      method: 'nip44v3_decrypt',
+      params: [peer, 9, 'different-scope', ciphertext],
+      withSharedKey
+    }), /scope mismatch/)
+  }
+  const detached = new ArrayBuffer(1)
+  structuredClone(detached, { transfer: [detached] })
+  for (const method of ['nip44v3_encrypt', 'nip44v3_encrypt_double_dh']) {
+    for (const invalid of ['', null, undefined, new Uint8Array(1), new DataView(new ArrayBuffer(1)), new SharedArrayBuffer(1), detached, { [Symbol.toStringTag]: 'ArrayBuffer' }]) {
+      await assert.rejects(run({
+        pubkey: alice.pubkey,
+        method,
+        params: [alice.pubkey, 9, '', invalid],
+        // Invalid plaintext must fail before shared-key validation/discovery.
+        withSharedKey: 'invalid'
+      }), { code: 'INVALID_PLAINTEXT_BUFFER' })
+    }
+  }
 })

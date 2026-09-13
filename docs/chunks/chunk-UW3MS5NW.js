@@ -25,7 +25,7 @@ import {
   unlock,
   updateState,
   waitForVaultTransition
-} from "./chunk-NHHPGB6R.js";
+} from "./chunk-OCHCEJP4.js";
 
 // src/helpers/platform.js
 function detectPlatform() {

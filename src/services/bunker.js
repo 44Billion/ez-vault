@@ -1,5 +1,6 @@
 import { generateSecretKey } from 'libp2r2p/key'
 import { bytesToHex, hexToBytes } from 'libp2r2p/base16'
+import { base64ToBytes, bytesToBase64 } from 'libp2r2p/base64'
 import { BunkerSigner, parseBunkerUrl, toBunkerUrl } from 'libp2r2p/nip46'
 import { relayPool } from 'libp2r2p/relay'
 import * as store from './accounts-store.js'
@@ -211,6 +212,23 @@ export class BunkerHandle {
     return parseJsonResult(await this.#sendRequest('nip44v3_decrypt_double_dh', [pk, String(kind), scope || '', ct, peerContentPubkey || '', ownContentPubkey || '']))
   }
 
+  // Binary local callers reach Base64 only at the remote NIP-46 boundary.
+  async nip44v3EncryptBytes (pk, kind, scope, plaintextBytes) {
+    return this.nip44v3Encrypt(pk, kind, scope, bytesToBase64(plaintextBytes))
+  }
+
+  async nip44v3DecryptBytes (...params) {
+    return base64ToBytes(await this.nip44v3Decrypt(...params))
+  }
+
+  async nip44EncryptDoubleDHBytes (pk, kind, scope, plaintextBytes, peerContentPubkey = '') {
+    return this.nip44EncryptDoubleDH(pk, kind, scope, bytesToBase64(plaintextBytes), peerContentPubkey)
+  }
+
+  async nip44DecryptDoubleDHBytes (...params) {
+    return base64ToBytes(await this.nip44DecryptDoubleDH(...params))
+  }
+
   async doubleSignEvent (event) { return parseJsonResult(await this.#sendRequest('double_sign_event', [JSON.stringify(event || {})])) }
   async getRelays () {
     // `getRelays` is not a standard NIP-46 RPC. Resolve NIP-65 locally
@@ -389,6 +407,23 @@ class BunkerSharedKeyHandle {
 
   async nip44DecryptDoubleDH (pk, kind, scope = '', ct, peerContentPubkey = '', ownContentPubkey = '') {
     return parseJsonResult(await this.#sendRequest('nip44v3_decrypt_double_dh', [pk, String(kind), scope || '', ct, peerContentPubkey || '', ownContentPubkey || '']))
+  }
+
+  // Binary local callers reach Base64 only at the remote NIP-46 boundary.
+  async nip44v3EncryptBytes (pk, kind, scope, plaintextBytes) {
+    return this.nip44v3Encrypt(pk, kind, scope, bytesToBase64(plaintextBytes))
+  }
+
+  async nip44v3DecryptBytes (...params) {
+    return base64ToBytes(await this.nip44v3Decrypt(...params))
+  }
+
+  async nip44EncryptDoubleDHBytes (pk, kind, scope, plaintextBytes, peerContentPubkey = '') {
+    return this.nip44EncryptDoubleDH(pk, kind, scope, bytesToBase64(plaintextBytes), peerContentPubkey)
+  }
+
+  async nip44DecryptDoubleDHBytes (...params) {
+    return base64ToBytes(await this.nip44DecryptDoubleDH(...params))
   }
 
   async doubleSignEvent (event) { return parseJsonResult(await this.#sendRequest('double_sign_event', [JSON.stringify(event || {})])) }

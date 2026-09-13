@@ -1,4 +1,6 @@
 import * as secrets from '../secrets.js'
+import { bytesToBase64 } from 'libp2r2p/base64'
+import { arrayBufferBytes } from '../../helpers/array-buffer.js'
 import {
   appendMessengerLog,
   clearMessengerLogs,
@@ -20,6 +22,17 @@ const listeners = new Set()
 // appKey -> JSON of the richest app metadata already propagated to older
 // entries this session. Skips repeat backfill scans for busy apps.
 const propagatedAppMetadata = new Map()
+
+// Keep the existing sealed JSON representation readable by the activity UI.
+// Binary plaintext is represented as standard Base64 only inside the sealed
+// params/result fields; JSON.stringify alone would silently turn it into {}.
+function binaryReplacer (_key, value) {
+  if (ArrayBuffer.isView(value)) return bytesToBase64(new Uint8Array(value.buffer, value.byteOffset, value.byteLength))
+  if (Object.prototype.toString.call(value) === '[object ArrayBuffer]') {
+    return bytesToBase64(arrayBufferBytes(value))
+  }
+  return value
+}
 
 function notify () {
   for (const fn of listeners) {
@@ -67,7 +80,7 @@ export async function append (entry) {
       appKey: appKey(entry)
     }
     if (Object.keys(sealedFields).length && secrets.isUnlocked()) {
-      stored.sealed = secrets.vaultEncrypt(JSON.stringify(sealedFields))
+      stored.sealed = secrets.vaultEncrypt(JSON.stringify(sealedFields, binaryReplacer))
     }
 
     await appendMessengerLog(stored, {

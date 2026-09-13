@@ -3,8 +3,9 @@ import * as store from './accounts-store.js'
 import * as secrets from './secrets.js'
 import * as nip44DoubleDh from './nip44-double-dh.js'
 import { doubleSignEvent } from './content-key/index.js'
+import { arrayBufferBytes } from '../helpers/array-buffer.js'
 
-// NIP-07 / NIP-46 method whitelist. Anything outside this set is rejected
+// Local launcher method whitelist. Anything outside this set is rejected
 // before we hit the per-type signer, so typos and unknown methods fail fast
 // with a uniform error instead of a TypeError from the concrete signer.
 const SUPPORTED_METHODS = new Set([
@@ -89,7 +90,7 @@ async function applyWithSharedKey ({ account, signer, withSharedKey }) {
   }
 }
 
-// Single entry point for the (future) messenger's NIP-07/46 dispatch. Looks
+// Single entry point for the local messenger's binary NIP-07 dispatch. Looks
 // up the account, picks the right signer, and invokes the method. Throws on
 // unknown account, read-only account, or unsupported method; the messenger
 // layer is responsible for translating thrown errors into the postMessage
@@ -99,9 +100,15 @@ export async function run ({ pubkey, method, params = [], internals = {}, withSh
   if (!storedAccount) throw new Error('UNKNOWN_ACCOUNT')
   const normalized = normalizeMethod(method)
   if (!SUPPORTED_METHODS.has(normalized)) throw new Error('UNSUPPORTED_METHOD')
+  const ownerSigner = claimSigner(storedAccount)
+  if (normalized === 'nip44v3Encrypt' || normalized === 'nip44EncryptDoubleDH') {
+    params = [...params]
+    // Own the bytes before asynchronous key selection, discovery or signing.
+    params[3] = arrayBufferBytes(params[3]).slice()
+  }
   const scoped = await applyWithSharedKey({
     account: storedAccount,
-    signer: claimSigner(storedAccount),
+    signer: ownerSigner,
     withSharedKey
   })
   const { account, signer } = scoped
@@ -109,8 +116,11 @@ export async function run ({ pubkey, method, params = [], internals = {}, withSh
     return nip44DoubleDh.nip44EncryptDoubleDH({ account, signer, params, internals })
   }
   if (normalized === 'nip44DecryptDoubleDH') {
-    return nip44DoubleDh.nip44DecryptDoubleDH({ account, signer, params })
+    return (await nip44DoubleDh.nip44DecryptDoubleDH({ account, signer, params })).slice().buffer
   }
+  if (normalized === 'nip44v3Encrypt') return signer.nip44v3EncryptBytes(...params)
+  // The crypto result may be a view into padded plaintext: return only its range.
+  if (normalized === 'nip44v3Decrypt') return (await signer.nip44v3DecryptBytes(...params)).slice().buffer
   if (normalized === 'doubleSignEvent') {
     const [event] = params || []
     if (account.type === 'bunker') return signer.doubleSignEvent(event)

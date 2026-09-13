@@ -79,8 +79,8 @@ export async function publishedOwnContentSigner ({ account, userSigner, warnings
 }
 
 function encryptParams (params) {
-  const [peerPubkey, kind, scope = '', plaintextB64, peerContentPubkey = ''] = params || []
-  return { peerPubkey, kind, scope, plaintextB64, peerContentPubkey }
+  const [peerPubkey, kind, scope = '', plaintextBytes, peerContentPubkey = ''] = params || []
+  return { peerPubkey, kind, scope, plaintextBytes, peerContentPubkey }
 }
 
 function decryptParams (params) {
@@ -89,19 +89,19 @@ function decryptParams (params) {
 }
 
 async function encrypt ({ account, signer, params, internals }) {
-  const { peerPubkey, kind, scope, plaintextB64, peerContentPubkey } = encryptParams(params)
+  const { peerPubkey, kind, scope, plaintextBytes, peerContentPubkey } = encryptParams(params)
   if (!peerPubkey) throw new Error('PEER_PUBKEY_REQUIRED')
-  if (typeof plaintextB64 !== 'string') throw new Error('PLAINTEXT_REQUIRED')
+  if (!(plaintextBytes instanceof Uint8Array)) throw new Error('PLAINTEXT_REQUIRED')
   const normalizedKind = normalizeKind(kind)
 
   const warnings = []
   await publishedOwnContentSigner({ account, userSigner: signer, warnings, internals })
 
-  const [ciphertext, senderContentPubkey = ''] = await signer.nip44EncryptDoubleDH(
+  const [ciphertext, senderContentPubkey = ''] = await signer.nip44EncryptDoubleDHBytes(
     peerPubkey,
     normalizedKind,
     scope,
-    plaintextB64,
+    plaintextBytes,
     peerContentPubkey
   )
   return [ciphertext, senderContentPubkey]
@@ -114,7 +114,7 @@ async function decrypt ({ account, signer, params }) {
   const normalizedKind = normalizeKind(kind)
 
   if (ownContentPubkey && !secrets.getContentKeySigner(account.pubkey, ownContentPubkey)) throw new Error('CONTENT_KEY_NOT_FOUND')
-  return signer.nip44DecryptDoubleDH(
+  return signer.nip44DecryptDoubleDHBytes(
     peerPubkey,
     normalizedKind,
     scope,
@@ -125,11 +125,11 @@ async function decrypt ({ account, signer, params }) {
 }
 
 export async function nip44EncryptDoubleDH ({ account, signer, params = [], internals = {} }) {
-  if (account.type !== 'nsec') return signer.nip44EncryptDoubleDH(...params)
+  if (account.type !== 'nsec') return signer.nip44EncryptDoubleDHBytes(...params)
   return encrypt({ account, signer, params, internals })
 }
 
 export async function nip44DecryptDoubleDH ({ account, signer, params = [] }) {
-  if (account.type !== 'nsec') return signer.nip44DecryptDoubleDH(...params)
+  if (account.type !== 'nsec') return signer.nip44DecryptDoubleDHBytes(...params)
   return decrypt({ account, signer, params })
 }

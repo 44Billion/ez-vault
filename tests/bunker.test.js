@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import * as store from '../src/services/accounts-store.js'
 import {
+  BunkerHandle,
   buildBunkerUrl,
   buildBunkerBackupUrl,
   persistHandleState,
@@ -93,4 +94,46 @@ test('authenticated copy and pairing share a backup constructor for new and inte
   })
   assert.deepEqual(new URL(interrupted).searchParams.getAll('relay'), ['wss://legacy.example'])
   assert.equal(new URL(interrupted).hash, `#client_key=${clientKey}`)
+})
+
+test('root and shared bunker byte adapters preserve the Base64 remote contract', async () => {
+  // Exercise the root adapter without opening relays, and the real shared-key
+  // wrapper through its RPC seam (including tweak and Double DH JSON framing).
+  const calls = []
+  const remote = {
+    nip44v3Encrypt: async (...args) => { calls.push(args); return 'cipher' },
+    nip44v3Decrypt: async (...args) => { calls.push(args); return '+/8A' },
+    nip44EncryptDoubleDH: async (...args) => { calls.push(args); return ['cipher', 'sender'] },
+    nip44DecryptDoubleDH: async (...args) => { calls.push(args); return '+/8A' }
+  }
+  const root = Object.fromEntries(
+    ['nip44v3EncryptBytes', 'nip44v3DecryptBytes', 'nip44EncryptDoubleDHBytes', 'nip44DecryptDoubleDHBytes']
+      .map(method => [method, BunkerHandle.prototype[method].bind(remote)])
+  )
+  const handle = {
+    tweakedSendRequest: async (tweak, method, params) => {
+      assert.deepEqual(tweak, ['withSharedKey', 'shared-peer', 'info'])
+      assert.equal(params[1], '9')
+      if (method === 'nip44v3_encrypt') return remote.nip44v3Encrypt(...params)
+      if (method === 'nip44v3_decrypt') return remote.nip44v3Decrypt(...params)
+      if (method === 'nip44v3_encrypt_double_dh') return JSON.stringify(await remote.nip44EncryptDoubleDH(...params))
+      if (method === 'nip44v3_decrypt_double_dh') return JSON.stringify(await remote.nip44DecryptDoubleDH(...params))
+      assert.fail(method)
+    }
+  }
+  const shared = BunkerHandle.prototype.withSharedKey.call(handle, 'shared-peer', 'info')
+  const bytes = new Uint8Array([99, 251, 255, 0, 99]).subarray(1, 4)
+  for (const adapter of [root, shared]) {
+    calls.length = 0
+    assert.equal(await adapter.nip44v3EncryptBytes('peer', 9, 'scope', bytes), 'cipher')
+    assert.deepEqual(await adapter.nip44v3DecryptBytes('peer', 9, 'scope', 'cipher'), bytes)
+    assert.deepEqual(await adapter.nip44EncryptDoubleDHBytes('peer', 9, 'scope', bytes, 'peer-content'), ['cipher', 'sender'])
+    assert.deepEqual(await adapter.nip44DecryptDoubleDHBytes('peer', 9, 'scope', 'cipher', 'peer-content', 'own-content'), bytes)
+    assert.equal(calls[0][3], '+/8A')
+    assert.equal(calls[2][3], '+/8A')
+    assert.deepEqual(calls[2].slice(4), ['peer-content'])
+    assert.deepEqual(calls[3].slice(4), ['peer-content', 'own-content'])
+    await adapter.nip44v3EncryptBytes('peer', 9, '', new Uint8Array())
+    assert.equal(calls.at(-1)[3], '')
+  }
 })

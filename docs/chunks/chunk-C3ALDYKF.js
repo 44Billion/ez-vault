@@ -1,5 +1,9 @@
 import {
+  arrayBufferBytes
+} from "./chunk-ILFV67WX.js";
+import {
   appendMessengerLog,
+  bytesToBase64,
   isUnlocked,
   listMessengerLogs,
   removeMessengerLogsForPubkey,
@@ -7,7 +11,7 @@ import {
   vaultDecrypt,
   vaultEncrypt,
   waitForVaultTransition
-} from "./chunk-NHHPGB6R.js";
+} from "./chunk-OCHCEJP4.js";
 
 // src/services/messenger-log/index.js
 var MAX_ENTRIES_PER_APP = 500;
@@ -15,6 +19,13 @@ var MAX_LOG_BYTES = 64 * 1024 * 1024;
 var PAGE_SIZE = 100;
 var listeners = /* @__PURE__ */ new Set();
 var propagatedAppMetadata = /* @__PURE__ */ new Map();
+function binaryReplacer(_key, value) {
+  if (ArrayBuffer.isView(value)) return bytesToBase64(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+  if (Object.prototype.toString.call(value) === "[object ArrayBuffer]") {
+    return bytesToBase64(arrayBufferBytes(value));
+  }
+  return value;
+}
 function notify() {
   for (const fn of listeners) {
     try {
@@ -60,7 +71,7 @@ async function append(entry) {
       appKey: appKey(entry)
     };
     if (Object.keys(sealedFields).length && isUnlocked()) {
-      stored.sealed = vaultEncrypt(JSON.stringify(sealedFields));
+      stored.sealed = vaultEncrypt(JSON.stringify(sealedFields, binaryReplacer));
     }
     await appendMessengerLog(stored, {
       maxEntriesPerApp: MAX_ENTRIES_PER_APP,
