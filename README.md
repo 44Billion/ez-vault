@@ -198,3 +198,8 @@ signer and therefore do not gain offline signing.
 The Python development server resolves its output directory explicitly instead
 of changing its working directory. Rebuilding generated output can replace the
 directory without invalidating the running server's working directory.
+
+Activity details are rendered on demand: collapsed rows keep short previews,
+while opening a row exposes its complete JSON and Copy action. Log refreshes
+are serialized to avoid overlapping large decrypted snapshots during bursts of
+signing/decryption. This does not change the persisted audit records.

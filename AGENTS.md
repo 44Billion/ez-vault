@@ -347,3 +347,10 @@ signer and therefore do not gain offline signing.
 The Python development server resolves its output directory explicitly instead
 of changing its working directory. Rebuilding generated output can replace the
 directory without invalidating the running server's working directory.
+
+Activity-log rendering reads/decrypts one page at a time and coalesces concurrent
+notifications. Collapsed rows contain a bounded 512-character preview and an
+empty JSON body. Materialize the complete record with textContent only when its
+details opens; release that text on collapse and retained entries on disconnect.
+Keep full audit data and Copy available on expansion; do not truncate storage or
+weaken sealed fields to reduce rendering memory.

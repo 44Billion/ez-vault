@@ -474,10 +474,13 @@ export class ActivityLog extends HTMLElement {
   #unsubAccounts = null
   #unsubLocale = null
   #renderId = 0
+  #rendering = false
+  #entries = []
 
   connectedCallback () {
     injectComponentStyles('activity-log', STYLES)
     this.addEventListener('click', this.#onClick)
+    this.addEventListener('toggle', this.#onToggle, true)
     this.#unsub = log.subscribe(() => this.#render())
     // Sealed entries inflate to their decrypted shape only while the vault
     // is unlocked; re-render on lock state changes so previews refresh.
@@ -488,7 +491,10 @@ export class ActivityLog extends HTMLElement {
   }
 
   disconnectedCallback () {
+    ++this.#renderId
+    this.#entries = []
     this.removeEventListener('click', this.#onClick)
+    this.removeEventListener('toggle', this.#onToggle, true)
     this.#unsub?.()
     this.#unsub = null
     this.#unsubSecrets?.()
@@ -499,16 +505,34 @@ export class ActivityLog extends HTMLElement {
     this.#unsubLocale = null
   }
 
-  async #render () {
-    const id = ++this.#renderId
+  #render () {
+    ++this.#renderId
+    if (this.#rendering) return
+    this.#rendering = true
+    // Coalesce notifications while a page of sealed records is being read.
+    // Concurrent reads otherwise retain multiple large decrypted snapshots.
+    const run = async () => {
+      try {
+        let id
+        do {
+          id = this.#renderId
+          await this.#renderEntries(id)
+        } while (this.isConnected && id !== this.#renderId)
+      } finally { this.#rendering = false }
+    }
+    run().catch(error => console.warn('activity-log render failed', error))
+  }
+
+  async #renderEntries (id) {
     let entries = await log.list()
     if (DEV_MODE) {
       const fixtures = await loadFixtures()
-      if (id !== this.#renderId) return
+      if (!this.isConnected || id !== this.#renderId) return
       entries = [...entries, ...fixtures].sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0))
     }
-    if (id !== this.#renderId) return
+    if (!this.isConnected || id !== this.#renderId) return
 
+    this.#entries = entries
     if (entries.length === 0) {
       // [data-empty] hides the wrapping accordion-panel via :has() so the
       // user doesn't see an empty disclosure. Keep the inner empty-state
@@ -552,14 +576,13 @@ export class ActivityLog extends HTMLElement {
     const name = appDisplayName(app)
     const op = methodLabel(entry.method, entry.eventKind, entry.code, entry.context)
     const preview = previewFor(entry)
-    const fullJson = JSON.stringify(entry, null, 2)
     const status = entry.status ?? 'success'
     const ts = entry.ts ?? 0
     const rel = relativeTime(ts)
     const iso = ts ? new Date(ts * 1000).toISOString() : ''
     const abs = ts ? new Date(ts * 1000).toLocaleString(getLocale()) : ''
     const summaryInner = preview
-      ? escapeHtml(preview)
+      ? escapeHtml(String(preview).slice(0, 512))
       : `<span class="empty-data">${t('(no payload)')}</span>`
 
     return `
@@ -586,7 +609,7 @@ export class ActivityLog extends HTMLElement {
               <span class="data-preview">${summaryInner}</span>
               <span class="data-toggle-icon" aria-hidden="true">${ICON_CHEVRON}</span>
             </summary>
-            <pre class="data-full">${escapeHtml(fullJson)}</pre>
+            <pre class="data-full"></pre>
             <div class="data-actions">
               <button type="button" class="copy-btn" data-action="copy">
                 <span class="copy-btn-icon">${ICON_COPY}</span>
@@ -627,6 +650,16 @@ export class ActivityLog extends HTMLElement {
         })
       }
     })
+  }
+
+  #onToggle = (event) => {
+    const details = event.target
+    if (!details.matches('details') || !this.contains(details)) return
+    const pre = details.querySelector('.data-full')
+    const entry = this.#entries[Number(details.closest('tr')?.dataset.row)]
+    // Keep collapsed rows light. The complete audit entry remains available
+    // on demand, and textContent avoids escaping/copying large JSON strings.
+    if (pre) pre.textContent = details.open && entry ? JSON.stringify(entry, null, 2) : ''
   }
 
   #onClick = async (e) => {

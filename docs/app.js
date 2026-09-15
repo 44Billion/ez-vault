@@ -227,7 +227,7 @@ await Promise.all([
   import("./chunks/trusted-signers-panel-CLMC43DS.js"),
   import("./chunks/accordion-panel-AGHO422R.js"),
   import("./chunks/toast-VTWQ4NKU.js"),
-  import("./chunks/activity-log-42XIW5CP.js"),
+  import("./chunks/activity-log-ML7BKYWN.js"),
   import("./chunks/vault-lock-button-LIT5XZNT.js"),
   import("./chunks/lock-overlay-6VOWTWDZ.js"),
   import("./chunks/create-overlay-AHPCV5KH.js")
