@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   accountForLauncher,
   applyAccountEvents,
+  handleLocalDevWipe,
   handleLegacyViewMessage,
   isTrustedOrigin,
   requestVaultClose,
@@ -51,6 +52,45 @@ test('signerRequestContext extracts NIP-44 v3 kind and scope', () => {
 
 test('requestVaultClose resolves immediately without a launcher port', async () => {
   await assert.doesNotReject(requestVaultClose())
+})
+
+test('the launcher full reset wipes the vault only in development builds', async () => {
+  const previous = globalThis.IS_DEVELOPMENT
+  const replies = []
+  const reloads = []
+  const scheduled = []
+  const wipes = []
+  const handlerOptions = {
+    _wipe: async () => { wipes.push('wipe'); return { databases: ['ez-vault'], failures: [] } },
+    _reply: message => replies.push(message),
+    _setTimeout: fn => scheduled.push(fn),
+    _reload: () => reloads.push('reload')
+  }
+  try {
+    globalThis.IS_DEVELOPMENT = false
+    assert.equal(handleLocalDevWipe({}, handlerOptions), undefined)
+    assert.deepEqual(wipes, [])
+    assert.deepEqual(replies, [])
+
+    globalThis.IS_DEVELOPMENT = true
+    await handleLocalDevWipe({}, handlerOptions)
+    assert.deepEqual(wipes, ['wipe'])
+    assert.deepEqual(replies, [{ payload: { databases: ['ez-vault'], failures: [] } }])
+    assert.equal(scheduled.length, 1)
+    scheduled.shift()()
+    assert.deepEqual(reloads, ['reload'])
+
+    await handleLocalDevWipe({}, {
+      ...handlerOptions,
+      _wipe: async () => { throw new Error('WIPE_FAILED') }
+    })
+    assert.equal(replies.at(-1).error.message, 'WIPE_FAILED')
+    assert.equal(scheduled.length, 0)
+    assert.deepEqual(reloads, ['reload'])
+  } finally {
+    if (previous === undefined) delete globalThis.IS_DEVELOPMENT
+    else globalThis.IS_DEVELOPMENT = previous
+  }
 })
 
 test('launcher origin allowlist accepts local hosts and 44billion.net only', () => {

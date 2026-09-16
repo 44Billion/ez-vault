@@ -206,6 +206,13 @@ When in doubt about a layout decision, ask: "does this still work as a tall vert
 - IndexedDB database `ez-vault` is the durable store for account records,
   encrypted vault/sidecars, passkey metadata, sync state and the bounded
   activity log. Do not add new `localStorage` or `sessionStorage` persistence.
+- A development build answers `LOCAL_DEV_WIPE` from the launcher (after the
+  `VAULT_READY` handshake, so only the trusted parent can ask): it closes the
+  storage connection, deletes every database in this origin, clears
+  localStorage/sessionStorage, cache storage and OPFS, replies with the report
+  and reloads. Production builds ignore the message and never reply, so a
+  shipped launcher cannot wipe a shipped vault. Keep this path development-only
+  and keep the launcher's full reset the only caller.
 - Use `libp2r2p/idb.run()` for IndexedDB requests. Attach transaction
   completion/error handlers immediately, await `oncomplete`, and publish
   cache updates or notifications only after commit.

@@ -12,6 +12,7 @@ import { npubFromPubkey, parseProfileEvent } from 'libp2r2p/key'
 import { parseRelayListEvent } from './relay.js'
 import { launcherLocale, setLocale } from '../i18n/index.js'
 import { resetVaultView } from './view-state.js'
+import { wipeLocalDevData } from './local-dev-wipe.js'
 
 // Read-only disclosures — the result is publicly derivable, so logging them
 // would just be noise in the audit trail. Match both wire and JS spellings.
@@ -302,6 +303,32 @@ function onPortMessage (e) {
   if (code === 'UPDATE_ACCOUNT_EVENTS') return handleUpdateAccountEvents(e)
   if (code === 'NOSTRDB_APP_BACKFILL') return handleNostrDbAppBackfill(e)
   if (code === 'NIP07') return handleNip07(e)
+  if (code === 'LOCAL_DEV_WIPE') return handleLocalDevWipe(e)
+}
+
+// Development-only: the launcher's full reset deletes every origin's storage,
+// and only this vault page can drop its own accounts, sealed secrets and
+// companion databases. Production builds ignore the message entirely; nothing
+// replies, so a shipped launcher cannot wipe a shipped vault.
+export function handleLocalDevWipe (e, {
+  _wipe = wipeLocalDevData,
+  _reply = message => reply(e, message, { to: launcherPort }),
+  _setTimeout = setTimeout,
+  _reload = () => globalThis.location?.reload?.()
+} = {}) {
+  if (typeof IS_DEVELOPMENT === 'undefined' || !IS_DEVELOPMENT) return
+  return _wipe()
+    .then(result => {
+      _reply({ payload: result })
+      // Storage is gone, so in-memory accounts are stale; reload before any
+      // background write can recreate the databases we just deleted.
+      _setTimeout(() => {
+        try { _reload() } catch { /* ignore an unloadable document */ }
+      }, 50)
+    })
+    .catch(error => {
+      _reply({ error: serializeError(error) })
+    })
 }
 
 export function handleLegacyViewMessage (

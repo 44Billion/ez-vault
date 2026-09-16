@@ -485,7 +485,10 @@ export async function requestPersistentStorage () {
   }
 }
 
-export async function resetStorageForTests ({ indexedDB = globalThis.indexedDB } = {}) {
+// Drop the open connection and every in-memory snapshot. Callers that delete
+// databases in this origin (development reset, tests) must await this first:
+// an open connection blocks `deleteDatabase` and leaves the wipe half applied.
+export async function closeStorage () {
   await mutationTail
   try { database?.close() } catch {}
   database = null
@@ -496,6 +499,10 @@ export async function resetStorageForTests ({ indexedDB = globalThis.indexedDB }
   stateCache.clear()
   recordCaches.set(REVOCATION_ROTATIONS_STORE, [])
   recordCaches.set(NOSTRDB_SYNC_STORE, [])
+}
+
+export async function resetStorageForTests ({ indexedDB = globalThis.indexedDB } = {}) {
+  await closeStorage()
   factory = indexedDB
   if (!indexedDB?.deleteDatabase) return
   await new Promise((resolve, reject) => {
