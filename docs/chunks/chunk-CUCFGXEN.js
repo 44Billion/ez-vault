@@ -4,15 +4,15 @@ import {
   onOnline,
   rotateContentKeyIfStillCanonical,
   upsertContentKeyEvent
-} from "./chunk-5T3BSYOI.js";
+} from "./chunk-PIEF7EMF.js";
 import {
   filterVisibleAccounts,
   hasPendingMutation,
   subscribePendingMutations
-} from "./chunk-6CJEW3BF.js";
+} from "./chunk-4KWP7U7B.js";
 import {
   trusted_signers_exports
-} from "./chunk-GSFAXU6W.js";
+} from "./chunk-IDH547PO.js";
 import {
   NOSTRDB_SYNC,
   PrivateMessenger,
@@ -44,7 +44,7 @@ import {
   setState,
   subscribe2 as subscribe,
   subscribeRelayListUpdates
-} from "./chunk-OCHCEJP4.js";
+} from "./chunk-GMXGPW7U.js";
 import {
   __export
 } from "./chunk-NZLE2WMY.js";
@@ -1961,6 +1961,7 @@ function createNostrDbSyncController({
       markRecentSyncEvent(event);
       try {
         const result = await db.add(event, { mergeSource: "sync" });
+        if (result?.storedEvent) markRecentSyncEvent(result.storedEvent);
         if (result?.ok !== false) imported++;
       } catch (err) {
         report(err);
@@ -1975,12 +1976,17 @@ function createNostrDbSyncController({
       const db = getDb(ownerPubkey);
       if (typeof db.addEventsForApp === "function") {
         const result = await db.addEventsForApp(appId, events);
+        for (const id of Array.isArray(result?.storedIds) ? result.storedIds : []) {
+          markRecentSyncEvent({ id });
+        }
         return normalizePositiveInteger(result?.added, 0);
       }
       let imported = 0;
       for (const event of events) {
         const result = await db.add(event, { appId, mergeSource: "sync" });
-        if (result?.ok !== false) imported++;
+        if (result?.ok === false) continue;
+        imported++;
+        if (result?.storedEvent) markRecentSyncEvent(result.storedEvent);
       }
       return imported;
     } catch (err) {

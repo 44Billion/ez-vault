@@ -1,6 +1,6 @@
 import {
   arrayBufferBytes
-} from "./chunk-ILFV67WX.js";
+} from "./chunk-QHQWPLWS.js";
 import {
   appendMessengerLog,
   bytesToBase64,
@@ -11,7 +11,7 @@ import {
   vaultDecrypt,
   vaultEncrypt,
   waitForVaultTransition
-} from "./chunk-OCHCEJP4.js";
+} from "./chunk-GMXGPW7U.js";
 
 // src/services/messenger-log/index.js
 var MAX_ENTRIES_PER_APP = 500;

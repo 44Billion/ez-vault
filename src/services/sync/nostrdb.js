@@ -934,6 +934,9 @@ export function createNostrDbSyncController ({
         // Synced rows stay app-neutral; CRDT merge uses deterministic sync
         // ordering instead of local authoring-time ordering.
         const result = await db.add(event, { mergeSource: 'sync' })
+        // A merged personal copy is rewritten under a new wrapper id; mark it
+        // too so the peer is not asked for it again immediately.
+        if (result?.storedEvent) markRecentSyncEvent(result.storedEvent)
         if (result?.ok !== false) imported++
       } catch (err) {
         report(err)
@@ -949,12 +952,19 @@ export function createNostrDbSyncController ({
       const db = getDb(ownerPubkey)
       if (typeof db.addEventsForApp === 'function') {
         const result = await db.addEventsForApp(appId, events)
+        // Merged personal copies are stored under a new wrapper id; mark those
+        // too so the peer is not asked for them immediately.
+        for (const id of Array.isArray(result?.storedIds) ? result.storedIds : []) {
+          markRecentSyncEvent({ id })
+        }
         return normalizePositiveInteger(result?.added, 0)
       }
       let imported = 0
       for (const event of events) {
         const result = await db.add(event, { appId, mergeSource: 'sync' })
-        if (result?.ok !== false) imported++
+        if (result?.ok === false) continue
+        imported++
+        if (result?.storedEvent) markRecentSyncEvent(result.storedEvent)
       }
       return imported
     } catch (err) {

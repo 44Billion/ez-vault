@@ -467,6 +467,21 @@ async function requestPersistentStorage() {
     return false;
   }
 }
+async function closeStorage() {
+  await mutationTail;
+  try {
+    database?.close();
+  } catch {
+  }
+  database = null;
+  dbPromise = null;
+  readyPromise = null;
+  mutationTail = Promise.resolve();
+  accountCache = [];
+  stateCache.clear();
+  recordCaches.set(REVOCATION_ROTATIONS_STORE, []);
+  recordCaches.set(NOSTRDB_SYNC_STORE, []);
+}
 
 // src/services/accounts-store.js
 var accounts_store_exports = {};
@@ -14709,6 +14724,7 @@ export {
   REVOCATION_ROTATIONS,
   NOSTRDB_SYNC,
   requestPersistentStorage,
+  closeStorage,
   subscribe,
   list,
   get,

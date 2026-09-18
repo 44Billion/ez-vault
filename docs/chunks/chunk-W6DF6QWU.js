@@ -6,19 +6,20 @@ import {
   requestNostrDbAppBackfill,
   serializeError,
   tell
-} from "./chunk-ISNB73IK.js";
+} from "./chunk-CUCFGXEN.js";
 import {
   append
-} from "./chunk-C3ALDYKF.js";
+} from "./chunk-EKXXJFVY.js";
 import {
   run
-} from "./chunk-5T3BSYOI.js";
+} from "./chunk-PIEF7EMF.js";
 import {
   filterVisibleAccounts,
   read,
   subscribe as subscribe3
-} from "./chunk-6CJEW3BF.js";
+} from "./chunk-4KWP7U7B.js";
 import {
+  closeStorage,
   get,
   getBunkerHandle,
   getNsecSigner,
@@ -29,7 +30,7 @@ import {
   subscribe,
   subscribe2,
   update
-} from "./chunk-OCHCEJP4.js";
+} from "./chunk-GMXGPW7U.js";
 import {
   launcherLocale,
   setLocale
@@ -62,6 +63,93 @@ function resetVaultView() {
     button.disabled = false;
     button.classList.remove("is-active");
   }
+}
+
+// src/services/local-dev-wipe.js
+var DELETE_TIMEOUT_MS = 5e3;
+function normalizeError(error) {
+  return {
+    name: error?.name ?? "Error",
+    message: error?.message ?? String(error ?? "Unknown error")
+  };
+}
+function deleteDatabase(indexedDB, name, timeoutMs = DELETE_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    let request;
+    try {
+      request = indexedDB.deleteDatabase(name);
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    let blocked = false;
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (result?.error) reject(result.error);
+      else resolve(result);
+    };
+    const timer = setTimeout(() => finish({ name, blocked: true }), timeoutMs);
+    request.onblocked = () => {
+      blocked = true;
+    };
+    request.onsuccess = () => finish({ name, blocked });
+    request.onerror = () => finish({ error: request.error || new Error(`IDB_DELETE_FAILED: ${name}`) });
+  });
+}
+async function clearCacheStorage(caches) {
+  if (typeof caches?.keys !== "function" || typeof caches?.delete !== "function") return;
+  const names = await caches.keys();
+  await Promise.all((names || []).map((name) => caches.delete(name)));
+}
+async function clearOpfs(storage) {
+  if (typeof storage?.getDirectory !== "function") return;
+  const directory = await storage.getDirectory();
+  if (typeof directory?.entries !== "function" || typeof directory?.removeEntry !== "function") return;
+  for await (const [name] of directory.entries()) {
+    await directory.removeEntry(name, { recursive: true });
+  }
+}
+async function wipeLocalDevData({
+  _window = globalThis.window,
+  _navigator = globalThis.navigator,
+  _caches = globalThis.caches,
+  _indexedDB = globalThis.indexedDB,
+  _closeStorage = closeStorage,
+  _deleteTimeoutMs = DELETE_TIMEOUT_MS,
+  _console = console
+} = {}) {
+  const failures = [];
+  const deletedDatabases = [];
+  const blockedDatabases = [];
+  const run2 = async (step, work) => {
+    try {
+      await work();
+    } catch (error) {
+      failures.push({ step, ...normalizeError(error) });
+      _console?.warn?.(`[local-dev-wipe] ${step} failed`, error);
+    }
+  };
+  await run2("storage", () => _closeStorage());
+  await run2("indexedDB", async () => {
+    if (typeof _indexedDB?.databases !== "function" || typeof _indexedDB?.deleteDatabase !== "function") {
+      throw new Error("IDB_UNAVAILABLE");
+    }
+    const databases = await _indexedDB.databases() || [];
+    for (const database of databases) {
+      if (typeof database?.name !== "string" || !database.name) continue;
+      const result = await deleteDatabase(_indexedDB, database.name, _deleteTimeoutMs);
+      deletedDatabases.push(result.name);
+      if (result.blocked) blockedDatabases.push(result.name);
+    }
+  });
+  await run2("localStorage", () => _window?.localStorage?.clear?.());
+  await run2("sessionStorage", () => _window?.sessionStorage?.clear?.());
+  await run2("caches", () => clearCacheStorage(_caches));
+  await run2("opfs", () => clearOpfs(_navigator?.storage));
+  return { databases: deletedDatabases, blockedDatabases, failures };
 }
 
 // src/services/messenger.js
@@ -281,6 +369,26 @@ function onPortMessage(e) {
   if (code === "UPDATE_ACCOUNT_EVENTS") return handleUpdateAccountEvents(e);
   if (code === "NOSTRDB_APP_BACKFILL") return handleNostrDbAppBackfill(e);
   if (code === "NIP07") return handleNip07(e);
+  if (code === "LOCAL_DEV_WIPE") return handleLocalDevWipe(e);
+}
+function handleLocalDevWipe(e, {
+  _wipe = wipeLocalDevData,
+  _reply = (message) => reply(e, message, { to: launcherPort }),
+  _setTimeout = setTimeout,
+  _reload = () => globalThis.location?.reload?.()
+} = {}) {
+  if (true) return;
+  return _wipe().then((result) => {
+    _reply({ payload: result });
+    _setTimeout(() => {
+      try {
+        _reload();
+      } catch {
+      }
+    }, 50);
+  }).catch((error) => {
+    _reply({ error: serializeError(error) });
+  });
 }
 function handleLegacyViewMessage(e, {
   resetView = resetVaultView,
