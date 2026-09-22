@@ -25,6 +25,7 @@ class FakeLiveStream {
   }
 
   emit (event) {
+    event = { type: 'event', event, relay: 'wss://fixture.test' }
     if (this.#closed) return
     const waiter = this.#waiters.shift()
     if (waiter) waiter({ value: event, done: false })

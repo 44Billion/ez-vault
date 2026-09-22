@@ -1186,7 +1186,7 @@ export function createNostrDbSyncController ({
       try {
         for await (const item of iterator) {
           if (sub.stopped) break
-          queuePush(ownerPubkey, item?.result)
+          if (item?.type === 'event') queuePush(ownerPubkey, item.event)
         }
       } catch (err) {
         if (!sub.stopped) report(err)

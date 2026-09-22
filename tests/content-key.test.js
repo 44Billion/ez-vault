@@ -67,7 +67,7 @@ function relayPoolStub ({
 } = {}) {
   return {
     async getEvents (filter, relays) {
-      return { result: await events(filter, relays), errors: [], success: true }
+      return { result: (await events(filter, relays)).map(event => ({ event, relay: event.meta?.relay ?? 'wss://fixture.test' })), errors: [], success: true }
     },
     sendEvent: send
   }

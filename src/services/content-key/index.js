@@ -166,7 +166,7 @@ async function fetchLatestContentKeyEventFromRelay ({ ownerPubkey, relay, _relay
     })
     if (!response.success) throw response.errors[0]?.reason || new Error('CONTENT_KEY_RELAY_READ_FAILED')
     let latest = null
-    for (const event of response.result) {
+    for (const { event } of response.result) {
       const parsed = parseContentKeyEvent(event)
       if (!parsed) continue
       if (!latest || event.created_at > latest.event.created_at) latest = { event, parsed }

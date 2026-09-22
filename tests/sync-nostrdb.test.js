@@ -709,3 +709,24 @@ test('nostrdb sync pushes local events on the leading edge then trailing throttl
   assert.equal(msg.sent.length, 2)
   assert.equal(JSON.parse(msg.sent[1].options.payload.jsonl.trim()).id, event2.id)
 })
+
+test('nostrdb live envelopes push only events, excluding control markers and IDs', async () => {
+  const msg = messenger()
+  const item = event(100)
+  const controller = createNostrDbSyncController({
+    getDb: () => ({
+      async * subscribe () {
+        yield { type: 'eose' }
+        yield { type: 'id', id: item.id, meta: { score: 1 } }
+        yield { type: 'event', event: item, meta: { algorithm: 'sync', sort: 'asc', score: 2 } }
+      }
+    }),
+    _setTimeout: () => ({}), _clearTimeout: () => {}
+  })
+  controller.ensureSubscriptions(context(msg))
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(msg.sent.length, 1)
+  assert.equal(msg.sent[0].options.code, NOSTRDB_SYNC_PUSH_CODE)
+  assert.deepEqual(JSON.parse(msg.sent[0].options.payload.jsonl.trim()), item)
+  controller.stop()
+})

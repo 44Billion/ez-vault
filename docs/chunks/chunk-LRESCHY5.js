@@ -4,15 +4,15 @@ import {
   onOnline,
   rotateContentKeyIfStillCanonical,
   upsertContentKeyEvent
-} from "./chunk-PIEF7EMF.js";
+} from "./chunk-656MY7Q6.js";
 import {
   filterVisibleAccounts,
   hasPendingMutation,
   subscribePendingMutations
-} from "./chunk-4KWP7U7B.js";
+} from "./chunk-GHIMHCHN.js";
 import {
   trusted_signers_exports
-} from "./chunk-IDH547PO.js";
+} from "./chunk-M7ANWQQC.js";
 import {
   NOSTRDB_SYNC,
   PrivateMessenger,
@@ -44,7 +44,7 @@ import {
   setState,
   subscribe2 as subscribe,
   subscribeRelayListUpdates
-} from "./chunk-GMXGPW7U.js";
+} from "./chunk-FRQWHRZ4.js";
 import {
   __export
 } from "./chunk-NZLE2WMY.js";
@@ -2188,7 +2188,7 @@ function createNostrDbSyncController({
       try {
         for await (const item of iterator) {
           if (sub.stopped) break;
-          queuePush(ownerPubkey, item?.result);
+          if (item?.type === "event") queuePush(ownerPubkey, item.event);
         }
       } catch (err) {
         if (!sub.stopped) report(err);

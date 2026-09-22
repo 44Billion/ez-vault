@@ -5424,6 +5424,15 @@ function countTimeoutError() {
 function getEventsTimeoutError() {
   return new Error("GET_EVENTS_TIMEOUT");
 }
+function asError(error) {
+  return error instanceof Error ? error : new Error(String(error));
+}
+function assertReadOptions(filter, timeouts) {
+  if (!filter || typeof filter !== "object" || Array.isArray(filter)) throw new ValidationError("INVALID_FILTER");
+  for (const value of Object.values(timeouts)) {
+    if (value !== null && (!Number.isFinite(value) || value < 0)) throw new ValidationError("INVALID_RELAY_TIMEOUT");
+  }
+}
 function normalizedRelayUrls(relays) {
   const urls = [];
   const seen = /* @__PURE__ */ new Set();
@@ -5650,111 +5659,120 @@ var RelayPool = class {
   // the operation deadline. Disabling cross-relay deduplication still suppresses
   // repeated ids from the same relay; callbacks remain immediate in both modes.
   async getEvents(filter, relays, { timeout = 5e3, timeoutAfterFirstEose = 500, callback, signal, deduplicateAcrossRelays = true } = {}) {
+    assertReadOptions(filter, { timeout, timeoutAfterFirstEose });
     if (typeof deduplicateAcrossRelays !== "boolean") throw new ValidationError("INVALID_DEDUPLICATE_ACROSS_RELAYS");
-    const urls = normalizedRelayUrls(relays);
-    if (!urls.length) return { result: [], errors: [], success: false };
     if (signal?.aborted) throw new Error("Aborted");
+    const urls = normalizedRelayUrls(relays);
     const subscriptions = /* @__PURE__ */ new Map();
-    const pending = new Set(urls);
-    const normalCloseUrls = /* @__PURE__ */ new Set();
+    const outcomes = /* @__PURE__ */ new Map();
     const errors = [];
     const events = [];
     const eventIds = deduplicateAcrossRelays ? /* @__PURE__ */ new Set() : null;
-    let completed = 0;
     let isResolved = false;
     let eoseTimer = null;
     let timeoutTimer = null;
     return await new Promise((resolve, reject) => {
-      const closeSubscriptions = () => {
-        for (const sub of subscriptions.values()) sub.close();
-        subscriptions.clear();
-      };
       const cleanup = () => {
         clearTimeout(timeoutTimer);
         clearTimeout(eoseTimer);
         signal?.removeEventListener("abort", onAbort);
-        closeSubscriptions();
+        for (const sub of subscriptions.values()) sub.close();
+        subscriptions.clear();
       };
-      const finish = () => {
+      const fail = (error) => {
+        if (isResolved) return;
+        isResolved = true;
+        cleanup();
+        reject(error);
+      };
+      const notify3 = (item) => {
+        try {
+          callback?.(item);
+        } catch (error) {
+          fail(error);
+        }
+      };
+      const settleRelay = (relay, status, error) => {
+        if (isResolved || outcomes.has(relay)) return;
+        outcomes.set(relay, { relay, status, ...error ? { error } : {} });
+        if (error) {
+          errors.push({ relay, reason: error });
+          notify3({ type: "error", relay, error });
+        }
+      };
+      const finish = (pendingStatus = "cutoff") => {
+        if (isResolved) return;
+        for (const url of urls) {
+          if (!outcomes.has(url)) settleRelay(url, pendingStatus, pendingStatus === "timeout" ? getEventsTimeoutError() : void 0);
+        }
+        if (isResolved) return;
+        const relays2 = urls.map((url) => outcomes.get(url));
+        notify3({ type: "eose", relays: relays2 });
         if (isResolved) return;
         isResolved = true;
         cleanup();
         resolve({
           result: events,
           errors,
-          success: events.length > 0 || completed > 0
+          success: events.length > 0 || relays2.some(({ status }) => ["eose", "satisfied", "closed"].includes(status)),
+          relays: relays2
         });
       };
       const finishIfComplete = () => {
-        if (pending.size === 0) finish();
+        if (outcomes.size === urls.length) finish();
       };
-      const settleRelay = (url, reason) => {
-        if (isResolved || !pending.delete(url)) return;
-        subscriptions.delete(url);
-        if (reason) {
-          errors.push({ reason, relay: url });
-          if (callback) callback({ type: "error", error: reason, relay: url });
-        } else {
-          completed++;
-        }
-        finishIfComplete();
-      };
-      const onAbort = () => {
-        if (isResolved) return;
-        isResolved = true;
-        cleanup();
-        reject(new Error("Aborted"));
-      };
-      const timeoutPending = () => {
-        if (isResolved) return;
-        for (const url of pending) {
-          errors.push({ reason: getEventsTimeoutError(), relay: url });
-        }
-        finish();
-      };
+      const onAbort = () => fail(new Error("Aborted"));
       signal?.addEventListener("abort", onAbort, { once: true });
-      if (timeout !== null) timeoutTimer = maybeUnref(setTimeout(timeoutPending, timeout));
+      if (timeout !== null) timeoutTimer = maybeUnref(setTimeout(() => finish("timeout"), timeout));
+      if (!urls.length) {
+        finish();
+        return;
+      }
       for (const url of urls) {
         const seenIds = eventIds ?? /* @__PURE__ */ new Set();
         this.#getRelay(url).then((relay) => {
-          if (isResolved || !pending.has(url)) return;
+          if (isResolved || outcomes.has(url)) return;
           let hasEvents = false;
           let sub;
-          const handleEose = () => {
-            if (isResolved || !pending.has(url)) return;
-            normalCloseUrls.add(url);
-            sub.close();
+          const complete = (status) => {
+            if (isResolved || outcomes.has(url)) return;
+            settleRelay(url, status);
+            sub?.close();
+            subscriptions.delete(url);
             if (hasEvents && timeoutAfterFirstEose !== null && !eoseTimer && !isResolved) {
-              eoseTimer = maybeUnref(setTimeout(finish, timeoutAfterFirstEose));
+              eoseTimer = maybeUnref(setTimeout(() => finish("cutoff"), timeoutAfterFirstEose));
             }
+            finishIfComplete();
           };
-          const checkEarlyClose = makeEarlyCloseChecker(filter, handleEose);
+          const checkEarlyClose = makeEarlyCloseChecker(filter, () => complete("satisfied"));
           sub = relay.subscribe([filter], {
             onevent: (event) => {
-              if (isResolved || !pending.has(url)) return;
+              if (isResolved || outcomes.has(url)) return;
               hasEvents = true;
               if (!event?.id || !seenIds.has(event.id)) {
                 if (event?.id) seenIds.add(event.id);
-                event.meta = { relay: url };
-                events.push(event);
-                if (callback) callback({ type: "event", event, relay: url });
+                events.push({ event, relay: url });
+                notify3({ type: "event", event, relay: url });
               }
               checkEarlyClose(event);
             },
             oninvalidevent: () => {
-              if (!isResolved && pending.has(url)) checkEarlyClose();
+              if (!isResolved && !outcomes.has(url)) checkEarlyClose();
             },
             onclose: (error) => {
-              const reason = normalCloseUrls.delete(url) || error === void 0 ? null : error instanceof Error ? error : new Error(String(error));
-              settleRelay(url, reason);
+              if (isResolved || outcomes.has(url)) return;
+              const reason = error === void 0 ? void 0 : asError(error);
+              settleRelay(url, reason ? "error" : "closed", reason);
+              subscriptions.delete(url);
+              finishIfComplete();
             },
-            oneose: handleEose
+            oneose: () => complete("eose")
           });
-          if (isResolved || !pending.has(url)) sub.close();
+          if (isResolved || outcomes.has(url)) sub.close();
           else subscriptions.set(url, sub);
         }).catch((error) => {
-          const reason = error instanceof Error ? error : new Error(String(error));
-          settleRelay(url, reason);
+          settleRelay(url, "error", asError(error));
+          finishIfComplete();
         });
       }
     });
@@ -5763,30 +5781,39 @@ var RelayPool = class {
     const queue = [];
     let p = Promise.withResolvers();
     let isDone = false;
-    const userCallback = options.callback;
+    let failure;
+    const controller = new AbortController();
     const callback = (item) => {
       queue.push(item);
-      if (userCallback) userCallback(item);
       p.resolve();
       p = Promise.withResolvers();
+      options.callback?.(item);
     };
-    const networkSignal = options._stopSignal ? AbortSignal.any([options._stopSignal, ...options.signal ? [options.signal] : []]) : options.signal;
-    const methodPromise = this.getEvents(filter, relays, { ...options, signal: networkSignal, callback }).catch((err) => {
-      if (err?.message !== "Aborted") console.error("Error in getEvents:", err);
+    const signal = AbortSignal.any([controller.signal, ...[options.signal, options._stopSignal].filter(Boolean)]);
+    const methodPromise = this.getEvents(filter, relays, { ...options, signal, callback }).catch((error) => {
+      if (!signal.aborted) failure = error;
     }).finally(() => {
       isDone = true;
       p.resolve();
     });
-    while (!isDone || queue.length > 0) {
-      if (options.signal?.aborted) break;
-      if (queue.length > 0) yield queue.shift();
-      else await p.promise;
+    try {
+      while (!isDone || queue.length > 0) {
+        if (options.signal?.aborted) return;
+        if (queue.length > 0) yield queue.shift();
+        else await p.promise;
+      }
+      const report = await methodPromise;
+      if (failure) throw failure;
+      return report;
+    } finally {
+      controller.abort();
+      queue.length = 0;
     }
-    return await methodPromise;
   }
   // Returns a strictly-live stream. `ready` reports the first initial EOSE window,
   // while `readyRelays` follows relays that are currently past their own EOSE.
   getLiveEventsGenerator(filter, relays, options = {}) {
+    assertReadOptions(filter, { timeout: options.timeout === void 0 ? 5e3 : options.timeout, timeoutAfterFirstEose: options.timeoutAfterFirstEose === void 0 ? 500 : options.timeoutAfterFirstEose });
     const ready = Promise.withResolvers();
     const readyRelays = /* @__PURE__ */ new Set();
     const stream = drainableStream((options2) => this.#getLiveEventsGenerator(filter, relays, options2, { ready, readyRelays }), options);
@@ -5807,6 +5834,7 @@ var RelayPool = class {
   async *#getLiveEventsGenerator(filter, relays, {
     signal,
     _stopSignal,
+    timeout = 5e3,
     timeoutAfterFirstEose = 500,
     timeoutForReconnectGap = 5e3,
     timeoutAfterFirstReconnectGapEose = 500,
@@ -5821,7 +5849,8 @@ var RelayPool = class {
     const liveSubs = /* @__PURE__ */ new Map();
     const retryTimers2 = /* @__PURE__ */ new Map();
     const initialPending = new Set(urls);
-    const initialErrors = [];
+    const initialOutcomes = /* @__PURE__ */ new Map();
+    let readyTimeout = null;
     let readyTimer = null;
     let isReady = false;
     const gapAc = new AbortController();
@@ -5832,14 +5861,28 @@ var RelayPool = class {
     let lastSeenAt = filter.since > 0 ? filter.since : null;
     const seenIds = /* @__PURE__ */ new Set();
     let untilTimer = null;
-    const finishReady = () => {
+    const enqueue = (item) => {
+      queue.push(item);
+      p.resolve();
+      p = Promise.withResolvers();
+    };
+    const finishReady = (pendingStatus = "cutoff", emit = true) => {
       if (isReady) return;
       isReady = true;
       clearTimeout(readyTimer);
+      clearTimeout(readyTimeout);
+      for (const relay of initialPending) {
+        const error = pendingStatus === "timeout" ? getEventsTimeoutError() : void 0;
+        initialOutcomes.set(relay, { relay, status: pendingStatus, ...error ? { error } : {} });
+        if (error && emit) enqueue({ type: "error", relay, error });
+      }
+      initialPending.clear();
+      const relays2 = urls.map((url) => initialOutcomes.get(url));
       ready.resolve(Object.freeze({
         relays: Object.freeze([...readyRelays]),
-        errors: Object.freeze([...initialErrors])
+        errors: Object.freeze(relays2.filter((item) => item.error).map(({ relay, error }) => ({ relay, reason: error })))
       }));
+      if (emit) enqueue({ type: "eose", relays: relays2 });
     };
     const teardown = (drain = false) => {
       if (isDone && (drain || !draining)) return;
@@ -5847,7 +5890,7 @@ var RelayPool = class {
       isDone = true;
       if (!drain) queue.length = 0;
       clearTimeout(untilTimer);
-      finishReady();
+      finishReady("closed", false);
       gapAc.abort();
       for (const timer of retryTimers2.values()) clearTimeout(timer);
       retryTimers2.clear();
@@ -5862,35 +5905,42 @@ var RelayPool = class {
         seenIds.add(event.id);
       }
       if (event.created_at > (lastSeenAt ?? 0)) lastSeenAt = event.created_at;
-      event.meta = { relay: url };
-      queue.push(event);
-      p.resolve();
-      p = Promise.withResolvers();
+      enqueue({ type: "event", event, relay: url });
     };
     if (signal?.aborted || _stopSignal?.aborted) {
-      finishReady();
+      finishReady("closed", false);
       return;
     }
     const abort = () => teardown();
     const stop = () => teardown(true);
     signal?.addEventListener("abort", abort, { once: true });
     _stopSignal?.addEventListener("abort", stop, { once: true });
+    if (timeout !== null) readyTimeout = maybeUnref(setTimeout(() => finishReady("timeout"), timeout));
     const maybeFinishInitialReady = () => {
       if (initialPending.size === 0) finishReady();
     };
     const markInitialEose = (url) => {
       readyRelays.add(url);
-      if (isReady) return;
-      initialPending.delete(url);
+      if (isReady || !initialPending.delete(url)) return;
+      initialOutcomes.set(url, { relay: url, status: "eose" });
       if (timeoutAfterFirstEose !== null && !readyTimer) {
-        readyTimer = maybeUnref(setTimeout(finishReady, timeoutAfterFirstEose));
+        readyTimer = maybeUnref(setTimeout(() => finishReady("cutoff"), timeoutAfterFirstEose));
       }
       maybeFinishInitialReady();
     };
-    const markInitialError = (url, reason) => {
-      if (!initialPending.delete(url)) return;
-      initialErrors.push({ relay: url, reason });
-      maybeFinishInitialReady();
+    const reportFailure = (url, error) => {
+      if (isDone) return;
+      enqueue({ type: "error", relay: url, error });
+      if (!isReady && initialPending.delete(url)) {
+        initialOutcomes.set(url, { relay: url, status: "error", error });
+        maybeFinishInitialReady();
+      }
+    };
+    const reportClosed = (url) => {
+      if (!isReady && initialPending.delete(url)) {
+        initialOutcomes.set(url, { relay: url, status: "closed" });
+        maybeFinishInitialReady();
+      }
     };
     const scheduleReconnect = (url, reconnectDelay) => {
       if (isDone || retryTimers2.has(url)) return;
@@ -5903,7 +5953,10 @@ var RelayPool = class {
     };
     if (filterUntil !== null) {
       const msUntil = filterUntil * 1e3 - Date.now();
-      untilTimer = maybeUnref(setTimeout(() => teardown(true), Math.max(0, msUntil)));
+      untilTimer = maybeUnref(setTimeout(() => {
+        finishReady("closed");
+        teardown(true);
+      }, Math.max(0, msUntil)));
     }
     const runReconnectGapFill = (url, gapSince, now) => {
       const gapUntil = filterUntil !== null ? Math.min(now, filterUntil) : now;
@@ -5917,9 +5970,10 @@ var RelayPool = class {
       return (async () => {
         for await (const item of gapGen) {
           if (item?.type === "event") pushEvent(item.event, url, true);
+          else if (item?.type === "error" && !isDone) enqueue(item);
         }
       })().catch((err) => {
-        if (!isDone) console.error(`Reconnect gap fill error for ${url}:`, err);
+        reportFailure(url, asError(err));
       });
     };
     const subscribeToRelay = (url, gapSince, reconnectDelay = 1e3) => {
@@ -5941,9 +5995,9 @@ var RelayPool = class {
             if (liveSubs.get(url) === liveSub) liveSubs.delete(url);
             else if (liveSubs.has(url)) return;
             readyRelays.delete(url);
-            if (!liveEose && !isDone) {
-              const reason = error instanceof Error ? error : new Error(error ? String(error) : "LIVE_SUBSCRIPTION_CLOSED");
-              markInitialError(url, reason);
+            if (!isDone) {
+              if (error !== void 0) reportFailure(url, asError(error));
+              else if (!liveEose) reportClosed(url);
             }
             if (isDone) return;
             scheduleReconnect(url, reconnectDelay);
@@ -5972,14 +6026,20 @@ var RelayPool = class {
       }).catch((err) => {
         readyRelays.delete(url);
         const reason = err instanceof Error ? err : new Error(String(err));
-        markInitialError(url, reason);
+        reportFailure(url, reason);
         if (isDone) return;
-        console.error(`Live subscription error at ${url}:`, reason);
         scheduleReconnect(url, reconnectDelay);
       });
     };
     if (!urls.length) {
       finishReady();
+      try {
+        yield queue.shift();
+      } finally {
+        teardown();
+        signal?.removeEventListener("abort", abort);
+        _stopSignal?.removeEventListener("abort", stop);
+      }
       return;
     }
     for (const url of urls) {
@@ -6015,6 +6075,7 @@ var RelayPool = class {
   //
   // All underlying generators are injectable for testing.
   getEventsFeedGenerator(filter, relays, options = {}) {
+    assertReadOptions(filter, { timeout: options.timeout === void 0 ? 5e3 : options.timeout, timeoutAfterFirstEose: options.timeoutAfterFirstEose === void 0 ? 500 : options.timeoutAfterFirstEose });
     return drainableStream((options2) => this.#getEventsFeedGenerator(filter, relays, options2), options);
   }
   async *#getEventsFeedGenerator(filter, relays, {
@@ -6031,29 +6092,32 @@ var RelayPool = class {
       const gen = _eventsGenerator(filter, relays, { timeout, timeoutAfterFirstEose, signal, _stopSignal });
       for await (const item of gen) {
         if (signal.aborted) return;
-        if (item?.type === "event") yield item.event;
+        yield item;
       }
       return;
     }
     if (filter.limit === 0) {
-      for await (const event of _liveGenerator(filter, relays, { signal, _stopSignal })) {
+      for await (const event of _liveGenerator(filter, relays, { timeout, timeoutAfterFirstEose, signal, _stopSignal })) {
         if (signal.aborted) return;
         yield event;
       }
       return;
     }
-    const liveGen = _liveGenerator(filter, relays, { signal, _stopSignal });
+    const liveGen = _liveGenerator(filter, relays, { timeout, timeoutAfterFirstEose, signal, _stopSignal });
     const liveBuffer = [];
     let liveDone = false;
+    let liveFailure;
     let liveWake = Promise.withResolvers();
     const bgLoop = (async () => {
       try {
         for await (const event of liveGen) {
           if (signal.aborted) break;
-          liveBuffer.push(event);
+          if (event.type !== "eose") liveBuffer.push(event);
           liveWake.resolve();
           liveWake = Promise.withResolvers();
         }
+      } catch (error) {
+        liveFailure = error;
       } finally {
         liveDone = true;
         liveWake.resolve();
@@ -6066,17 +6130,18 @@ var RelayPool = class {
         if (signal.aborted) return;
         if (item?.type === "event" && !seenIds.has(item.event.id)) {
           seenIds.add(item.event.id);
-          yield item.event;
-        }
+          yield item;
+        } else if (item?.type !== "event") yield item;
       }
       while (liveBuffer.length > 0) {
         if (signal.aborted) return;
-        const event = liveBuffer.shift();
-        if (!seenIds.has(event.id)) {
-          seenIds.add(event.id);
-          yield event;
+        const item = liveBuffer.shift();
+        if (item.type !== "event" || !seenIds.has(item.event.id)) {
+          if (item.type === "event") seenIds.add(item.event.id);
+          yield item;
         }
       }
+      seenIds.clear();
       while (!liveDone || liveBuffer.length > 0) {
         while (liveBuffer.length > 0) {
           if (signal.aborted) return;
@@ -6084,6 +6149,7 @@ var RelayPool = class {
         }
         if (!liveDone) await liveWake.promise;
       }
+      if (liveFailure) throw liveFailure;
     } finally {
       await liveGen.return();
       await bgLoop;
@@ -6311,7 +6377,7 @@ function subscribeRelayListUpdates(pubkeys, {
   const controller = new AbortController();
   async function consumeRelayListUpdates() {
     try {
-      for await (const event of _eventsFeedGenerator({
+      for await (const item of _eventsFeedGenerator({
         kinds: [10002],
         authors
       }, relays, {
@@ -6319,6 +6385,12 @@ function subscribeRelayListUpdates(pubkeys, {
         timeout: 5e3,
         timeoutAfterFirstEose: null
       })) {
+        if (item.type === "error") {
+          console.error("relay-list watch failed:", item.error);
+          continue;
+        }
+        if (item.type !== "event") continue;
+        const { event } = item;
         if (closed || !authors.includes(event.pubkey)) continue;
         const update2 = cacheRelayListEvent(event, { cacheMs, relayUrlPolicy });
         if (!update2 || !relayTypeChanged(update2.changes, relayType)) continue;
@@ -6354,7 +6426,7 @@ async function loadMissingRelays(missingPubkeys, {
     timeoutAfterFirstEose
   });
   const latestByPubkey = {};
-  for (const event of events || []) {
+  for (const { event } of events || []) {
     if (!missingPubkeys.includes(event.pubkey)) continue;
     if (isNewerRelayListEvent(event, latestByPubkey[event.pubkey])) latestByPubkey[event.pubkey] = event;
   }
@@ -6426,7 +6498,7 @@ async function fetchLatestEvent(filter, relays, { _relayPool = relayPool } = {})
     timeout: READ_TIMEOUT_MS,
     timeoutAfterFirstEose: READ_TIMEOUT_AFTER_FIRST_EOSE_MS
   });
-  return latestEvent(result);
+  return latestEvent(result.map(({ event }) => event));
 }
 async function fetchRelayListEvent(pubkey, {
   _getRelaysByPubkey = getRelaysByPubkey,
@@ -6933,14 +7005,16 @@ var Nip46Transport = class {
     const controller = new AbortController();
     const stream = this.#relayPool.getLiveEventsGenerator(filter, relays, {
       signal: controller.signal,
+      timeout: this.#operationTimeout,
       timeoutAfterFirstEose: this.#timeoutAfterFirstEose
     });
     const context = { controller, stream, relays: [...relays], consume: null };
     this.#contexts.add(context);
     context.consume = (async () => {
       try {
-        for await (const event of stream) {
-          Promise.resolve(onEvent(event)).catch((error) => this.#reportError(error));
+        for await (const item of stream) {
+          if (item.type === "error") this.#reportError(item.error);
+          else if (item.type === "event") Promise.resolve(onEvent(item.event)).catch((error) => this.#reportError(error));
         }
       } catch (error) {
         if (!this.#closed && error?.message !== "Aborted") this.#reportError(error);
@@ -7144,12 +7218,19 @@ var Nip46Client = class {
       limit: 0
     }, parsed.relays, {
       signal: controller.signal,
+      timeout: options.timeout ?? DEFAULT_TIMEOUT,
       timeoutAfterFirstEose: options.timeoutAfterFirstEose ?? DEFAULT_TIMEOUT_AFTER_FIRST_EOSE
     });
     const found = Promise.withResolvers();
     const consume = (async () => {
       try {
-        for await (const event of stream) {
+        for await (const item of stream) {
+          if (item.type === "error") {
+            options.onError?.(item.error);
+            continue;
+          }
+          if (item.type !== "event") continue;
+          const { event } = item;
           if (!isNip46EventFor(event, clientPubkey)) continue;
           const response = decodeNip46Frame(event, clientSecretKey);
           if (response?.result === parsed.secret) {
@@ -8286,7 +8367,7 @@ async function getIykcProofs(pubkeys, {
         timeout: 5e3,
         timeoutAfterFirstEose: null
       });
-      return result;
+      return result.map(({ event }) => event);
     })
   );
   const latestByPubkey = {};
@@ -9990,10 +10071,11 @@ async function fetch({ receiverSigner, iykcSigner, privateChannelSigner = receiv
   if (since != null) filter.since = since;
   if (until != null) filter.until = until;
   if (limit != null) filter.limit = limit;
-  const { result: events } = await _getEvents(filter, relays, {
+  const { result } = await _getEvents(filter, relays, {
     timeout: 5e3,
     timeoutAfterFirstEose: null
   });
+  const events = result.map(({ event }) => event);
   events.sort((a, b) => a.created_at - b.created_at);
   const processOuterEvent = createProcessor({ receiverSigner, iykcSigner, privateChannelSigner, privateChannelSignersByPubkey, privateChannelReaderSigner, privateChannelReaderSignersByPubkey, privateChannelReaderPubkey, privateChannelReaderPubkeysByPubkey, receiverPubkey, mode, modeByPubkey, onChunk, onEvent, onNymEvent, onSeedEvent, onContentKeyUsage, onError, receivedChunkTtlMs, receivedChunkTtlMsByPubkey, receivedChunkMaxBytes, receivedChunkIndexedDB, ignoredGroupTtlMs, ignoredGroupMaxEntries });
   try {
@@ -10022,9 +10104,10 @@ function subscribe2({ receiverSigner, iykcSigner, privateChannelSigner = receive
   });
   async function consumeEvents() {
     try {
-      for await (const outer of events) {
+      for await (const item of events) {
         if (controller.signal.aborted) continue;
-        await processOuterEvent(outer);
+        if (item.type === "error") onError?.(item.error);
+        else if (item.type === "event") await processOuterEvent(item.event);
       }
     } catch (error) {
       if (!controller.signal.aborted && error?.message !== "Aborted") onError?.(error);

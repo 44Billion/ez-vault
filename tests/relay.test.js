@@ -88,7 +88,7 @@ test('write-relay resolution falls back and profile reads use resolved relays', 
     _relayPool: {
       async getEvents (_filter, relays) {
         requestedRelays = relays
-        return { result: [profile], errors: [], success: true }
+        return { result: ([profile]).map(event => ({ event, relay: event.meta?.relay ?? 'wss://fixture.test' })), errors: [], success: true }
       }
     }
   })

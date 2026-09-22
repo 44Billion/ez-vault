@@ -86,7 +86,7 @@ describe('vault nostrdb launcher bridge', () => {
       getPort: () => 'port',
       askStream: async function * (port, message, options) {
         calls.push({ type: 'askStream', port, message, options })
-        yield { payload: { result: { id: 'event' }, meta: { source: 'local' } } }
+        yield { payload: { type: 'event', event: { id: 'event' }, meta: { source: 'local' } } }
       },
       tell: (port, message) => calls.push({ type: 'tell', port, message }),
       makeSubscriptionId: () => 'sub-1'
@@ -94,7 +94,7 @@ describe('vault nostrdb launcher bridge', () => {
     const iterator = service.forAccount('d'.repeat(64)).subscribe({ kinds: [1] })
 
     assert.deepEqual(await iterator.next(), {
-      value: { result: { id: 'event' }, meta: { source: 'local' } },
+      value: { type: 'event', event: { id: 'event' }, meta: { source: 'local' } },
       done: false
     })
     assert.deepEqual(await iterator.return(), { done: true })

@@ -32,7 +32,7 @@ async function fetchLatestEvent (filter, relays, { _relayPool = relayPool } = {}
     timeout: READ_TIMEOUT_MS,
     timeoutAfterFirstEose: READ_TIMEOUT_AFTER_FIRST_EOSE_MS
   })
-  return latestEvent(result)
+  return latestEvent(result.map(({ event }) => event))
 }
 
 export async function fetchRelayListEvent (pubkey, {

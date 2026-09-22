@@ -1,9 +1,9 @@
 import {
   arrayBufferBytes
-} from "./chunk-QHQWPLWS.js";
+} from "./chunk-YAIOXYQH.js";
 import {
   filterVisibleAccounts
-} from "./chunk-4KWP7U7B.js";
+} from "./chunk-GHIMHCHN.js";
 import {
   CONTENT_KEY_KIND,
   PERSONAL_COPY,
@@ -35,7 +35,7 @@ import {
   setState,
   subscribe2 as subscribe,
   update
-} from "./chunk-GMXGPW7U.js";
+} from "./chunk-FRQWHRZ4.js";
 
 // node_modules/libp2r2p/network/index.js
 var RETRY_DELAYS = [5e3, 15e3, 3e4, 6e4];
@@ -345,7 +345,7 @@ async function fetchLatestContentKeyEventFromRelay({ ownerPubkey, relay, _relayP
     });
     if (!response.success) throw response.errors[0]?.reason || new Error("CONTENT_KEY_RELAY_READ_FAILED");
     let latest = null;
-    for (const event of response.result) {
+    for (const { event } of response.result) {
       const parsed = parseContentKeyEvent(event);
       if (!parsed) continue;
       if (!latest || event.created_at > latest.event.created_at) latest = { event, parsed };
