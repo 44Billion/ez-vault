@@ -6,18 +6,18 @@ import {
   requestNostrDbAppBackfill,
   serializeError,
   tell
-} from "./chunk-LRESCHY5.js";
+} from "./chunk-2U7FZ2Q3.js";
 import {
   append
-} from "./chunk-IUHBM6YF.js";
+} from "./chunk-ALETP3YV.js";
 import {
   run
-} from "./chunk-656MY7Q6.js";
+} from "./chunk-Z2IRPAYI.js";
 import {
   filterVisibleAccounts,
   read,
   subscribe as subscribe3
-} from "./chunk-GHIMHCHN.js";
+} from "./chunk-KG6EB3FC.js";
 import {
   closeStorage,
   get,
@@ -30,7 +30,7 @@ import {
   subscribe,
   subscribe2,
   update
-} from "./chunk-FRQWHRZ4.js";
+} from "./chunk-BMNLPMUY.js";
 import {
   launcherLocale,
   setLocale
@@ -349,6 +349,15 @@ async function initMessenger() {
   }
   launcherOrigin ??= origin;
   handshakeComplete = true;
+  window.addEventListener("pagehide", () => {
+    if (launcherPort === port1 && handshakeComplete) tell(port1, { code: "VAULT_CONNECTION_STATE", payload: { connected: false } });
+  });
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted && launcherPort === port1 && handshakeComplete) {
+      setAccountsState();
+      tell(port1, { code: "VAULT_CONNECTION_STATE", payload: { connected: true } });
+    }
+  });
   lastAccountsStateFingerprint = accountsFingerprint;
   pendingTranslateMessages.splice(0).forEach(handleTranslate);
   connect(launcherPort);
@@ -365,6 +374,7 @@ function onPortMessage(e) {
     return;
   }
   if (!handshakeComplete) return;
+  if (code === "VAULT_PING") return reply(e, { payload: true }, { to: launcherPort });
   if (handleLegacyViewMessage(e)) return;
   if (code === "UPDATE_ACCOUNT_EVENTS") return handleUpdateAccountEvents(e);
   if (code === "NOSTRDB_APP_BACKFILL") return handleNostrDbAppBackfill(e);

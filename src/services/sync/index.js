@@ -431,11 +431,13 @@ export function createSyncController ({
         let reachedEmptyQueue = false
         // eslint-disable-next-line no-unmodified-loop-condition
         while (isCurrentLifecycle(id) && messenger && _secrets.isUnlocked()) {
-          const message = await messenger.nextMessage?.()
-          if (!message) {
+          const delivery = await messenger.nextMessage?.()
+          if (!delivery) {
             reachedEmptyQueue = true
             break
           }
+          const { message, ack, nack } = delivery
+          if (!isCurrentLifecycle(id) || !_secrets.isUnlocked()) { await nack(); break }
           handled += 1
           emitDebug('handle', messageDebugInfo(message))
           try {
@@ -464,8 +466,14 @@ export function createSyncController ({
                 })
               }
             }
+            await ack()
           } catch (err) {
+            await nack()
             onError(err)
+            // Do not spin on a persistent storage/permission failure. A later
+            // unlock, refresh or queued delivery schedules another attempt.
+            drainQueued = false
+            break
           }
         }
         if (reachedEmptyQueue) drainQueued = false

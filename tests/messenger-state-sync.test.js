@@ -25,6 +25,7 @@ const parent = {
 }
 
 globalThis.window = {
+  addEventListener: globalThis.addEventListener,
   top: {},
   parent,
   location: {

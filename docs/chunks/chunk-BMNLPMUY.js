@@ -8177,6 +8177,7 @@ __export(private_message_exports, {
   broadcastNymRumor: () => broadcastNymRumor,
   broadcastRumor: () => broadcastRumor,
   clearChannelState: () => clearChannelState,
+  createPrivateMessageSession: () => createPrivateMessageSession,
   parseRumorContent: () => parseRumorContent,
   reply: () => reply,
   tell: () => tell,
@@ -8386,6 +8387,28 @@ async function getIykcProofs(pubkeys, {
   }
   pruneCache(contentKeysByPubkey, iykcCacheTimersByPubkey, iykcCacheAddedAtByPubkey, IYKC_CACHE_MAX_ITEMS);
   return out;
+}
+
+// node_modules/libp2r2p/private-channel/helpers/rumor.js
+function normalizeRumor(rumor, senderPubkey) {
+  if (!rumor || typeof rumor !== "object" || Array.isArray(rumor) || "sig" in rumor) throw new ValidationError("INVALID_RUMOR");
+  const event = {
+    pubkey: rumor.pubkey === void 0 ? senderPubkey : rumor.pubkey,
+    kind: rumor.kind,
+    created_at: rumor.created_at,
+    tags: rumor.tags,
+    content: rumor.content
+  };
+  if (!isSerializableEvent(event)) throw new ValidationError("INVALID_RUMOR");
+  const id = getEventHash(event);
+  if (rumor.id !== void 0 && rumor.id !== id) throw new ValidationError("INVALID_RUMOR_ID");
+  return { ...event, id };
+}
+function deliveryInfo(event, senderPubkey) {
+  return {
+    senderPubkey,
+    provenance: event.sig ? "signed" : event.pubkey === senderPubkey ? "direct" : "hearsay"
+  };
 }
 
 // node_modules/libp2r2p/private-channel/constants/index.js
@@ -8898,6 +8921,7 @@ function wait(ms) {
 }
 function createReceivedChunkStore({
   prefix = DEFAULT_PREFIX,
+  scope = "",
   indexedDB = globalThis.indexedDB,
   ttlMs = DEFAULT_RECEIVED_CHUNK_TTL_MS,
   maxBytes = DEFAULT_RECEIVED_CHUNK_MAX_BYTES
@@ -8939,7 +8963,7 @@ function createReceivedChunkStore({
     }
   }
   function groupKeyFor(channelPubkey, routerPubkey) {
-    return `${channelPubkey}:${routerPubkey}`;
+    return `${scope ? `${scope}:` : ""}${channelPubkey}:${routerPubkey}`;
   }
   async function readUsage(tx) {
     return normalizeUsage((await run("get", [USAGE_KEY], STATE_STORE2, null, { tx })).result);
@@ -9590,8 +9614,7 @@ function eventFromPayload({ payloadCiphertext, messageSeckey, senderPubkey }) {
   const messagePubkey = getPublicKey(messageSecretKey);
   const decrypted = JSON.parse(decrypt4(messageSecretKey, messagePubkey, ROUTER_KIND, NIP44_V3_SCOPE, payloadCiphertext));
   if (hasEventSignature(decrypted)) return assertValidSignedInnerEvent(decrypted);
-  const normalized = { ...decrypted, pubkey: senderPubkey };
-  return { ...normalized, id: getEventHash(normalized) };
+  return normalizeRumor(decrypted, senderPubkey);
 }
 async function unwrapRecipientEnvelope({ payloadCiphertext, envelope, receiverSigner, receiverPubkey, senderPubkey, imkcPubkey, rowScope = "" }) {
   if (receiverPubkey && envelope.receiverPubkey !== receiverPubkey) return null;
@@ -9855,6 +9878,7 @@ function createProcessor({
   onSeedEvent,
   onContentKeyUsage,
   onError,
+  receivedChunkScope = "",
   receivedChunkTtlMs = DEFAULT_RECEIVED_CHUNK_TTL_MS,
   receivedChunkTtlMsByPubkey,
   receivedChunkMaxBytes = DEFAULT_RECEIVED_CHUNK_MAX_BYTES,
@@ -9863,6 +9887,7 @@ function createProcessor({
   ignoredGroupMaxEntries = DEFAULT_IGNORED_GROUP_MAX_ENTRIES
 }) {
   const receivedChunks = createReceivedChunkStore({
+    scope: `${receivedChunkScope}:${receiverPubkey || ""}`,
     ttlMs: receivedChunkTtlMs,
     maxBytes: receivedChunkMaxBytes,
     indexedDB: receivedChunkIndexedDB
@@ -9932,7 +9957,8 @@ function createProcessor({
         await onNymEvent?.(event2, outer, {
           carrier: carriers[0],
           carriers,
-          channelPubkey
+          channelPubkey,
+          ...deliveryInfo(event2, carriers[0].pubkey)
         });
         await receivedChunks.removeGroup(groupKey);
         return;
@@ -10008,7 +10034,7 @@ function createProcessor({
         }
       });
       if (event && !mustScanWholeBundle) {
-        await onEvent?.(event, outer, { router: joinedRouter(router), channelPubkey });
+        await onEvent?.(event, outer, { router: joinedRouter(router), channelPubkey, ...deliveryInfo(event, senderPubkey) });
         ignoredGroups.add(groupKey);
         await receivedChunks.removeGroup(groupKey);
         return;
@@ -10027,7 +10053,7 @@ function createProcessor({
         onContentKeyUsage
       });
       if (shouldSeed) await onSeedEvent?.({ recordType: "routerRow_v1", outer, router: completeRouter, channelPubkey, jsonl, innerEventIdsByRowIndex });
-      if (event) await onEvent?.(event, outer, { router: completeRouter, channelPubkey, jsonl });
+      if (event) await onEvent?.(event, outer, { router: completeRouter, channelPubkey, jsonl, ...deliveryInfo(event, senderPubkey) });
       await receivedChunks.removeGroup(groupKey);
     } catch (err) {
       if (shouldIgnoreGroupError(err) && groupKey) {
@@ -10035,6 +10061,8 @@ function createProcessor({
         await receivedChunks.removeGroup(groupKey).catch(() => {
         });
       }
+      if (groupKey && !shouldIgnoreGroupError(err)) await receivedChunks.removeGroup(groupKey).catch(() => {
+      });
       onError?.(err);
     }
   }
@@ -10063,7 +10091,7 @@ function shouldIgnoreGroupError(err) {
     "MISSING_NYM_CARRIER_ID"
   ].includes(err?.message);
 }
-async function fetch({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelSignersByPubkey, privateChannelReaderSigner = privateChannelSigner, privateChannelReaderSignersByPubkey, privateChannelReaderPubkey, privateChannelReaderPubkeysByPubkey, privateChannelPubkey, privateChannelPubkeys, receiverPubkey, relays, onChunk, onEvent, onNymEvent, onSeedEvent, onContentKeyUsage, onError, since, until, limit, mode = "leecher", modeByPubkey, receivedChunkTtlMs = DEFAULT_RECEIVED_CHUNK_TTL_MS, receivedChunkTtlMsByPubkey, receivedChunkMaxBytes = DEFAULT_RECEIVED_CHUNK_MAX_BYTES, receivedChunkIndexedDB = globalThis.indexedDB, ignoredGroupTtlMs = DEFAULT_IGNORED_GROUP_TTL_MS, ignoredGroupMaxEntries = DEFAULT_IGNORED_GROUP_MAX_ENTRIES, _getEvents = getEvents3 }) {
+async function fetch({ signal, receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelSignersByPubkey, privateChannelReaderSigner = privateChannelSigner, privateChannelReaderSignersByPubkey, privateChannelReaderPubkey, privateChannelReaderPubkeysByPubkey, privateChannelPubkey, privateChannelPubkeys, receiverPubkey, relays, onChunk, onEvent, onNymEvent, onSeedEvent, onContentKeyUsage, onError, since, until, limit, mode = "leecher", modeByPubkey, receivedChunkScope = "", receivedChunkTtlMs = DEFAULT_RECEIVED_CHUNK_TTL_MS, receivedChunkTtlMsByPubkey, receivedChunkMaxBytes = DEFAULT_RECEIVED_CHUNK_MAX_BYTES, receivedChunkIndexedDB = globalThis.indexedDB, ignoredGroupTtlMs = DEFAULT_IGNORED_GROUP_TTL_MS, ignoredGroupMaxEntries = DEFAULT_IGNORED_GROUP_MAX_ENTRIES, _getEvents = getEvents3 }) {
   if (!relays?.length) throw new ValidationError("NO_RELAYS");
   const authors = privateChannelPubkeyList({ privateChannelPubkey, privateChannelPubkeys });
   const filter = { kinds: [PRIVATE_BROADCAST_KIND] };
@@ -10071,21 +10099,29 @@ async function fetch({ receiverSigner, iykcSigner, privateChannelSigner = receiv
   if (since != null) filter.since = since;
   if (until != null) filter.until = until;
   if (limit != null) filter.limit = limit;
-  const { result } = await _getEvents(filter, relays, {
+  const { result, errors = [], relays: report = [] } = await _getEvents(filter, relays, {
     timeout: 5e3,
-    timeoutAfterFirstEose: null
+    timeoutAfterFirstEose: null,
+    ...signal ? { signal } : {}
   });
   const events = result.map(({ event }) => event);
   events.sort((a, b) => a.created_at - b.created_at);
-  const processOuterEvent = createProcessor({ receiverSigner, iykcSigner, privateChannelSigner, privateChannelSignersByPubkey, privateChannelReaderSigner, privateChannelReaderSignersByPubkey, privateChannelReaderPubkey, privateChannelReaderPubkeysByPubkey, receiverPubkey, mode, modeByPubkey, onChunk, onEvent, onNymEvent, onSeedEvent, onContentKeyUsage, onError, receivedChunkTtlMs, receivedChunkTtlMsByPubkey, receivedChunkMaxBytes, receivedChunkIndexedDB, ignoredGroupTtlMs, ignoredGroupMaxEntries });
+  const processOuterEvent = createProcessor({ receiverSigner, iykcSigner, privateChannelSigner, privateChannelSignersByPubkey, privateChannelReaderSigner, privateChannelReaderSignersByPubkey, privateChannelReaderPubkey, privateChannelReaderPubkeysByPubkey, receiverPubkey, mode, modeByPubkey, onChunk, onEvent, onNymEvent, onSeedEvent, onContentKeyUsage, onError, receivedChunkScope, receivedChunkTtlMs, receivedChunkTtlMsByPubkey, receivedChunkMaxBytes, receivedChunkIndexedDB, ignoredGroupTtlMs, ignoredGroupMaxEntries });
   try {
-    for (const event of events) await processOuterEvent(event);
+    for (const event of events) {
+      signal?.throwIfAborted();
+      await processOuterEvent(event);
+    }
+    signal?.throwIfAborted();
+    if (errors.length || report.some((entry) => !["eose", "satisfied"].includes(entry.status))) {
+      throw new AggregateError(errors.map((entry) => entry.reason), "PRIVATE_CHANNEL_FETCH_INCOMPLETE");
+    }
     return events;
   } finally {
     processOuterEvent.close();
   }
 }
-function subscribe2({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelSignersByPubkey, privateChannelReaderSigner = privateChannelSigner, privateChannelReaderSignersByPubkey, privateChannelReaderPubkey, privateChannelReaderPubkeysByPubkey, privateChannelPubkey, privateChannelPubkeys, receiverPubkey, relays, onChunk, onEvent, onNymEvent, onSeedEvent, onContentKeyUsage, onError, since = nowSeconds2() - 5, limit, liveOnly = false, mode = "leecher", modeByPubkey, receivedChunkTtlMs = DEFAULT_RECEIVED_CHUNK_TTL_MS, receivedChunkTtlMsByPubkey, receivedChunkMaxBytes = DEFAULT_RECEIVED_CHUNK_MAX_BYTES, receivedChunkIndexedDB = globalThis.indexedDB, ignoredGroupTtlMs = DEFAULT_IGNORED_GROUP_TTL_MS, ignoredGroupMaxEntries = DEFAULT_IGNORED_GROUP_MAX_ENTRIES, _liveEventsGenerator = getLiveEventsGenerator, _eventsFeedGenerator = getEventsFeedGenerator2 }) {
+function subscribe2({ receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelSignersByPubkey, privateChannelReaderSigner = privateChannelSigner, privateChannelReaderSignersByPubkey, privateChannelReaderPubkey, privateChannelReaderPubkeysByPubkey, privateChannelPubkey, privateChannelPubkeys, receiverPubkey, relays, onChunk, onEvent, onNymEvent, onSeedEvent, onContentKeyUsage, onError, since = nowSeconds2() - 5, limit, liveOnly = false, mode = "leecher", modeByPubkey, receivedChunkScope = "", receivedChunkTtlMs = DEFAULT_RECEIVED_CHUNK_TTL_MS, receivedChunkTtlMsByPubkey, receivedChunkMaxBytes = DEFAULT_RECEIVED_CHUNK_MAX_BYTES, receivedChunkIndexedDB = globalThis.indexedDB, ignoredGroupTtlMs = DEFAULT_IGNORED_GROUP_TTL_MS, ignoredGroupMaxEntries = DEFAULT_IGNORED_GROUP_MAX_ENTRIES, _liveEventsGenerator = getLiveEventsGenerator, _eventsFeedGenerator = getEventsFeedGenerator2 }) {
   if (!relays?.length) throw new ValidationError("NO_RELAYS");
   if (receiverSigner && !receiverSigner?.nip44DecryptDoubleDH && !receiverSigner?.nip44v3Decrypt) throw new ValidationError("RECEIVER_SIGNER_NIP44V3_DECRYPT_UNSUPPORTED");
   if (!privateChannelReaderSigner && !privateChannelReaderSignersByPubkey && !privateChannelSigner && !privateChannelSignersByPubkey) throw new ValidationError("PRIVATE_CHANNEL_READER_REQUIRED");
@@ -10093,7 +10129,7 @@ function subscribe2({ receiverSigner, iykcSigner, privateChannelSigner = receive
   const filter = { kinds: [PRIVATE_BROADCAST_KIND], since };
   if (authors.length) filter.authors = authors;
   if (limit != null) filter.limit = limit;
-  const processOuterEvent = createProcessor({ receiverSigner, iykcSigner, privateChannelSigner, privateChannelSignersByPubkey, privateChannelReaderSigner, privateChannelReaderSignersByPubkey, privateChannelReaderPubkey, privateChannelReaderPubkeysByPubkey, receiverPubkey, mode, modeByPubkey, onChunk, onEvent, onNymEvent, onSeedEvent, onContentKeyUsage, onError, receivedChunkTtlMs, receivedChunkTtlMsByPubkey, receivedChunkMaxBytes, receivedChunkIndexedDB, ignoredGroupTtlMs, ignoredGroupMaxEntries });
+  const processOuterEvent = createProcessor({ receiverSigner, iykcSigner, privateChannelSigner, privateChannelSignersByPubkey, privateChannelReaderSigner, privateChannelReaderSignersByPubkey, privateChannelReaderPubkey, privateChannelReaderPubkeysByPubkey, receiverPubkey, mode, modeByPubkey, onChunk, onEvent, onNymEvent, onSeedEvent, onContentKeyUsage, onError, receivedChunkScope, receivedChunkTtlMs, receivedChunkTtlMsByPubkey, receivedChunkMaxBytes, receivedChunkIndexedDB, ignoredGroupTtlMs, ignoredGroupMaxEntries });
   const controller = new AbortController();
   const events = liveOnly ? _liveEventsGenerator(filter, relays, {
     signal: controller.signal
@@ -10131,9 +10167,6 @@ var TELL_KIND = 7331;
 var RESUBSCRIBE_GRACE_MS = 500;
 var PRIVATE_MESSAGE_KINDS = [ASK_KIND, REPLY_KIND, TELL_KIND];
 var HEX_PUBKEY5 = /^[0-9a-f]{64}$/i;
-var watchesByChannel = /* @__PURE__ */ new Map();
-var subsByRelay = /* @__PURE__ */ new Map();
-var nextWatchRevision = 1;
 function nowSeconds3() {
   return Math.floor(Date.now() / 1e3);
 }
@@ -10227,19 +10260,13 @@ function cloneTags(tags) {
 async function makeOutgoingRumor({ senderSigner, rumor }) {
   if (!senderSigner?.getPublicKey) throw new ValidationError("SENDER_SIGNER_REQUIRED");
   const senderPubkey = await senderSigner.getPublicKey();
-  const wireEvent = {
-    kind: rumor.kind,
-    tags: cloneTags(rumor.tags),
-    content: rumor.content,
-    created_at: rumor.created_at !== void 0 ? rumor.created_at : nowSeconds3()
-  };
-  const event = normalizeRumor(wireEvent, senderPubkey);
+  if (rumor.pubkey !== void 0 && rumor.pubkey !== senderPubkey && rumor.created_at === void 0) {
+    throw new ValidationError("FORWARDED_RUMOR_TIMESTAMP_REQUIRED");
+  }
+  const event = normalizeRumor({ ...rumor, tags: cloneTags(rumor.tags), created_at: rumor.created_at === void 0 ? nowSeconds3() : rumor.created_at }, senderPubkey);
+  const { id: _, pubkey, ...template } = event;
+  const wireEvent = pubkey === senderPubkey ? template : { ...template, pubkey };
   return { event, wireEvent };
-}
-function normalizeRumor(event, pubkey) {
-  const normalized = { ...event, pubkey };
-  if (!isSerializableEvent(normalized)) throw new ValidationError("INVALID_RUMOR");
-  return { ...normalized, id: getEventHash(normalized) };
 }
 function assertValidSignedEvent(event) {
   if (!isValidEvent(event)) {
@@ -10254,266 +10281,326 @@ async function ownPrivateChannelPubkey(signer) {
   if (!signer?.getPublicKey) throw new ValidationError("PRIVATE_CHANNEL_SIGNER_REQUIRED");
   return signer.getPublicKey();
 }
-function assertWatching(channelPubkey) {
-  if (!watchesByChannel.has(channelPubkey)) throw new Error("PRIVATE_MESSAGE_NOT_WATCHING");
-}
-function watchCallbacks(channelPubkey) {
-  return watchesByChannel.get(channelPubkey)?.callbacks || {};
-}
-function dispatchWatchedEvent(event, outer, meta) {
-  const callbacks = watchCallbacks(meta.channelPubkey);
-  const payload = parseRumorContent(event);
-  const message = { event, outer, meta, payload };
-  if (event.kind === ASK_KIND) {
-    callbacks.onAsk?.({ ...message, question: event });
-  } else if (event.kind === REPLY_KIND) {
-    const questionId = readTag(event, "q");
-    callbacks.onReply?.({ ...message, questionId, reply: event });
-  } else if (event.kind === TELL_KIND) {
-    const receiverTag = readTag(event, "r");
-    if (receiverTag) callbacks.onTell?.({ ...message, tell: event });
-    else callbacks.onYell?.({ ...message, yell: event });
+function createPrivateMessageSession() {
+  const watchesByChannel = /* @__PURE__ */ new Map();
+  const subsByRelay = /* @__PURE__ */ new Map();
+  let nextWatchRevision = 1;
+  let requestSequence = 0;
+  const watchRequests = /* @__PURE__ */ new Map();
+  let identity;
+  const receivedChunkScope = globalThis.crypto.randomUUID();
+  let subscribe4 = subscribe2;
+  function assertWatching(channelPubkey) {
+    if (!watchesByChannel.has(channelPubkey)) throw new Error("PRIVATE_MESSAGE_NOT_WATCHING");
   }
-  callbacks.onMessage?.(message);
-}
-function dispatchWatchedNymEvent(event, outer, meta) {
-  const callbacks = watchCallbacks(meta.channelPubkey);
-  callbacks.onNym?.({
-    event,
-    outer,
-    meta,
-    payload: parseRumorContent(event),
-    nym: event
-  });
-}
-function dispatchSeedEvent(seed) {
-  watchCallbacks(seed.channelPubkey).onSeed?.(seed);
-}
-function dispatchContentKeyUsage(usage) {
-  watchCallbacks(usage.channelPubkey).onContentKeyUsage?.(usage);
-}
-function handleChunk(chunk) {
-  watchCallbacks(chunk.channelPubkey).onChunk?.(chunk);
-}
-function desiredRelayState() {
-  const relayToChannels = /* @__PURE__ */ new Map();
-  for (const [channelPubkey, watch2] of watchesByChannel) {
-    for (const relay of watch2.relays) {
-      if (!relayToChannels.has(relay)) relayToChannels.set(relay, /* @__PURE__ */ new Set());
-      relayToChannels.get(relay).add(channelPubkey);
+  function watchCallbacks(channelPubkey) {
+    return watchesByChannel.get(channelPubkey)?.callbacks || {};
+  }
+  async function dispatchWatchedEvent(event, outer, meta) {
+    const callbacks = watchCallbacks(meta.channelPubkey);
+    const payload = parseRumorContent(event);
+    const info = deliveryInfo(event, meta.senderPubkey ?? meta.router?.tags?.find((tag) => tag[0] === "f")?.[1]);
+    const message = { event, outer, meta, payload, ...info };
+    if (info.provenance === "hearsay" || info.senderPubkey && info.senderPubkey !== event.pubkey) {
+      await callbacks.onMessage?.(message);
+      return;
     }
-  }
-  return relayToChannels;
-}
-function signersForChannels(channels) {
-  const out = {};
-  for (const channel of channels) {
-    const signer = watchesByChannel.get(channel)?.privateChannelSigner;
-    if (signer) out[channel] = signer;
-  }
-  return out;
-}
-function readerSignersForChannels(channels) {
-  const out = {};
-  for (const channel of channels) {
-    const signer = watchesByChannel.get(channel)?.privateChannelReaderSigner;
-    if (signer) out[channel] = signer;
-  }
-  return out;
-}
-function readerPubkeysForChannels(channels) {
-  const out = {};
-  for (const channel of channels) {
-    const pubkey = watchesByChannel.get(channel)?.privateChannelReaderPubkey;
-    if (pubkey) out[channel] = pubkey;
-  }
-  return out;
-}
-function modesForChannels(channels) {
-  const out = {};
-  for (const channel of channels) out[channel] = watchesByChannel.get(channel)?.mode || "leecher";
-  return out;
-}
-function maxWatchNumber(channels, field) {
-  const values = channels.map((channel) => watchesByChannel.get(channel)?.[field]).filter((value) => Number.isFinite(value));
-  return values.length ? Math.max(...values) : void 0;
-}
-function watchNumbersForChannels(channels, field) {
-  const out = {};
-  for (const channel of channels) {
-    const value = watchesByChannel.get(channel)?.[field];
-    if (Number.isFinite(value)) out[channel] = value;
-  }
-  return out;
-}
-function watchRevisionsForChannels(channels) {
-  return Object.fromEntries(channels.map((channel) => [channel, watchesByChannel.get(channel)?.revision || 0]));
-}
-function doesSubscriptionMatch(current, channels) {
-  if (!current || !areSetsEqual(current.channels, channels)) return false;
-  for (const channel of channels) {
-    if (current.revisions?.[channel] !== watchesByChannel.get(channel)?.revision) return false;
-  }
-  return true;
-}
-function firstWatchValue(channels, field) {
-  for (const channel of channels) {
-    const value = watchesByChannel.get(channel)?.[field];
-    if (value !== void 0) return value;
-  }
-  return void 0;
-}
-function closeSubscription(sub, gracefulClose) {
-  if (gracefulClose) {
-    setTimeout(() => Promise.resolve().then(() => sub.close()).catch(() => {
-    }), RESUBSCRIBE_GRACE_MS);
-    return null;
-  }
-  try {
-    return Promise.resolve(sub.close());
-  } catch (err) {
-    return Promise.reject(err);
-  }
-}
-function rebuildSubscriptions({ _subscribe = subscribe2, gracefulClose = true } = {}) {
-  const desired = desiredRelayState();
-  const closing = [];
-  for (const [relay, current] of subsByRelay) {
-    const nextChannels = desired.get(relay);
-    if (nextChannels && doesSubscriptionMatch(current, nextChannels)) continue;
-    if (!nextChannels) {
-      const close = closeSubscription(current.sub, gracefulClose);
-      if (close) closing.push(close);
-      subsByRelay.delete(relay);
+    if (event.kind === ASK_KIND) {
+      await callbacks.onAsk?.({ ...message, question: event });
+    } else if (event.kind === REPLY_KIND) {
+      const questionId = readTag(event, "q");
+      await callbacks.onReply?.({ ...message, questionId, reply: event });
+    } else if (event.kind === TELL_KIND) {
+      const receiverTag = readTag(event, "r");
+      if (receiverTag) await callbacks.onTell?.({ ...message, tell: event });
+      else await callbacks.onYell?.({ ...message, yell: event });
     }
+    await callbacks.onMessage?.(message);
   }
-  for (const [relay, channels] of desired) {
-    const current = subsByRelay.get(relay);
-    if (doesSubscriptionMatch(current, channels)) continue;
-    const channelList = [...channels];
-    const firstWatch = watchesByChannel.get(channelList[0]);
-    const sub = _subscribe({
-      receiverSigner: firstWatch.receiverSigner,
-      iykcSigner: firstWatch.iykcSigner,
-      privateChannelSigner: firstWatch.privateChannelSigner,
-      privateChannelSignersByPubkey: signersForChannels(channelList),
-      privateChannelReaderSigner: firstWatch.privateChannelReaderSigner,
-      privateChannelReaderSignersByPubkey: readerSignersForChannels(channelList),
-      privateChannelReaderPubkey: firstWatch.privateChannelReaderPubkey,
-      privateChannelReaderPubkeysByPubkey: readerPubkeysForChannels(channelList),
-      privateChannelPubkeys: channelList,
-      receiverPubkey: firstWatch.receiverPubkey,
-      relays: [relay],
-      mode: firstWatch.mode,
-      modeByPubkey: modesForChannels(channelList),
-      receivedChunkTtlMs: maxWatchNumber(channelList, "receivedChunkTtlMs"),
-      receivedChunkTtlMsByPubkey: watchNumbersForChannels(channelList, "receivedChunkTtlMs"),
-      receivedChunkMaxBytes: maxWatchNumber(channelList, "receivedChunkMaxBytes"),
-      receivedChunkIndexedDB: firstWatchValue(channelList, "receivedChunkIndexedDB"),
-      ignoredGroupTtlMs: maxWatchNumber(channelList, "ignoredGroupTtlMs"),
-      ignoredGroupMaxEntries: maxWatchNumber(channelList, "ignoredGroupMaxEntries"),
-      limit: 0,
-      since: nowSeconds3(),
-      liveOnly: true,
-      onChunk: handleChunk,
-      onEvent: (event, outer, meta) => {
-        dispatchWatchedEvent(event, outer, meta);
-      },
-      onNymEvent: (event, outer, meta) => {
-        dispatchWatchedNymEvent(event, outer, meta);
-      },
-      onSeedEvent: (seed) => {
-        dispatchSeedEvent(seed);
-      },
-      onContentKeyUsage: dispatchContentKeyUsage,
-      onError: (err) => firstWatch.callbacks.onError?.(err)
+  async function dispatchWatchedNymEvent(event, outer, meta) {
+    const callbacks = watchCallbacks(meta.channelPubkey);
+    await callbacks.onNym?.({
+      event,
+      outer,
+      meta,
+      payload: parseRumorContent(event),
+      ...deliveryInfo(event, meta.senderPubkey ?? meta.carrier?.pubkey ?? event.pubkey),
+      nym: event
     });
-    subsByRelay.set(relay, {
-      channels: new Set(channels),
-      revisions: watchRevisionsForChannels(channelList),
-      sub
-    });
-    if (current) {
-      const close = closeSubscription(current.sub, gracefulClose);
-      if (close) closing.push(close);
+  }
+  function dispatchSeedEvent(seed) {
+    return watchCallbacks(seed.channelPubkey).onSeed?.(seed);
+  }
+  function dispatchContentKeyUsage(usage) {
+    watchCallbacks(usage.channelPubkey).onContentKeyUsage?.(usage);
+  }
+  function handleChunk(chunk) {
+    watchCallbacks(chunk.channelPubkey).onChunk?.(chunk);
+  }
+  function desiredRelayState() {
+    const relayToChannels = /* @__PURE__ */ new Map();
+    for (const [channelPubkey, watch3] of watchesByChannel) {
+      for (const relay of watch3.relays) {
+        if (!relayToChannels.has(relay)) relayToChannels.set(relay, /* @__PURE__ */ new Set());
+        relayToChannels.get(relay).add(channelPubkey);
+      }
+    }
+    return relayToChannels;
+  }
+  function signersForChannels(channels) {
+    const out = {};
+    for (const channel of channels) {
+      const signer = watchesByChannel.get(channel)?.privateChannelSigner;
+      if (signer) out[channel] = signer;
+    }
+    return out;
+  }
+  function readerSignersForChannels(channels) {
+    const out = {};
+    for (const channel of channels) {
+      const signer = watchesByChannel.get(channel)?.privateChannelReaderSigner;
+      if (signer) out[channel] = signer;
+    }
+    return out;
+  }
+  function readerPubkeysForChannels(channels) {
+    const out = {};
+    for (const channel of channels) {
+      const pubkey = watchesByChannel.get(channel)?.privateChannelReaderPubkey;
+      if (pubkey) out[channel] = pubkey;
+    }
+    return out;
+  }
+  function modesForChannels(channels) {
+    const out = {};
+    for (const channel of channels) out[channel] = watchesByChannel.get(channel)?.mode || "leecher";
+    return out;
+  }
+  function maxWatchNumber(channels, field) {
+    const values = channels.map((channel) => watchesByChannel.get(channel)?.[field]).filter((value) => Number.isFinite(value));
+    return values.length ? Math.max(...values) : void 0;
+  }
+  function watchNumbersForChannels(channels, field) {
+    const out = {};
+    for (const channel of channels) {
+      const value = watchesByChannel.get(channel)?.[field];
+      if (Number.isFinite(value)) out[channel] = value;
+    }
+    return out;
+  }
+  function watchRevisionsForChannels(channels) {
+    return Object.fromEntries(channels.map((channel) => [channel, watchesByChannel.get(channel)?.revision || 0]));
+  }
+  function doesSubscriptionMatch(current, channels) {
+    if (!current || !areSetsEqual(current.channels, channels)) return false;
+    for (const channel of channels) {
+      if (current.revisions?.[channel] !== watchesByChannel.get(channel)?.revision) return false;
+    }
+    return true;
+  }
+  function firstWatchValue(channels, field) {
+    for (const channel of channels) {
+      const value = watchesByChannel.get(channel)?.[field];
+      if (value !== void 0) return value;
+    }
+    return void 0;
+  }
+  function closeSubscription(sub, gracefulClose) {
+    if (gracefulClose) {
+      setTimeout(() => Promise.resolve().then(() => sub.close()).catch(() => {
+      }), RESUBSCRIBE_GRACE_MS);
+      return null;
+    }
+    try {
+      return Promise.resolve(sub.close());
+    } catch (err) {
+      return Promise.reject(err);
     }
   }
-  return Promise.allSettled(closing);
-}
-async function watch({
-  channels,
-  relays,
-  receiverSigner,
-  iykcSigner,
-  privateChannelSigner = receiverSigner,
-  privateChannelReaderSigner = privateChannelSigner,
-  privateChannelReaderPubkey,
-  receiverPubkey,
-  mode = "leecher",
-  onAsk,
-  onReply,
-  onTell,
-  onYell,
-  onNym,
-  onMessage,
-  onSeed,
-  onChunk,
-  onContentKeyUsage,
-  onError,
-  receivedChunkTtlMs,
-  receivedChunkMaxBytes,
-  receivedChunkIndexedDB,
-  ignoredGroupTtlMs,
-  ignoredGroupMaxEntries,
-  since = nowSeconds3(),
-  _subscribe = subscribe2
-}) {
-  if (!relays?.length) throw new ValidationError("NO_RELAYS");
-  const channelList = uniq3(channels?.length ? channels : [await ownPrivateChannelPubkey(privateChannelSigner)]);
-  const ownPubkey = receiverPubkey || await receiverSigner?.getPublicKey?.();
-  const callbacks = { onAsk, onReply, onTell, onYell, onNym, onMessage, onSeed, onChunk, onContentKeyUsage, onError };
-  let changed = false;
-  for (const channel of channelList) {
-    const next = {
-      relays: uniq3(relays),
-      receiverSigner,
-      iykcSigner,
-      privateChannelSigner,
-      privateChannelReaderSigner: privateChannelReaderSigner || privateChannelSigner,
-      privateChannelReaderPubkey,
-      receiverPubkey: ownPubkey,
-      mode,
-      receivedChunkTtlMs,
-      receivedChunkMaxBytes,
-      receivedChunkIndexedDB,
-      ignoredGroupTtlMs,
-      ignoredGroupMaxEntries,
-      callbacks,
-      since
+  function rebuildSubscriptions({ _subscribe = subscribe2, gracefulClose = true } = {}) {
+    subscribe4 = _subscribe === subscribe2 ? subscribe4 : _subscribe;
+    _subscribe = subscribe4;
+    const desired = desiredRelayState();
+    const closing = [];
+    for (const [relay, current] of subsByRelay) {
+      const nextChannels = desired.get(relay);
+      if (nextChannels && doesSubscriptionMatch(current, nextChannels)) continue;
+      if (!nextChannels) {
+        const close = closeSubscription(current.sub, gracefulClose);
+        if (close) closing.push(close);
+        subsByRelay.delete(relay);
+      }
+    }
+    for (const [relay, channels] of desired) {
+      const current = subsByRelay.get(relay);
+      if (doesSubscriptionMatch(current, channels)) continue;
+      const channelList = [...channels];
+      const firstWatch = watchesByChannel.get(channelList[0]);
+      const sub = _subscribe({
+        receiverSigner: firstWatch.receiverSigner,
+        iykcSigner: firstWatch.iykcSigner,
+        privateChannelSigner: firstWatch.privateChannelSigner,
+        privateChannelSignersByPubkey: signersForChannels(channelList),
+        privateChannelReaderSigner: firstWatch.privateChannelReaderSigner,
+        privateChannelReaderSignersByPubkey: readerSignersForChannels(channelList),
+        privateChannelReaderPubkey: firstWatch.privateChannelReaderPubkey,
+        privateChannelReaderPubkeysByPubkey: readerPubkeysForChannels(channelList),
+        privateChannelPubkeys: channelList,
+        receiverPubkey: firstWatch.receiverPubkey,
+        relays: [relay],
+        mode: firstWatch.mode,
+        modeByPubkey: modesForChannels(channelList),
+        receivedChunkScope,
+        receivedChunkTtlMs: maxWatchNumber(channelList, "receivedChunkTtlMs"),
+        receivedChunkTtlMsByPubkey: watchNumbersForChannels(channelList, "receivedChunkTtlMs"),
+        receivedChunkMaxBytes: maxWatchNumber(channelList, "receivedChunkMaxBytes"),
+        receivedChunkIndexedDB: firstWatchValue(channelList, "receivedChunkIndexedDB"),
+        ignoredGroupTtlMs: maxWatchNumber(channelList, "ignoredGroupTtlMs"),
+        ignoredGroupMaxEntries: maxWatchNumber(channelList, "ignoredGroupMaxEntries"),
+        limit: 0,
+        since: nowSeconds3(),
+        liveOnly: true,
+        onChunk: handleChunk,
+        onEvent: (event, outer, meta) => {
+          return dispatchWatchedEvent(event, outer, meta);
+        },
+        onNymEvent: (event, outer, meta) => {
+          return dispatchWatchedNymEvent(event, outer, meta);
+        },
+        onSeedEvent: (seed) => {
+          return dispatchSeedEvent(seed);
+        },
+        onContentKeyUsage: dispatchContentKeyUsage,
+        onError: (err) => firstWatch.callbacks.onError?.(err)
+      });
+      subsByRelay.set(relay, {
+        channels: new Set(channels),
+        revisions: watchRevisionsForChannels(channelList),
+        sub
+      });
+      if (current) {
+        const close = closeSubscription(current.sub, gracefulClose);
+        if (close) closing.push(close);
+      }
+    }
+    return Promise.allSettled(closing);
+  }
+  async function watch2({
+    channels,
+    relays,
+    receiverSigner,
+    iykcSigner,
+    privateChannelSigner = receiverSigner,
+    privateChannelReaderSigner = privateChannelSigner,
+    privateChannelReaderPubkey,
+    receiverPubkey,
+    mode = "leecher",
+    onAsk,
+    onReply,
+    onTell,
+    onYell,
+    onNym,
+    onMessage,
+    onSeed,
+    onChunk,
+    onContentKeyUsage,
+    onError,
+    receivedChunkTtlMs,
+    receivedChunkMaxBytes,
+    receivedChunkIndexedDB,
+    ignoredGroupTtlMs,
+    ignoredGroupMaxEntries,
+    since = nowSeconds3(),
+    _subscribe = subscribe2
+  }) {
+    if (!relays?.length) throw new ValidationError("NO_RELAYS");
+    const request = ++requestSequence;
+    const channelList = uniq3(channels?.length ? channels : [await ownPrivateChannelPubkey(privateChannelSigner)]);
+    for (const channel of channelList) {
+      if ((watchRequests.get(channel) || 0) < request) watchRequests.set(channel, request);
+    }
+    const ownPubkey = receiverPubkey || await receiverSigner?.getPublicKey?.();
+    if (identity !== void 0 && identity !== ownPubkey) throw new ValidationError("PRIVATE_MESSAGE_IDENTITY_MISMATCH");
+    identity = ownPubkey;
+    const callbacks = { onAsk, onReply, onTell, onYell, onNym, onMessage, onSeed, onChunk, onContentKeyUsage, onError };
+    let changed = false;
+    for (const channel of channelList) {
+      if (watchRequests.get(channel) !== request) continue;
+      const next = {
+        request,
+        relays: uniq3(relays),
+        receiverSigner,
+        iykcSigner,
+        privateChannelSigner,
+        privateChannelReaderSigner: privateChannelReaderSigner || privateChannelSigner,
+        privateChannelReaderPubkey,
+        receiverPubkey: ownPubkey,
+        mode,
+        receivedChunkTtlMs,
+        receivedChunkMaxBytes,
+        receivedChunkIndexedDB,
+        ignoredGroupTtlMs,
+        ignoredGroupMaxEntries,
+        callbacks,
+        since
+      };
+      const current = watchesByChannel.get(channel);
+      const areSettingsEqual = Boolean(
+        current && current.receiverSigner === next.receiverSigner && current.iykcSigner === next.iykcSigner && current.privateChannelSigner === next.privateChannelSigner && current.privateChannelReaderSigner === next.privateChannelReaderSigner && current.privateChannelReaderPubkey === next.privateChannelReaderPubkey && current.receiverPubkey === next.receiverPubkey && current.mode === next.mode && current.receivedChunkTtlMs === next.receivedChunkTtlMs && current.receivedChunkMaxBytes === next.receivedChunkMaxBytes && current.receivedChunkIndexedDB === next.receivedChunkIndexedDB && current.ignoredGroupTtlMs === next.ignoredGroupTtlMs && current.ignoredGroupMaxEntries === next.ignoredGroupMaxEntries
+      );
+      next.revision = areSettingsEqual ? current.revision : nextWatchRevision++;
+      if (areSettingsEqual && areSetsEqual(new Set(current.relays), new Set(next.relays))) {
+        current.callbacks = callbacks;
+        current.request = request;
+        continue;
+      }
+      watchesByChannel.set(channel, next);
+      changed = true;
+    }
+    if (changed) await rebuildSubscriptions({ _subscribe });
+    return () => {
+      const owned = channelList.filter((channel) => watchRequests.get(channel) === request);
+      return unwatch2(owned);
     };
-    const current = watchesByChannel.get(channel);
-    const areSettingsEqual = Boolean(
-      current && current.receiverSigner === next.receiverSigner && current.iykcSigner === next.iykcSigner && current.privateChannelSigner === next.privateChannelSigner && current.privateChannelReaderSigner === next.privateChannelReaderSigner && current.privateChannelReaderPubkey === next.privateChannelReaderPubkey && current.receiverPubkey === next.receiverPubkey && current.mode === next.mode && current.receivedChunkTtlMs === next.receivedChunkTtlMs && current.receivedChunkMaxBytes === next.receivedChunkMaxBytes && current.receivedChunkIndexedDB === next.receivedChunkIndexedDB && current.ignoredGroupTtlMs === next.ignoredGroupTtlMs && current.ignoredGroupMaxEntries === next.ignoredGroupMaxEntries
-    );
-    next.revision = areSettingsEqual ? current.revision : nextWatchRevision++;
-    if (areSettingsEqual && areSetsEqual(new Set(current.relays), new Set(next.relays))) {
-      current.callbacks = callbacks;
-      continue;
-    }
-    watchesByChannel.set(channel, next);
-    changed = true;
   }
-  if (changed) await rebuildSubscriptions({ _subscribe });
-  return () => unwatch(channelList);
+  function unwatch2(channels) {
+    const channelList = channels ? uniq3(Array.isArray(channels) ? channels : [channels]) : [...watchRequests.keys()];
+    for (const channel of channelList) {
+      watchRequests.set(channel, ++requestSequence);
+      watchesByChannel.delete(channel);
+    }
+    return rebuildSubscriptions({ gracefulClose: false });
+  }
+  function clearChannelState2(channelPubkey) {
+    if (watchesByChannel.has(channelPubkey)) return unwatch2(channelPubkey);
+    return Promise.resolve([]);
+  }
+  return {
+    watch: watch2,
+    unwatch: unwatch2,
+    clearChannelState: clearChannelState2,
+    ask: (options) => ask({ ...options, _assertWatching: assertWatching }),
+    reply,
+    tell,
+    yell,
+    broadcastRumor,
+    broadcastEvent,
+    broadcastNymRumor,
+    broadcastNymEvent
+  };
 }
-function unwatch(channels) {
-  const channelList = channels ? uniq3(Array.isArray(channels) ? channels : [channels]) : [...watchesByChannel.keys()];
-  for (const channel of channelList) watchesByChannel.delete(channel);
-  return rebuildSubscriptions({ gracefulClose: false });
+var defaultSessions = /* @__PURE__ */ new Map();
+async function watch(options) {
+  const identity = options.receiverPubkey || await options.receiverSigner?.getPublicKey?.() || "";
+  let session = defaultSessions.get(identity);
+  if (!session) defaultSessions.set(identity, session = createPrivateMessageSession());
+  return session.watch(options);
 }
-function clearChannelState(channelPubkey) {
-  if (watchesByChannel.has(channelPubkey)) return unwatch(channelPubkey);
-  return Promise.resolve([]);
+async function unwatch(channels) {
+  await Promise.all([...defaultSessions.values()].map((session) => session.unwatch(channels)));
+}
+async function clearChannelState(channelPubkey) {
+  await Promise.all([...defaultSessions.values()].map((session) => session.clearChannelState(channelPubkey)));
 }
 async function sendPrivateMessage({
   senderSigner,
@@ -10571,12 +10658,19 @@ async function ask({
   deletionPubkey,
   deletionSeckey,
   autoDeletionCapability = true,
-  _publish = publish
+  _publish = publish,
+  _assertWatching
 }) {
   if (!receiverPubkey) throw new ValidationError("RECEIVER_PUBKEY_REQUIRED");
   if (!privateChannelSigner?.getPublicKey) throw new ValidationError("PRIVATE_CHANNEL_WRITER_REQUIRED");
   const privateChannelPubkey = await ownPrivateChannelPubkey(privateChannelSigner);
-  assertWatching(privateChannelPubkey);
+  if (_assertWatching) _assertWatching(privateChannelPubkey);
+  else {
+    const identity = await senderSigner?.getPublicKey?.();
+    const session = defaultSessions.get(identity);
+    if (!session) throw new Error("PRIVATE_MESSAGE_NOT_WATCHING");
+    return session.ask({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receiverPubkey, relays, relayToReceivers, recoveryRelays, message, code, payload, error, content, expirationSeconds, temporaryStorageArea, _getIykcProofs, deletionPubkey, deletionSeckey, autoDeletionCapability, _publish });
+  }
   const { event: question, wireEvent } = await makeOutgoingRumor({
     senderSigner,
     rumor: makeMessageRumor({
@@ -10762,6 +10856,8 @@ async function broadcastNymRumor({
   _publish = publishNymEvent
 }) {
   if (!nymSigner?.getPublicKey) throw new ValidationError("NYM_SIGNER_REQUIRED");
+  if (!nymSigner?.getPublicKey) throw new ValidationError("NYM_SIGNER_REQUIRED");
+  if (rumor.pubkey !== void 0 && rumor.pubkey !== await nymSigner.getPublicKey()) throw new ValidationError("NYM_RUMOR_AUTHOR_MISMATCH");
   const { event, wireEvent } = await makeOutgoingRumor({ senderSigner: nymSigner, rumor });
   const deletion = resolveDeletionCapability({ deletionPubkey, deletionSeckey, autoDeletionCapability });
   const reports = await sendNymMessage({ nymSigner, privateChannelSigner, privateChannelReaderPubkey, deletionPubkey: deletion.deletionPubkey, event: wireEvent, relays, relayToReceivers, recoveryRelays, expirationSeconds, _publish });
@@ -10816,6 +10912,7 @@ function byteLength2(value) {
 }
 function normalizeEvictionPolicy(policy) {
   if (policy === "opposite-end" || policy === void 0 || policy === null) return "opposite-end";
+  if (policy === "reject") return "reject";
   if (policy === "fifo" || policy === "head") return "head";
   if (policy === "lifo" || policy === "tail") return "tail";
   throw new ValidationError("QUEUE_INVALID_EVICTION_POLICY");
@@ -11161,6 +11258,12 @@ async function createQueue({
   async function evictToFit(tx, state, requiredBytes, options = {}) {
     if (!hasByteLimit()) return;
     if (requiredBytes > sessionMaxBytes) throw new Error("QUEUE_ITEM_TOO_LARGE");
+    if (configuredEvictionPolicy === "reject") {
+      if (state.usedBytes + requiredBytes > sessionMaxBytes) {
+        throw Object.assign(new Error("QUEUE_CAPACITY_EXCEEDED"), { requiredBytes, maxBytes: sessionMaxBytes });
+      }
+      return;
+    }
     const targetBytes = targetBytesAfterWrite(requiredBytes);
     while (state.usedBytes + requiredBytes > targetBytes) {
       if (!await evictOne(tx, state, options)) break;
@@ -11168,7 +11271,7 @@ async function createQueue({
     if (state.usedBytes + requiredBytes > sessionMaxBytes) throw new Error("QUEUE_CAPACITY_EXCEEDED");
   }
   async function evictToBytes(tx, state, targetBytes, options = {}) {
-    if (!hasByteLimit()) return;
+    if (!hasByteLimit() || configuredEvictionPolicy === "reject") return;
     while (state.usedBytes > targetBytes) {
       if (!await evictOne(tx, state, options)) break;
     }
@@ -11270,7 +11373,7 @@ async function createQueue({
         if (wakeWaiters) wake();
         return value;
       } catch (err) {
-        if (retried || !hasByteLimit() || !isQuotaExceeded2(err)) throw err;
+        if (configuredEvictionPolicy === "reject" || retried || !hasByteLimit() || !isQuotaExceeded2(err)) throw err;
         lowerSessionMaxBytes(requiredBytes);
         retried = true;
       }
@@ -11411,6 +11514,58 @@ async function createQueue({
       return result.map((record) => record.item);
     });
   }
+  async function reserve({ leaseMs = 3e4, now = Date.now() } = {}) {
+    if (!Number.isSafeInteger(leaseMs) || leaseMs <= 0 || !Number.isSafeInteger(now) || now < 0) throw new ValidationError("QUEUE_INVALID_LEASE");
+    const token = globalThis.crypto.randomUUID();
+    const reserved = await mutate2(async (tx) => {
+      const p = deferred4();
+      let cursor = (await run("openCursor", [], ITEMS_STORE, null, { tx, p })).result;
+      while (cursor) {
+        const record = cursor.value;
+        if (!record.reservation || record.reservation.until <= now) {
+          record.reservation = { token, until: now + leaseMs };
+          await putRecord(tx, record);
+          return record;
+        }
+        cursor = await nextCursor(cursor, p);
+      }
+      return null;
+    });
+    if (!reserved) return null;
+    let settled = false;
+    let completedAction;
+    let completedResult;
+    let tail = Promise.resolve();
+    const update2 = (action, at = Date.now()) => {
+      const operation = tail.then(async () => {
+        if (settled) return action === completedAction ? completedResult : false;
+        const result = await mutate2(async (tx, state) => {
+          const record = await getRecord(tx, reserved.position);
+          if (record?.reservation?.token !== token || record.reservation.until <= at) return false;
+          if (action === "ack") {
+            await deleteRecord(tx, record.position);
+            state.usedBytes = Math.max(0, state.usedBytes - record.byteSize);
+            await trimBounds(tx, state);
+          } else {
+            if (action === "renew") record.reservation.until = at + leaseMs;
+            else delete record.reservation;
+            await putRecord(tx, record);
+          }
+          return true;
+        }, { wakeWaiters: action !== "renew" });
+        if (action !== "renew" || !result) {
+          settled = true;
+          completedAction = action;
+          completedResult = result;
+        }
+        return result;
+      });
+      tail = operation.catch(() => {
+      });
+      return operation;
+    };
+    return { item: reserved.item, ack: () => update2("ack"), nack: () => update2("nack"), renew: () => update2("renew") };
+  }
   async function snapshotStoredItems() {
     return snapshot(async (tx) => {
       const state = await readState(tx);
@@ -11473,6 +11628,8 @@ async function createQueue({
     }
   });
   return {
+    reserve,
+    getCapacity: () => snapshot(async (tx) => ({ usedBytes: (await readState(tx)).usedBytes, maxBytes: sessionMaxBytes })),
     enqueue: push,
     push,
     pop,
@@ -12276,7 +12433,7 @@ var SEED_TIME = "__p2r2pSeedTime";
 var MESSAGE_QUEUE_INDEXES = {
   byChannel: "channelPubkey",
   byChannelTypeEventId: {
-    keyPath: ["channelPubkey", "type", "event.id"],
+    keyPath: ["channelPubkey", "type", "event.id", "provenance"],
     unique: true
   }
 };
@@ -12401,7 +12558,7 @@ var PrivateMessenger = class _PrivateMessenger {
     this.onMessageQueued = onMessageQueued;
     this.onDebug = onDebug;
     this.onError = onError;
-    this._privateMessage = _privateMessage;
+    this._privateMessage = _privateMessage.createPrivateMessageSession?.() ?? _privateMessage;
     this._privateChannel = _privateChannel;
     this._getRelaysByPubkey = _getRelaysByPubkey;
     this._pickRelaysForPubkeys = _pickRelaysForPubkeys;
@@ -12424,8 +12581,20 @@ var PrivateMessenger = class _PrivateMessenger {
     this.stateStore = null;
     this.state = { channels: {} };
     this.stateWriteTail = Promise.resolve();
+    this.stateWriteError = null;
     this.channels = /* @__PURE__ */ new Map();
     this.stopByChannel = /* @__PURE__ */ new Map();
+    this.desiredChannels = /* @__PURE__ */ new Set();
+    this.pauseReasons = /* @__PURE__ */ new Set();
+    this.deliveries = /* @__PURE__ */ new Set();
+    this.deliveryReads = /* @__PURE__ */ new Set();
+    this.deliveryWaiters = /* @__PURE__ */ new Set();
+    this.recoveries = /* @__PURE__ */ new Map();
+    this.recoveryControllers = /* @__PURE__ */ new Set();
+    this.resumeWork = null;
+    this.capacityTimer = null;
+    this.capacityCheck = null;
+    this.capacityRequiredBytes = 0;
     this.reloadGapTimers = /* @__PURE__ */ new Map();
     this.watchRevisionByChannel = /* @__PURE__ */ new Map();
     this.presenceTimers = /* @__PURE__ */ new Map();
@@ -12492,7 +12661,7 @@ var PrivateMessenger = class _PrivateMessenger {
         prefix: this.prefix,
         indexes: MESSAGE_QUEUE_INDEXES,
         maxBytes: this.messageQueueMaxBytes,
-        evictionPolicy: "fifo",
+        evictionPolicy: "reject",
         indexedDB: this._indexedDB
       });
       this.assertOpen();
@@ -12624,9 +12793,9 @@ var PrivateMessenger = class _PrivateMessenger {
       const channels = [...this.channels.values()];
       await this.applyRecoveryPolicies(channels);
       await this.cleanupStaleChannels();
-      const pubkeys = [...this.channels.keys()];
+      const pubkeys = [...this.desiredChannels];
       if (pubkeys.length) {
-        await this.unwatch(pubkeys);
+        await this.stopWatches(pubkeys);
         await this.watch(pubkeys);
       }
       await this.reconcilePresencePublishers();
@@ -12731,7 +12900,7 @@ var PrivateMessenger = class _PrivateMessenger {
     return run2;
   }
   queueIncoming(operation) {
-    return this.runQueueOperation(operation).catch(() => void 0);
+    return this.runQueueOperation(operation);
   }
   debug(action, detail = {}) {
     try {
@@ -12779,6 +12948,7 @@ var PrivateMessenger = class _PrivateMessenger {
     const nextChannels = await this.normalizeChannels(channels, { relays, mode });
     this.assertOpen();
     const nextPubkeys = new Set(nextChannels.map((channel) => channel.pubkey));
+    const watchPubkeys = [...nextPubkeys].filter((pubkey) => !this.channels.has(pubkey) || this.desiredChannels.has(pubkey));
     const removedPubkeys = [...this.channels.keys()].filter((pubkey) => !nextPubkeys.has(pubkey));
     const updatesStoragePolicy = updatesStalePolicy || updatesIdentityPolicy;
     if (updatesStoragePolicy) {
@@ -12809,7 +12979,7 @@ var PrivateMessenger = class _PrivateMessenger {
     for (const channel of nextChannels) this.channels.set(channel.pubkey, channel);
     await this.cleanupStaleChannels({ storageSnapshot });
     await this.applyRecoveryPolicies(nextChannels);
-    await this.watch([...nextPubkeys]);
+    await this.watch(watchPubkeys);
     await this.reconcilePresencePublishers();
     if (this.storagePolicyRevision === storageSnapshot.policyRevision) {
       this.storagePolicyNeedsApply = false;
@@ -12906,6 +13076,7 @@ var PrivateMessenger = class _PrivateMessenger {
     const snapshot = structuredClone(changed);
     const write = this.stateWriteTail.then(() => this.stateStore.update(snapshot, removed));
     this.stateWriteTail = write.catch((err) => {
+      this.stateWriteError = err;
       try {
         this.onError?.(err);
       } catch {
@@ -12915,6 +13086,17 @@ var PrivateMessenger = class _PrivateMessenger {
   }
   async flushStateWrites() {
     await this.stateWriteTail;
+    if (!this.stateWriteError) return;
+    const repair = this.stateWriteTail.then(async () => {
+      const stored = await this.stateStore.load();
+      const snapshot = structuredClone(this.state.channels);
+      await this.stateStore.update(snapshot, Object.keys(stored).filter((pubkey) => !Object.hasOwn(snapshot, pubkey)));
+      this.stateWriteError = null;
+    });
+    this.stateWriteTail = repair.catch((err) => {
+      this.stateWriteError = err;
+    });
+    await repair;
   }
   async stampChannelActivity(pubkeys) {
     if (!this.stateStore || !this.state) return false;
@@ -12929,6 +13111,7 @@ var PrivateMessenger = class _PrivateMessenger {
     }
     const write = this.stateWriteTail.then(() => this.stateStore.touch(pubkeys, lastWatchedAt));
     this.stateWriteTail = write.catch((err) => {
+      this.stateWriteError = err;
       try {
         this.onError?.(err);
       } catch {
@@ -12957,6 +13140,7 @@ var PrivateMessenger = class _PrivateMessenger {
     this.touchStorageActivity().catch((err) => this.onError?.(err));
     const write = this.stateWriteTail.then(() => this.stateStore.update({}, pubkeys));
     this.stateWriteTail = write.catch((err) => {
+      this.stateWriteError = err;
       try {
         this.onError?.(err);
       } catch {
@@ -13004,7 +13188,8 @@ var PrivateMessenger = class _PrivateMessenger {
     return true;
   }
   trackSeederActivity(channelPubkey, message) {
-    const senderPubkey = message.event?.pubkey;
+    if (message.provenance === "hearsay") return false;
+    const senderPubkey = message.senderPubkey || message.event?.pubkey;
     if (!senderPubkey) return false;
     const channel = this.channels.get(channelPubkey);
     if (!channel) return false;
@@ -13081,7 +13266,7 @@ var PrivateMessenger = class _PrivateMessenger {
       start: Math.max(0, Math.floor(start)),
       end: Math.floor(end)
     };
-    if (normalized.end <= normalized.start || normalized.end < minStart) return;
+    if (normalized.end < normalized.start || normalized.end < minStart) return;
     normalized.start = Math.max(normalized.start, minStart);
     const state = this.readState();
     const current = state.channels[pubkey] || {};
@@ -13090,12 +13275,12 @@ var PrivateMessenger = class _PrivateMessenger {
     state.channels[pubkey] = current;
     this.writeState(state);
   }
-  closeOpenOfflineRanges() {
+  closeOpenOfflineRanges(channels = [...this.desiredChannels]) {
     const state = this.readState();
     const end = nowSeconds5();
-    for (const pubkey of Object.keys(state.channels)) {
+    for (const pubkey of channels) {
       const current = state.channels[pubkey];
-      if (!current.openOfflineStart) continue;
+      if (current?.openOfflineStart == null) continue;
       const recoverySeconds = this.offlineRecoverySecondsFor(pubkey);
       if (!recoverySeconds) {
         delete current.openOfflineStart;
@@ -13105,7 +13290,7 @@ var PrivateMessenger = class _PrivateMessenger {
       }
       const minStart = end - recoverySeconds;
       const start = Math.max(minStart, Math.max(0, current.openOfflineStart));
-      if (end > start) {
+      if (end >= start) {
         current.offlineRanges = mergeRanges((current.offlineRanges || []).concat([{ start, end }]));
       }
       delete current.openOfflineStart;
@@ -13117,10 +13302,25 @@ var PrivateMessenger = class _PrivateMessenger {
     this.assertOpen();
     const channelPubkeys = uniq4(channels);
     for (const pubkey of channelPubkeys) {
+      this.requireChannel(pubkey);
+      this.desiredChannels.add(pubkey);
+    }
+    this.ensureNetworkWatchers();
+    if (this.pauseReasons.size) {
+      this.recordInterruption(channelPubkeys);
+      await this.flushStateWrites();
+      return this;
+    }
+    for (const pubkey of channelPubkeys) {
       const channel = this.channels.get(pubkey);
       if (!channel) throw new ValidationError("UNKNOWN_CHANNEL");
+      const revision = (this.watchRevisionByChannel.get(pubkey) || 0) + 1;
+      this.watchRevisionByChannel.set(pubkey, revision);
+      this.recordRecoveryWindow(pubkey);
+      await this.flushStateWrites();
       const watchRelays = await this.resolveWatchRelays(channel);
       this.assertOpen();
+      if (this.pauseReasons.size || !this.desiredChannels.has(pubkey) || revision !== (this.watchRevisionByChannel.get(pubkey) || 0)) continue;
       const stop = await this._privateMessage.watch({
         channels: [pubkey],
         relays: watchRelays,
@@ -13130,24 +13330,25 @@ var PrivateMessenger = class _PrivateMessenger {
         privateChannelReaderSigner: channel.readerSigner,
         privateChannelReaderPubkey: channel.readerPubkey,
         mode: channel.mode,
-        onAsk: (message) => this.queueIncoming(() => this.handleAsk(pubkey, message)),
-        onReply: (message) => this.queueIncoming(() => this.handleReply(pubkey, message)),
-        onTell: (message) => this.queueIncoming(() => this.handleTell(pubkey, message)),
-        onYell: (message) => this.queueIncoming(() => this.handleYell(pubkey, message)),
-        onNym: (message) => this.queueIncoming(() => this.handleNym(pubkey, message)),
-        onMessage: (message) => this.queueIncoming(() => this.handleMessage(pubkey, message)),
-        onSeed: (seed) => this.queueIncoming(() => this.enqueueSeed(pubkey, seed)),
+        onAsk: (message) => this.receive(pubkey, () => this.handleAsk(pubkey, message), message),
+        onReply: (message) => this.receive(pubkey, () => this.handleReply(pubkey, message), message),
+        onTell: (message) => this.receive(pubkey, () => this.handleTell(pubkey, message), message),
+        onYell: (message) => this.receive(pubkey, () => this.handleYell(pubkey, message), message),
+        onNym: (message) => this.receive(pubkey, () => this.handleNym(pubkey, message), message),
+        onMessage: (message) => this.receive(pubkey, () => this.handleMessage(pubkey, message), message),
+        onSeed: (seed) => this.receive(pubkey, () => this.enqueueSeed(pubkey, seed), seed),
         onContentKeyUsage: (usage) => this.handleContentKeyUsage(pubkey, usage),
         receivedChunkTtlMs: this.receivedChunkTtlMsFor(channel),
         receivedChunkIndexedDB: this._indexedDB,
         onError: (err) => this.onError?.(err)
       });
-      if (this.closePromise) {
+      if (this.closePromise || this.pauseReasons.size || !this.desiredChannels.has(pubkey) || revision !== (this.watchRevisionByChannel.get(pubkey) || 0)) {
         await stop?.();
         this.assertOpen();
+        continue;
       }
       this.stopByChannel.set(pubkey, stop);
-      this.watchRevisionByChannel.set(pubkey, (this.watchRevisionByChannel.get(pubkey) || 0) + 1);
+      this.watchRevisionByChannel.set(pubkey, revision);
       this.updateChannelState(pubkey, {
         lastWatchedAt: nowSeconds5(),
         mode: channel.mode,
@@ -13162,25 +13363,98 @@ var PrivateMessenger = class _PrivateMessenger {
         seeders: channel.seeders,
         seederCount: channel.seeders.length
       });
-      if (scheduleReloadGap) this.scheduleReloadGap(pubkey);
+      if (scheduleReloadGap) {
+        this.closeOpenOfflineRanges([pubkey]);
+        this.scheduleReloadGap(pubkey);
+      }
     }
     this.ensureNetworkWatchers();
     this.ensureRelayListWatcher();
     return this;
   }
-  unwatch(channels) {
-    const channelPubkeys = channels ? uniq4(Array.isArray(channels) ? channels : [channels]) : [...this.stopByChannel.keys()];
+  recordInterruption(channels, at = nowSeconds5()) {
+    const state = this.readState();
+    for (const pubkey of channels) {
+      if (!this.offlineRecoverySecondsFor(pubkey)) continue;
+      const current = state.channels[pubkey] || {};
+      const start = Math.max(0, at - this.offlineSkewSeconds);
+      current.openOfflineStart = Math.min(current.openOfflineStart ?? start, start);
+      state.channels[pubkey] = current;
+    }
+    this.writeState(state);
+  }
+  stopWatches(channels = [...this.stopByChannel.keys()]) {
     const closing = [];
-    for (const pubkey of channelPubkeys) {
+    for (const pubkey of channels) {
       this.cancelReloadGap(pubkey);
       this.watchRevisionByChannel.set(pubkey, (this.watchRevisionByChannel.get(pubkey) || 0) + 1);
       const close = this.stopByChannel.get(pubkey)?.();
-      if (close && typeof close.then === "function") closing.push(close);
+      if (close?.then) closing.push(close);
       this.stopByChannel.delete(pubkey);
       this.stopPresencePublisher(pubkey);
     }
     this.ensureRelayListWatcher();
     return Promise.allSettled(closing);
+  }
+  unwatch(channels) {
+    const pubkeys = channels ? uniq4(Array.isArray(channels) ? channels : [channels]) : [...this.desiredChannels];
+    for (const pubkey of pubkeys) this.desiredChannels.delete(pubkey);
+    this.recordInterruption(pubkeys);
+    for (const controller of this.recoveryControllers) {
+      if (pubkeys.includes(controller.channelPubkey)) controller.abort();
+    }
+    return Promise.all([this.stopWatches(pubkeys), this.flushStateWrites()]);
+  }
+  pause(reason) {
+    if (typeof reason !== "string" || !reason.trim()) throw new ValidationError("PAUSE_REASON_REQUIRED");
+    this.assertOpen();
+    this.pauseReasons.add(reason);
+    this.recordInterruption(this.desiredChannels);
+    for (const controller of this.recoveryControllers) controller.abort();
+    return Promise.all([this.stopWatches([...this.desiredChannels]), this.flushStateWrites()]);
+  }
+  async resume(reason) {
+    if (typeof reason !== "string" || !reason.trim()) throw new ValidationError("PAUSE_REASON_REQUIRED");
+    this.assertOpen();
+    const removed = this.pauseReasons.delete(reason);
+    if (reason === "capacity" && removed) {
+      clearInterval(this.capacityTimer);
+      this.capacityTimer = null;
+      this.capacityRequiredBytes = 0;
+    }
+    if (!removed || this.pauseReasons.size) return;
+    if (this.resumeWork) await this.resumeWork;
+    if (this.pauseReasons.size || this.closePromise) return;
+    const work = (async () => {
+      const channels = [...this.desiredChannels];
+      this.closeOpenOfflineRanges(channels);
+      await this.watch(channels, { scheduleReloadGap: false });
+      if (this.pauseReasons.size || this.closePromise) return;
+      await this.reconcilePresencePublishers();
+      await this.recoverOfflineRanges(channels);
+    })();
+    this.resumeWork = work;
+    try {
+      await work;
+    } catch (err) {
+      if (!this.closePromise) await this.pause(reason);
+      throw err;
+    } finally {
+      if (this.resumeWork === work) this.resumeWork = null;
+    }
+  }
+  receive(pubkey, operation, message = {}) {
+    if (this.closePromise) {
+      if (this.storageActive) this.recordInterruption([pubkey], messageTime(message));
+      return Promise.reject(new Error("PRIVATE_MESSENGER_CLOSED"));
+    }
+    return this.queueIncoming(async () => {
+      if (this.pauseReasons.size || !this.desiredChannels.has(pubkey)) {
+        this.recordInterruption([pubkey], messageTime(message));
+        throw new Error("PRIVATE_MESSENGER_PAUSED");
+      }
+      return operation();
+    });
   }
   nip65WatchChannelPubkeys() {
     return [...this.channels.values()].filter((channel) => channel.usesNip65WatchRelays && this.stopByChannel.has(channel.pubkey)).map((channel) => channel.pubkey);
@@ -13225,6 +13499,7 @@ var PrivateMessenger = class _PrivateMessenger {
     await this.recoverOfflineRanges(channelPubkeys);
   }
   async handleAsk(channelPubkey, message) {
+    if (message.provenance === "hearsay") return this.enqueueRumor("message", channelPubkey, message);
     this.trackSeederActivity(channelPubkey, message);
     if (doesModeStoreRecoverySeeds2(this.channels.get(channelPubkey)?.mode) && messageCode(message) === MISSING_MESSAGES_ASK_CODE) {
       await this.replyWithStoredSeeds(channelPubkey, message);
@@ -13233,6 +13508,7 @@ var PrivateMessenger = class _PrivateMessenger {
     await this.enqueueRumor("ask", channelPubkey, message);
   }
   async handleReply(channelPubkey, message) {
+    if (message.provenance === "hearsay") return this.enqueueRumor("message", channelPubkey, message);
     this.trackSeederActivity(channelPubkey, message);
     if (messageCode(message) === MISSING_MESSAGES_REPLY_CODE) {
       await this.consumeMissingMessagesReply(channelPubkey, message);
@@ -13245,6 +13521,7 @@ var PrivateMessenger = class _PrivateMessenger {
     await this.enqueueRumor("tell", channelPubkey, message);
   }
   async handleYell(channelPubkey, message) {
+    if (message.provenance === "hearsay") return this.enqueueRumor("message", channelPubkey, message);
     this.trackSeederActivity(channelPubkey, message);
     if (messageCode(message) === SEEDER_PRESENCE_CODE) return;
     await this.enqueueRumor("yell", channelPubkey, message);
@@ -13253,17 +13530,18 @@ var PrivateMessenger = class _PrivateMessenger {
     await this.enqueueRumor("nym", channelPubkey, message);
   }
   async handleMessage(channelPubkey, message) {
-    if (eventType(message.event) !== "message") return;
+    if (eventType(message.event) !== "message" && message.provenance !== "hearsay" && (!message.senderPubkey || message.senderPubkey === message.event.pubkey)) return;
     this.trackSeederActivity(channelPubkey, message);
     await this.enqueueRumor("message", channelPubkey, message);
   }
   async enqueueRumor(type, channelPubkey, message) {
     const channel = this.channels.get(channelPubkey);
     if (channel?.mode === "watchtower" && type !== "ask") return;
-    this.markSeen(channelPubkey, message.outer?.created_at || message.event?.created_at || nowSeconds5());
+    const info = deliveryInfo(message.event, message.senderPubkey ?? message.meta?.senderPubkey ?? message.meta?.router?.tags?.find((tag) => tag[0] === "f")?.[1]);
     const eventId = message.event?.id || "";
-    const dedupeKey = eventId ? [channelPubkey, type, eventId] : null;
+    const dedupeKey = eventId ? [channelPubkey, type, eventId, info.provenance] : null;
     if (dedupeKey && await this.queue.someBy("byChannelTypeEventId", dedupeKey)) {
+      this.markSeen(channelPubkey, message.outer?.created_at || message.event?.created_at || nowSeconds5());
       this.debug("dedupe", debugMessageInfo(type, channelPubkey, message));
       return;
     }
@@ -13273,6 +13551,7 @@ var PrivateMessenger = class _PrivateMessenger {
         channelPubkey,
         receivedAt: nowSeconds5(),
         event: message.event,
+        ...info,
         payload: message.payload,
         question: message.question || null,
         questionId: message.questionId || null,
@@ -13281,11 +13560,25 @@ var PrivateMessenger = class _PrivateMessenger {
       });
     } catch (err) {
       if (dedupeKey && err?.name === "ConstraintError") {
+        this.markSeen(channelPubkey, message.outer?.created_at || message.event?.created_at || nowSeconds5());
         this.debug("dedupe", debugMessageInfo(type, channelPubkey, message));
         return;
       }
+      this.recordInterruption([channelPubkey], message.outer?.created_at || message.event?.created_at || nowSeconds5());
+      const atCapacity = err.message === "QUEUE_CAPACITY_EXCEEDED";
+      this.pause(atCapacity ? "capacity" : "storage").catch((error) => this.onError?.(error));
+      if (atCapacity) {
+        this.capacityRequiredBytes = Math.max(this.capacityRequiredBytes, err.requiredBytes || 0);
+        if (!this.capacityTimer) {
+          this.capacityTimer = setInterval(() => this.checkCapacity().catch((error) => this.onError?.(error)), 1e3);
+          this.capacityTimer.unref?.();
+        }
+      }
+      await this.flushStateWrites();
       throw err;
     }
+    this.markSeen(channelPubkey, message.outer?.created_at || message.event?.created_at || nowSeconds5());
+    this.wakeDeliveries();
     this.debug("enqueue", debugMessageInfo(type, channelPubkey, message));
     this.onMessageQueued?.();
   }
@@ -13295,7 +13588,6 @@ var PrivateMessenger = class _PrivateMessenger {
     if (seed.recordType === NYM_CARRIER_SEED_RECORD_TYPE || seed.carriers?.length) {
       const carriers = compactSeedNymCarriers(seed.carriers);
       const recordTime = nymCarrierRecordTime2({ carriers }) || seed.outer?.created_at || receivedAt;
-      this.markSeen(channelPubkey, recordTime);
       const key = nymCarrierSeedKey({ channelPubkey, carriers });
       const seedKey = key ? `nym:${key}` : "";
       if (seedKey && await this.seedQueue.someBy("bySeedKey", seedKey)) return;
@@ -13313,10 +13605,8 @@ var PrivateMessenger = class _PrivateMessenger {
       return;
     }
     const rows = compactSeedRouterRows(seed);
-    let newest = seed.outer?.created_at || receivedAt;
     for (const row of rows) {
       const rowTime = row.lastSeenAt || row.router?.created_at || receivedAt;
-      newest = Math.max(newest, rowTime);
       const rowKey = routerSeedRowKey({ ...row, channelPubkey });
       const seedKey = `router:${rowKey}`;
       const [previous] = await this.seedQueue.removeBy("bySeedKey", seedKey);
@@ -13335,16 +13625,128 @@ var PrivateMessenger = class _PrivateMessenger {
         [SEED_TIME]: lastSeenAt || rowTime
       });
     }
-    this.markSeen(channelPubkey, newest);
     await this.pruneStoredSeeds(channelPubkey);
   }
-  async *messages() {
-    for await (const item of this.queue.items()) yield withoutQueueMetadata(item);
+  checkCapacity() {
+    if (this.capacityCheck) return this.capacityCheck;
+    const work = (async () => {
+      if (this.closePromise || !this.pauseReasons.has("capacity")) return;
+      const { usedBytes, maxBytes } = await this.queue.getCapacity();
+      if (!this.closePromise && usedBytes + this.capacityRequiredBytes <= maxBytes) await this.resume("capacity");
+    })();
+    this.capacityCheck = work;
+    work.then(() => {
+      this.capacityCheck = null;
+    }, () => {
+      this.capacityCheck = null;
+    });
+    return work;
   }
-  async nextMessage() {
+  wakeDeliveries() {
+    for (const wake of this.deliveryWaiters) wake();
+    this.deliveryWaiters.clear();
+  }
+  // A cancellable iterator, including while next() is waiting on an empty queue.
+  messages() {
+    let cancelled = false;
+    const held = /* @__PURE__ */ new Set();
+    let tail = Promise.resolve();
+    const next = async () => {
+      while (true) {
+        if (cancelled || this.closePromise) break;
+        const delivery = await this.nextMessage();
+        if (delivery) {
+          if (cancelled || this.closePromise) {
+            await delivery.nack();
+            break;
+          }
+          held.add(delivery);
+          delivery.settled.then(() => held.delete(delivery));
+          return { value: delivery, done: false };
+        }
+        await new Promise((resolve) => {
+          const wake = () => {
+            clearTimeout(timer);
+            this.deliveryWaiters.delete(wake);
+            resolve();
+          };
+          const timer = setTimeout(wake, 250);
+          this.deliveryWaiters.add(wake);
+          if (cancelled || this.closePromise) wake();
+        });
+      }
+      return { done: true };
+    };
+    return {
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+      next: () => {
+        const work = tail.then(next);
+        tail = work.catch(() => {
+        });
+        return work;
+      },
+      return: async () => {
+        cancelled = true;
+        this.wakeDeliveries();
+        await tail;
+        await Promise.all([...held].map((delivery) => delivery.nack()));
+        return { done: true };
+      }
+    };
+  }
+  nextMessage() {
+    const work = this.reserveMessage();
+    this.deliveryReads.add(work);
+    work.then(() => this.deliveryReads.delete(work), () => this.deliveryReads.delete(work));
+    return work;
+  }
+  async reserveMessage() {
+    this.assertOpen();
     this.touchStorageActivity().catch((err) => this.onError?.(err));
     await this.queueOperationTail;
-    return withoutQueueMetadata(await this.queue.shift());
+    const reservation = await this.queue.reserve();
+    if (!reservation) return null;
+    if (this.closePromise) {
+      await reservation.nack();
+      return null;
+    }
+    let finish;
+    const settled = new Promise((resolve) => {
+      finish = resolve;
+    });
+    const done = () => {
+      clearInterval(timer);
+      this.deliveries.delete(delivery);
+      finish();
+      this.wakeDeliveries();
+    };
+    const settle = async (method) => {
+      const result = await reservation[method]();
+      done();
+      if (method === "ack" && result && !this.closePromise && this.pauseReasons.has("capacity")) {
+        this.checkCapacity().catch((err) => this.onError?.(err));
+      }
+      return result;
+    };
+    const delivery = {
+      message: withoutQueueMetadata(reservation.item),
+      ack: () => settle("ack"),
+      nack: () => settle("nack")
+    };
+    Object.defineProperty(delivery, "settled", { value: settled });
+    this.deliveries.add(delivery);
+    const timer = setInterval(() => {
+      reservation.renew().then((ok) => {
+        if (!ok) done();
+      }, (err) => {
+        done();
+        this.onError?.(err);
+      });
+    }, 1e4);
+    timer.unref?.();
+    return delivery;
   }
   async ask({ channelPubkey = this.defaultChannelPubkey(), receiverPubkey, relays, relayToReceivers, message, code, payload, error, content, deletionPubkey }) {
     const channel = this.requireWritableChannel(channelPubkey);
@@ -13532,13 +13934,14 @@ var PrivateMessenger = class _PrivateMessenger {
     });
   }
   async startPresencePublisher(channelPubkey) {
-    if (!this.offlineRecoverySecondsFor(channelPubkey)) return;
+    if (this.pauseReasons.size || !this.desiredChannels.has(channelPubkey) || !this.offlineRecoverySecondsFor(channelPubkey)) return;
     if (this.presenceTimers.has(channelPubkey)) return;
     try {
       await this.publishSeederPresence(channelPubkey);
     } catch (err) {
       console.warn("private-messenger seeder presence failed", err?.message ?? err);
     }
+    if (this.pauseReasons.size || this.closePromise || !this.desiredChannels.has(channelPubkey)) return;
     const timer = this._setInterval(() => {
       return this.publishSeederPresence(channelPubkey).catch((err) => {
         console.warn("private-messenger seeder presence failed", err?.message ?? err);
@@ -13555,10 +13958,10 @@ var PrivateMessenger = class _PrivateMessenger {
   async reconcilePresencePublishers() {
     const starts = [];
     for (const pubkey of [...this.presenceTimers.keys()]) {
-      if (!doesModeStoreRecoverySeeds2(this.channels.get(pubkey)?.mode) || !this.offlineRecoverySecondsFor(pubkey)) this.stopPresencePublisher(pubkey);
+      if (this.pauseReasons.size || !this.desiredChannels.has(pubkey) || !doesModeStoreRecoverySeeds2(this.channels.get(pubkey)?.mode) || !this.offlineRecoverySecondsFor(pubkey)) this.stopPresencePublisher(pubkey);
     }
     for (const [pubkey, channel] of this.channels) {
-      if (doesModeStoreRecoverySeeds2(channel.mode) && this.offlineRecoverySecondsFor(channel)) starts.push(this.startPresencePublisher(pubkey));
+      if (!this.pauseReasons.size && this.desiredChannels.has(pubkey) && doesModeStoreRecoverySeeds2(channel.mode) && this.offlineRecoverySecondsFor(channel)) starts.push(this.startPresencePublisher(pubkey));
       else this.stopPresencePublisher(pubkey);
     }
     await Promise.all(starts);
@@ -13578,6 +13981,8 @@ var PrivateMessenger = class _PrivateMessenger {
     return channel;
   }
   requireWritableChannel(pubkey) {
+    this.assertOpen();
+    if (this.pauseReasons.size) throw new Error("PRIVATE_MESSENGER_PAUSED");
     const channel = this.requireChannel(pubkey);
     if (!channel.signer) throw new ValidationError("PRIVATE_CHANNEL_WRITER_REQUIRED");
     return channel;
@@ -13641,12 +14046,21 @@ var PrivateMessenger = class _PrivateMessenger {
   contentKeyLookup() {
     return this.useContentKeys ? void 0 : noContentKeys;
   }
+  recordRecoveryWindow(pubkey) {
+    const seconds = this.offlineRecoverySecondsFor(pubkey);
+    if (!seconds) return;
+    const now = nowSeconds5();
+    const current = this.readState().channels[pubkey] || {};
+    const checkpoint = Math.max(current.lastSeenAt || 0, current.recoveredThrough || 0);
+    const since = checkpoint ? checkpoint - this.offlineSkewSeconds : now - seconds;
+    this.addOfflineRange(pubkey, Math.max(0, now - seconds, since), now);
+  }
   scheduleReloadGap(pubkey) {
     this.cancelReloadGap(pubkey);
     if (!this.offlineRecoverySecondsFor(pubkey)) return;
     const current = this.readState().channels[pubkey];
-    const start = current?.openOfflineStart || current?.lastSeenAt;
-    if (!start) return;
+    const start = current?.openOfflineStart ?? current?.lastSeenAt;
+    if (start == null && !current?.offlineRanges?.length || this.pauseReasons.size) return;
     const revision = this.watchRevisionByChannel.get(pubkey) || 0;
     const token = {};
     const timer = this._setTimeout(async () => {
@@ -13655,8 +14069,12 @@ var PrivateMessenger = class _PrivateMessenger {
       this.reloadGapTimers.delete(pubkey);
       if (this.closePromise || !this.channels.has(pubkey) || !this.stopByChannel.has(pubkey)) return;
       if ((this.watchRevisionByChannel.get(pubkey) || 0) !== revision) return;
-      this.addOfflineRange(pubkey, Math.max(0, start - this.offlineSkewSeconds), nowSeconds5());
-      await this.recoverOfflineRanges([pubkey]);
+      if (start != null) this.addOfflineRange(pubkey, Math.max(0, start - this.offlineSkewSeconds), nowSeconds5());
+      try {
+        await this.recoverOfflineRanges([pubkey]);
+      } catch (err) {
+        this.onError?.(err);
+      }
     }, this.reloadGapDelayMs);
     this.reloadGapTimers.set(pubkey, { timer, token, revision });
   }
@@ -13666,44 +14084,18 @@ var PrivateMessenger = class _PrivateMessenger {
     this.reloadGapTimers.delete(pubkey);
     this._clearTimeout(scheduled.timer);
   }
-  // Browser-offline recovery owns durable gaps. Stop only the child live reads;
-  // unwatch() would also stop seeder-presence publishing and alter channel state.
-  #pauseLiveWatches() {
-    for (const [pubkey, stop] of this.stopByChannel) {
-      this.cancelReloadGap(pubkey);
-      this.watchRevisionByChannel.set(pubkey, (this.watchRevisionByChannel.get(pubkey) || 0) + 1);
-      stop?.();
-    }
-    this.stopByChannel.clear();
-  }
-  async #resumeLiveWatches() {
-    const channelPubkeys = [...this.channels.keys()];
-    await this.watch(channelPubkeys, { scheduleReloadGap: false });
-    return channelPubkeys;
-  }
   ensureNetworkWatchers() {
     if (typeof window === "undefined") return;
     if (!this.stopOffline) {
       const offline = () => {
-        const state = this.readState();
-        const start = Math.max(0, nowSeconds5() - this.offlineSkewSeconds);
-        for (const pubkey of this.channels.keys()) {
-          if (!this.offlineRecoverySecondsFor(pubkey)) continue;
-          const current = state.channels[pubkey] || {};
-          current.openOfflineStart ||= start;
-          state.channels[pubkey] = current;
-        }
-        this.writeState(state);
-        this.#pauseLiveWatches();
+        this.pause("network").catch((err) => this.onError?.(err));
       };
       window.addEventListener("offline", offline);
       this.stopOffline = () => window.removeEventListener("offline", offline);
     }
     if (!this.stopOnline) {
-      const online = async () => {
-        this.closeOpenOfflineRanges();
-        const channelPubkeys = await this.#resumeLiveWatches();
-        await this.recoverOfflineRanges(channelPubkeys);
+      const online = () => {
+        this.resume("network").catch((err) => this.onError?.(err));
       };
       window.addEventListener("online", online);
       this.stopOnline = () => window.removeEventListener("online", online);
@@ -13781,6 +14173,7 @@ var PrivateMessenger = class _PrivateMessenger {
       await this.enqueueRumor(recovered.type, channelPubkey, {
         event: recovered.event,
         outer: recovered.outer,
+        ...deliveryInfo(recovered.event, recovered.meta?.senderPubkey),
         meta: { ...recovered.meta || {}, channelPubkey, recoveredFromSeeder: message.event?.pubkey || "" },
         payload: recovered.payload
       });
@@ -13793,7 +14186,7 @@ var PrivateMessenger = class _PrivateMessenger {
         type: "nym",
         event: event2,
         outer: { id: "", created_at: nymCarrierRecordTime2(record) },
-        meta: { channelPubkey, carriers: record.carriers },
+        meta: { channelPubkey, carriers: record.carriers, ...deliveryInfo(event2, record.carriers[0]?.pubkey) },
         payload: parseEventContent2(event2)
       };
     }
@@ -13836,11 +14229,26 @@ var PrivateMessenger = class _PrivateMessenger {
       type: eventType(event),
       event,
       outer,
-      meta: { channelPubkey },
+      meta: { channelPubkey, ...deliveryInfo(event, router.tags.find((tag) => tag[0] === "f")?.[1]) },
       payload: parseEventContent2(event)
     };
   }
   async recoverOfflineRanges(channels = [...this.stopByChannel.keys()]) {
+    for (const pubkey of uniq4(channels)) {
+      if (this.pauseReasons.size || this.closePromise || !this.desiredChannels.has(pubkey)) continue;
+      let work = this.recoveries.get(pubkey);
+      if (!work) {
+        work = this.recoverChannelRanges([pubkey]);
+        this.recoveries.set(pubkey, work);
+      }
+      try {
+        await work;
+      } finally {
+        if (this.recoveries.get(pubkey) === work) this.recoveries.delete(pubkey);
+      }
+    }
+  }
+  async recoverChannelRanges(channels) {
     const state = this.readState();
     const now = nowSeconds5();
     for (const pubkey of uniq4(channels)) {
@@ -13852,12 +14260,20 @@ var PrivateMessenger = class _PrivateMessenger {
       const minStart = now - recoverySeconds;
       const processedRanges = new Set(current.offlineRanges.map((range) => `${range.start}:${range.end}`));
       const remaining = [];
+      let recoveredThrough = current.recoveredThrough || 0;
       for (const range of current.offlineRanges) {
         if (range.end < minStart) continue;
         const watchRevision = this.watchRevisionByChannel.get(pubkey) || 0;
+        const controller = new AbortController();
+        controller.channelPubkey = pubkey;
+        this.recoveryControllers.add(controller);
         try {
+          if (this.pauseReasons.size || this.closePromise || !this.desiredChannels.has(pubkey)) throw new Error("PRIVATE_MESSENGER_PAUSED");
           const fetchRelays = await this.resolveWatchRelays(channel);
+          controller.signal.throwIfAborted();
           const fetchedEvents = await this._privateChannel.fetch({
+            signal: controller.signal,
+            receivedChunkScope: this.storageLeaseId,
             receiverSigner: this.userSigner,
             iykcSigner: this.contentKeySigner,
             privateChannelSigner: channel.signer,
@@ -13872,35 +14288,41 @@ var PrivateMessenger = class _PrivateMessenger {
             modeByPubkey: { [pubkey]: channel.mode },
             receivedChunkTtlMs: this.receivedChunkTtlMsFor(channel),
             receivedChunkIndexedDB: this._indexedDB,
-            onEvent: (event, outer, meta) => this.queueIncoming(() => this.enqueueRumor(eventType(event), pubkey, { event, outer, meta, payload: parseEventContent2(event) })),
-            onNymEvent: (event, outer, meta) => this.queueIncoming(() => this.enqueueRumor("nym", pubkey, { event, outer, meta, payload: parseEventContent2(event) })),
-            onSeedEvent: (seed) => this.queueIncoming(() => this.enqueueSeed(pubkey, seed)),
+            onEvent: (event, outer, meta) => this.receive(pubkey, () => this.enqueueRumor(eventType(event), pubkey, { event, outer, meta, payload: parseEventContent2(event) }), { event, outer }),
+            onNymEvent: (event, outer, meta) => this.receive(pubkey, () => this.enqueueRumor("nym", pubkey, { event, outer, meta, payload: parseEventContent2(event) }), { event, outer }),
+            onSeedEvent: (seed) => this.receive(pubkey, () => this.enqueueSeed(pubkey, seed), seed),
             onContentKeyUsage: (usage) => this.handleContentKeyUsage(pubkey, usage),
             onError: (err) => {
               throw err;
             }
           }) || [];
+          controller.signal.throwIfAborted();
           const attempt = await this.#askSeedersForRelayLeftEdgeAttempt(pubkey, range, fetchedEvents);
           const lifecycleChanged = this.closePromise || !this.channels.has(pubkey) || !this.stopByChannel.has(pubkey) || (this.watchRevisionByChannel.get(pubkey) || 0) !== watchRevision;
           if (lifecycleChanged || attempt.failures.length) remaining.push(range);
+          else recoveredThrough = Math.max(recoveredThrough, range.end);
         } catch (err) {
           this.onError?.(err);
           remaining.push(range);
+        } finally {
+          this.recoveryControllers.delete(controller);
         }
       }
       const fresh = this.readState();
       const concurrentRanges = (fresh.channels[pubkey]?.offlineRanges || []).filter((range) => !processedRanges.has(`${range.start}:${range.end}`));
       fresh.channels[pubkey] = {
         ...fresh.channels[pubkey] || {},
+        recoveredThrough: Math.max(fresh.channels[pubkey]?.recoveredThrough || 0, recoveredThrough),
         offlineRanges: mergeRanges(concurrentRanges.concat(remaining))
       };
       this.writeState(fresh);
+      await this.flushStateWrites();
     }
   }
   async clearChannel(pubkey) {
+    await this.unwatch(pubkey);
+    await this._privateMessage.clearChannelState?.(pubkey);
     return this.runQueueOperation(async () => {
-      await this.unwatch(pubkey);
-      await this._privateMessage.clearChannelState?.(pubkey);
       this.channels.delete(pubkey);
       this.removeChannelState(pubkey);
       await this.flushStateWrites();
@@ -13979,6 +14401,9 @@ var PrivateMessenger = class _PrivateMessenger {
     this.stopOnline = null;
     this.stopStorageMaintenance();
     this.stopStoragePolicyBroadcast();
+    clearInterval(this.capacityTimer);
+    this.capacityTimer = null;
+    this.wakeDeliveries();
     this.closePromise = (async () => {
       let unwatchError;
       try {
@@ -13989,6 +14414,9 @@ var PrivateMessenger = class _PrivateMessenger {
       await initSettledPromise;
       await this.stampActiveChannelActivity();
       await this.queueOperationTail;
+      await Promise.allSettled([...this.recoveries.values()]);
+      await Promise.allSettled([...this.deliveryReads]);
+      await Promise.all([...this.deliveries].map((delivery) => delivery.nack()));
       await this.stateWriteTail;
       try {
         await this.storageTouchPromise;

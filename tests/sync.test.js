@@ -814,7 +814,8 @@ test('sync drains messages enqueued while another message is being handled', asy
     }
 
     async nextMessage () {
-      return this.queue.shift() || null
+      const message = this.queue.shift()
+      return message ? { message, ack: async () => true, nack: async () => { this.queue.unshift(message); return true } } : null
     }
 
     close () {}
@@ -1390,4 +1391,73 @@ test('dev content-key generation persists, publishes, updates debug source, and 
   } finally {
     unsubscribe()
   }
+})
+
+test('sync only acknowledges a successful handler and nacks a failed delivery without spinning', async () => {
+  const storeStub = createSubscribable({
+    list: () => [{ type: 'nsec', pubkey: 'nsec1' }]
+  })
+  const secretsStub = createSubscribable({
+    isUnlocked: () => true,
+    getDeviceSigner: async () => signer('device')
+  })
+  const trustedStub = createSubscribable({
+    list: () => [{ pubkey: 'trusted1', platform: 'Laptop' }]
+  })
+  const handled = []
+  const acknowledgements = []; const rejections = []
+  const debugEvents = []
+  let messenger = null
+
+  class FakeMessenger {
+    constructor (options) {
+      this.options = options
+      this.queue = [{ id: 'a' }]
+      messenger = this
+    }
+
+    async init (options) {
+      this.initOptions = options
+      return this
+    }
+
+    async nextMessage () {
+      const message = this.queue.shift()
+      return message ? { message, ack: async () => { acknowledgements.push(message.id); return true }, nack: async () => { rejections.push(message.id); this.queue.unshift(message); return true } } : null
+    }
+
+    close () {}
+  }
+
+  const controller = createSyncController({
+    MessengerClass: FakeMessenger,
+    _store: storeStub,
+    _secrets: secretsStub,
+    _trustedSigners: trustedStub,
+    _contentKeys: {
+      resetDebugSources: () => {},
+      announceContentKeys: async () => {},
+      handleMessage: async message => {
+        handled.push(message.id)
+        throw new Error('storage failed')
+      }
+    },
+    _claimSigner: () => signer('nsec1'),
+    _setTimeout: () => ({}),
+    _clearTimeout: () => {},
+    _setInterval: () => ({}),
+    _clearInterval: () => {},
+    onError: () => {},
+    _debug: event => debugEvents.push(event)
+  })
+
+  await controller.init()
+  await flushMicrotasks()
+
+  assert.deepEqual(handled, ['a'])
+  assert.deepEqual(acknowledgements, [])
+  assert.deepEqual(rejections, ['a'])
+  assert.equal(messenger.queue.length, 1)
+
+  controller.close()
 })

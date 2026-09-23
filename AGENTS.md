@@ -361,3 +361,9 @@ empty JSON body. Materialize the complete record with textContent only when its
 details opens; release that text on collapse and retained entries on disconnect.
 Keep full audit data and Copy available on expansion; do not truncate storage or
 weaken sealed fields to reduce rendering memory.
+
+## Private-messenger delivery contract
+
+`nextMessage()` returns `{ message, ack, nack }` in libp2r2p 0.10.20. Sync must
+finish its handler before acknowledging, and nack failed or superseded work.
+Never destructively drain a reservation on lock, shutdown or handler failure.

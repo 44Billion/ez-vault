@@ -4,15 +4,15 @@ import {
   onOnline,
   rotateContentKeyIfStillCanonical,
   upsertContentKeyEvent
-} from "./chunk-656MY7Q6.js";
+} from "./chunk-Z2IRPAYI.js";
 import {
   filterVisibleAccounts,
   hasPendingMutation,
   subscribePendingMutations
-} from "./chunk-GHIMHCHN.js";
+} from "./chunk-KG6EB3FC.js";
 import {
   trusted_signers_exports
-} from "./chunk-M7ANWQQC.js";
+} from "./chunk-RLAKWDVD.js";
 import {
   NOSTRDB_SYNC,
   PrivateMessenger,
@@ -44,7 +44,7 @@ import {
   setState,
   subscribe2 as subscribe,
   subscribeRelayListUpdates
-} from "./chunk-FRQWHRZ4.js";
+} from "./chunk-BMNLPMUY.js";
 import {
   __export
 } from "./chunk-NZLE2WMY.js";
@@ -2699,9 +2699,14 @@ function createSyncController({
         emitDebug3("drain", { phase: "start" });
         let reachedEmptyQueue = false;
         while (isCurrentLifecycle(id) && messenger && _secrets.isUnlocked()) {
-          const message = await messenger.nextMessage?.();
-          if (!message) {
+          const delivery = await messenger.nextMessage?.();
+          if (!delivery) {
             reachedEmptyQueue = true;
+            break;
+          }
+          const { message, ack, nack } = delivery;
+          if (!isCurrentLifecycle(id) || !_secrets.isUnlocked()) {
+            await nack();
             break;
           }
           handled += 1;
@@ -2732,8 +2737,12 @@ function createSyncController({
                 });
               }
             }
+            await ack();
           } catch (err) {
+            await nack();
             onError(err);
+            drainQueued = false;
+            break;
           }
         }
         if (reachedEmptyQueue) drainQueued = false;

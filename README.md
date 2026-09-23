@@ -203,3 +203,13 @@ Activity details are rendered on demand: collapsed rows keep short previews,
 while opening a row exposes its complete JSON and Copy action. Log refreshes
 are serialized to avoid overlapping large decrypted snapshots during bursts of
 signing/decryption. This does not change the persisted audit records.
+
+### Persistent private-message consumption
+
+Vault sync uses libp2r2p 0.10.20 delivery reservations. It awaits its sync handler
+before `ack()`. Handler/storage failures, locking and replaced sessions release
+or retain the reservation with `nack()`; closing never implicitly acknowledges
+pending work. Redelivery after interruption is expected and handled by existing
+sync deduplication. Locking still closes the messenger; reopening uses its
+persisted recovery checkpoints and the default seven-day remote recovery window.
+Recovery is limited by data retained on relays/seeders, not guaranteed delivery.

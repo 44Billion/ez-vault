@@ -278,6 +278,17 @@ export async function initMessenger () {
   }
   launcherOrigin ??= origin
   handshakeComplete = true
+  // A document can disappear while its MessagePort object still exists in
+  // the launcher. Report lifecycle changes on the authenticated port.
+  window.addEventListener('pagehide', () => {
+    if (launcherPort === port1 && handshakeComplete) tell(port1, { code: 'VAULT_CONNECTION_STATE', payload: { connected: false } })
+  })
+  window.addEventListener('pageshow', event => {
+    if (event.persisted && launcherPort === port1 && handshakeComplete) {
+      setAccountsState()
+      tell(port1, { code: 'VAULT_CONNECTION_STATE', payload: { connected: true } })
+    }
+  })
   lastAccountsStateFingerprint = accountsFingerprint
   pendingTranslateMessages.splice(0).forEach(handleTranslate)
   nostrdb.connect(launcherPort)
@@ -299,6 +310,7 @@ function onPortMessage (e) {
     return
   }
   if (!handshakeComplete) return
+  if (code === 'VAULT_PING') return reply(e, { payload: true }, { to: launcherPort })
   if (handleLegacyViewMessage(e)) return
   if (code === 'UPDATE_ACCOUNT_EVENTS') return handleUpdateAccountEvents(e)
   if (code === 'NOSTRDB_APP_BACKFILL') return handleNostrDbAppBackfill(e)
