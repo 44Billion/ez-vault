@@ -13,6 +13,10 @@ const bootFailsafeJs = await readFile(new URL('src/boot-failsafe.js', projectUrl
 const swBootstrapJs = await readFile(new URL('src/sw-bootstrap.js', projectUrl), 'utf8')
 const builtHtml = inlineBootFiles(html, { bootFailsafeCss, bootFailsafeJs, swBootstrapJs })
 
+test('index.html upgrades insecure requests before mixed-content checks', () => {
+  assert.match(html, /<meta\s+http-equiv="Content-Security-Policy"\s+content="upgrade-insecure-requests"\s*\/?>/)
+})
+
 test('index.html no longer ships an importmap and loads the bundled entry', () => {
   assert.doesNotMatch(html, /type=["']importmap["']/)
   assert.doesNotMatch(html, /ga\.jspm\.io/)

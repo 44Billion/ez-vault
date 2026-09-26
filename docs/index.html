@@ -1,6 +1,11 @@
 <!DOCTYPE html>
 <html>
   <head>
+    <!-- GitHub Pages cannot set response headers. Upgrade cleartext
+         subresources before the browser's mixed-content check so this
+         HTTPS document, and the launcher tab embedding it, never stop
+         being a secure context for WebAuthn. -->
+    <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests" />
     <title>EZ Vault</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
