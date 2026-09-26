@@ -17,6 +17,7 @@ test('bunker liveness RPCs have a finite response timeout', () => {
   const source = readFileSync(new URL('../src/services/bunker.js', import.meta.url), 'utf8')
   assert.match(source, /signer\.connect\(\{[\s\S]*?timeout: CONNECTION_TIMEOUT_MS/)
   assert.match(source, /getPublicKey\(\{ timeout: CONNECTION_TIMEOUT_MS \}\)/)
+  assert.match(source, /\[bunker\] Relay switch failed/)
 })
 
 test('bunker URL cleanup keeps the relay pointer while dropping only its one-use secret', () => {

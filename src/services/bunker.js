@@ -117,7 +117,13 @@ async function openSigner (bunkerUrl, clientSecretKey) {
       try { await signer.close() } catch { /* noop */ }
       throw err
     }
-    await signer.switchRelays({ timeout: 1000 }).catch(() => false)
+    try {
+      await signer.switchRelays({ timeout: 1000 })
+    } catch (error) {
+      // The session keeps working on the previous relay, but the failed
+      // switch should be visible instead of silently swallowed.
+      console.warn('[bunker] Relay switch failed', { relays: pointer.relays, error: error?.message ?? error })
+    }
   }
   return signer
 }

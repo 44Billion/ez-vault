@@ -4,7 +4,7 @@ import {
   seedRelays,
   signProfileEvent,
   signRelayListEvent
-} from "./chunk-BMNLPMUY.js";
+} from "./chunk-MEZ2TIAG.js";
 
 // src/services/account-names.js
 var ACCOUNT_NAME_COLORS = Object.freeze([

@@ -8,23 +8,23 @@ import {
 import {
   initMessenger,
   setVaultViewShell
-} from "./chunks/chunk-62UKT472.js";
+} from "./chunks/chunk-K7LWQKYO.js";
 import {
   init,
   startDeviceRelayListRefresh,
   startRevocationRotation
-} from "./chunks/chunk-2U7FZ2Q3.js";
+} from "./chunks/chunk-LHYD3R3J.js";
 import {
   clearError,
   setError
 } from "./chunks/chunk-OQVZFKQZ.js";
-import "./chunks/chunk-ALETP3YV.js";
+import "./chunks/chunk-FEDNECTX.js";
 import {
   isOnline,
   onOnline,
   startContentKeyEventRefresh
-} from "./chunks/chunk-Z2IRPAYI.js";
-import "./chunks/chunk-BU77ZI4Y.js";
+} from "./chunks/chunk-GDKTMCH5.js";
+import "./chunks/chunk-RFVQP7PV.js";
 import {
   seededAvatarDataUrl
 } from "./chunks/chunk-3RWQBTGN.js";
@@ -32,14 +32,14 @@ import {
   filterVisibleAccounts,
   recoverPendingMutation,
   runSecretAccountMutation
-} from "./chunks/chunk-KG6EB3FC.js";
-import "./chunks/chunk-RLAKWDVD.js";
+} from "./chunks/chunk-UBBYUU4Q.js";
+import "./chunks/chunk-ZBKKW6J5.js";
 import {
   checkForIconUpdate,
   hasPasskey,
   initializeVaultProtection,
   preparePasskeyRegistration
-} from "./chunks/chunk-OY7W3OOF.js";
+} from "./chunks/chunk-TV6XYKGN.js";
 import {
   fetchLatestProfile,
   fetchRelayListEvent,
@@ -54,7 +54,7 @@ import {
   subscribe2 as subscribe,
   transferBunkerSecret,
   update
-} from "./chunks/chunk-BMNLPMUY.js";
+} from "./chunks/chunk-MEZ2TIAG.js";
 import {
   defineLocales,
   getT,
@@ -221,16 +221,16 @@ await initializeVaultProtection();
 if (!hasPasskey()) preparePasskeyRegistration().catch(() => {
 });
 await Promise.all([
-  import("./chunks/account-list-NW2IC3EA.js"),
-  import("./chunks/account-add-K6WRQG22.js"),
-  import("./chunks/sync-panel-727M4FLT.js"),
-  import("./chunks/trusted-signers-panel-CWISAWFW.js"),
+  import("./chunks/account-list-TNFZWHL5.js"),
+  import("./chunks/account-add-4ODFZ34L.js"),
+  import("./chunks/sync-panel-T5TGRIWM.js"),
+  import("./chunks/trusted-signers-panel-FX6VUMC5.js"),
   import("./chunks/accordion-panel-AGHO422R.js"),
   import("./chunks/toast-VTWQ4NKU.js"),
-  import("./chunks/activity-log-XMJEOLNV.js"),
-  import("./chunks/vault-lock-button-EPTV36IO.js"),
-  import("./chunks/lock-overlay-AII5WOUK.js"),
-  import("./chunks/create-overlay-JCMLQZRP.js")
+  import("./chunks/activity-log-GL7NRUVY.js"),
+  import("./chunks/vault-lock-button-T4HAXUAN.js"),
+  import("./chunks/lock-overlay-3J3OCLGS.js"),
+  import("./chunks/create-overlay-G2GL6T4N.js")
 ]);
 try {
   sessionStorage.removeItem("ezVaultBootAutoReloaded");
@@ -312,7 +312,7 @@ startRevocationRotation().catch((err) => {
 });
 if (window === window.top) {
   document.body.classList.add("dev");
-  import("./chunks/dev-panel-S6E5BQHJ.js").then(() => {
+  import("./chunks/dev-panel-GZK3B2JT.js").then(() => {
     document.querySelector(".diagnostics-section")?.append(document.createElement("dev-panel"));
   });
 }

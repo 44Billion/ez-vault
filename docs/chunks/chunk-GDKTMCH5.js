@@ -1,9 +1,9 @@
 import {
   arrayBufferBytes
-} from "./chunk-BU77ZI4Y.js";
+} from "./chunk-RFVQP7PV.js";
 import {
   filterVisibleAccounts
-} from "./chunk-KG6EB3FC.js";
+} from "./chunk-UBBYUU4Q.js";
 import {
   CONTENT_KEY_KIND,
   PERSONAL_COPY,
@@ -35,7 +35,7 @@ import {
   setState,
   subscribe2 as subscribe,
   update
-} from "./chunk-BMNLPMUY.js";
+} from "./chunk-MEZ2TIAG.js";
 
 // node_modules/libp2r2p/network/index.js
 var RETRY_DELAYS = [5e3, 15e3, 3e4, 6e4];
@@ -45,27 +45,64 @@ var CONNECTIVITY_PROBE_URLS = [
   { url: "https://captive.apple.com/hotspot-detect.html" },
   { method: "GET", url: "https://connectivity-check.ubuntu.com" }
 ];
-var sharedCheck;
-async function isOnline({ signal } = {}) {
+var STRICT_CONNECTIVITY_PROBE_URLS = [
+  { url: "https://captive.apple.com/hotspot-detect.html", method: "GET", marker: "Success" },
+  { url: "https://1.1.1.1/cdn-cgi/trace", method: "GET", marker: "ip=" },
+  { url: "https://cloudflare.com/cdn-cgi/trace", method: "GET", marker: "ip=" }
+];
+var FIRST_PROBE_TIMEOUT_MS = 2500;
+var HEDGE_DELAY_MS = 1e3;
+var REMAINING_PROBE_TIMEOUT_MS = 4e3;
+var sharedChecks = /* @__PURE__ */ new Map();
+async function isOnline({ signal, strict = false } = {}) {
   if (signal?.aborted) throw signal.reason;
   if (globalThis.navigator?.onLine === false) return false;
-  if (signal) return hasInternetConnectivity(signal);
-  sharedCheck ??= hasInternetConnectivity().finally(() => {
-    sharedCheck = null;
-  });
-  return sharedCheck;
+  if (signal) return hasInternetConnectivity(signal, strict);
+  const key = strict ? "strict" : "lenient";
+  if (!sharedChecks.has(key)) {
+    sharedChecks.set(key, hasInternetConnectivity(void 0, strict).finally(() => {
+      sharedChecks.delete(key);
+    }));
+  }
+  return sharedChecks.get(key);
 }
-async function hasInternetConnectivity(signal) {
-  for (const candidate of shuffle(CONNECTIVITY_PROBE_URLS)) {
-    if (signal?.aborted) throw signal.reason;
+async function hasInternetConnectivity(signal, strict) {
+  if (signal?.aborted) throw signal.reason;
+  const candidates = shuffle(strict ? STRICT_CONNECTIVITY_PROBE_URLS : CONNECTIVITY_PROBE_URLS);
+  const [first, ...rest] = candidates;
+  if (!first) return false;
+  const controller = new AbortController();
+  const onAbort = () => controller.abort(signal?.reason);
+  signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) onAbort();
+  let hedgeTimer;
+  let onHedgeAbort;
+  try {
+    let startHedge;
+    const firstAttempt = ping(first, { strict, signal: controller.signal, timeout: FIRST_PROBE_TIMEOUT_MS });
+    const hedge = new Promise((resolve, reject) => {
+      startHedge = resolve;
+      hedgeTimer = setTimeout(resolve, HEDGE_DELAY_MS);
+      if (signal) {
+        onHedgeAbort = () => reject(signal.reason);
+        signal.addEventListener("abort", onHedgeAbort, { once: true });
+        if (signal.aborted) onHedgeAbort();
+      }
+    }).then(() => Promise.any(rest.map((candidate) => ping(candidate, { strict, signal: controller.signal, timeout: REMAINING_PROBE_TIMEOUT_MS }))));
+    firstAttempt.catch(() => startHedge());
     try {
-      await ping(candidate.url, { method: candidate.method, signal });
+      await Promise.any([firstAttempt, hedge]);
       return true;
     } catch {
       if (signal?.aborted) throw signal.reason;
+      return false;
     }
+  } finally {
+    clearTimeout(hedgeTimer);
+    if (onHedgeAbort) signal?.removeEventListener("abort", onHedgeAbort);
+    controller.abort();
+    signal?.removeEventListener("abort", onAbort);
   }
-  return false;
 }
 function shuffle(list2) {
   const copy = list2.slice();
@@ -75,7 +112,8 @@ function shuffle(list2) {
   }
   return copy;
 }
-async function ping(url, { method = "HEAD", timeout = 5e3, signal } = {}) {
+async function ping(candidate, { strict = false, timeout, signal } = {}) {
+  if (signal?.aborted) throw signal.reason;
   const controller = new AbortController();
   let timer;
   let onAbort;
@@ -92,17 +130,27 @@ async function ping(url, { method = "HEAD", timeout = 5e3, signal } = {}) {
     if (signal?.aborted) onAbort();
   });
   try {
-    await Promise.race([
-      fetch(url, { method, mode: "no-cors", cache: "no-store", redirect: "follow", signal: controller.signal }),
+    const response = await Promise.race([
+      fetch(candidate.url, {
+        method: candidate.method ?? (strict ? "GET" : "HEAD"),
+        mode: strict ? "cors" : "no-cors",
+        cache: "no-store",
+        redirect: "follow",
+        signal: controller.signal
+      }),
       stopped
     ]);
+    if (!strict) return;
+    if (!response.ok) throw new Error("PING_STATUS");
+    if (!(await response.text()).includes(candidate.marker)) throw new Error("PING_BODY");
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener("abort", onAbort);
   }
 }
 function createConnectivityMonitor({
-  check = isOnline,
+  check,
+  strict = false,
   eventTarget = globalThis.window,
   document = globalThis.document,
   _setTimeout = globalThis.setTimeout,
@@ -110,7 +158,8 @@ function createConnectivityMonitor({
   _random = Math.random,
   reportError = (error) => console.error("Online listener failed", error)
 } = {}) {
-  if (typeof check !== "function") throw new ValidationError("INVALID_CONNECTIVITY_CHECK");
+  if (check !== void 0 && typeof check !== "function") throw new ValidationError("INVALID_CONNECTIVITY_CHECK");
+  const runCheck = check ?? ((options) => isOnline({ ...options, strict }));
   const listeners = /* @__PURE__ */ new Set();
   const setTimer = (...args) => Reflect.apply(_setTimeout, globalThis, args);
   const clearTimer = (...args) => Reflect.apply(_clearTimeout, globalThis, args);
@@ -139,7 +188,7 @@ function createConnectivityMonitor({
     current.timer = null;
     current.pending = true;
     try {
-      const online = await check({ signal: current.controller.signal });
+      const online = await runCheck({ signal: current.controller.signal });
       if (session !== current) return;
       current.online = online === true && globalThis.navigator?.onLine !== false;
       if (current.online) {
@@ -206,10 +255,15 @@ function createConnectivityMonitor({
   }
   return { onOnline: onOnline2 };
 }
-var defaultMonitor;
-function onOnline(handler) {
-  defaultMonitor ??= createConnectivityMonitor();
-  return defaultMonitor.onOnline(handler);
+var defaultMonitors = /* @__PURE__ */ new Map();
+function onOnline(handler, { strict = false } = {}) {
+  const key = strict ? "strict" : "lenient";
+  let monitor = defaultMonitors.get(key);
+  if (!monitor) {
+    monitor = createConnectivityMonitor({ strict });
+    defaultMonitors.set(key, monitor);
+  }
+  return monitor.onOnline(handler);
 }
 
 // src/services/content-key/index.js

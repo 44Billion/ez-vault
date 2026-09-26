@@ -4941,6 +4941,93 @@ function publishSummary(settlements, relays, { includeSucceededRelays = false } 
   return summary;
 }
 
+// node_modules/libp2r2p/relay/helpers/read-admission.js
+function admissionError(code, relay) {
+  return Object.assign(new Error(code), { code, relay, phase: "admission" });
+}
+var ReadAdmission = class {
+  constructor({ maxSubscriptionsPerRelay = 28, maxConcurrentHistoryPerRelay = 2, maxQueuedReadsPerRelay = 256 } = {}) {
+    for (const value of [maxSubscriptionsPerRelay, maxConcurrentHistoryPerRelay, maxQueuedReadsPerRelay]) {
+      if (!Number.isSafeInteger(value) || value < 1) throw new ValidationError("INVALID_RELAY_READ_CAPACITY");
+    }
+    Object.assign(this, { maxSubscriptionsPerRelay, maxConcurrentHistoryPerRelay, maxQueuedReadsPerRelay });
+    this.states = /* @__PURE__ */ new Map();
+  }
+  acquire(relay, { history = false, live = false, signal, queueTimeout = 3e4 } = {}) {
+    if (queueTimeout !== null && (!Number.isFinite(queueTimeout) || queueTimeout < 0)) throw new ValidationError("INVALID_RELAY_TIMEOUT");
+    const weight = Number(history) + Number(live);
+    if (!weight || weight > this.maxSubscriptionsPerRelay) return Promise.reject(admissionError("RELAY_READ_CAPACITY", relay));
+    if (signal?.aborted) return Promise.reject(admissionError("RELAY_READ_CANCELLED", relay));
+    let state = this.states.get(relay);
+    if (!state) {
+      state = { active: 0, history: 0, queue: [] };
+      this.states.set(relay, state);
+    }
+    const deferred6 = Promise.withResolvers();
+    let timer;
+    const job = {
+      history,
+      weight,
+      grant: () => {
+        cleanup();
+        state.active += weight;
+        state.history += Number(history);
+        const leases = {};
+        for (const kind of ["history", "live"]) {
+          if (!(kind === "history" ? history : live)) continue;
+          let released = false;
+          leases[kind] = {
+            release: () => {
+              if (released) return;
+              released = true;
+              state.active--;
+              if (kind === "history") state.history--;
+              this.drain(relay, state);
+            }
+          };
+        }
+        deferred6.resolve(leases);
+      },
+      cancel: (code) => {
+        const index = state.queue.indexOf(job);
+        if (index < 0) return;
+        state.queue.splice(index, 1);
+        cleanup();
+        deferred6.reject(admissionError(code, relay));
+        this.drain(relay, state);
+      }
+    };
+    const abort = () => job.cancel("RELAY_READ_CANCELLED");
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+    };
+    if (state.queue.length >= this.maxQueuedReadsPerRelay) return Promise.reject(admissionError("RELAY_READ_QUEUE_FULL", relay));
+    state.queue.push(job);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (queueTimeout !== null) timer = maybeUnref(setTimeout(() => job.cancel("RELAY_READ_QUEUE_TIMEOUT"), queueTimeout));
+    this.drain(relay, state);
+    return deferred6.promise;
+  }
+  drain(relay, state) {
+    while (state.queue.length) {
+      const job = state.queue[0];
+      if (state.active + job.weight > this.maxSubscriptionsPerRelay || job.history && state.history >= this.maxConcurrentHistoryPerRelay) break;
+      state.queue.shift().grant();
+    }
+    if (!state.active && !state.queue.length && this.states.get(relay) === state) this.states.delete(relay);
+  }
+  cancelQueued(relay) {
+    const state = this.states.get(relay);
+    if (!state) return;
+    const jobs = state.queue.splice(0);
+    for (const job of jobs) {
+      state.queue.push(job);
+      job.cancel("RELAY_DISCONNECTED");
+    }
+  }
+};
+
 // node_modules/libp2r2p/relay/helpers/drainable-stream.js
 function drainableStream(create, options = {}) {
   const cancel = new AbortController();
@@ -5372,6 +5459,8 @@ var COUNT_TIMEOUT_MS = 5e3;
 var COUNT_TIMEOUT_AFTER_FIRST_COUNT_MS = 500;
 var SEND_TIMEOUT_UNTIL_FIRST_FULFILLMENT_MS = 3e3;
 var SEND_TIMEOUT_MS = 3e4;
+var LIVE_OVERLAP_SECONDS = 600;
+var LIVE_PROGRESS_INTERVAL_MS = 6e4;
 function makeEarlyCloseChecker(filter, onSatisfied) {
   let count = 0;
   const remainingIds = filter.ids?.length > 0 ? new Set(filter.ids) : null;
@@ -5433,6 +5522,11 @@ function assertReadOptions(filter, timeouts) {
     if (value !== null && (!Number.isFinite(value) || value < 0)) throw new ValidationError("INVALID_RELAY_TIMEOUT");
   }
 }
+function assertBufferOptions(options) {
+  for (const value of [options.maxBufferedLiveEvents === void 0 ? 1e3 : options.maxBufferedLiveEvents, options.maxBufferedLiveBytes === void 0 ? 8 * 1024 * 1024 : options.maxBufferedLiveBytes]) {
+    if (!Number.isSafeInteger(value) || value < 1) throw new ValidationError("INVALID_RELAY_BUFFER_CAPACITY");
+  }
+}
 function normalizedRelayUrls(relays) {
   const urls = [];
   const seen = /* @__PURE__ */ new Set();
@@ -5463,12 +5557,26 @@ var RelayPool = class {
   #timeout = 3e4;
   // 30 seconds
   #createRelay;
-  constructor({ _createRelay = (url) => new RelayConnection(url) } = {}) {
-    this.#createRelay = _createRelay;
+  #WebSocket;
+  #admission;
+  constructor({ _createRelay, WebSocket: WebSocketImpl, ...capacity } = {}) {
+    this.#WebSocket = WebSocketImpl;
+    this.#createRelay = _createRelay ?? ((url) => new RelayConnection(url, this.#WebSocket ? { WebSocket: this.#WebSocket } : void 0));
+    this.#admission = new ReadAdmission(capacity);
+  }
+  // Injects the WebSocket implementation used by new pooled connections (e.g.
+  // a launcher-owned relay multiplexer). Existing connections keep the
+  // implementation they were created with.
+  setWebSocket(WebSocketImpl) {
+    if (typeof WebSocketImpl !== "function") throw new ValidationError("INVALID_WEBSOCKET_IMPLEMENTATION");
+    this.#WebSocket = WebSocketImpl;
   }
   #scheduleIdleDisconnect(url) {
     clearTimeout(this.#relayTimeouts.get(url));
-    this.#relayTimeouts.set(url, maybeUnref(setTimeout(() => this.disconnect(url), this.#timeout)));
+    this.#relayTimeouts.set(url, maybeUnref(setTimeout(() => {
+      if (this.#admission.states.get(url)?.active) this.#scheduleIdleDisconnect(url);
+      else this.disconnect(url);
+    }, this.#timeout)));
   }
   // Opens a normalized pooled connection. Failed connects are evicted so a later
   // retry creates a fresh RelayConnection instead of reusing broken socket state.
@@ -5517,6 +5625,7 @@ var RelayPool = class {
   // Disconnect from a relay
   async disconnect(url) {
     const normalizedUrl = normalizeRelayUrl(url);
+    this.#admission.cancelQueued(normalizedUrl);
     if (this.#relays.has(normalizedUrl)) {
       const relay = this.#relays.get(normalizedUrl);
       if (relay.ws?.readyState < 2) await relay.close()?.catch(console.log);
@@ -5527,7 +5636,7 @@ var RelayPool = class {
   }
   // Disconnect from all relays
   async disconnectAll() {
-    for (const url of [...this.#relays.keys()]) {
+    for (const url of /* @__PURE__ */ new Set([...this.#relays.keys(), ...this.#admission.states.keys()])) {
       await this.disconnect(url);
     }
   }
@@ -5658,8 +5767,8 @@ var RelayPool = class {
   // grace window; null disables that window so callers wait for every relay or
   // the operation deadline. Disabling cross-relay deduplication still suppresses
   // repeated ids from the same relay; callbacks remain immediate in both modes.
-  async getEvents(filter, relays, { timeout = 5e3, timeoutAfterFirstEose = 500, callback, signal, deduplicateAcrossRelays = true } = {}) {
-    assertReadOptions(filter, { timeout, timeoutAfterFirstEose });
+  async getEvents(filter, relays, { timeout = 5e3, timeoutAfterFirstEose = 500, callback, signal, deduplicateAcrossRelays = true, queueTimeout = 3e4, _admissions } = {}) {
+    assertReadOptions(filter, { timeout, timeoutAfterFirstEose, queueTimeout });
     if (typeof deduplicateAcrossRelays !== "boolean") throw new ValidationError("INVALID_DEDUPLICATE_ACROSS_RELAYS");
     if (signal?.aborted) throw new Error("Aborted");
     const urls = normalizedRelayUrls(relays);
@@ -5670,14 +5779,20 @@ var RelayPool = class {
     const eventIds = deduplicateAcrossRelays ? /* @__PURE__ */ new Set() : null;
     let isResolved = false;
     let eoseTimer = null;
-    let timeoutTimer = null;
+    const timers = /* @__PURE__ */ new Map();
+    const leases = /* @__PURE__ */ new Map();
+    const admissionAbort = new AbortController();
+    const admissionSignal = signal ? AbortSignal.any([signal, admissionAbort.signal]) : admissionAbort.signal;
     return await new Promise((resolve, reject) => {
       const cleanup = () => {
-        clearTimeout(timeoutTimer);
+        admissionAbort.abort();
+        for (const timer of timers.values()) clearTimeout(timer);
         clearTimeout(eoseTimer);
         signal?.removeEventListener("abort", onAbort);
         for (const sub of subscriptions.values()) sub.close();
         subscriptions.clear();
+        for (const lease of leases.values()) lease.release();
+        leases.clear();
       };
       const fail = (error) => {
         if (isResolved) return;
@@ -5695,6 +5810,11 @@ var RelayPool = class {
       const settleRelay = (relay, status, error) => {
         if (isResolved || outcomes.has(relay)) return;
         outcomes.set(relay, { relay, status, ...error ? { error } : {} });
+        clearTimeout(timers.get(relay));
+        subscriptions.get(relay)?.close();
+        subscriptions.delete(relay);
+        leases.get(relay)?.release();
+        leases.delete(relay);
         if (error) {
           errors.push({ relay, reason: error });
           notify3({ type: "error", relay, error });
@@ -5723,14 +5843,27 @@ var RelayPool = class {
       };
       const onAbort = () => fail(new Error("Aborted"));
       signal?.addEventListener("abort", onAbort, { once: true });
-      if (timeout !== null) timeoutTimer = maybeUnref(setTimeout(() => finish("timeout"), timeout));
       if (!urls.length) {
         finish();
         return;
       }
       for (const url of urls) {
         const seenIds = eventIds ?? /* @__PURE__ */ new Set();
-        this.#getRelay(url).then((relay) => {
+        const reservation = _admissions?.get(url) ?? this.#admission.acquire(normalizeRelayUrl(url), { history: true, signal: admissionSignal, queueTimeout });
+        reservation.then(async (slots) => {
+          const lease = slots.history;
+          if (isResolved || outcomes.has(url)) {
+            lease.release();
+            return;
+          }
+          leases.set(url, lease);
+          if (timeout !== null) {
+            timers.set(url, maybeUnref(setTimeout(() => {
+              settleRelay(url, "timeout", getEventsTimeoutError());
+              finishIfComplete();
+            }, timeout)));
+          }
+          const relay = await this.#getRelay(url);
           if (isResolved || outcomes.has(url)) return;
           let hasEvents = false;
           let sub;
@@ -5777,7 +5910,10 @@ var RelayPool = class {
       }
     });
   }
-  async *getEventsGenerator(filter, relays, options = {}) {
+  getEventsGenerator(filter, relays, options = {}) {
+    return drainableStream((options2) => this.#getEventsGenerator(filter, relays, options2), options);
+  }
+  async *#getEventsGenerator(filter, relays, options = {}) {
     const queue = [];
     let p = Promise.withResolvers();
     let isDone = false;
@@ -5813,7 +5949,8 @@ var RelayPool = class {
   // Returns a strictly-live stream. `ready` reports the first initial EOSE window,
   // while `readyRelays` follows relays that are currently past their own EOSE.
   getLiveEventsGenerator(filter, relays, options = {}) {
-    assertReadOptions(filter, { timeout: options.timeout === void 0 ? 5e3 : options.timeout, timeoutAfterFirstEose: options.timeoutAfterFirstEose === void 0 ? 500 : options.timeoutAfterFirstEose });
+    assertBufferOptions(options);
+    assertReadOptions(filter, { timeout: options.timeout === void 0 ? 5e3 : options.timeout, timeoutAfterFirstEose: options.timeoutAfterFirstEose === void 0 ? 500 : options.timeoutAfterFirstEose, queueTimeout: options.queueTimeout === void 0 ? 3e4 : options.queueTimeout });
     const ready = Promise.withResolvers();
     const readyRelays = /* @__PURE__ */ new Set();
     const stream = drainableStream((options2) => this.#getLiveEventsGenerator(filter, relays, options2, { ready, readyRelays }), options);
@@ -5836,6 +5973,10 @@ var RelayPool = class {
     _stopSignal,
     timeout = 5e3,
     timeoutAfterFirstEose = 500,
+    queueTimeout = 3e4,
+    _admissions,
+    maxBufferedLiveEvents = 1e3,
+    maxBufferedLiveBytes = 8 * 1024 * 1024,
     timeoutForReconnectGap = 5e3,
     timeoutAfterFirstReconnectGapEose = 500,
     _gapEventsGenerator = (...args) => this.getEventsGenerator(...args)
@@ -5845,12 +5986,17 @@ var RelayPool = class {
     let p = Promise.withResolvers();
     let isDone = false;
     let draining = false;
+    let failure;
+    let queuedBytes = 0;
+    const encoder9 = new TextEncoder();
     const gapTasks = /* @__PURE__ */ new Set();
     const liveSubs = /* @__PURE__ */ new Map();
     const retryTimers2 = /* @__PURE__ */ new Map();
     const initialPending = new Set(urls);
     const initialOutcomes = /* @__PURE__ */ new Map();
-    let readyTimeout = null;
+    const readyTimeouts = /* @__PURE__ */ new Map();
+    const liveLeases = /* @__PURE__ */ new Map();
+    const initialAdmissions = /* @__PURE__ */ new Set();
     let readyTimer = null;
     let isReady = false;
     const gapAc = new AbortController();
@@ -5858,19 +6004,57 @@ var RelayPool = class {
     delete baseFilter.since;
     delete baseFilter.until;
     const filterUntil = filter.until > 0 ? filter.until : null;
-    let lastSeenAt = filter.since > 0 ? filter.since : null;
+    const lastSeenAt = /* @__PURE__ */ new Map();
+    const openedAt = /* @__PURE__ */ new Map();
+    const pendingGaps = /* @__PURE__ */ new Map();
+    const attempts = /* @__PURE__ */ new Map();
+    let nextEpoch = 0;
+    const sinceFloor = Math.max(0, filter.since ?? 0);
+    const overlappingSince = (timestamp) => Math.max(sinceFloor, timestamp - LIVE_OVERLAP_SECONDS);
+    const observeEvent = (event, url) => {
+      const timestamp = Math.min(event.created_at, Math.floor(Date.now() / 1e3));
+      if (Number.isFinite(timestamp) && timestamp > (lastSeenAt.get(url) ?? -Infinity)) lastSeenAt.set(url, timestamp);
+    };
+    const scheduleProgress = (attempt) => {
+      if (isDone || attempt.closed || attempts.get(attempt.url) !== attempt || attempt.since === null || !attempt.recovered || attempt.timer) return;
+      attempt.timer = maybeUnref(setTimeout(() => {
+        attempt.timer = null;
+        if (isDone || attempt.closed || attempts.get(attempt.url) !== attempt) return;
+        const until = Math.min(filterUntil ?? Infinity, Math.floor(Date.now() / 1e3));
+        if (until > attempt.lastProgress && until >= attempt.since) {
+          enqueue({ type: "live-progress", relay: attempt.url, epoch: attempt.epoch, since: attempt.since, until });
+          attempt.lastProgress = until;
+        }
+        scheduleProgress(attempt);
+      }, LIVE_PROGRESS_INTERVAL_MS));
+    };
     const seenIds = /* @__PURE__ */ new Set();
     let untilTimer = null;
+    const overflow = (relay) => {
+      failure = Object.assign(new Error("RELAY_LIVE_BUFFER_FULL"), { code: "RELAY_LIVE_BUFFER_FULL", relay, phase: "live-buffer" });
+      teardown();
+    };
     const enqueue = (item) => {
-      queue.push(item);
+      const bytes = encoder9.encode(JSON.stringify(item)).byteLength;
+      if (queue.length >= maxBufferedLiveEvents || queuedBytes + bytes > maxBufferedLiveBytes) {
+        overflow(item.relay);
+        return;
+      }
+      queuedBytes += bytes;
+      queue.push({ item, bytes });
       p.resolve();
       p = Promise.withResolvers();
+    };
+    const shift = () => {
+      const { item, bytes } = queue.shift();
+      queuedBytes -= bytes;
+      return item;
     };
     const finishReady = (pendingStatus = "cutoff", emit = true) => {
       if (isReady) return;
       isReady = true;
       clearTimeout(readyTimer);
-      clearTimeout(readyTimeout);
+      for (const timer of readyTimeouts.values()) clearTimeout(timer);
       for (const relay of initialPending) {
         const error = pendingStatus === "timeout" ? getEventsTimeoutError() : void 0;
         initialOutcomes.set(relay, { relay, status: pendingStatus, ...error ? { error } : {} });
@@ -5888,14 +6072,23 @@ var RelayPool = class {
       if (isDone && (drain || !draining)) return;
       draining = drain;
       isDone = true;
-      if (!drain) queue.length = 0;
+      if (!drain) {
+        queue.length = 0;
+        queuedBytes = 0;
+      }
       clearTimeout(untilTimer);
       finishReady("closed", false);
       gapAc.abort();
+      for (const attempt of attempts.values()) {
+        clearTimeout(attempt.timer);
+        attempt.stop.abort();
+      }
       for (const timer of retryTimers2.values()) clearTimeout(timer);
       retryTimers2.clear();
       liveSubs.forEach((sub) => sub.close());
       liveSubs.clear();
+      for (const lease of liveLeases.values()) lease.release();
+      liveLeases.clear();
       p.resolve();
     };
     const pushEvent = (event, url, accepted = false) => {
@@ -5904,7 +6097,6 @@ var RelayPool = class {
         if (seenIds.size >= 500) seenIds.delete(seenIds.values().next().value);
         seenIds.add(event.id);
       }
-      if (event.created_at > (lastSeenAt ?? 0)) lastSeenAt = event.created_at;
       enqueue({ type: "event", event, relay: url });
     };
     if (signal?.aborted || _stopSignal?.aborted) {
@@ -5915,11 +6107,11 @@ var RelayPool = class {
     const stop = () => teardown(true);
     signal?.addEventListener("abort", abort, { once: true });
     _stopSignal?.addEventListener("abort", stop, { once: true });
-    if (timeout !== null) readyTimeout = maybeUnref(setTimeout(() => finishReady("timeout"), timeout));
     const maybeFinishInitialReady = () => {
       if (initialPending.size === 0) finishReady();
     };
     const markInitialEose = (url) => {
+      clearTimeout(readyTimeouts.get(url));
       readyRelays.add(url);
       if (isReady || !initialPending.delete(url)) return;
       initialOutcomes.set(url, { relay: url, status: "eose" });
@@ -5932,13 +6124,15 @@ var RelayPool = class {
       if (isDone) return;
       enqueue({ type: "error", relay: url, error });
       if (!isReady && initialPending.delete(url)) {
+        clearTimeout(readyTimeouts.get(url));
         initialOutcomes.set(url, { relay: url, status: "error", error });
         maybeFinishInitialReady();
       }
     };
-    const reportClosed = (url) => {
+    const reportClosed = (url, error) => {
       if (!isReady && initialPending.delete(url)) {
-        initialOutcomes.set(url, { relay: url, status: "closed" });
+        clearTimeout(readyTimeouts.get(url));
+        initialOutcomes.set(url, { relay: url, status: "closed", error });
         maybeFinishInitialReady();
       }
     };
@@ -5947,7 +6141,7 @@ var RelayPool = class {
       const nextDelay = Math.min(reconnectDelay * 2, 5 * 6e4);
       const timer = maybeUnref(setTimeout(() => {
         retryTimers2.delete(url);
-        subscribeToRelay(url, lastSeenAt, nextDelay);
+        subscribeToRelay(url, pendingGaps.get(url) ?? lastSeenAt.get(url) ?? openedAt.get(url) ?? null, nextDelay);
       }, reconnectDelay));
       retryTimers2.set(url, timer);
     };
@@ -5958,72 +6152,146 @@ var RelayPool = class {
         teardown(true);
       }, Math.max(0, msUntil)));
     }
-    const runReconnectGapFill = (url, gapSince, now) => {
+    const runReconnectGapFill = (url, gapSince, now, slots, attempt) => {
       const gapUntil = filterUntil !== null ? Math.min(now, filterUntil) : now;
-      const gapFilter = { ...baseFilter, since: gapSince, until: gapUntil };
+      const gapFilter = { ...baseFilter, since: overlappingSince(gapSince), until: gapUntil };
       const gapGen = _gapEventsGenerator(gapFilter, [url], {
+        _admissions: /* @__PURE__ */ new Map([[url, Promise.resolve(slots)]]),
+        queueTimeout,
         timeout: timeoutForReconnectGap,
         timeoutAfterFirstEose: timeoutAfterFirstReconnectGapEose,
         signal,
-        _stopSignal: gapAc.signal
+        _stopSignal: AbortSignal.any([gapAc.signal, attempt.stop.signal])
       });
       return (async () => {
+        let completed = false;
+        let failed = false;
         for await (const item of gapGen) {
-          if (item?.type === "event") pushEvent(item.event, url, true);
-          else if (item?.type === "error" && !isDone) enqueue(item);
+          if (item?.type === "event") {
+            observeEvent(item.event, url);
+            pushEvent(item.event, url, true);
+          } else if (item?.type === "error") {
+            failed = true;
+            if (!isDone) enqueue(item);
+          } else if (item?.type === "eose") {
+            completed = item.relays?.length === 1 && ["eose", "satisfied"].includes(item.relays[0].status);
+          }
         }
+        return completed && !failed;
       })().catch((err) => {
         reportFailure(url, asError(err));
-      });
+        return false;
+      }).finally(() => slots.history.release());
     };
     const subscribeToRelay = (url, gapSince, reconnectDelay = 1e3) => {
-      const now = Math.floor(Date.now() / 1e3);
+      let now = Math.floor(Date.now() / 1e3);
       if (filterUntil !== null && now >= filterUntil) return;
-      this.#getRelay(url).then((relay) => {
-        if (isDone) return;
-        let liveBuffer = gapSince !== null && gapSince > 0 ? [] : null;
+      const reservation = !initialAdmissions.has(url) && _admissions?.get(url);
+      const recovering = gapSince !== null;
+      if (recovering) pendingGaps.set(url, gapSince);
+      const attempt = { url, epoch: ++nextEpoch, since: null, lastProgress: -Infinity, recovered: !recovering, timer: null, closed: false, stop: new AbortController() };
+      attempts.set(url, attempt);
+      let recoveryLease;
+      initialAdmissions.add(url);
+      Promise.resolve(reservation || this.#admission.acquire(normalizeRelayUrl(url), { live: true, history: recovering, signal: gapAc.signal, queueTimeout })).then(async (slots) => {
+        const lease = slots.live;
+        recoveryLease = recovering ? slots.history : null;
+        if (isDone) {
+          lease.release();
+          recoveryLease?.release();
+          return;
+        }
+        liveLeases.set(url, lease);
+        if (timeout !== null && initialPending.has(url)) {
+          readyTimeouts.set(url, maybeUnref(setTimeout(() => {
+            if (!initialPending.delete(url)) return;
+            const error = getEventsTimeoutError();
+            initialOutcomes.set(url, { relay: url, status: "timeout", error });
+            enqueue({ type: "error", relay: url, error });
+            maybeFinishInitialReady();
+          }, timeout)));
+        }
+        const relay = await this.#getRelay(url);
+        if (isDone) {
+          recoveryLease?.release();
+          return;
+        }
+        now = Math.floor(Date.now() / 1e3);
+        if (filterUntil !== null && now >= filterUntil) {
+          lease.release();
+          recoveryLease?.release();
+          return;
+        }
+        let liveBuffer = recovering ? [] : null;
         let liveEose = false;
-        const liveFilter = { ...baseFilter, since: now, limit: 0 };
+        let bufferedBytes = 0;
+        if (!openedAt.has(url)) openedAt.set(url, now);
+        const liveFilter = { ...baseFilter, since: overlappingSince(now), limit: 0 };
         if (filterUntil !== null) liveFilter.until = filterUntil;
         const liveSub = relay.subscribe([liveFilter], {
           onevent: (event) => {
-            if (isDone || liveSubs.get(url) !== liveSub || !liveEose) return;
-            if (liveBuffer) liveBuffer.push(event);
-            else pushEvent(event, url);
+            if (isDone || liveSubs.get(url) !== liveSub || attempt.closed || !liveEose) return;
+            observeEvent(event, url);
+            if (liveBuffer) {
+              const bytes = encoder9.encode(JSON.stringify(event)).byteLength;
+              if (liveBuffer.length >= maxBufferedLiveEvents || bufferedBytes + bytes > maxBufferedLiveBytes) {
+                overflow(url);
+                return;
+              }
+              bufferedBytes += bytes;
+              liveBuffer.push(event);
+            } else pushEvent(event, url);
           },
           onclose: (error) => {
+            if (attempt.closed || attempts.get(url) !== attempt) return;
+            attempt.closed = true;
+            clearTimeout(attempt.timer);
+            attempt.stop.abort();
             if (liveSubs.get(url) === liveSub) liveSubs.delete(url);
-            else if (liveSubs.has(url)) return;
+            lease.release();
+            if (liveLeases.get(url) === lease) liveLeases.delete(url);
             readyRelays.delete(url);
-            if (!isDone) {
-              if (error !== void 0) reportFailure(url, asError(error));
-              else if (!liveEose) reportClosed(url);
-            }
             if (isDone) return;
+            if (error !== void 0) reportFailure(url, asError(error));
+            else {
+              const interruption = Object.assign(categorizeRelayError(new Error("RELAY_LIVE_INTERRUPTED"), "transport"), { code: "RELAY_LIVE_INTERRUPTED" });
+              enqueue({ type: "error", relay: url, error: interruption });
+              reportClosed(url, interruption);
+            }
             scheduleReconnect(url, reconnectDelay);
           },
           oneose: () => {
-            if (isDone || liveSubs.has(url) && liveSubs.get(url) !== liveSub) return;
+            if (isDone || attempt.closed || attempts.get(url) !== attempt || liveEose) return;
             liveEose = true;
+            attempt.since = Math.max(sinceFloor, Math.floor(Date.now() / 1e3));
             markInitialEose(url);
+            scheduleProgress(attempt);
           }
         });
         if (isDone) {
           liveSub.close();
+          recoveryLease?.release();
           return;
         }
         liveSubs.set(url, liveSub);
-        if (gapSince !== null && gapSince > 0) {
-          const task = runReconnectGapFill(url, gapSince, now).finally(() => {
+        if (recovering) {
+          const task = runReconnectGapFill(url, gapSince, now, slots, attempt).then((recovered) => {
+            attempt.recovered = recovered;
+            if (recovered && !attempt.closed && attempts.get(url) === attempt) pendingGaps.delete(url);
+          }).finally(() => {
             const buf = liveBuffer;
             liveBuffer = null;
             for (const event of buf) pushEvent(event, url, true);
             gapTasks.delete(task);
+            scheduleProgress(attempt);
             p.resolve();
           });
           gapTasks.add(task);
         }
       }).catch((err) => {
+        recoveryLease?.release();
+        liveLeases.get(url)?.release();
+        liveLeases.delete(url);
         readyRelays.delete(url);
         const reason = err instanceof Error ? err : new Error(String(err));
         reportFailure(url, reason);
@@ -6034,7 +6302,8 @@ var RelayPool = class {
     if (!urls.length) {
       finishReady();
       try {
-        yield queue.shift();
+        if (failure) throw failure;
+        yield shift();
       } finally {
         teardown();
         signal?.removeEventListener("abort", abort);
@@ -6049,12 +6318,13 @@ var RelayPool = class {
     try {
       while (!isDone || draining && gapTasks.size > 0 || queue.length > 0) {
         if (signal?.aborted) break;
-        if (queue.length > 0) yield queue.shift();
+        if (queue.length > 0) yield shift();
         else {
           await p.promise;
           p = Promise.withResolvers();
         }
       }
+      if (failure) throw failure;
     } finally {
       signal?.removeEventListener("abort", abort);
       _stopSignal?.removeEventListener("abort", stop);
@@ -6064,8 +6334,8 @@ var RelayPool = class {
   }
   // All-in-one event feed generator. For live:true, handles the full sequence:
   //
-  // - live:true (default): unless filter.limit === 0, starts the live sub immediately
-  //   (so no incoming events are missed), runs an initial one-shot fetch of stored events
+  // - live:true (default): unless filter.limit === 0, reserves live+history capacity,
+  //   starts live input, then runs an initial one-shot fetch of stored events
   //   concurrently, yields stored events first, then flushes buffered live events (deduped
   //   against stored ones), then yields live events indefinitely. With limit:0 the relay
   //   sends no stored events, so the fetch is skipped and only the live sub runs.
@@ -6073,69 +6343,123 @@ var RelayPool = class {
   //   short-circuits after the fastest relay with events EOSEs, or waits for all
   //   relays when null.
   //
+  // snapshot:true captures a historical until after initial live readiness;
+  // that bound is reported in the history marker and never stops live input.
   // All underlying generators are injectable for testing.
   getEventsFeedGenerator(filter, relays, options = {}) {
-    assertReadOptions(filter, { timeout: options.timeout === void 0 ? 5e3 : options.timeout, timeoutAfterFirstEose: options.timeoutAfterFirstEose === void 0 ? 500 : options.timeoutAfterFirstEose });
+    if (options.snapshot !== void 0 && typeof options.snapshot !== "boolean") throw new ValidationError("INVALID_RELAY_SNAPSHOT");
+    assertBufferOptions(options);
+    assertReadOptions(filter, { timeout: options.timeout === void 0 ? 5e3 : options.timeout, timeoutAfterFirstEose: options.timeoutAfterFirstEose === void 0 ? 500 : options.timeoutAfterFirstEose, queueTimeout: options.queueTimeout === void 0 ? 3e4 : options.queueTimeout });
     return drainableStream((options2) => this.#getEventsFeedGenerator(filter, relays, options2), options);
   }
   async *#getEventsFeedGenerator(filter, relays, {
     signal,
     _stopSignal,
     live = true,
+    snapshot = false,
     timeout = 5e3,
     timeoutAfterFirstEose = 500,
+    queueTimeout = 3e4,
+    maxBufferedLiveEvents = 1e3,
+    maxBufferedLiveBytes = 8 * 1024 * 1024,
     _liveGenerator = (...args) => this.getLiveEventsGenerator(...args),
     _eventsGenerator = (...args) => this.getEventsGenerator(...args)
   } = {}) {
     if (signal.aborted || _stopSignal.aborted) return;
+    const options = { timeout, timeoutAfterFirstEose, queueTimeout, signal, _stopSignal };
     if (!live) {
-      const gen = _eventsGenerator(filter, relays, { timeout, timeoutAfterFirstEose, signal, _stopSignal });
-      for await (const item of gen) {
+      const bounds = { since: filter.since ?? 0, until: Math.min(filter.until ?? Infinity, Math.floor(Date.now() / 1e3)) };
+      for await (const item of _eventsGenerator(snapshot ? { ...filter, ...bounds } : filter, relays, options)) {
         if (signal.aborted) return;
-        yield item;
+        yield snapshot && item.type === "eose" ? { ...item, snapshot: bounds } : item;
       }
       return;
     }
     if (filter.limit === 0) {
-      for await (const event of _liveGenerator(filter, relays, { timeout, timeoutAfterFirstEose, signal, _stopSignal })) {
-        if (signal.aborted) return;
-        yield event;
-      }
+      yield* _liveGenerator(filter, relays, { ...options, maxBufferedLiveEvents, maxBufferedLiveBytes });
       return;
     }
-    const liveGen = _liveGenerator(filter, relays, { timeout, timeoutAfterFirstEose, signal, _stopSignal });
+    const urls = normalizedRelayUrls(relays);
+    const inputAbort = new AbortController();
+    const inputSignal = AbortSignal.any([signal, inputAbort.signal]);
+    const admissionSignal = AbortSignal.any([inputSignal, _stopSignal]);
+    const reservations = /* @__PURE__ */ new Map();
+    const leases = /* @__PURE__ */ new Set();
+    for (const url of urls) {
+      const reservation = this.#admission.acquire(normalizeRelayUrl(url), { history: true, live: true, signal: admissionSignal, queueTimeout }).then((slots) => {
+        for (const lease of Object.values(slots)) {
+          leases.add(lease);
+          if (admissionSignal.aborted) lease.release();
+        }
+        return slots;
+      });
+      reservation.catch(() => {
+      });
+      reservations.set(url, reservation);
+    }
+    const readOptions = { ...options, signal: inputSignal, _admissions: reservations, maxBufferedLiveEvents, maxBufferedLiveBytes };
+    const liveFilter = { ...filter };
+    if (snapshot) delete liveFilter.until;
+    const liveGen = _liveGenerator(liveFilter, urls, readOptions);
     const liveBuffer = [];
+    const encoder9 = new TextEncoder();
+    let bufferedBytes = 0;
     let liveDone = false;
     let liveFailure;
     let liveWake = Promise.withResolvers();
+    const initialReady = Promise.withResolvers();
+    const shift = () => {
+      const entry = liveBuffer.shift();
+      bufferedBytes -= entry.bytes;
+      return entry.item;
+    };
     const bgLoop = (async () => {
       try {
-        for await (const event of liveGen) {
-          if (signal.aborted) break;
-          if (event.type !== "eose") liveBuffer.push(event);
+        for await (const item of liveGen) {
+          if (inputSignal.aborted) break;
+          if (item.type === "eose") initialReady.resolve();
+          else {
+            const bytes = encoder9.encode(JSON.stringify(item)).byteLength;
+            if (liveBuffer.length >= maxBufferedLiveEvents || bufferedBytes + bytes > maxBufferedLiveBytes) {
+              throw Object.assign(new Error("RELAY_LIVE_BUFFER_FULL"), { code: "RELAY_LIVE_BUFFER_FULL", relay: item.relay, phase: "live-buffer" });
+            }
+            liveBuffer.push({ item, bytes });
+            bufferedBytes += bytes;
+          }
           liveWake.resolve();
           liveWake = Promise.withResolvers();
         }
       } catch (error) {
         liveFailure = error;
+        if (error.code === "RELAY_LIVE_BUFFER_FULL") inputAbort.abort();
       } finally {
         liveDone = true;
+        initialReady.resolve();
         liveWake.resolve();
       }
     })();
     try {
-      const fetchGen = _eventsGenerator(filter, relays, { timeout, timeoutAfterFirstEose, signal, _stopSignal });
+      if (snapshot) await initialReady.promise;
+      if (liveFailure?.code === "RELAY_LIVE_BUFFER_FULL") throw liveFailure;
+      if (signal.aborted) return;
+      const bounds = { since: filter.since ?? 0, until: Math.min(filter.until ?? Infinity, Math.floor(Date.now() / 1e3)) };
+      const historyFilter = snapshot ? { ...filter, ...bounds } : filter;
+      const fetchGen = _eventsGenerator(historyFilter, urls, readOptions);
       const seenIds = /* @__PURE__ */ new Set();
       for await (const item of fetchGen) {
+        if (liveFailure?.code === "RELAY_LIVE_BUFFER_FULL") throw liveFailure;
         if (signal.aborted) return;
         if (item?.type === "event" && !seenIds.has(item.event.id)) {
           seenIds.add(item.event.id);
           yield item;
-        } else if (item?.type !== "event") yield item;
+        } else if (item?.type !== "event") {
+          yield snapshot && item.type === "eose" ? { ...item, snapshot: bounds } : item;
+        }
       }
+      if (liveFailure?.code === "RELAY_LIVE_BUFFER_FULL") throw liveFailure;
       while (liveBuffer.length > 0) {
         if (signal.aborted) return;
-        const item = liveBuffer.shift();
+        const item = shift();
         if (item.type !== "event" || !seenIds.has(item.event.id)) {
           if (item.type === "event") seenIds.add(item.event.id);
           yield item;
@@ -6143,16 +6467,20 @@ var RelayPool = class {
       }
       seenIds.clear();
       while (!liveDone || liveBuffer.length > 0) {
+        if (liveFailure?.code === "RELAY_LIVE_BUFFER_FULL") throw liveFailure;
         while (liveBuffer.length > 0) {
           if (signal.aborted) return;
-          yield liveBuffer.shift();
+          yield shift();
         }
         if (!liveDone) await liveWake.promise;
       }
       if (liveFailure) throw liveFailure;
     } finally {
+      inputAbort.abort();
       await liveGen.return();
       await bgLoop;
+      liveBuffer.length = 0;
+      for (const lease of leases) lease.release();
     }
   }
   // Returns after the first acknowledgement window. timeout is one deadline for
@@ -7757,7 +8085,11 @@ async function openSigner(bunkerUrl, clientSecretKey) {
       }
       throw err;
     }
-    await signer.switchRelays({ timeout: 1e3 }).catch(() => false);
+    try {
+      await signer.switchRelays({ timeout: 1e3 });
+    } catch (error) {
+      console.warn("[bunker] Relay switch failed", { relays: pointer.relays, error: error?.message ?? error });
+    }
   }
   return signer;
 }
@@ -11490,6 +11822,35 @@ async function createQueue({
       state.usedBytes = 0;
     });
   }
+  async function putBy(indexName, item, { existingOnly = false } = {}) {
+    const definition = indexDefinitions.find((index) => index.name === indexName);
+    if (!definition?.unique || definition.multiEntry) throw new ValidationError("QUEUE_PUT_INDEX_INVALID");
+    const value = structuredClone(item);
+    const readKey = (path) => path.split(".").reduce((part, key2) => part?.[key2], value);
+    const key = Array.isArray(definition.keyPath) ? definition.keyPath.map(readKey) : readKey(definition.keyPath);
+    try {
+      indexedDB.cmp(key, key);
+    } catch {
+      throw new ValidationError("QUEUE_PUT_KEY_INVALID");
+    }
+    const requiredBytes = itemForStorage(0, value).byteSize;
+    const written = await mutate2(async (tx, state) => {
+      const { result: previous } = await run("get", [key], ITEMS_STORE, indexName, { tx });
+      if (previous) {
+        const index = previous.position - state.head;
+        await putItem(tx, state, previous.position, value, {
+          direction: evictionDirectionFor("setAt", { index, length: state.tail - state.head }),
+          protectedPositions: /* @__PURE__ */ new Set([previous.position])
+        });
+      } else {
+        if (existingOnly) return false;
+        await pushInTransaction(tx, state, value);
+      }
+      return true;
+    }, { requiredBytes });
+    if (written) wake();
+    return written;
+  }
   async function getBy(indexName, query) {
     return snapshot(async (tx) => {
       const { result } = await run("get", [query], ITEMS_STORE, indexName, { tx });
@@ -11646,6 +12007,7 @@ async function createQueue({
     removeWhere,
     some,
     clear,
+    putBy,
     getBy,
     someBy,
     removeBy,

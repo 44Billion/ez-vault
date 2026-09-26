@@ -13,6 +13,7 @@ import { parseRelayListEvent } from './relay.js'
 import { launcherLocale, setLocale } from '../i18n/index.js'
 import { resetVaultView } from './view-state.js'
 import { wipeLocalDevData } from './local-dev-wipe.js'
+import { installLauncherRelayPoolShim, shouldUseLauncherRelayPool } from './launcher-relay-pool.js'
 
 // Read-only disclosures — the result is publicly derivable, so logging them
 // would just be noise in the audit trail. Match both wire and JS spellings.
@@ -251,8 +252,10 @@ export async function initMessenger () {
   const targetOrigin = launcherOrigin ?? '*'
 
   const { port1, port2 } = new MessageChannel()
+  const { port1: relayPort, port2: relayPortForLauncher } = new MessageChannel()
   port1.addEventListener('message', onPortMessage)
   port1.start()
+  relayPort.start()
   launcherPort = port1
 
   // ask() generates a reqId, posts on window.parent, and resolves on the
@@ -262,15 +265,16 @@ export async function initMessenger () {
   // can't fake a trusted e.origin on the reply.
   const accounts = snapshotAccounts()
   const accountsFingerprint = JSON.stringify(accounts)
-  const { error, origin } = await ask(window.parent, {
+  const { error, origin, payload } = await ask(window.parent, {
     code: 'VAULT_READY',
     payload: { accounts }
-  }, { targetOrigin, transfer: [port2] })
+  }, { targetOrigin, transfer: [port2, relayPortForLauncher] })
   if (error || !isTrustedOrigin(origin)) {
     // Disentangle the channel — port2 may be held by an untrusted parent via
     // the "*" fallback; closing port1 guarantees any message they post on it
     // can no longer reach us.
     try { port1.close() } catch { /* noop */ }
+    try { relayPort.close() } catch { /* noop */ }
     nostrdb.disconnect(port1)
     launcherPort = null
     lastAccountsStateFingerprint = null
@@ -278,6 +282,11 @@ export async function initMessenger () {
   }
   launcherOrigin ??= origin
   handshakeComplete = true
+  if (shouldUseLauncherRelayPool(payload)) {
+    installLauncherRelayPoolShim({ port: relayPort })
+  } else {
+    try { relayPort.close() } catch { /* noop */ }
+  }
   // A document can disappear while its MessagePort object still exists in
   // the launcher. Report lifecycle changes on the authenticated port.
   window.addEventListener('pagehide', () => {
