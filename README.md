@@ -213,3 +213,14 @@ pending work. Redelivery after interruption is expected and handled by existing
 sync deduplication. Locking still closes the messenger; reopening uses its
 persisted recovery checkpoints and the default seven-day remote recovery window.
 Recovery is limited by data retained on relays/seeders, not guaranteed delivery.
+
+Private-messenger consumers are coordinated on libp2r2p 0.11.0. Its encrypted
+router recipient tag is `p`; inner sync/control tags remain unchanged. Outgoing
+seeds are persisted before publication. Deploy communicating versions together;
+this change does not add cross-device replication of file seeds.
+
+Recovery storage for the synchronization transport stays local. Apps can use
+libp2r2p's event-store recovery adapters to synchronize their chat seeds and file
+authorizations, but applying that adapter to this transport would recursively
+synchronize the envelopes used to synchronize envelopes. Keep its default IDB
+seed storage even when consumer apps opt into personal-copy recovery records.

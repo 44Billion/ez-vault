@@ -367,3 +367,11 @@ weaken sealed fields to reduce rendering memory.
 `nextMessage()` returns `{ message, ack, nack }` in libp2r2p 0.10.20. Sync must
 finish its handler before acknowledging, and nack failed or superseded work.
 Never destructively drain a reservation on lock, shutdown or handler failure.
+
+Private-messenger uses the coordinated libp2r2p 0.11 router (`p` recipient,
+without legacy router `r` fallback). Do not rename inner sync control tags.
+Outgoing seeds no longer depend on relay echo. Consumer apps can persist recovery
+seeds and file grants as personal copies through libp2r2p/private-messenger/event-store.
+The vault's own synchronization messenger MUST retain its local default seed
+storage: synchronizing seeds of messages that synchronize seeds recursively
+creates more synchronization data. Do not inject that event-store adapter here.

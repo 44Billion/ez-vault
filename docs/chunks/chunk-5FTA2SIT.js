@@ -5457,7 +5457,6 @@ var RelayConnection = class {
 var CONNECTION_TIMEOUT_MS = 3e3;
 var COUNT_TIMEOUT_MS = 5e3;
 var COUNT_TIMEOUT_AFTER_FIRST_COUNT_MS = 500;
-var SEND_TIMEOUT_UNTIL_FIRST_FULFILLMENT_MS = 3e3;
 var SEND_TIMEOUT_MS = 3e4;
 var LIVE_OVERLAP_SECONDS = 600;
 var LIVE_PROGRESS_INTERVAL_MS = 6e4;
@@ -6483,8 +6482,8 @@ var RelayPool = class {
       for (const lease of leases) lease.release();
     }
   }
-  // Returns after the first acknowledgement window. timeout is one deadline for
-  // the whole operation, while timeoutUntilFirstFulfillment controls only this
+  // Returns on the first acknowledgement, all failures, or the 30s deadline.
+  // An optional timeoutUntilFirstFulfillment imposes an earlier deadline on this
   // initial return and closes pending reports when it fails. null disables either
   // timer independently. onRelayResult receives one
   // { relay, success, outcome, reason? } result per relay as it settles; outcome
@@ -6493,7 +6492,7 @@ var RelayPool = class {
   // Await `promise` for the complete report, including every relay outcome.
   async sendEvent(event, relays, {
     timeout = SEND_TIMEOUT_MS,
-    timeoutUntilFirstFulfillment = SEND_TIMEOUT_UNTIL_FIRST_FULFILLMENT_MS,
+    timeoutUntilFirstFulfillment = null,
     getAuthEvent,
     onRelayResult
   } = {}) {
@@ -8534,6 +8533,7 @@ __export(private_channel_exports, {
   publishNymEvent: () => publishNymEvent,
   subscribe: () => subscribe2,
   unwrapEvent: () => unwrapEvent,
+  unwrapRouterEvent: () => unwrapRouterEvent,
   wrapEvent: () => wrapEvent,
   wrapEvents: () => wrapEvents,
   wrapNymEvent: () => wrapNymEvent,
@@ -8743,6 +8743,46 @@ function deliveryInfo(event, senderPubkey) {
   };
 }
 
+// node_modules/libp2r2p/private-channel/helpers/fetch-error.js
+var describe = (reason) => `${reason?.category ? `[${reason.category}] ` : ""}${reason?.message || String(reason)}`;
+function incompleteFetchError({ errors, report, request, receivedEventCount, elapsedMs }) {
+  const relayErrors = errors.map(({ relay, reason }) => ({ relay, reason }));
+  const relays = report.map(({ relay, status, error }) => ({ relay, status, ...error ? { error } : {} }));
+  const reasons = [...new Set([...relayErrors.map((entry) => entry.reason), ...relays.map((entry) => entry.error)].filter((reason) => reason !== void 0))];
+  const details = relays.map(({ relay, status, error }) => {
+    const failures = relayErrors.filter((entry) => entry.relay === relay).map((entry) => entry.reason);
+    if (error && !failures.includes(error)) failures.push(error);
+    return `${relay} [${status}]${failures.length ? `: ${failures.map(describe).join("; ")}` : ""}`;
+  });
+  for (const { relay, reason } of relayErrors) {
+    if (!relays.some((entry) => entry.relay === relay)) details.push(`${relay || "unknown relay"}: ${describe(reason)}`);
+  }
+  return Object.assign(new AggregateError(
+    reasons,
+    `PRIVATE_CHANNEL_FETCH_INCOMPLETE: ${details.join(" | ")} (received=${receivedEventCount}, readElapsedMs=${elapsedMs}, timeoutMs=${request.timeoutMs})`
+  ), {
+    code: "PRIVATE_CHANNEL_FETCH_INCOMPLETE",
+    operation: "private-channel.fetch",
+    request,
+    receivedEventCount,
+    elapsedMs,
+    relays,
+    relayErrors
+  });
+}
+
+// node_modules/libp2r2p/private-channel/helpers/subscription-error.js
+function subscriptionError(reason, relay) {
+  const message = reason?.message ?? String(reason);
+  const error = reason instanceof AggregateError ? new AggregateError(reason.errors, message, { cause: reason }) : new Error(message, { cause: reason });
+  for (const key of ["name", "code", "category", "closeCode", "closeReason", "wasClean"]) {
+    if (reason?.[key] !== void 0) error[key] = reason[key];
+  }
+  error.operation = "private-channel.subscribe";
+  if (typeof relay === "string") error.relay = relay;
+  return error;
+}
+
 // node_modules/libp2r2p/private-channel/constants/index.js
 var PRIVATE_BROADCAST_KIND = 3560;
 var ROUTER_KIND = 26300;
@@ -8759,7 +8799,7 @@ function eventByteLength(event) {
   return encoder3.encode(JSON.stringify(event)).length;
 }
 function readReceiverTag(event) {
-  return event.tags?.find((t) => t[0] === "r")?.[1] || "";
+  return event.tags?.find((t) => t[0] === "p")?.[1] || "";
 }
 function readSenderTag(event) {
   const senderPubkey = event.tags?.find((t) => t[0] === "f")?.[1];
@@ -8787,14 +8827,18 @@ function readChunkTag(event) {
   }
   return { index, total };
 }
-function makeRouterEvent({ pubkey, senderPubkey, imkcPubkey, imkcProof, receiverPubkey, chunkIndex, chunkTotal, content }) {
+function makeRouterEvent({ pubkey, senderPubkey, imkcPubkey, imkcProof, receiverPubkey, chunkIndex, chunkTotal, fileChunkIndex, content }) {
   const tags = [["f", senderPubkey]];
   if (imkcPubkey) {
     if (!imkcProof) throw new ValidationError("INVALID_IMKC_PROOF");
     tags.push(["imkc", imkcPubkey, imkcProof]);
   }
+  if (fileChunkIndex !== void 0) {
+    if (!Number.isSafeInteger(fileChunkIndex) || fileChunkIndex < 0) throw new ValidationError("INVALID_FILE_CHUNK_INDEX");
+    tags.push(["i", String(fileChunkIndex)]);
+  }
   tags.push(["c", String(chunkIndex), String(chunkTotal)]);
-  if (receiverPubkey) tags.push(["r", receiverPubkey]);
+  if (receiverPubkey) tags.push(["p", receiverPubkey]);
   return { kind: ROUTER_KIND, pubkey, created_at: nowSeconds2(), tags, content };
 }
 function makeNymCarrierEvent({ innerId, chunkIndex, chunkTotal, content, createdAt = nowSeconds2() }) {
@@ -8805,6 +8849,12 @@ function makeNymCarrierEvent({ innerId, chunkIndex, chunkTotal, content, created
     tags: [["id", innerId], ["c", String(chunkIndex), String(chunkTotal)]],
     content
   };
+}
+function readFileChunkIndex(event) {
+  const tags = event.tags?.filter((tag) => tag[0] === "i") || [];
+  if (!tags.length) return void 0;
+  if (tags.length !== 1 || tags[0].length !== 2 || !/^(0|[1-9][0-9]*)$/.test(tags[0][1]) || !Number.isSafeInteger(Number(tags[0][1]))) throw new ValidationError("INVALID_FILE_CHUNK_INDEX");
+  return Number(tags[0][1]);
 }
 
 // node_modules/libp2r2p/private-channel/helpers/chunk-size.js
@@ -8820,7 +8870,7 @@ function routerPlaintextByteLengthForChunk(jsonlByteLength) {
     kind: ROUTER_KIND,
     pubkey: SAMPLE_PUBKEY,
     created_at: MAX_TIME_SECONDS,
-    tags: [["f", SAMPLE_PUBKEY], ["imkc", SAMPLE_PUBKEY, `${MAX_TIME_SECONDS}:${SAMPLE_SIGNATURE}`], ["c", MAX_CHUNK_TAG_VALUE, MAX_CHUNK_TAG_VALUE], ["r", SAMPLE_PUBKEY]],
+    tags: [["f", SAMPLE_PUBKEY], ["imkc", SAMPLE_PUBKEY, `${MAX_TIME_SECONDS}:${SAMPLE_SIGNATURE}`], ["c", MAX_CHUNK_TAG_VALUE, MAX_CHUNK_TAG_VALUE], ["p", SAMPLE_PUBKEY], ["i", String(Number.MAX_SAFE_INTEGER)]],
     content: "A".repeat(base64EncodedByteLength2(jsonlByteLength)),
     id: SAMPLE_PUBKEY,
     sig: SAMPLE_SIGNATURE
@@ -9216,6 +9266,7 @@ function normalizeMeta(meta, fallbackTtlMs = DEFAULT_RECEIVED_CHUNK_TTL_MS) {
   return {
     groupKey: String(meta.groupKey),
     channelPubkey: String(meta.channelPubkey || ""),
+    descriptor: meta.descriptor,
     routerPubkey: String(meta.routerPubkey || ""),
     total,
     received: normalizeReceived(meta.received),
@@ -9337,7 +9388,7 @@ function createReceivedChunkStore({
     await ready(nowMs);
     return cleanupStaleRaw(nowMs);
   }
-  async function putOnce({ channelPubkey, routerPubkey, index, total, contentBytes, ttlMs: ttlMs2 }) {
+  async function putOnce({ channelPubkey, routerPubkey, index, total, contentBytes, ttlMs: ttlMs2, descriptor }) {
     const groupKey = groupKeyFor(channelPubkey, routerPubkey);
     const bytes = normalizeBytes(contentBytes);
     const now = Date.now();
@@ -9349,6 +9400,7 @@ function createReceivedChunkStore({
         await deleteGroupInTransaction(tx, groupKey, usage, meta);
         meta = null;
       }
+      if (meta && meta.descriptor !== descriptor) throw new ValidationError("INCONSISTENT_ROUTER_DESCRIPTOR");
       if (meta && meta.total !== total) {
         await deleteGroupInTransaction(tx, groupKey, usage, meta);
         meta = null;
@@ -9358,6 +9410,7 @@ function createReceivedChunkStore({
           groupKey,
           channelPubkey,
           routerPubkey,
+          descriptor,
           total,
           received: {},
           receivedCount: 0,
@@ -9420,7 +9473,7 @@ function createReceivedChunkStore({
       return true;
     });
   }
-  async function put({ channelPubkey, routerPubkey, index, total, contentBytes, ttlMs: ttlMs2 }) {
+  async function put({ channelPubkey, routerPubkey, index, total, contentBytes, ttlMs: ttlMs2, descriptor }) {
     if (!channelPubkey || !routerPubkey) throw new ValidationError("RECEIVED_CHUNK_GROUP_REQUIRED");
     if (!Number.isSafeInteger(index) || !Number.isSafeInteger(total) || index < 0 || total < 1 || index >= total) {
       throw new ValidationError("INVALID_RECEIVED_CHUNK_INDEX");
@@ -9429,7 +9482,7 @@ function createReceivedChunkStore({
     await ready();
     while (true) {
       try {
-        const result = await putOnce({ channelPubkey, routerPubkey, index, total, contentBytes: bytes, ttlMs: ttlMs2 });
+        const result = await putOnce({ channelPubkey, routerPubkey, index, total, contentBytes: bytes, ttlMs: ttlMs2, descriptor });
         if (result.tooLarge) throw new Error("RECEIVED_CHUNK_GROUP_TOO_LARGE");
         return result.meta;
       } catch (err) {
@@ -9731,7 +9784,7 @@ async function prepareRoutedMessage({ senderSigner, imkcSigner, privateChannelSi
     imkcProof
   };
 }
-async function* wrapPreparedEvents({ privateChannelSigner, receivers, receiverTag, deletionPubkey, expirationSeconds = EXPIRATION_SECONDS, context }) {
+async function* wrapPreparedEvents({ privateChannelSigner, receivers, receiverTag, fileChunkIndex, onPreparedSeed, deletionPubkey, expirationSeconds = EXPIRATION_SECONDS, context }) {
   const routerSeckey = generateSecretKey();
   const routerPubkey = getPublicKey(routerSeckey);
   const receiverPubkeyList = receiverPubkeys(receivers);
@@ -9743,6 +9796,15 @@ async function* wrapPreparedEvents({ privateChannelSigner, receivers, receiverTa
   } = writeChunksFromPreparedRows(context.preparedRows, rowIndexes);
   const temporaryStorage = context.preparedRows.temporaryStorage;
   try {
+    if (onPreparedSeed) {
+      const router = makeRouterEvent({ pubkey: routerPubkey, senderPubkey: context.senderPubkey, imkcPubkey: context.imkcPubkey, imkcProof: context.imkcProof, receiverPubkey: routerReceiverTag, chunkIndex: 0, chunkTotal: 1, fileChunkIndex, content: "" });
+      const payloadRow = readPreparedRow(context.preparedRows, 0);
+      for (const rowIndex of rowIndexes) {
+        await onPreparedSeed({ channelPubkey: context.channelPubkey, router, jsonl: `${payloadRow}
+${readPreparedRow(context.preparedRows, rowIndex)}
+` });
+      }
+    }
     for (let index = 0; index < total; index++) {
       const content = readChunkContent(id, index, temporaryStorage);
       const router = finalizeEvent(makeRouterEvent({
@@ -9751,6 +9813,7 @@ async function* wrapPreparedEvents({ privateChannelSigner, receivers, receiverTa
         imkcPubkey: context.imkcPubkey,
         imkcProof: context.imkcProof,
         receiverPubkey: routerReceiverTag,
+        fileChunkIndex,
         chunkIndex: index,
         chunkTotal: total,
         content
@@ -9769,7 +9832,7 @@ async function* wrapPreparedEvents({ privateChannelSigner, receivers, receiverTa
     cleanupChunks(id, total, temporaryStorage);
   }
 }
-async function* wrapEvents({ senderSigner, imkcSigner, privateChannelSigner = senderSigner, privateChannelReaderPubkey, receivers, receiverTag, deletionPubkey, event, expirationSeconds = EXPIRATION_SECONDS, temporaryStorageArea, _getIykcProofs = getIykcProofs }) {
+async function* wrapEvents({ senderSigner, imkcSigner, privateChannelSigner = senderSigner, privateChannelReaderPubkey, receivers, receiverTag, fileChunkIndex, onPreparedSeed, deletionPubkey, event, expirationSeconds = EXPIRATION_SECONDS, temporaryStorageArea, _getIykcProofs = getIykcProofs }) {
   const normalizedDeletionPubkey = normalizeDeletionPubkey(deletionPubkey);
   const context = await prepareRoutedMessage({
     senderSigner,
@@ -9782,7 +9845,7 @@ async function* wrapEvents({ senderSigner, imkcSigner, privateChannelSigner = se
     _getIykcProofs
   });
   try {
-    yield* wrapPreparedEvents({ privateChannelSigner, receivers, receiverTag, deletionPubkey: normalizedDeletionPubkey, expirationSeconds, context });
+    yield* wrapPreparedEvents({ privateChannelSigner, receivers, receiverTag, fileChunkIndex, onPreparedSeed, deletionPubkey: normalizedDeletionPubkey, expirationSeconds, context });
   } finally {
     cleanupEnvelopeRows(context.preparedRows);
   }
@@ -9984,6 +10047,9 @@ async function unwrapEvent({ receiverSigner, privateChannelSigner = receiverSign
     channelReaderSigner,
     channelReaderPubkey: privateChannelReaderPubkey
   });
+  return unwrapRouterEvent({ router, receiverSigner, receiverPubkey, channelPubkey });
+}
+async function unwrapRouterEvent({ router, receiverSigner, receiverPubkey, channelPubkey }) {
   if (router.kind !== ROUTER_KIND) throw new ValidationError("INVALID_ROUTER_KIND");
   if (receiverPubkey && readReceiverTag(router) && readReceiverTag(router) !== receiverPubkey) return null;
   const senderPubkey = readSenderTag(router);
@@ -9993,7 +10059,7 @@ async function unwrapEvent({ receiverSigner, privateChannelSigner = receiverSign
   if (!lines.length) throw new ValidationError("MISSING_PAYLOAD_ENVELOPE");
   const payload = parsePayloadEnvelope(lines[0], 0);
   for (let index = 1; index < lines.length; index++) {
-    const event2 = await unwrapRecipientEnvelope({
+    const event = await unwrapRecipientEnvelope({
       payloadCiphertext: payload.ciphertext,
       envelope: parseRecipientEnvelope(lines[index], index),
       receiverSigner,
@@ -10002,7 +10068,7 @@ async function unwrapEvent({ receiverSigner, privateChannelSigner = receiverSign
       imkcPubkey,
       rowScope: channelPubkey
     });
-    if (event2) return event2;
+    if (event) return event;
   }
   return null;
 }
@@ -10062,7 +10128,7 @@ function relaysFromRelayReceivers(relayToReceivers) {
 function withRecoveryRelays(relays, recoveryRelays) {
   return uniq2([...relays || [], ...recoveryRelays || []]);
 }
-async function publish({ senderSigner, imkcSigner, privateChannelSigner = senderSigner, privateChannelReaderPubkey, receivers, receiverTag, deletionPubkey, event, relays, relayToReceivers, recoveryRelays, expirationSeconds, temporaryStorageArea, _getIykcProofs = getIykcProofs, _publish = sendToRelays }) {
+async function publish({ senderSigner, imkcSigner, privateChannelSigner = senderSigner, privateChannelReaderPubkey, receivers, receiverTag, fileChunkIndex, onPreparedSeed, deletionPubkey, event, relays, relayToReceivers, recoveryRelays, expirationSeconds, temporaryStorageArea, _getIykcProofs = getIykcProofs, _publish = sendToRelays }) {
   const normalizedDeletionPubkey = normalizeDeletionPubkey(deletionPubkey);
   const results = [];
   const groups = groupedRelayReceivers({ relayToReceivers, receivers });
@@ -10079,7 +10145,7 @@ async function publish({ senderSigner, imkcSigner, privateChannelSigner = sender
     });
     try {
       for (const group of groups) {
-        for await (const wrappedEvent of wrapPreparedEvents({ privateChannelSigner, receivers: group.receivers, receiverTag, deletionPubkey: normalizedDeletionPubkey, expirationSeconds, context })) {
+        for await (const wrappedEvent of wrapPreparedEvents({ privateChannelSigner, receivers: group.receivers, receiverTag, fileChunkIndex, onPreparedSeed, deletionPubkey: normalizedDeletionPubkey, expirationSeconds, context })) {
           results.push(await _publish(wrappedEvent, withRecoveryRelays(group.relays, recoveryRelays)));
         }
       }
@@ -10088,7 +10154,7 @@ async function publish({ senderSigner, imkcSigner, privateChannelSigner = sender
     }
     return results;
   }
-  for await (const wrappedEvent of wrapEvents({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag, deletionPubkey: normalizedDeletionPubkey, event, expirationSeconds, temporaryStorageArea, _getIykcProofs })) {
+  for await (const wrappedEvent of wrapEvents({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag, fileChunkIndex, onPreparedSeed, deletionPubkey: normalizedDeletionPubkey, event, expirationSeconds, temporaryStorageArea, _getIykcProofs })) {
     results.push(await _publish(wrappedEvent, withRecoveryRelays(relays, recoveryRelays)));
   }
   return results;
@@ -10300,6 +10366,7 @@ function createProcessor({
       const senderPubkey = readSenderTag(router);
       if (receiverPubkey && readReceiverTag(router) && readReceiverTag(router) !== receiverPubkey && senderPubkey !== receiverPubkey) return;
       const { index, total } = readChunkTag(router);
+      readFileChunkIndex(router);
       groupKey = receivedChunks.groupKeyFor(channelPubkey, router.pubkey);
       if (ignoredGroups.has(groupKey)) return;
       const imkcPubkey = readImkcTag(router);
@@ -10307,6 +10374,7 @@ function createProcessor({
       const meta = await receivedChunks.put({
         channelPubkey,
         routerPubkey: router.pubkey,
+        descriptor: JSON.stringify(router.tags.filter((tag) => tag[0] !== "c")),
         index,
         total,
         contentBytes: base64ToBytes(router.content),
@@ -10431,11 +10499,14 @@ async function fetch({ signal, receiverSigner, iykcSigner, privateChannelSigner 
   if (since != null) filter.since = since;
   if (until != null) filter.until = until;
   if (limit != null) filter.limit = limit;
+  const timeoutMs = 5e3;
+  const startedAt = performance.now();
   const { result, errors = [], relays: report = [] } = await _getEvents(filter, relays, {
-    timeout: 5e3,
+    timeout: timeoutMs,
     timeoutAfterFirstEose: null,
     ...signal ? { signal } : {}
   });
+  const elapsedMs = Math.round(performance.now() - startedAt);
   const events = result.map(({ event }) => event);
   events.sort((a, b) => a.created_at - b.created_at);
   const processOuterEvent = createProcessor({ receiverSigner, iykcSigner, privateChannelSigner, privateChannelSignersByPubkey, privateChannelReaderSigner, privateChannelReaderSignersByPubkey, privateChannelReaderPubkey, privateChannelReaderPubkeysByPubkey, receiverPubkey, mode, modeByPubkey, onChunk, onEvent, onNymEvent, onSeedEvent, onContentKeyUsage, onError, receivedChunkScope, receivedChunkTtlMs, receivedChunkTtlMsByPubkey, receivedChunkMaxBytes, receivedChunkIndexedDB, ignoredGroupTtlMs, ignoredGroupMaxEntries });
@@ -10446,7 +10517,13 @@ async function fetch({ signal, receiverSigner, iykcSigner, privateChannelSigner 
     }
     signal?.throwIfAborted();
     if (errors.length || report.some((entry) => !["eose", "satisfied"].includes(entry.status))) {
-      throw new AggregateError(errors.map((entry) => entry.reason), "PRIVATE_CHANNEL_FETCH_INCOMPLETE");
+      throw incompleteFetchError({
+        errors,
+        report,
+        elapsedMs,
+        receivedEventCount: events.length,
+        request: { relays: [...relays], channelPubkeys: [...authors], receiverPubkey, since, until, limit, timeoutMs }
+      });
     }
     return events;
   } finally {
@@ -10474,7 +10551,7 @@ function subscribe2({ receiverSigner, iykcSigner, privateChannelSigner = receive
     try {
       for await (const item of events) {
         if (controller.signal.aborted) continue;
-        if (item.type === "error") onError?.(item.error);
+        if (item.type === "error") onError?.(subscriptionError(item.error, item.relay));
         else if (item.type === "event") await processOuterEvent(item.event);
       }
     } catch (error) {
@@ -10485,6 +10562,7 @@ function subscribe2({ receiverSigner, iykcSigner, privateChannelSigner = receive
   }
   const consumePromise = consumeEvents();
   return {
+    ready: events.ready || Promise.resolve(),
     close() {
       controller.abort();
       return consumePromise;
@@ -10949,10 +11027,12 @@ async function sendPrivateMessage({
   temporaryStorageArea,
   deletionPubkey,
   _getIykcProofs,
+  fileChunkIndex,
+  onPreparedSeed,
   _publish = publish
 }) {
   if (!privateChannelSigner?.getPublicKey) throw new ValidationError("PRIVATE_CHANNEL_WRITER_REQUIRED");
-  return _publish({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag, deletionPubkey, event, relays, relayToReceivers, recoveryRelays, expirationSeconds, temporaryStorageArea, _getIykcProofs });
+  return _publish({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag, deletionPubkey, event, relays, relayToReceivers, recoveryRelays, expirationSeconds, temporaryStorageArea, fileChunkIndex, onPreparedSeed, _getIykcProofs });
 }
 async function sendNymMessage({
   nymSigner,
@@ -10990,6 +11070,8 @@ async function ask({
   deletionPubkey,
   deletionSeckey,
   autoDeletionCapability = true,
+  fileChunkIndex,
+  onPreparedSeed,
   _publish = publish,
   _assertWatching
 }) {
@@ -11012,7 +11094,7 @@ async function ask({
     })
   });
   const deletion = resolveDeletionCapability({ deletionPubkey, deletionSeckey, autoDeletionCapability });
-  const reports = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers: [receiverPubkey], receiverTag: receiverPubkey, deletionPubkey: deletion.deletionPubkey, event: wireEvent, relays, relayToReceivers, recoveryRelays, expirationSeconds, temporaryStorageArea, _getIykcProofs, _publish });
+  const reports = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers: [receiverPubkey], receiverTag: receiverPubkey, deletionPubkey: deletion.deletionPubkey, event: wireEvent, relays, relayToReceivers, recoveryRelays, expirationSeconds, temporaryStorageArea, fileChunkIndex, onPreparedSeed, _getIykcProofs, _publish });
   return withDelivery({ question }, reports, deletion.deletionSeckey);
 }
 async function reply({
@@ -11036,6 +11118,8 @@ async function reply({
   deletionPubkey,
   deletionSeckey,
   autoDeletionCapability = true,
+  fileChunkIndex,
+  onPreparedSeed,
   _publish = publish
 }) {
   if (!question?.id) throw new ValidationError("QUESTION_REQUIRED");
@@ -11049,7 +11133,7 @@ async function reply({
     })
   });
   const deletion = resolveDeletionCapability({ deletionPubkey, deletionSeckey, autoDeletionCapability });
-  const reports = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers: [receiverPubkey], receiverTag: receiverPubkey, deletionPubkey: deletion.deletionPubkey, event: wireEvent, relays, relayToReceivers, recoveryRelays, expirationSeconds, temporaryStorageArea, _getIykcProofs, _publish });
+  const reports = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers: [receiverPubkey], receiverTag: receiverPubkey, deletionPubkey: deletion.deletionPubkey, event: wireEvent, relays, relayToReceivers, recoveryRelays, expirationSeconds, temporaryStorageArea, fileChunkIndex, onPreparedSeed, _getIykcProofs, _publish });
   return withDelivery({ reply: event }, reports, deletion.deletionSeckey);
 }
 async function tell({
@@ -11072,6 +11156,8 @@ async function tell({
   deletionPubkey,
   deletionSeckey,
   autoDeletionCapability = true,
+  fileChunkIndex,
+  onPreparedSeed,
   _publish = publish
 }) {
   if (!receiverPubkey) throw new ValidationError("RECEIVER_PUBKEY_REQUIRED");
@@ -11084,7 +11170,7 @@ async function tell({
     })
   });
   const deletion = resolveDeletionCapability({ deletionPubkey, deletionSeckey, autoDeletionCapability });
-  const reports = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers: [receiverPubkey], receiverTag: receiverPubkey, deletionPubkey: deletion.deletionPubkey, event: wireEvent, relays, relayToReceivers, recoveryRelays, expirationSeconds, temporaryStorageArea, _getIykcProofs, _publish });
+  const reports = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers: [receiverPubkey], receiverTag: receiverPubkey, deletionPubkey: deletion.deletionPubkey, event: wireEvent, relays, relayToReceivers, recoveryRelays, expirationSeconds, temporaryStorageArea, fileChunkIndex, onPreparedSeed, _getIykcProofs, _publish });
   return withDelivery({ tell: event }, reports, deletion.deletionSeckey);
 }
 async function yell({
@@ -11107,6 +11193,8 @@ async function yell({
   deletionPubkey,
   deletionSeckey,
   autoDeletionCapability = true,
+  fileChunkIndex,
+  onPreparedSeed,
   _publish = publish
 }) {
   const receivers = uniq3(receiverPubkeys2);
@@ -11120,7 +11208,7 @@ async function yell({
     })
   });
   const deletion = resolveDeletionCapability({ deletionPubkey, deletionSeckey, autoDeletionCapability });
-  const reports = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag: "", deletionPubkey: deletion.deletionPubkey, event: wireEvent, relays, relayToReceivers, recoveryRelays, expirationSeconds, temporaryStorageArea, _getIykcProofs, _publish });
+  const reports = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag: "", deletionPubkey: deletion.deletionPubkey, event: wireEvent, relays, relayToReceivers, recoveryRelays, expirationSeconds, temporaryStorageArea, fileChunkIndex, onPreparedSeed, _getIykcProofs, _publish });
   return withDelivery({ yell: event }, reports, deletion.deletionSeckey);
 }
 async function broadcastRumor({
@@ -11139,13 +11227,15 @@ async function broadcastRumor({
   deletionPubkey,
   deletionSeckey,
   autoDeletionCapability = true,
+  fileChunkIndex,
+  onPreparedSeed,
   _publish = publish
 }) {
   const receivers = uniq3(receiverPubkeys2);
   if (!receivers.length) throw new ValidationError("NO_RECEIVERS");
   const { event, wireEvent } = await makeOutgoingRumor({ senderSigner, rumor });
   const deletion = resolveDeletionCapability({ deletionPubkey, deletionSeckey, autoDeletionCapability });
-  const reports = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag: "", deletionPubkey: deletion.deletionPubkey, event: wireEvent, relays, relayToReceivers, recoveryRelays, expirationSeconds, temporaryStorageArea, _getIykcProofs, _publish });
+  const reports = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag: "", deletionPubkey: deletion.deletionPubkey, event: wireEvent, relays, relayToReceivers, recoveryRelays, expirationSeconds, temporaryStorageArea, fileChunkIndex, onPreparedSeed, _getIykcProofs, _publish });
   return withDelivery({ rumor: event }, reports, deletion.deletionSeckey);
 }
 async function broadcastEvent({
@@ -11164,13 +11254,15 @@ async function broadcastEvent({
   deletionPubkey,
   deletionSeckey,
   autoDeletionCapability = true,
+  fileChunkIndex,
+  onPreparedSeed,
   _publish = publish
 }) {
   const receivers = uniq3(receiverPubkeys2);
   if (!receivers.length) throw new ValidationError("NO_RECEIVERS");
   const wireEvent = assertValidSignedEvent({ ...event, tags: cloneTags(event?.tags) });
   const deletion = resolveDeletionCapability({ deletionPubkey, deletionSeckey, autoDeletionCapability });
-  const reports = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag: "", deletionPubkey: deletion.deletionPubkey, event: wireEvent, relays, relayToReceivers, recoveryRelays, expirationSeconds, temporaryStorageArea, _getIykcProofs, _publish });
+  const reports = await sendPrivateMessage({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag: "", deletionPubkey: deletion.deletionPubkey, event: wireEvent, relays, relayToReceivers, recoveryRelays, expirationSeconds, temporaryStorageArea, fileChunkIndex, onPreparedSeed, _getIykcProofs, _publish });
   return withDelivery({ event: wireEvent }, reports, deletion.deletionSeckey);
 }
 async function broadcastNymRumor({
@@ -12289,6 +12381,9 @@ function storageDatabaseNames(userPubkey) {
   return [
     `${prefix}:idb-queue`,
     `${prefix}:seeds:idb-queue`,
+    `${prefix}:file-seeds:idb-queue`,
+    `${prefix}:file-authorizations:idb-queue`,
+    `${prefix}:file-chunks:idb`,
     `${prefix}:state:idb`
   ];
 }
@@ -12881,6 +12976,7 @@ var PrivateMessenger = class _PrivateMessenger {
     maxDynamicRecoverySeeders = DEFAULT_MAX_DYNAMIC_RECOVERY_SEEDERS,
     messageQueueMaxBytes = DEFAULT_MESSAGE_QUEUE_MAX_BYTES,
     seedQueueMaxBytes = DEFAULT_SEED_QUEUE_MAX_BYTES,
+    seedStorage,
     temporaryStorageArea = globalThis.sessionStorage,
     autoDeletionCapability = true,
     _indexedDB = globalThis.indexedDB,
@@ -12912,6 +13008,7 @@ var PrivateMessenger = class _PrivateMessenger {
     this.maxDynamicRecoverySeeders = maxDynamicRecoverySeeders;
     this.messageQueueMaxBytes = messageQueueMaxBytes;
     this.seedQueueMaxBytes = seedQueueMaxBytes;
+    this.seedStorage = seedStorage;
     this.temporaryStorageArea = temporaryStorageArea;
     this.autoDeletionCapability = normalizeAutoDeletionCapability(autoDeletionCapability);
     this._indexedDB = _indexedDB;
@@ -12944,6 +13041,7 @@ var PrivateMessenger = class _PrivateMessenger {
     this.state = { channels: {} };
     this.stateWriteTail = Promise.resolve();
     this.stateWriteError = null;
+    this.extensions = /* @__PURE__ */ new Set();
     this.channels = /* @__PURE__ */ new Map();
     this.stopByChannel = /* @__PURE__ */ new Map();
     this.desiredChannels = /* @__PURE__ */ new Set();
@@ -13027,7 +13125,7 @@ var PrivateMessenger = class _PrivateMessenger {
         indexedDB: this._indexedDB
       });
       this.assertOpen();
-      this.seedQueue = await createQueue({
+      this.seedQueue = this.seedStorage ? null : await createQueue({
         prefix: `${this.prefix}:seeds`,
         indexes: SEED_QUEUE_INDEXES,
         maxBytes: this.seedQueueMaxBytes,
@@ -13760,6 +13858,7 @@ var PrivateMessenger = class _PrivateMessenger {
   }
   unwatch(channels) {
     const pubkeys = channels ? uniq4(Array.isArray(channels) ? channels : [channels]) : [...this.desiredChannels];
+    for (const extension of this.extensions) extension.unwatch?.(pubkeys);
     for (const pubkey of pubkeys) this.desiredChannels.delete(pubkey);
     this.recordInterruption(pubkeys);
     for (const controller of this.recoveryControllers) {
@@ -13771,6 +13870,7 @@ var PrivateMessenger = class _PrivateMessenger {
     if (typeof reason !== "string" || !reason.trim()) throw new ValidationError("PAUSE_REASON_REQUIRED");
     this.assertOpen();
     this.pauseReasons.add(reason);
+    for (const extension of this.extensions) extension.pause?.();
     this.recordInterruption(this.desiredChannels);
     for (const controller of this.recoveryControllers) controller.abort();
     return Promise.all([this.stopWatches([...this.desiredChannels]), this.flushStateWrites()]);
@@ -13794,6 +13894,7 @@ var PrivateMessenger = class _PrivateMessenger {
       if (this.pauseReasons.size || this.closePromise) return;
       await this.reconcilePresencePublishers();
       await this.recoverOfflineRanges(channels);
+      for (const extension of this.extensions) await extension.resume?.();
     })();
     this.resumeWork = work;
     try {
@@ -13863,6 +13964,7 @@ var PrivateMessenger = class _PrivateMessenger {
   async handleAsk(channelPubkey, message) {
     if (message.provenance === "hearsay") return this.enqueueRumor("message", channelPubkey, message);
     this.trackSeederActivity(channelPubkey, message);
+    for (const extension of this.extensions) if (await extension.handleAsk?.(channelPubkey, message)) return;
     if (doesModeStoreRecoverySeeds2(this.channels.get(channelPubkey)?.mode) && messageCode(message) === MISSING_MESSAGES_ASK_CODE) {
       await this.replyWithStoredSeeds(channelPubkey, message);
       return;
@@ -13944,9 +14046,21 @@ var PrivateMessenger = class _PrivateMessenger {
     this.debug("enqueue", debugMessageInfo(type, channelPubkey, message));
     this.onMessageQueued?.();
   }
+  outgoingSeedHandler(channelPubkey) {
+    if (!doesModeStoreRecoverySeeds2(this.channels.get(channelPubkey)?.mode) || !this.offlineRecoverySecondsFor(channelPubkey)) return void 0;
+    return (seed) => this.enqueueSeed(channelPubkey, seed);
+  }
   async enqueueSeed(channelPubkey, seed) {
     if (!this.offlineRecoverySecondsFor(channelPubkey)) return;
     const receivedAt = nowSeconds5();
+    if (this.seedStorage) {
+      const rows2 = seed.recordType === NYM_CARRIER_SEED_RECORD_TYPE || seed.carriers?.length ? [{ recordType: NYM_CARRIER_SEED_RECORD_TYPE, carriers: compactSeedNymCarriers(seed.carriers) }] : compactSeedRouterRows(seed);
+      for (const row of rows2) {
+        const time = seedRecordTime(row) || receivedAt;
+        await this.seedStorage.put({ ...row, channelPubkey, receivedAt, expiresAt: time + this.offlineRecoverySecondsFor(channelPubkey) });
+      }
+      return;
+    }
     if (seed.recordType === NYM_CARRIER_SEED_RECORD_TYPE || seed.carriers?.length) {
       const carriers = compactSeedNymCarriers(seed.carriers);
       const recordTime = nymCarrierRecordTime2({ carriers }) || seed.outer?.created_at || receivedAt;
@@ -14130,6 +14244,7 @@ var PrivateMessenger = class _PrivateMessenger {
       payload,
       error,
       content,
+      onPreparedSeed: this.outgoingSeedHandler(channelPubkey),
       _getIykcProofs: this.contentKeyLookup()
     });
   }
@@ -14155,6 +14270,7 @@ var PrivateMessenger = class _PrivateMessenger {
       payload,
       error,
       content,
+      onPreparedSeed: this.outgoingSeedHandler(channelPubkey),
       _getIykcProofs: this.contentKeyLookup()
     });
   }
@@ -14178,6 +14294,7 @@ var PrivateMessenger = class _PrivateMessenger {
       payload,
       error,
       content,
+      onPreparedSeed: this.outgoingSeedHandler(channelPubkey),
       _getIykcProofs: this.contentKeyLookup()
     });
   }
@@ -14201,6 +14318,7 @@ var PrivateMessenger = class _PrivateMessenger {
       payload,
       error,
       content,
+      onPreparedSeed: this.outgoingSeedHandler(channelPubkey),
       _getIykcProofs: this.contentKeyLookup()
     });
   }
@@ -14220,6 +14338,7 @@ var PrivateMessenger = class _PrivateMessenger {
       deletionPubkey,
       autoDeletionCapability: this.autoDeletionCapabilityFor(channel),
       rumor,
+      onPreparedSeed: this.outgoingSeedHandler(channelPubkey),
       _getIykcProofs: this.contentKeyLookup()
     });
   }
@@ -14239,6 +14358,7 @@ var PrivateMessenger = class _PrivateMessenger {
       deletionPubkey,
       autoDeletionCapability: this.autoDeletionCapabilityFor(channel),
       event,
+      onPreparedSeed: this.outgoingSeedHandler(channelPubkey),
       _getIykcProofs: this.contentKeyLookup()
     });
   }
@@ -14292,6 +14412,7 @@ var PrivateMessenger = class _PrivateMessenger {
       autoDeletionCapability: this.autoDeletionCapabilityFor(channel),
       code: SEEDER_PRESENCE_CODE,
       payload: {},
+      onPreparedSeed: this.outgoingSeedHandler(channelPubkey),
       _getIykcProofs: this.contentKeyLookup()
     });
   }
@@ -14517,7 +14638,9 @@ var PrivateMessenger = class _PrivateMessenger {
       sendEmptyReply: !this.offlineRecoverySecondsFor(channelPubkey)
     });
     if (this.offlineRecoverySecondsFor(channelPubkey)) {
-      for await (const seed of this.seedQueue.storedItemsBy("byChannel", channelPubkey)) {
+      for await (const seed of this.seedStorage ? this.seedStorage.iterate({ channelPubkey, receiverPubkey: message.event?.pubkey, since, until }) : this.seedQueue.storedItemsBy("byChannel", channelPubkey)) {
+        if (seedRecordTime(seed) < nowSeconds5() - this.offlineRecoverySecondsFor(channelPubkey)) continue;
+        if (this.seedStorage && !await this.seedStorage.has(seed)) continue;
         await packer.update(seed);
       }
     }
@@ -14689,7 +14812,7 @@ var PrivateMessenger = class _PrivateMessenger {
       this.removeChannelState(pubkey);
       await this.flushStateWrites();
       await this.queue.removeBy("byChannel", pubkey);
-      await this.seedQueue.removeBy("byChannel", pubkey);
+      await (this.seedStorage ? this.seedStorage.removeLocal({ channelPubkey: pubkey }) : this.seedQueue.removeBy("byChannel", pubkey));
       await this.touchStorageActivity({ force: true });
       this.ensureRelayListWatcher();
     });
@@ -14713,13 +14836,17 @@ var PrivateMessenger = class _PrivateMessenger {
         delete state.channels[pubkey];
         stalePubkeys.push(pubkey);
         await this.queue?.removeBy("byChannel", pubkey);
-        await this.seedQueue?.removeBy("byChannel", pubkey);
+        await (this.seedStorage ? this.seedStorage.removeLocal({ channelPubkey: pubkey }) : this.seedQueue?.removeBy("byChannel", pubkey));
       }
       this.state = state;
       if (stalePubkeys.length) await this.removeChannelStates(stalePubkeys);
     });
   }
   async pruneStoredSeeds(channelPubkey) {
+    if (this.seedStorage) {
+      await this.seedStorage.prune({ now: nowSeconds5() });
+      return;
+    }
     if (!this.seedQueue) return;
     const keyRange = globalThis.IDBKeyRange;
     if (!channelPubkey) {
@@ -14774,6 +14901,7 @@ var PrivateMessenger = class _PrivateMessenger {
         unwatchError = err;
       }
       await initSettledPromise;
+      await Promise.all([...this.extensions].map((extension) => extension.close?.()));
       await this.stampActiveChannelActivity();
       await this.queueOperationTail;
       await Promise.allSettled([...this.recoveries.values()]);
