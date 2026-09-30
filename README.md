@@ -224,3 +224,8 @@ libp2r2p's event-store recovery adapters to synchronize their chat seeds and fil
 authorizations, but applying that adapter to this transport would recursively
 synchronize the envelopes used to synchronize envelopes. Keep its default IDB
 seed storage even when consumer apps opt into personal-copy recovery records.
+
+NostrDB synchronization stops stale push batches when their queue or messenger is
+replaced. An in-flight shutdown cannot send subsequent chunks or restart its
+cooldown, and shutdown errors are not reported as active synchronization failures.
+Errors from the current messenger remain visible.

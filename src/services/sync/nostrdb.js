@@ -1104,10 +1104,12 @@ export function createNostrDbSyncController ({
     const target = pushRuntime(ownerPubkey)
     if (!target) return
 
+    const current = () => pushQueues.get(ownerPubkey) === queue && runtime.messenger === target.messenger
     const events = [...queue.events.values()]
     queue.events.clear()
     let index = 0
     for (let i = 0; i < events.length; i += PUSH_EVENTS_PER_CHUNK) {
+      if (!current()) return
       const chunk = events.slice(i, i + PUSH_EVENTS_PER_CHUNK)
       try {
         await target.messenger.yell({
@@ -1121,9 +1123,11 @@ export function createNostrDbSyncController ({
           }
         })
       } catch (err) {
+        if (!current()) return
         report(err)
       }
     }
+    if (!current()) return
     emitDebug(runtime.debug, 'push', {
       ownerPubkey,
       channelPubkey: target.channelPubkey,
@@ -1133,6 +1137,7 @@ export function createNostrDbSyncController ({
   }
 
   function startPushCooldown (ownerPubkey, queue) {
+    if (pushQueues.get(ownerPubkey) !== queue) return
     queue.cooling = true
     queue.timer = _setTimeout(async () => {
       queue.timer = null

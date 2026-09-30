@@ -712,6 +712,7 @@ export function createSyncController ({
       const currentMessenger = messenger
       messenger = null
       clearAnnouncementTimers({ clearPending: false })
+      nostrDbSync.stop()
       await Promise.resolve(currentMessenger?.close?.()).catch(onError)
       if (!isCurrentLifecycle(id)) return null
       publishChannelSnapshot(snapshot)

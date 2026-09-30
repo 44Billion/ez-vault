@@ -6,7 +6,7 @@ import {
   requestNostrDbAppBackfill,
   serializeError,
   tell
-} from "./chunk-M463QKHB.js";
+} from "./chunk-GAQGT6R5.js";
 import {
   append
 } from "./chunk-BW7VZZ6Z.js";

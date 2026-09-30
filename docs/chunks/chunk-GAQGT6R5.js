@@ -2112,10 +2112,12 @@ function createNostrDbSyncController({
     if (!queue || queue.events.size === 0) return;
     const target = pushRuntime(ownerPubkey);
     if (!target) return;
+    const current = () => pushQueues.get(ownerPubkey) === queue && runtime.messenger === target.messenger;
     const events = [...queue.events.values()];
     queue.events.clear();
     let index = 0;
     for (let i = 0; i < events.length; i += PUSH_EVENTS_PER_CHUNK) {
+      if (!current()) return;
       const chunk = events.slice(i, i + PUSH_EVENTS_PER_CHUNK);
       try {
         await target.messenger.yell({
@@ -2129,9 +2131,11 @@ function createNostrDbSyncController({
           }
         });
       } catch (err) {
+        if (!current()) return;
         report(err);
       }
     }
+    if (!current()) return;
     emitDebug2(runtime.debug, "push", {
       ownerPubkey,
       channelPubkey: target.channelPubkey,
@@ -2140,6 +2144,7 @@ function createNostrDbSyncController({
     });
   }
   function startPushCooldown(ownerPubkey, queue) {
+    if (pushQueues.get(ownerPubkey) !== queue) return;
     queue.cooling = true;
     queue.timer = _setTimeout(async () => {
       queue.timer = null;
@@ -2961,6 +2966,7 @@ function createSyncController({
       const currentMessenger = messenger;
       messenger = null;
       clearAnnouncementTimers({ clearPending: false });
+      nostrDbSync.stop();
       await Promise.resolve(currentMessenger?.close?.()).catch(onError);
       if (!isCurrentLifecycle(id)) return null;
       publishChannelSnapshot(snapshot);

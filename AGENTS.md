@@ -375,3 +375,8 @@ seeds and file grants as personal copies through libp2r2p/private-messenger/even
 The vault's own synchronization messenger MUST retain its local default seed
 storage: synchronizing seeds of messages that synchronize seeds recursively
 creates more synchronization data. Do not inject that event-store adapter here.
+
+NostrDB push batches are scoped to their queue and messenger lifetime. On stop or
+replacement, stale in-flight results must not report shutdown errors, send the
+next chunk or rearm the trailing cooldown. Active messenger/storage errors still
+reach onError; lifecycle suppression must not become a blanket error filter.

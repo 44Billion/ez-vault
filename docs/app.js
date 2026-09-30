@@ -8,12 +8,12 @@ import {
 import {
   initMessenger,
   setVaultViewShell
-} from "./chunks/chunk-4I5RHBHF.js";
+} from "./chunks/chunk-WUFBONV6.js";
 import {
   init,
   startDeviceRelayListRefresh,
   startRevocationRotation
-} from "./chunks/chunk-M463QKHB.js";
+} from "./chunks/chunk-GAQGT6R5.js";
 import {
   clearError,
   setError
@@ -228,9 +228,9 @@ await Promise.all([
   import("./chunks/accordion-panel-AGHO422R.js"),
   import("./chunks/toast-VTWQ4NKU.js"),
   import("./chunks/activity-log-5SGADIJP.js"),
-  import("./chunks/vault-lock-button-CXM6HXLO.js"),
-  import("./chunks/lock-overlay-SS6P5YO6.js"),
-  import("./chunks/create-overlay-7X275LR7.js")
+  import("./chunks/vault-lock-button-W7VYJ6ZH.js"),
+  import("./chunks/lock-overlay-P5PI4TW4.js"),
+  import("./chunks/create-overlay-2NSV2FWK.js")
 ]);
 try {
   sessionStorage.removeItem("ezVaultBootAutoReloaded");
@@ -312,7 +312,7 @@ startRevocationRotation().catch((err) => {
 });
 if (window === window.top) {
   document.body.classList.add("dev");
-  import("./chunks/dev-panel-2OX7LQK4.js").then(() => {
+  import("./chunks/dev-panel-7TBT2F5N.js").then(() => {
     document.querySelector(".diagnostics-section")?.append(document.createElement("dev-panel"));
   });
 }

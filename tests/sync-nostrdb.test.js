@@ -730,3 +730,41 @@ test('nostrdb live envelopes push only events, excluding control markers and IDs
   assert.deepEqual(JSON.parse(msg.sent[0].options.payload.jsonl.trim()), item)
   controller.stop()
 })
+
+for (const stopped of [false, true]) {
+  test(`nostrdb push ${stopped ? 'stops a stale trailing batch without rearming its timer' : 'reports failures from the active messenger'}`, async () => {
+    const timers = new Set()
+    const errors = []
+    const gate = Promise.withResolvers()
+    const msg = messenger()
+    const controller = createNostrDbSyncController({
+      getDb: () => ({ subscribe: emptySubscription }),
+      onError: error => errors.push(error),
+      _setTimeout: (fn, ms) => { const timer = { fn, ms }; timers.add(timer); return timer },
+      _clearTimeout: timer => timers.delete(timer)
+    })
+    controller.ensureSubscriptions(context(msg))
+    controller.queuePush(OWNER, event(1))
+    await Promise.resolve()
+    // More than one chunk must remain when the first in-flight call settles.
+    for (let i = 2; i < 205; i++) controller.queuePush(OWNER, event(i))
+    let calls = 0
+    msg.yell = async () => { calls++; await gate.promise }
+    const timer = [...timers].find(timer => timer.ms === 1500)
+    timers.delete(timer)
+    const flushing = timer.fn()
+    assert.equal(calls, 1)
+    if (stopped) controller.stop()
+    const error = new DOMException('The database connection is closing.', 'InvalidStateError')
+    gate.reject(error)
+    await flushing
+    if (stopped) {
+      assert.equal(calls, 1, 'no next chunk uses the closed messenger')
+      assert.deepEqual(errors, [])
+      assert.equal(timers.size, 0, 'a completed stale callback cannot restart cooldown')
+    } else {
+      assert.ok(errors.includes(error), 'active storage errors remain visible')
+    }
+    controller.stop()
+  })
+}
