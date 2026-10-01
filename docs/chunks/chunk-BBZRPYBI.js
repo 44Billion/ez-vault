@@ -2,7 +2,7 @@ import {
   persistSecretsBlob,
   restoreSecretsBlobSnapshot,
   snapshotSecretsBlob
-} from "./chunk-LAHZHA3L.js";
+} from "./chunk-AIMEACC2.js";
 import {
   applyRecords,
   finalizeLegacyBunkerMigrations,
@@ -18,7 +18,7 @@ import {
   setState,
   snapshotContentKeySecrets,
   waitForVaultTransition
-} from "./chunk-5FTA2SIT.js";
+} from "./chunk-FQO6K2OL.js";
 
 // src/services/account-mutation-journal.js
 var KEY = "account-mutation";

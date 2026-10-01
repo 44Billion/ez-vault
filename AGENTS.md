@@ -380,3 +380,20 @@ NostrDB push batches are scoped to their queue and messenger lifetime. On stop o
 replacement, stale in-flight results must not report shutdown errors, send the
 next chunk or rearm the trailing cooldown. Active messenger/storage errors still
 reach onError; lifecycle suppression must not become a blanket error filter.
+
+
+## Launcher relay bridge
+
+- `src/services/launcher-relay-pool.js` is only a WebSocket facade over the
+  dedicated launcher port; registry, routing and physical sockets stay in the
+  launcher. Standalone/unsupported launchers retain native sockets.
+- Preserve FIFO when an outgoing queue exists, even if a newer small frame fits
+  the remaining credit. Keep the 64-frame/256-KiB credit window and
+  256-frame/1-MiB queue limits, including the existing string-length accounting.
+- Return trailing receive credits in a microtask. Close releases local buffers
+  and suppresses pending refunds; an overflow also sends `RELAY_CLOSE` so the
+  launcher releases its attachment. Late `RELAY_ATTACHED` must not reopen a
+  closing socket. Receive-queue diagnostics belong to the launcher and must not
+  include message contents or account keys.
+- Cover ordering, credit return and overflow cleanup in
+  `tests/launcher-relay-pool.test.js`; regenerate the committed `docs/` build.

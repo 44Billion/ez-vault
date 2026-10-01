@@ -159,3 +159,61 @@ describe('vault launcher relay pool shim', () => {
     port.emit({ code: 'RELAY_CLOSED', payload: { virtualId: secondAttach.virtualId, code: 1000, reason: '', wasClean: true } })
   })
 })
+
+it('preserves send order when a small frame fits the credit left behind a queued large frame', () => {
+  const { port, shim } = createFixture()
+  const socket = new shim.WebSocket('wss://relay.example')
+  const { virtualId } = attachFrame(port)
+  port.emit({ code: 'RELAY_ATTACHED', payload: { virtualId } })
+  const frames = ['a'.repeat(200 * 1024), 'b'.repeat(100 * 1024), '["CLOSE","history"]']
+  frames.forEach(frame => socket.send(frame))
+  assert.equal(port.sent.filter(message => message.code === 'RELAY_SEND').length, 1)
+  port.emit({ code: 'RELAY_CREDIT', payload: { virtualId, frames: 1, bytes: frames[0].length } })
+  assert.deepEqual(port.sent.filter(message => message.code === 'RELAY_SEND').map(message => message.payload.data), frames)
+  assert.equal(socket.bufferedAmount, 0)
+  shim.dispose()
+})
+
+for (const limit of ['frames', 'bytes']) {
+  it(`notifies the launcher and releases the local queue on ${limit} overflow`, async () => {
+    const { port, shim } = createFixture()
+    const socket = new shim.WebSocket('wss://relay.example')
+    const { virtualId } = attachFrame(port)
+    port.emit({ code: 'RELAY_ATTACHED', payload: { virtualId } })
+    const closes = []
+    socket.onclose = event => closes.push([event.code, event.reason])
+    const count = limit === 'frames' ? 64 + 257 : 6
+    const frame = limit === 'frames' ? 'small' : 'x'.repeat(256 * 1024)
+    for (let i = 0; i < count; i++) socket.send(frame)
+    assert.deepEqual(closes, [[1013, 'relay bridge queue overflow']])
+    assert.equal(socket.readyState, socket.CLOSED)
+    assert.equal(socket.bufferedAmount, 0)
+    assert.deepEqual(port.sent.at(-1), { code: 'RELAY_CLOSE', payload: { virtualId, code: 1000, reason: '' } })
+    const sentCount = port.sent.length
+    port.emit({ code: 'RELAY_CREDIT', payload: { virtualId, frames: 64, bytes: 256 * 1024 } })
+    port.emit({ code: 'RELAY_ATTACHED', payload: { virtualId } })
+    await tick()
+    assert.equal(port.sent.length, sentCount)
+    assert.equal(socket.readyState, socket.CLOSED)
+    shim.dispose()
+  })
+}
+
+it('returns trailing receive credit but suppresses it after close', async () => {
+  const { port, shim } = createFixture()
+  const socket = new shim.WebSocket('wss://relay.example')
+  const { virtualId } = attachFrame(port)
+  port.emit({ code: 'RELAY_ATTACHED', payload: { virtualId } })
+  port.emit({ code: 'RELAY_FRAME', payload: { virtualId, data: 'one' } })
+  await tick()
+  assert.deepEqual(port.sent.at(-1), { code: 'RELAY_CREDIT', payload: { virtualId, frames: 1, bytes: 3 } })
+  socket.onmessage = () => socket.close()
+  port.emit({ code: 'RELAY_FRAME', payload: { virtualId, data: 'two' } })
+  await tick()
+  assert.equal(port.sent.at(-1).code, 'RELAY_CLOSE')
+  assert.equal(port.sent.filter(message => message.code === 'RELAY_CREDIT').length, 1)
+  // An already in-flight attach must not resurrect a closing socket.
+  port.emit({ code: 'RELAY_ATTACHED', payload: { virtualId } })
+  assert.equal(socket.readyState, socket.CLOSING)
+  shim.dispose()
+})

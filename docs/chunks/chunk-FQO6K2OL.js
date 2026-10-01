@@ -5154,13 +5154,13 @@ function publicRelayUrlError(value, policy = {}) {
   } catch {
     return "INVALID_RELAY_URL";
   }
-  let normalized;
+  let normalized2;
   try {
-    normalized = normalizeRelayUrl(value);
+    normalized2 = normalizeRelayUrl(value);
   } catch (error) {
     return error instanceof ValidationError ? error.code : "INVALID_RELAY_URL";
   }
-  const url = new URL(normalized);
+  const url = new URL(normalized2);
   const policyRelay = isPolicyRelayUrl(url, policy);
   if (url.protocol !== "wss:" && !policyRelay) return "INSECURE_RELAY_URL";
   if (url.username || url.password) return "RELAY_URL_CREDENTIALS_NOT_ALLOWED";
@@ -5173,7 +5173,7 @@ function publicRelayUrlError(value, policy = {}) {
     if (hostError) return hostError;
   }
   if (!policy?.nostrEntityUrls) {
-    const lowerValue = normalized.toLowerCase();
+    const lowerValue = normalized2.toLowerCase();
     if (lowerValue.includes("npub1") || lowerValue.includes("nprofile1")) return "RELAY_URL_NOSTR_ENTITY_NOT_ALLOWED";
   }
   return null;
@@ -7179,11 +7179,11 @@ function parseBunkerUrl(input) {
   }
 }
 function toBunkerUrl(pointer) {
-  const normalized = normalizeBunkerPointer(pointer);
-  if (!normalized) throw new ValidationError("INVALID_BUNKER_POINTER");
-  const url = new URL(`bunker://${normalized.remoteSignerPubkey}`);
-  for (const relay of normalized.relays) url.searchParams.append("relay", relay);
-  if (normalized.secret) url.searchParams.set("secret", normalized.secret);
+  const normalized2 = normalizeBunkerPointer(pointer);
+  if (!normalized2) throw new ValidationError("INVALID_BUNKER_POINTER");
+  const url = new URL(`bunker://${normalized2.remoteSignerPubkey}`);
+  for (const relay of normalized2.relays) url.searchParams.append("relay", relay);
+  if (normalized2.secret) url.searchParams.set("secret", normalized2.secret);
   return url.toString();
 }
 function parseNostrConnectURI(input) {
@@ -7514,10 +7514,10 @@ var Nip46Client = class {
     timeout = DEFAULT_TIMEOUT,
     timeoutAfterFirstEose = DEFAULT_TIMEOUT_AFTER_FIRST_EOSE
   } = {}) {
-    const normalized = normalizeBunkerPointer(pointer);
-    if (!normalized) throw new ValidationError("INVALID_BUNKER_POINTER");
+    const normalized2 = normalizeBunkerPointer(pointer);
+    if (!normalized2) throw new ValidationError("INVALID_BUNKER_POINTER");
     this.#secretKey = clientSecretKey;
-    this.#pointer = normalized;
+    this.#pointer = normalized2;
     this.#onAuthUrl = onAuthUrl;
     this.#onRequest = onRequest;
     this.#transport = new Nip46Transport(clientSecretKey, {
@@ -7526,7 +7526,7 @@ var Nip46Client = class {
       timeoutAfterFirstEose,
       onError
     });
-    this.#transport.activateContext(this.#openResponseContext(normalized), { retirePrevious: false });
+    this.#transport.activateContext(this.#openResponseContext(normalized2), { retirePrevious: false });
   }
   // Creates a client for a parsed direct `bunker://` pointer.
   static fromBunker(clientSecretKey, pointer, options = {}) {
@@ -8526,7 +8526,7 @@ __export(private_channel_exports, {
   PRIVATE_BROADCAST_KIND: () => PRIVATE_BROADCAST_KIND,
   ROUTER_KIND: () => ROUTER_KIND,
   eventFromNymCarriers: () => eventFromNymCarriers,
-  fetch: () => fetch,
+  fetch: () => fetch2,
   getJsonlChunkByteSize: () => getJsonlChunkByteSize,
   getNymCarrierChunkSize: () => getNymCarrierChunkSize,
   publish: () => publish,
@@ -8928,8 +8928,8 @@ function createTemporaryStorage({ storageArea = globalThis.sessionStorage } = {}
     }
   }
   function writeTrackedKeys(keys) {
-    const normalized = normalizeKeys(keys);
-    if (normalized.length) storage().setItem(TEMPORARY_STORAGE_KEYS_KEY, JSON.stringify(normalized));
+    const normalized2 = normalizeKeys(keys);
+    if (normalized2.length) storage().setItem(TEMPORARY_STORAGE_KEYS_KEY, JSON.stringify(normalized2));
     else storage().removeItem(TEMPORARY_STORAGE_KEYS_KEY);
   }
   function trackTemporaryKey(key) {
@@ -8955,9 +8955,9 @@ function createTemporaryStorage({ storageArea = globalThis.sessionStorage } = {}
     storage().setItem(key, value);
   }
   function removeItems(keys) {
-    const normalized = normalizeKeys(keys);
-    for (const key of normalized) storage().removeItem(key);
-    untrackTemporaryKeys(normalized);
+    const normalized2 = normalizeKeys(keys);
+    for (const key of normalized2) storage().removeItem(key);
+    untrackTemporaryKeys(normalized2);
   }
   return { cleanup, getItem, setItem, removeItems };
 }
@@ -9707,7 +9707,7 @@ var HEX_PUBKEY4 = /^[0-9a-f]{64}$/i;
 var encoder5 = new TextEncoder();
 var decoder5 = new TextDecoder();
 var NIP44_V3_SCOPE = "";
-var sendToRelays = (...args) => relayPool.sendEvent(...args);
+var sendToRelays = (event, relays) => relayPool.sendEvent(event, relays);
 var getEvents3 = (...args) => relayPool.getEvents(...args);
 var getLiveEventsGenerator = (...args) => relayPool.getLiveEventsGenerator(...args);
 var getEventsFeedGenerator2 = (...args) => relayPool.getEventsFeedGenerator(...args);
@@ -9919,9 +9919,9 @@ function assertValidSignedInnerEvent(event) {
   return event;
 }
 function normalizeNymRumor(event, pubkey) {
-  const normalized = { ...event, pubkey };
-  if (!isSerializableEvent(normalized)) throw new ValidationError("INVALID_NYM_RUMOR");
-  return { ...normalized, id: getEventHash(normalized) };
+  const normalized2 = { ...event, pubkey };
+  if (!isSerializableEvent(normalized2)) throw new ValidationError("INVALID_NYM_RUMOR");
+  return { ...normalized2, id: getEventHash(normalized2) };
 }
 function wireNymRumor(event = {}) {
   return {
@@ -10146,7 +10146,7 @@ async function publish({ senderSigner, imkcSigner, privateChannelSigner = sender
     try {
       for (const group of groups) {
         for await (const wrappedEvent of wrapPreparedEvents({ privateChannelSigner, receivers: group.receivers, receiverTag, fileChunkIndex, onPreparedSeed, deletionPubkey: normalizedDeletionPubkey, expirationSeconds, context })) {
-          results.push(await _publish(wrappedEvent, withRecoveryRelays(group.relays, recoveryRelays)));
+          results.push(await _publish(wrappedEvent, withRecoveryRelays(group.relays, recoveryRelays), { receiverPubkeys: receiverPubkeys(group.receivers), primaryRelays: group.relays }));
         }
       }
     } finally {
@@ -10155,7 +10155,7 @@ async function publish({ senderSigner, imkcSigner, privateChannelSigner = sender
     return results;
   }
   for await (const wrappedEvent of wrapEvents({ senderSigner, imkcSigner, privateChannelSigner, privateChannelReaderPubkey, receivers, receiverTag, fileChunkIndex, onPreparedSeed, deletionPubkey: normalizedDeletionPubkey, event, expirationSeconds, temporaryStorageArea, _getIykcProofs })) {
-    results.push(await _publish(wrappedEvent, withRecoveryRelays(relays, recoveryRelays)));
+    results.push(await _publish(wrappedEvent, withRecoveryRelays(relays, recoveryRelays), { receiverPubkeys: receiverPubkeys(receivers), primaryRelays: relays }));
   }
   return results;
 }
@@ -10491,7 +10491,7 @@ function shouldIgnoreGroupError(err) {
     "MISSING_NYM_CARRIER_ID"
   ].includes(err?.message);
 }
-async function fetch({ signal, receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelSignersByPubkey, privateChannelReaderSigner = privateChannelSigner, privateChannelReaderSignersByPubkey, privateChannelReaderPubkey, privateChannelReaderPubkeysByPubkey, privateChannelPubkey, privateChannelPubkeys, receiverPubkey, relays, onChunk, onEvent, onNymEvent, onSeedEvent, onContentKeyUsage, onError, since, until, limit, mode = "leecher", modeByPubkey, receivedChunkScope = "", receivedChunkTtlMs = DEFAULT_RECEIVED_CHUNK_TTL_MS, receivedChunkTtlMsByPubkey, receivedChunkMaxBytes = DEFAULT_RECEIVED_CHUNK_MAX_BYTES, receivedChunkIndexedDB = globalThis.indexedDB, ignoredGroupTtlMs = DEFAULT_IGNORED_GROUP_TTL_MS, ignoredGroupMaxEntries = DEFAULT_IGNORED_GROUP_MAX_ENTRIES, _getEvents = getEvents3 }) {
+async function fetch2({ signal, receiverSigner, iykcSigner, privateChannelSigner = receiverSigner, privateChannelSignersByPubkey, privateChannelReaderSigner = privateChannelSigner, privateChannelReaderSignersByPubkey, privateChannelReaderPubkey, privateChannelReaderPubkeysByPubkey, privateChannelPubkey, privateChannelPubkeys, receiverPubkey, relays, onChunk, onEvent, onNymEvent, onSeedEvent, onContentKeyUsage, onError, since, until, limit, mode = "leecher", modeByPubkey, receivedChunkScope = "", receivedChunkTtlMs = DEFAULT_RECEIVED_CHUNK_TTL_MS, receivedChunkTtlMsByPubkey, receivedChunkMaxBytes = DEFAULT_RECEIVED_CHUNK_MAX_BYTES, receivedChunkIndexedDB = globalThis.indexedDB, ignoredGroupTtlMs = DEFAULT_IGNORED_GROUP_TTL_MS, ignoredGroupMaxEntries = DEFAULT_IGNORED_GROUP_MAX_ENTRIES, _getEvents = getEvents3 }) {
   if (!relays?.length) throw new ValidationError("NO_RELAYS");
   const authors = privateChannelPubkeyList({ privateChannelPubkey, privateChannelPubkeys });
   const filter = { kinds: [PRIVATE_BROADCAST_KIND] };
@@ -10635,11 +10635,11 @@ function addHeaderTag(tags, { code, error }) {
   return out.concat([header]);
 }
 function makeMessageRumor({ kind, tags, message }) {
-  const normalized = normalizeMessage(message);
+  const normalized2 = normalizeMessage(message);
   return {
     kind,
-    tags: addHeaderTag(tags, normalized),
-    content: normalized.content
+    tags: addHeaderTag(tags, normalized2),
+    content: normalized2.content
   };
 }
 function parsePayloadContent(content) {
@@ -11306,6 +11306,372 @@ async function broadcastNymEvent({
   const deletion = resolveDeletionCapability({ deletionPubkey, deletionSeckey, autoDeletionCapability });
   const reports = await sendNymMessage({ nymSigner, privateChannelSigner, privateChannelReaderPubkey, deletionPubkey: deletion.deletionPubkey, event: wireEvent, relays, relayToReceivers, recoveryRelays, expirationSeconds, _publish });
   return withDelivery({ event: wireEvent }, reports, deletion.deletionSeckey);
+}
+
+// node_modules/libp2r2p/network/index.js
+var RETRY_DELAYS = [5e3, 15e3, 3e4, 6e4];
+var CONNECTIVITY_PROBE_URLS = [
+  { url: "https://www.gstatic.com/generate_204" },
+  { url: "https://connectivitycheck.gstatic.com/generate_204" },
+  { url: "https://captive.apple.com/hotspot-detect.html" },
+  { method: "GET", url: "https://connectivity-check.ubuntu.com" }
+];
+var STRICT_CONNECTIVITY_PROBE_URLS = [
+  { url: "https://captive.apple.com/hotspot-detect.html", method: "GET", marker: "Success" },
+  { url: "https://1.1.1.1/cdn-cgi/trace", method: "GET", marker: "ip=" },
+  { url: "https://cloudflare.com/cdn-cgi/trace", method: "GET", marker: "ip=" }
+];
+var FIRST_PROBE_TIMEOUT_MS = 2500;
+var HEDGE_DELAY_MS = 1e3;
+var REMAINING_PROBE_TIMEOUT_MS = 4e3;
+var sharedChecks = /* @__PURE__ */ new Map();
+async function isOnline({ signal, strict = false } = {}) {
+  if (signal?.aborted) throw signal.reason;
+  if (globalThis.navigator?.onLine === false) return false;
+  if (signal) return hasInternetConnectivity(signal, strict);
+  const key = strict ? "strict" : "lenient";
+  if (!sharedChecks.has(key)) {
+    sharedChecks.set(key, hasInternetConnectivity(void 0, strict).finally(() => {
+      sharedChecks.delete(key);
+    }));
+  }
+  return sharedChecks.get(key);
+}
+async function hasInternetConnectivity(signal, strict) {
+  if (signal?.aborted) throw signal.reason;
+  const candidates = shuffle(strict ? STRICT_CONNECTIVITY_PROBE_URLS : CONNECTIVITY_PROBE_URLS);
+  const [first, ...rest] = candidates;
+  if (!first) return false;
+  const controller = new AbortController();
+  const onAbort = () => controller.abort(signal?.reason);
+  signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) onAbort();
+  let hedgeTimer;
+  let onHedgeAbort;
+  try {
+    let startHedge;
+    const firstAttempt = ping(first, { strict, signal: controller.signal, timeout: FIRST_PROBE_TIMEOUT_MS });
+    const hedge = new Promise((resolve, reject) => {
+      startHedge = resolve;
+      hedgeTimer = setTimeout(resolve, HEDGE_DELAY_MS);
+      if (signal) {
+        onHedgeAbort = () => reject(signal.reason);
+        signal.addEventListener("abort", onHedgeAbort, { once: true });
+        if (signal.aborted) onHedgeAbort();
+      }
+    }).then(() => Promise.any(rest.map((candidate) => ping(candidate, { strict, signal: controller.signal, timeout: REMAINING_PROBE_TIMEOUT_MS }))));
+    firstAttempt.catch(() => startHedge());
+    try {
+      await Promise.any([firstAttempt, hedge]);
+      return true;
+    } catch {
+      if (signal?.aborted) throw signal.reason;
+      return false;
+    }
+  } finally {
+    clearTimeout(hedgeTimer);
+    if (onHedgeAbort) signal?.removeEventListener("abort", onHedgeAbort);
+    controller.abort();
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+function shuffle(list2) {
+  const copy = list2.slice();
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+async function ping(candidate, { strict = false, timeout, signal } = {}) {
+  if (signal?.aborted) throw signal.reason;
+  const controller = new AbortController();
+  let timer;
+  let onAbort;
+  const stopped = new Promise((_resolve, reject) => {
+    onAbort = () => {
+      controller.abort(signal.reason);
+      reject(signal.reason);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error("PING_TIMEOUT"));
+    }, timeout);
+    if (signal?.aborted) onAbort();
+  });
+  try {
+    const response = await Promise.race([
+      fetch(candidate.url, {
+        method: candidate.method ?? (strict ? "GET" : "HEAD"),
+        mode: strict ? "cors" : "no-cors",
+        cache: "no-store",
+        redirect: "follow",
+        signal: controller.signal
+      }),
+      stopped
+    ]);
+    if (!strict) return;
+    if (!response.ok) throw new Error("PING_STATUS");
+    if (!(await response.text()).includes(candidate.marker)) throw new Error("PING_BODY");
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+function createConnectivityMonitor({
+  check,
+  strict = false,
+  eventTarget = globalThis.window,
+  document = globalThis.document,
+  _setTimeout = globalThis.setTimeout,
+  _clearTimeout = globalThis.clearTimeout,
+  _random = Math.random,
+  reportError = (error) => console.error("Online listener failed", error)
+} = {}) {
+  if (check !== void 0 && typeof check !== "function") throw new ValidationError("INVALID_CONNECTIVITY_CHECK");
+  const runCheck = check ?? ((options) => isOnline({ ...options, strict }));
+  const listeners3 = /* @__PURE__ */ new Set();
+  const setTimer = (...args) => Reflect.apply(_setTimeout, globalThis, args);
+  const clearTimer = (...args) => Reflect.apply(_clearTimeout, globalThis, args);
+  let session;
+  function deliver(entry, current) {
+    if (entry.delivered || !listeners3.has(entry) || session !== current) return;
+    entry.delivered = true;
+    try {
+      Promise.resolve(entry.handler()).catch(reportError);
+    } catch (error) {
+      reportError(error);
+    }
+  }
+  function schedule(current) {
+    if (session !== current || !listeners3.size) return;
+    const delay = current.online ? 6e4 : RETRY_DELAYS[Math.min(current.retry++, RETRY_DELAYS.length - 1)];
+    current.timer = setTimer(() => {
+      current.timer = null;
+      return probe(current);
+    }, Math.round(delay * (0.8 + _random() * 0.4)));
+    current.timer?.unref?.();
+  }
+  async function probe(current) {
+    if (session !== current || current.pending) return;
+    if (current.timer != null) clearTimer(current.timer);
+    current.timer = null;
+    current.pending = true;
+    try {
+      const online = await runCheck({ signal: current.controller.signal });
+      if (session !== current) return;
+      current.online = online === true && globalThis.navigator?.onLine !== false;
+      if (current.online) {
+        current.retry = 0;
+        for (const entry of [...listeners3]) deliver(entry, current);
+      } else {
+        for (const entry of listeners3) entry.delivered = false;
+      }
+    } catch {
+      if (session !== current) return;
+      current.online = false;
+      for (const entry of listeners3) entry.delivered = false;
+    } finally {
+      current.pending = false;
+      schedule(current);
+    }
+  }
+  function start() {
+    const current = { online: false, retry: 0, timer: null, pending: false, controller: new AbortController() };
+    session = current;
+    current.wake = () => {
+      probe(current);
+    };
+    current.connectionChanged = () => {
+      current.online = false;
+      current.retry = 0;
+      for (const entry of listeners3) entry.delivered = false;
+      current.wake();
+    };
+    current.visible = () => {
+      if (document?.visibilityState !== "hidden") current.wake();
+    };
+    eventTarget?.addEventListener("online", current.connectionChanged);
+    eventTarget?.addEventListener("offline", current.connectionChanged);
+    eventTarget?.addEventListener("focus", current.wake);
+    document?.addEventListener("visibilitychange", current.visible);
+    queueMicrotask(current.wake);
+  }
+  function stop() {
+    const current = session;
+    session = null;
+    if (current.timer != null) clearTimer(current.timer);
+    current.controller.abort();
+    eventTarget?.removeEventListener("online", current.connectionChanged);
+    eventTarget?.removeEventListener("offline", current.connectionChanged);
+    eventTarget?.removeEventListener("focus", current.wake);
+    document?.removeEventListener("visibilitychange", current.visible);
+  }
+  function onOnline2(handler) {
+    if (typeof handler !== "function") throw new ValidationError("INVALID_ONLINE_HANDLER");
+    const entry = { handler, delivered: false };
+    listeners3.add(entry);
+    if (!session) start();
+    else {
+      const current = session;
+      queueMicrotask(() => {
+        probe(current);
+      });
+    }
+    return () => {
+      if (!listeners3.delete(entry)) return;
+      if (!listeners3.size) stop();
+    };
+  }
+  return { onOnline: onOnline2 };
+}
+var defaultMonitors = /* @__PURE__ */ new Map();
+function onOnline(handler, { strict = false } = {}) {
+  const key = strict ? "strict" : "lenient";
+  let monitor = defaultMonitors.get(key);
+  if (!monitor) {
+    monitor = createConnectivityMonitor({ strict });
+    defaultMonitors.set(key, monitor);
+  }
+  return monitor.onOnline(handler);
+}
+
+// node_modules/libp2r2p/private-messenger/helpers/send-routing.js
+var REJECTION_PREFIXES = /* @__PURE__ */ new Set(["blocked", "restricted", "auth-required", "pow", "rate-limited", "error"]);
+var TRANSPORT_CATEGORIES = /* @__PURE__ */ new Set(["connection", "transport", "timeout"]);
+var EXCLUSION_MS = 5 * 60 * 1e3;
+var normalized = (relay) => {
+  try {
+    return normalizeRelayUrl(relay);
+  } catch {
+    return "";
+  }
+};
+function isReplaceableRelayFailure(error) {
+  if (error?.name === "Nip42AuthenticationError") return false;
+  if (TRANSPORT_CATEGORIES.has(error?.category)) return true;
+  if (error?.category && error.category !== "relay") return false;
+  return REJECTION_PREFIXES.has(/^([a-z-]+):/.exec(error?.message || "")?.[1]);
+}
+function normalizeFallbackRelays(value = []) {
+  if (!Array.isArray(value)) throw new ValidationError("INVALID_FALLBACK_RELAYS");
+  return [...new Set(Array.from(value, normalizeRelayUrl))];
+}
+function routeEntries(routes) {
+  return routes instanceof Map ? [...routes] : Object.entries(routes || {});
+}
+function routeGroups(routes) {
+  const groups = /* @__PURE__ */ new Map();
+  for (const [relay, receivers] of routes) {
+    const key = [...receivers].sort().join(",");
+    if (!groups.has(key)) groups.set(key, { receivers, relays: [] });
+    groups.get(key).relays.push(relay);
+  }
+  return [...groups.values()];
+}
+function createSendRelayRouting({ peer, peers = [peer], relaysByPubkey: relaysByPubkey2, primaryRelays, primaryRelayToReceivers, fallbackRelays = [], exclusions, pickRelays, recoveryRelays, publish: publish2, publishNymEvent: publishNymEvent2, sendEvent, isOnline: isOnline2, isCurrent, signal, now = Date.now }) {
+  const explicit = Boolean(primaryRelays || primaryRelayToReceivers);
+  const primaryRoutes = primaryRelayToReceivers || (primaryRelays ? new Map(primaryRelays.map((relay) => [relay, peers])) : pickRelays(peers, relaysByPubkey2, { relayType: "read", maxPerPubkey: Infinity }));
+  const primaryByPeer = Object.fromEntries(peers.map((pubkey) => [pubkey, { read: [] }]));
+  for (const [relay, receivers] of routeEntries(primaryRoutes)) {
+    for (const pubkey of Array.isArray(receivers) ? receivers : [receivers]) primaryByPeer[pubkey]?.read.push(normalizeRelayUrl(relay));
+  }
+  const candidates = [.../* @__PURE__ */ new Set([...Object.values(primaryByPeer).flatMap((value) => value.read), ...fallbackRelays])];
+  const candidateSet = new Set(candidates);
+  for (const [relay, expires] of exclusions) if (expires <= now() || !candidateSet.has(relay)) exclusions.delete(relay);
+  if (peers.some((pubkey) => {
+    const available = [...primaryByPeer[pubkey].read, ...fallbackRelays];
+    return available.length && available.every((relay) => exclusions.has(relay));
+  })) exclusions.clear();
+  const select = (receivers, excluded, staged = false) => {
+    const excludedRelays = [...excluded];
+    const excludeRelaysByPubkey = new Map(receivers.map((pubkey) => [pubkey, excludedRelays]));
+    const options = { relayType: "read", excludeRelaysByPubkey, emptyRelaysFallback: [] };
+    const routes = pickRelays(receivers, primaryByPeer, { ...options, ...explicit ? { maxPerPubkey: Infinity } : {} });
+    if (staged && routes.size) return routes;
+    const covered = new Set([...routes.values()].flat());
+    const missing = receivers.filter((pubkey) => !covered.has(pubkey));
+    const fallback = pickRelays(missing, Object.fromEntries(missing.map((pubkey) => [pubkey, { read: fallbackRelays }])), options);
+    for (const [relay, pubkeys] of fallback) routes.set(relay, [.../* @__PURE__ */ new Set([...routes.get(relay) || [], ...pubkeys])]);
+    return routes;
+  };
+  const relayToReceivers = primaryRelayToReceivers || select(peers, exclusions.keys());
+  const current = () => !signal?.aborted && isCurrent();
+  const rejected = (report) => (report?.errors || []).filter((item) => candidateSet.has(normalized(item.relay)) && isReplaceableRelayFailure(item.reason));
+  const remember = (errors) => {
+    for (const item of errors) exclusions.set(normalized(item.relay), now() + EXCLUSION_MS);
+  };
+  const online = async () => {
+    if (!current()) return false;
+    try {
+      return await isOnline2({ signal }) && current();
+    } catch {
+      return false;
+    }
+  };
+  async function send(event, initialRelays, context = {}) {
+    const receivers = context.receiverPubkeys || peers;
+    const pending = new Set(receivers);
+    const mirrors = initialRelays.filter((relay) => !candidateSet.has(normalized(relay)));
+    const initialPrimary = context.primaryRelays || (primaryRelays || peers.length === 1 ? routeEntries(relayToReceivers).map(([relay]) => relay) : []);
+    const first = [...new Set(initialPrimary.map(normalizeRelayUrl))].filter((relay) => !exclusions.has(relay));
+    let batch = first.length ? { receivers, relays: first } : null;
+    const tried = /* @__PURE__ */ new Set();
+    const errors = [];
+    const summaries = [];
+    const next = () => routeGroups(select([...pending], /* @__PURE__ */ new Set([...exclusions.keys(), ...tried]), true))[0];
+    const finish = (result2) => ({
+      ...result2,
+      success: summaries.length > 0 && pending.size === 0,
+      total: tried.size,
+      promise: Promise.all(summaries).then((reports) => ({
+        total: tried.size,
+        success: summaries.length > 0 && pending.size === 0,
+        fulfilled: reports.reduce((total, report) => total + (report.fulfilled || 0), 0),
+        succeededRelays: [...new Set(reports.flatMap((report) => report.succeededRelays || []))],
+        errors: reports.flatMap((report) => report.errors || [])
+      }))
+    });
+    let result = { success: false };
+    while (batch ||= next()) {
+      signal?.throwIfAborted();
+      const relays = [.../* @__PURE__ */ new Set([...batch.relays, ...summaries.length ? [] : mirrors])];
+      for (const relay of relays) tried.add(normalized(relay));
+      result = await sendEvent(event, relays);
+      const settled = Promise.resolve(result.promise);
+      summaries.push(settled);
+      if (result.success) {
+        for (const pubkey of batch.receivers) pending.delete(pubkey);
+        settled.then(async (report) => {
+          const failed = rejected(report);
+          if (failed.length && await online()) remember(failed);
+        }).catch(() => {
+        });
+        if (!pending.size) return finish(result);
+      } else {
+        const report = await settled;
+        const failed = rejected(report);
+        errors.push(...report?.errors || []);
+        if (!failed.length || errors.some((item) => !isReplaceableRelayFailure(item.reason))) return finish(result);
+        if (!next()) {
+          exclusions.clear();
+          return finish(result);
+        }
+        if (!await online()) return { ...finish(result), retryWhenAvailable: !signal?.aborted, retryWhenOnline: current() };
+        remember(failed);
+      }
+      if (!current()) return { ...finish(result), retryWhenAvailable: !signal?.aborted, retryWhenOnline: false };
+      batch = null;
+    }
+    return finish(result);
+  }
+  return {
+    relayToReceivers,
+    // A recovery mirror must not reintroduce refused relays or promote a fallback.
+    recoveryRelays: recoveryRelays.filter((relay) => !candidateSet.has(normalized(relay)) || !exclusions.has(normalized(relay))),
+    _publish: (options) => (options.nymSigner ? publishNymEvent2 : publish2)({ ...options, _publish: send })
+  };
 }
 
 // node_modules/libp2r2p/idb-queue/index.js
@@ -12966,6 +13332,7 @@ var PrivateMessenger = class _PrivateMessenger {
     return maintainPrivateMessengerStorage({ indexedDB, temporaryStorageArea });
   }
   constructor({
+    fallbackRelays = [],
     offlineRecoverySeconds = DEFAULT_OFFLINE_RECOVERY_SECONDS,
     staleChannelSeconds = DEFAULT_STALE_CHANNEL_SECONDS,
     identityStorageRetentionSeconds = DEFAULT_IDENTITY_STORAGE_RETENTION_SECONDS,
@@ -12990,6 +13357,7 @@ var PrivateMessenger = class _PrivateMessenger {
     _getRelaysByPubkey = getRelaysByPubkey,
     _pickRelaysForPubkeys = pickRelaysForPubkeys,
     _subscribeRelayListUpdates = subscribeRelayListUpdates,
+    _isOnline = isOnline,
     _setTimeout = globalThis.setTimeout.bind(globalThis),
     _clearTimeout = globalThis.clearTimeout.bind(globalThis),
     _setInterval = globalThis.setInterval.bind(globalThis),
@@ -12998,6 +13366,7 @@ var PrivateMessenger = class _PrivateMessenger {
     _storageClearInterval = globalThis.clearInterval.bind(globalThis),
     _BroadcastChannel = _indexedDB === globalThis.indexedDB ? globalThis.BroadcastChannel : void 0
   } = {}) {
+    this.fallbackRelays = normalizeFallbackRelays(fallbackRelays);
     this.offlineRecoverySeconds = normalizeOfflineRecoverySeconds(offlineRecoverySeconds);
     this.staleChannelSeconds = normalizeStaleChannelSeconds(staleChannelSeconds);
     this.identityStorageRetentionSeconds = normalizeIdentityStorageRetentionSeconds(identityStorageRetentionSeconds);
@@ -13022,6 +13391,9 @@ var PrivateMessenger = class _PrivateMessenger {
     this._getRelaysByPubkey = _getRelaysByPubkey;
     this._pickRelaysForPubkeys = _pickRelaysForPubkeys;
     this._subscribeRelayListUpdates = _subscribeRelayListUpdates;
+    this._isOnline = _isOnline;
+    this.sendRelayExclusions = /* @__PURE__ */ new Map();
+    this.sendRoutingLifetime = new AbortController();
     this._setTimeout = _setTimeout;
     this._clearTimeout = _clearTimeout;
     this._setInterval = _setInterval;
@@ -13436,6 +13808,7 @@ var PrivateMessenger = class _PrivateMessenger {
     if (updatesStoragePolicy) this.broadcastStoragePolicyChange();
     await this.unwatch(removedPubkeys);
     for (const pubkey of removedPubkeys) this.channels.delete(pubkey);
+    for (const [key, value] of this.sendRelayExclusions) if (removedPubkeys.includes(value.channelPubkey)) this.sendRelayExclusions.delete(key);
     for (const channel of nextChannels) this.channels.set(channel.pubkey, channel);
     await this.cleanupStaleChannels({ storageSnapshot });
     await this.applyRecoveryPolicies(nextChannels);
@@ -13507,18 +13880,40 @@ var PrivateMessenger = class _PrivateMessenger {
     }
   }
   async resolveWatchRelays(channel) {
-    if (!channel.usesNip65WatchRelays && channel.relays.length) return channel.relays;
-    return this.readRelaysForPubkey(this.userPubkey);
+    const primary = !channel.usesNip65WatchRelays && channel.relays.length ? channel.relays : await this.readRelaysForPubkey(this.userPubkey);
+    return uniq4([...primary, ...this.fallbackRelays].map(normalizeRelayUrl));
   }
-  async resolveSendRouting({ channel, receiverPubkeys: receiverPubkeys2, relays, relayToReceivers }) {
+  async resolveSendRouting({ channel, receiverPubkeys: receiverPubkeys2, relays, relayToReceivers, signal }) {
     const recoveryRelays = await this.recoveryMirrorRelays(channel.pubkey);
-    if (relayToReceivers) return { relayToReceivers, recoveryRelays };
-    if (relays?.length) return { relays: uniq4(relays), recoveryRelays };
-    if (channel.sendRelays.length) return { relays: channel.sendRelays, recoveryRelays };
-    if (channel.relays.length) return { relays: channel.relays, recoveryRelays };
-    const derived = await this.readRelayToReceivers(receiverPubkeys2);
-    if (!relayMapRelays(derived).length) throw new ValidationError("NO_RELAYS");
-    return { relayToReceivers: derived, recoveryRelays };
+    if (relayToReceivers && !this.fallbackRelays.length) return { relayToReceivers, recoveryRelays };
+    const fixed = relayToReceivers ? null : relays?.length ? uniq4(relays) : channel.sendRelays.length ? channel.sendRelays : channel.relays.length ? channel.relays : null;
+    if (fixed && !this.fallbackRelays.length) return { relays: fixed, recoveryRelays };
+    const recipients = uniq4(receiverPubkeys2?.length ? receiverPubkeys2 : relayMapReceivers(relayToReceivers));
+    const relaysByPubkey2 = fixed || relayToReceivers ? void 0 : await this._getRelaysByPubkey(recipients);
+    const key = `${channel.pubkey}:${[...recipients].sort().join(",")}`;
+    if (!this.sendRelayExclusions.has(key)) {
+      if (this.sendRelayExclusions.size >= 256) this.sendRelayExclusions.delete(this.sendRelayExclusions.keys().next().value);
+      this.sendRelayExclusions.set(key, { channelPubkey: channel.pubkey, exclusions: /* @__PURE__ */ new Map() });
+    }
+    const routing = createSendRelayRouting({
+      peers: fixed && !recipients.length ? [this.userPubkey] : recipients,
+      relaysByPubkey: relaysByPubkey2,
+      recoveryRelays,
+      primaryRelays: fixed?.map(normalizeRelayUrl),
+      primaryRelayToReceivers: relayToReceivers,
+      fallbackRelays: this.fallbackRelays,
+      signal: signal ? AbortSignal.any([this.sendRoutingLifetime.signal, signal]) : this.sendRoutingLifetime.signal,
+      exclusions: this.sendRelayExclusions.get(key).exclusions,
+      pickRelays: this._pickRelaysForPubkeys,
+      publish: this._privateChannel.publish || publish,
+      publishNymEvent: this._privateChannel.publishNymEvent || publishNymEvent,
+      sendEvent: (...args) => relayPool.sendEvent(...args),
+      isOnline: this._isOnline,
+      isCurrent: () => !this.closePromise && !this.pauseReasons.size && this.channels.has(channel.pubkey)
+    });
+    if (!relayMapRelays(routing.relayToReceivers).length) throw new ValidationError("NO_RELAYS");
+    if (fixed) return { relays: fixed, recoveryRelays: routing.recoveryRelays, _publish: routing._publish };
+    return routing;
   }
   readState() {
     return structuredClone(this.state);
@@ -13722,15 +14117,15 @@ var PrivateMessenger = class _PrivateMessenger {
     if (!recoverySeconds) return;
     const now = nowSeconds5();
     const minStart = now - recoverySeconds;
-    const normalized = {
+    const normalized2 = {
       start: Math.max(0, Math.floor(start)),
       end: Math.floor(end)
     };
-    if (normalized.end < normalized.start || normalized.end < minStart) return;
-    normalized.start = Math.max(normalized.start, minStart);
+    if (normalized2.end < normalized2.start || normalized2.end < minStart) return;
+    normalized2.start = Math.max(normalized2.start, minStart);
     const state = this.readState();
     const current = state.channels[pubkey] || {};
-    const ranges = (current.offlineRanges || []).filter((range) => range.end >= minStart).concat([normalized]).sort((a, b) => a.start - b.start);
+    const ranges = (current.offlineRanges || []).filter((range) => range.end >= minStart).concat([normalized2]).sort((a, b) => a.start - b.start);
     current.offlineRanges = mergeRanges(ranges);
     state.channels[pubkey] = current;
     this.writeState(state);
@@ -14322,9 +14717,9 @@ var PrivateMessenger = class _PrivateMessenger {
       _getIykcProofs: this.contentKeyLookup()
     });
   }
-  async broadcastRumor({ channelPubkey = this.defaultChannelPubkey(), receiverPubkeys: receiverPubkeys2, relays, relayToReceivers, rumor, deletionPubkey }) {
+  async broadcastRumor({ channelPubkey = this.defaultChannelPubkey(), receiverPubkeys: receiverPubkeys2, relays, relayToReceivers, rumor, deletionPubkey, signal }) {
     const channel = this.requireWritableChannel(channelPubkey);
-    const routing = await this.resolveSendRouting({ channel, receiverPubkeys: receiverPubkeys2, relays, relayToReceivers });
+    const routing = await this.resolveSendRouting({ channel, receiverPubkeys: receiverPubkeys2, relays, relayToReceivers, signal });
     this.debugSend("broadcastRumor", channelPubkey, { receiverPubkeys: receiverPubkeys2 });
     return this._privateMessage.broadcastRumor({
       senderSigner: this.userSigner,
@@ -14342,9 +14737,9 @@ var PrivateMessenger = class _PrivateMessenger {
       _getIykcProofs: this.contentKeyLookup()
     });
   }
-  async broadcastEvent({ channelPubkey = this.defaultChannelPubkey(), receiverPubkeys: receiverPubkeys2, relays, relayToReceivers, event, deletionPubkey }) {
+  async broadcastEvent({ channelPubkey = this.defaultChannelPubkey(), receiverPubkeys: receiverPubkeys2, relays, relayToReceivers, event, deletionPubkey, signal }) {
     const channel = this.requireWritableChannel(channelPubkey);
-    const routing = await this.resolveSendRouting({ channel, receiverPubkeys: receiverPubkeys2, relays, relayToReceivers });
+    const routing = await this.resolveSendRouting({ channel, receiverPubkeys: receiverPubkeys2, relays, relayToReceivers, signal });
     this.debugSend("broadcastEvent", channelPubkey, { receiverPubkeys: receiverPubkeys2 });
     return this._privateMessage.broadcastEvent({
       senderSigner: this.userSigner,
@@ -14874,6 +15269,8 @@ var PrivateMessenger = class _PrivateMessenger {
   close() {
     if (this.closePromise) return this.closePromise;
     const initSettledPromise = this.initSettledPromise;
+    this.sendRoutingLifetime.abort();
+    this.sendRelayExclusions.clear();
     let unwatchPromise;
     try {
       unwatchPromise = Promise.resolve(this.unwatch());
@@ -14983,6 +15380,11 @@ function oldestCreatedAt(events) {
     oldest = oldest == null ? event.created_at : Math.min(oldest, event.created_at);
   }
   return oldest;
+}
+function relayMapReceivers(relayToReceivers) {
+  if (!relayToReceivers) return [];
+  const values = relayToReceivers instanceof Map ? [...relayToReceivers.values()] : Object.values(relayToReceivers);
+  return uniq4(values.flat());
 }
 function relayMapRelays(relayToReceivers) {
   if (!relayToReceivers) return [];
@@ -15351,10 +15753,10 @@ function normalizeContentKeyEntry(entry) {
 function replaceContentKeyEntries(entries, { pruneStale = true } = {}) {
   dropAllContentKeys();
   for (const entry of entries) {
-    const normalized = normalizeContentKeyEntry(entry);
-    if (!normalized) continue;
+    const normalized2 = normalizeContentKeyEntry(entry);
+    if (!normalized2) continue;
     try {
-      adoptContentKey(normalized.ownerPubkey, normalized.seckey, normalized.createdAt);
+      adoptContentKey(normalized2.ownerPubkey, normalized2.seckey, normalized2.createdAt);
     } catch (err) {
       console.warn("content key skipped", err?.message ?? err);
     }
@@ -15748,6 +16150,8 @@ export {
   makeContentKeyEvent,
   parseContentKeyEvent,
   getIykcProofs,
+  isOnline,
+  onOnline,
   createEventReplyPacker,
   PrivateMessenger,
   beginVaultTransition,

@@ -229,3 +229,15 @@ NostrDB synchronization stops stale push batches when their queue or messenger i
 replaced. An in-flight shutdown cannot send subsequent chunks or restart its
 cooldown, and shutdown errors are not reported as active synchronization failures.
 Errors from the current messenger remain visible.
+
+
+### Launcher relay bridge
+
+When the launcher advertises relay-pool support, the vault uses its dedicated
+MessagePort and shares the launcher's physical relay connections. Standalone
+vaults keep native sockets. The bridge preserves outgoing frame order under
+backpressure, returns trailing receive credits, and releases queued payloads on
+close. An outgoing overflow closes the virtual socket and releases its launcher
+attachment; it does not increase the existing queue/credit limits. The launcher's
+`relayPoolSnapshot().bridge` identifies vault receive overflows without recording
+message content or keys.

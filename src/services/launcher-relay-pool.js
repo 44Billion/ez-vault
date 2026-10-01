@@ -182,10 +182,11 @@ export function installLauncherRelayPoolShim ({
         throw new TypeError("Failed to execute 'send' on 'WebSocket': The provided value is not of type '(ArrayBuffer or ArrayBufferView or Blob or string)'.")
       }
       const size = dataByteLength(data)
-      if (this.#creditFrames < 1 || this.#creditBytes < size) {
+      if (this.#queue.length > 0 || this.#creditFrames < 1 || this.#creditBytes < size) {
         this.#queue.push(data)
         this.#queuedBytes += size
         if (this.#queue.length > MAX_QUEUED_FRAMES || this.#queuedBytes > MAX_QUEUED_BYTES) {
+          port.postMessage({ code: RELAY_BRIDGE.CLOSE, payload: { virtualId: this.#virtualId, code: 1000, reason: '' } })
           this.#finalizeClose(1013, 'relay bridge queue overflow', false)
         }
         return
@@ -199,6 +200,7 @@ export function installLauncherRelayPoolShim ({
         throw domException("Failed to execute 'close' on 'WebSocket': The close code must be either 1000 or in the range 3000 to 4999.", 'InvalidAccessError')
       }
       if (this.readyState === LauncherRelayPoolWebSocket.CLOSING || this.readyState === LauncherRelayPoolWebSocket.CLOSED) return
+      this.#clearBuffers()
       if (this.readyState === LauncherRelayPoolWebSocket.CONNECTING) {
         defineOwnValue(this, 'readyState', LauncherRelayPoolWebSocket.CLOSING)
         port.postMessage({ code: RELAY_BRIDGE.CLOSE, payload: { virtualId: this.#virtualId, code, reason } })
@@ -210,6 +212,8 @@ export function installLauncherRelayPoolShim ({
     }
 
     _receive (message) {
+      if (this.readyState === LauncherRelayPoolWebSocket.CLOSED) return
+      if (this.readyState === LauncherRelayPoolWebSocket.CLOSING && message.code !== RELAY_BRIDGE.CLOSED && message.code !== RELAY_BRIDGE.DETACH) return
       const payload = message.payload ?? {}
       switch (message.code) {
         case RELAY_BRIDGE.ATTACHED:
@@ -251,6 +255,7 @@ export function installLauncherRelayPoolShim ({
       this.#creditScheduled = true
       queueMicrotask(() => {
         this.#creditScheduled = false
+        if (this.readyState !== LauncherRelayPoolWebSocket.OPEN) return
         if (this.#grantedFrames === 0 && this.#grantedBytes === 0) return
         port.postMessage({
           code: RELAY_BRIDGE.CREDIT,
@@ -273,9 +278,17 @@ export function installLauncherRelayPoolShim ({
       }
     }
 
+    #clearBuffers () {
+      this.#queue.length = 0
+      this.#queuedBytes = 0
+      this.#grantedFrames = 0
+      this.#grantedBytes = 0
+    }
+
     #finalizeClose (code, reason, wasClean) {
       if (this.readyState === LauncherRelayPoolWebSocket.CLOSED) return
       sockets.delete(this.#virtualId)
+      this.#clearBuffers()
       defineOwnValue(this, 'readyState', LauncherRelayPoolWebSocket.CLOSED)
       this.#fire('close', closeEvent(code, reason, wasClean))
     }
