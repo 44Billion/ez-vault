@@ -1,3 +1,4 @@
+import { accountProfile, isAccountMetadataEvent, isNewerAccountMetadata } from '../helpers/account-metadata.js'
 import { ask, reply, tell } from '../helpers/window-message.js'
 import { serializeError } from '../helpers/error.js'
 import * as store from './accounts-store.js'
@@ -100,27 +101,24 @@ function syncTrustedParentOrigin () {
   }
 }
 
-function eventList (event) {
-  return event ? [event] : []
+function eventList (event, pubkey, kind) {
+  return isAccountMetadataEvent(event, pubkey, kind) ? [event] : []
 }
 
 function launcherProfile (account) {
-  const parsed = parseProfileEvent(account.profileEvent)
   return {
-    name: parsed.name || account.name || '',
-    about: parsed.about || '',
-    picture: parsed.picture || account.picture || '',
+    ...accountProfile(account),
     npub: npubFromPubkey(account.pubkey),
-    meta: { events: eventList(account.profileEvent) }
+    meta: { events: eventList(account.profileEvent, account.pubkey, 0) }
   }
 }
 
 function launcherRelays (account) {
-  const parsed = parseRelayListEvent(account.relayListEvent)
+  const parsed = parseRelayListEvent(eventList(account.relayListEvent, account.pubkey, 10002)[0])
   return {
     read: parsed.read,
     write: parsed.write.length ? parsed.write : [...(account.writeRelays || [])],
-    meta: { events: eventList(account.relayListEvent) }
+    meta: { events: eventList(account.relayListEvent, account.pubkey, 10002) }
   }
 }
 
@@ -146,22 +144,19 @@ export function snapshotAccounts () {
   return filterVisibleAccounts(store.list()).map(accountForLauncher)
 }
 
-function isNewerEvent (event, storedEvent) {
-  return Number.isFinite(event?.created_at) && event.created_at > (storedEvent?.created_at ?? 0)
-}
-
 export async function applyAccountEvents (pubkey, events) {
   const account = pubkey ? store.get(pubkey) : null
   if (!account || !Array.isArray(events) || !events.length) return false
 
   const patch = {}
   for (const event of events) {
-    if (event?.kind === 0 && isNewerEvent(event, patch.profileEvent || account.profileEvent)) {
+    if (event?.kind === 0 && isNewerAccountMetadata(event, patch.profileEvent || account.profileEvent, pubkey, 0)) {
       const parsed = parseProfileEvent(event)
       patch.profileEvent = event
+      patch.about = parsed.about
       patch.name = parsed.name || account.name || ''
       patch.picture = parsed.picture || account.picture || ''
-    } else if (event?.kind === 10002 && isNewerEvent(event, patch.relayListEvent || account.relayListEvent)) {
+    } else if (event?.kind === 10002 && isNewerAccountMetadata(event, patch.relayListEvent || account.relayListEvent, pubkey, 10002)) {
       const relays = parseRelayListEvent(event)
       patch.relayListEvent = event
       patch.writeRelays = relays.write

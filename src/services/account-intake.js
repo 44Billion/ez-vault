@@ -1,3 +1,4 @@
+import { accountProfile, isAccountMetadataEvent } from '../helpers/account-metadata.js'
 import * as store from './accounts-store.js'
 import * as nostr from 'libp2r2p/key'
 import * as secrets from './secrets.js'
@@ -74,20 +75,6 @@ function cleanProfile (profile) {
   return out
 }
 
-function profileEventFromProfile (pubkey, profile) {
-  if (!Object.keys(profile).length) return undefined
-  const tags = []
-  if (profile.name) tags.push(['name', profile.name])
-  if (profile.picture) tags.push(['picture', profile.picture])
-  return {
-    kind: 0,
-    pubkey,
-    created_at: 0,
-    tags,
-    content: JSON.stringify(profile)
-  }
-}
-
 async function fetchOrNull (fn) {
   try {
     return await fn()
@@ -103,18 +90,19 @@ export async function resolveMetadata (pubkey, {
 } = {}) {
   const paired = cleanProfile(pairedProfile)
   const fetchedRelayListEvent = await fetchOrNull(() => _fetchRelayListEvent(pubkey))
-  const relayListEvent = fetchedRelayListEvent || undefined
+  const relayListEvent = isAccountMetadataEvent(fetchedRelayListEvent, pubkey, 10002) ? fetchedRelayListEvent : undefined
   const parsed = relayListEvent ? parseRelayListEvent(relayListEvent) : { write: [] }
   const writeRelays = parsed.write.length ? parsed.write : freeRelays.slice(0, 2)
   const fetchedProfileEvent = await fetchOrNull(() => _fetchLatestProfile(pubkey, { writeRelays }))
-  const profileEvent = fetchedProfileEvent || profileEventFromProfile(pubkey, paired)
+  const profileEvent = isAccountMetadataEvent(fetchedProfileEvent, pubkey, 0) ? fetchedProfileEvent : undefined
   const parsedProfile = profileEvent ? nostr.parseProfileEvent(profileEvent) : { name: '', picture: '' }
   return {
     profileEvent: profileEvent || undefined,
     relayListEvent: relayListEvent || undefined,
     writeRelays,
     name: parsedProfile.name || paired.name || '',
-    picture: parsedProfile.picture || paired.picture || ''
+    picture: parsedProfile.picture || paired.picture || '',
+    about: profileEvent ? parsedProfile.about : (paired.about || '')
   }
 }
 
@@ -145,8 +133,9 @@ export async function prepareSeckey (raw, options = {}) {
     pubkey,
     picture,
     name: meta.name || existing?.name || '',
-    profileEvent: meta.profileEvent || existing?.profileEvent,
-    relayListEvent: meta.relayListEvent || existing?.relayListEvent,
+    about: meta.profileEvent ? meta.about : (meta.about || (existing && accountProfile(existing).about) || ''),
+    profileEvent: meta.profileEvent || (isAccountMetadataEvent(existing?.profileEvent, pubkey, 0) ? existing.profileEvent : undefined),
+    relayListEvent: meta.relayListEvent || (isAccountMetadataEvent(existing?.relayListEvent, pubkey, 10002) ? existing.relayListEvent : undefined),
     writeRelays: meta.writeRelays
   }
   return { type: 'nsec', pubkey, record, seckey }
@@ -168,6 +157,7 @@ export async function prepareNpub (npub, options = {}) {
     pubkey,
     picture,
     name: meta.name || '',
+    about: meta.about,
     profileEvent: meta.profileEvent,
     relayListEvent: meta.relayListEvent,
     writeRelays: meta.writeRelays
@@ -226,8 +216,9 @@ export async function prepareBunker (bunkerUrlInput, token, options = {}) {
       ...publicBunkerRecord(bunkerUrl),
       picture,
       name: meta.name || existing?.name || '',
-      profileEvent: meta.profileEvent || existing?.profileEvent,
-      relayListEvent: meta.relayListEvent || existing?.relayListEvent,
+      about: meta.profileEvent ? meta.about : (meta.about || (existing && accountProfile(existing).about) || ''),
+      profileEvent: meta.profileEvent || (isAccountMetadataEvent(existing?.profileEvent, pubkey, 0) ? existing.profileEvent : undefined),
+      relayListEvent: meta.relayListEvent || (isAccountMetadataEvent(existing?.relayListEvent, pubkey, 10002) ? existing.relayListEvent : undefined),
       writeRelays: meta.writeRelays
     }
     return {

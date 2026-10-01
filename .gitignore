@@ -24,3 +24,6 @@ todo
 
 # Dev watcher output — never committed (docs/ is the committed build output)
 .dev/
+
+# Disposable protected browser diagnostics
+/tmp/browser-failures/

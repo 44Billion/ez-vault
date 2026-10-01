@@ -1,3 +1,4 @@
+import { isNewerAccountMetadata } from '../helpers/account-metadata.js'
 import * as store from './accounts-store.js'
 import { fetchLatestProfile, fetchRelayListEvent, parseRelayListEvent, freeRelays } from './relay.js'
 import { parseProfileEvent } from 'libp2r2p/key'
@@ -53,6 +54,7 @@ async function rehydrateOne (account) {
         relayListEvent: undefined,
         writeRelays: undefined,
         name: '',
+        about: '',
         picture: undefined
       }
       const afterAccount = { ...account, ...reset }
@@ -80,9 +82,8 @@ async function rehydrateOne (account) {
 
   // Refresh the user's NIP-65 write relays (seed relays → kind:10002).
   const relayListEvent = await fetchRelayListEvent(account.pubkey)
-  const cachedRelayListAt = account.relayListEvent?.created_at ?? 0
   let writeRelays = account.writeRelays
-  if (relayListEvent && relayListEvent.created_at > cachedRelayListAt) {
+  if (isNewerAccountMetadata(relayListEvent, account.relayListEvent, account.pubkey, 10002)) {
     const parsed = parseRelayListEvent(relayListEvent)
     if (parsed.write.length) {
       writeRelays = parsed.write
@@ -94,10 +95,10 @@ async function rehydrateOne (account) {
   // Fetch the kind:0 from the user's write relays (fall back to free relays).
   const targetWriteRelays = writeRelays?.length ? writeRelays : freeRelays.slice(0, 2)
   const fresh = await fetchLatestProfile(account.pubkey, { writeRelays: targetWriteRelays })
-  const cachedProfileAt = account.profileEvent?.created_at ?? 0
-  if (fresh && fresh.created_at > cachedProfileAt) {
+  if (isNewerAccountMetadata(fresh, account.profileEvent, account.pubkey, 0)) {
     const parsed = parseProfileEvent(fresh)
     patch.profileEvent = fresh
+    patch.about = parsed.about
     patch.name = parsed.name || account.name || ''
     patch.picture = parsed.picture ||
       account.picture ||

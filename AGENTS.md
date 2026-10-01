@@ -410,3 +410,12 @@ reach onError; lifecycle suppression must not become a blanket error filter.
   Sync JSONL batches target 128 KiB UTF-8 plus the 100-record cap; an indivisible
   oversized event travels alone. Keep native errors visible and never raise
   browser storage quotas or acknowledge an unsent final response.
+
+
+Account presentation (`name`, `picture`, `about`) may come from pairing before
+signed metadata is available. Intake never fabricates Nostr profile events.
+Metadata sent to or received from the launcher must have a valid signature,
+matching account author and expected kind (0/10002). Legacy unsigned timestamp-0
+placeholders remain readable for presentation/export only; no bulk migration or
+storage reset is required. A valid signed timestamp-0 event is acceptable.
+Sync overflow warnings include only bounded operational queue diagnostics.

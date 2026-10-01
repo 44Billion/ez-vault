@@ -2,15 +2,15 @@ import {
   claimSigner,
   rotateContentKeyIfStillCanonical,
   upsertContentKeyEvent
-} from "./chunk-FPLPUQXJ.js";
+} from "./chunk-XURN5UD2.js";
 import {
   filterVisibleAccounts,
   hasPendingMutation,
   subscribePendingMutations
-} from "./chunk-FNWJZJ6N.js";
+} from "./chunk-WPQZWNZS.js";
 import {
   trusted_signers_exports
-} from "./chunk-J3J2POM2.js";
+} from "./chunk-CXZEDZVI.js";
 import {
   NOSTRDB_SYNC,
   PrivateMessenger,
@@ -44,7 +44,7 @@ import {
   setState,
   subscribe2 as subscribe,
   subscribeRelayListUpdates
-} from "./chunk-KNFWBG3L.js";
+} from "./chunk-GFIOFY6D.js";
 import {
   __export
 } from "./chunk-NZLE2WMY.js";
@@ -460,6 +460,24 @@ async function startRevocationRotation({
   };
   await tick();
   return stopRevocationRotation;
+}
+
+// src/helpers/sync-error.js
+function syncErrorDetails(error) {
+  if (error?.code !== "RELAY_LIVE_BUFFER_FULL") return null;
+  const details = { code: error.code };
+  for (const key of ["relay", "operation", "phase"]) if (typeof error[key] === "string") details[key] = error[key];
+  const buffer = error.buffer;
+  if (buffer) {
+    details.buffer = {};
+    if (["delivery", "reconnect", "history-wait"].includes(buffer.stage)) details.buffer.stage = buffer.stage;
+    for (const key of ["queuedEvents", "queuedBytes", "incomingBytes", "oldestQueuedMs"]) {
+      if (Number.isFinite(buffer[key])) details.buffer[key] = buffer[key];
+    }
+    details.buffer.limits = {};
+    for (const key of ["events", "bytes"]) if (Number.isFinite(buffer.limits?.[key])) details.buffer.limits[key] = buffer.limits[key];
+  }
+  return details;
 }
 
 // src/services/sync/content-keys.js
@@ -2349,7 +2367,9 @@ var TRUSTED_SIGNER_SYNC_INFO2 = "trusted-signer-sync-v1";
 var HEX326 = /^[0-9a-f]{64}$/i;
 var APP_ID_MAX_LENGTH2 = 512;
 function defaultOnError(err) {
-  console.warn("sync failed", err?.message ?? err);
+  const details = syncErrorDetails(err);
+  if (details) console.warn("sync failed", err.message, details);
+  else console.warn("sync failed", err?.message ?? err);
 }
 function isPlainObject4(value) {
   return value && typeof value === "object" && !Array.isArray(value);

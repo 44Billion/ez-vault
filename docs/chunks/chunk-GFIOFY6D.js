@@ -4775,6 +4775,26 @@ function pickRelaysForPubkeys(pubkeys, relaysByPubkey2, {
   return relayToAuthors;
 }
 
+// node_modules/libp2r2p/relay/helpers/live-buffer-error.js
+function liveBufferError({ relay, stage, queue, queuedBytes, incoming, incomingBytes, maxEvents, maxBytes, since }) {
+  const now = Date.now();
+  const boundaries = [since, incoming?.event?.created_at, ...queue.map((entry) => entry.item?.event?.created_at)].filter((value) => Number.isFinite(value) && value >= 0);
+  return Object.assign(new Error("RELAY_LIVE_BUFFER_FULL"), {
+    code: "RELAY_LIVE_BUFFER_FULL",
+    relay,
+    phase: "live-buffer",
+    recoverySince: Math.min(Math.floor(now / 1e3), ...boundaries),
+    buffer: {
+      stage,
+      queuedEvents: queue.length,
+      queuedBytes,
+      incomingBytes,
+      limits: { events: maxEvents, bytes: maxBytes },
+      oldestQueuedMs: queue.length ? Math.max(0, now - queue[0].receivedAt) : 0
+    }
+  });
+}
+
 // node_modules/libp2r2p/relay/helpers/hll.js
 var REGISTER_COUNT = 256;
 var HLL_HEX_LENGTH = REGISTER_COUNT * 2;
@@ -6086,18 +6106,29 @@ var RelayPool = class {
     };
     const seenIds = /* @__PURE__ */ new Set();
     let untilTimer = null;
-    const overflow = (relay) => {
-      failure = Object.assign(new Error("RELAY_LIVE_BUFFER_FULL"), { code: "RELAY_LIVE_BUFFER_FULL", relay, phase: "live-buffer" });
+    const overflow = (item, bytes, stage = "delivery", entries = queue, volume = queuedBytes) => {
+      if (isDone) return;
+      failure = liveBufferError({
+        relay: item.relay,
+        stage,
+        queue: entries,
+        queuedBytes: volume,
+        incoming: item,
+        incomingBytes: bytes,
+        maxEvents: maxBufferedLiveEvents,
+        maxBytes: maxBufferedLiveBytes,
+        since: Math.min(sinceFloor, ...pendingGaps.values(), ...queue.map((entry) => entry.item?.event?.created_at).filter(Number.isFinite))
+      });
       teardown();
     };
     const enqueue = (item) => {
       const bytes = encoder10.encode(JSON.stringify(item)).byteLength;
       if (queue.length >= maxBufferedLiveEvents || queuedBytes + bytes > maxBufferedLiveBytes) {
-        overflow(item.relay);
+        overflow(item, bytes);
         return;
       }
       queuedBytes += bytes;
-      queue.push({ item, bytes });
+      queue.push({ item, bytes, receivedAt: Date.now() });
       p.resolve();
       p = Promise.withResolvers();
     };
@@ -6291,11 +6322,11 @@ var RelayPool = class {
             if (liveBuffer) {
               const bytes = encoder10.encode(JSON.stringify(event)).byteLength;
               if (liveBuffer.length >= maxBufferedLiveEvents || bufferedBytes + bytes > maxBufferedLiveBytes) {
-                overflow(url);
+                overflow({ event, relay: url }, bytes, "reconnect", liveBuffer, bufferedBytes);
                 return;
               }
               bufferedBytes += bytes;
-              liveBuffer.push(event);
+              liveBuffer.push({ item: { event, relay: url }, receivedAt: Date.now() });
             } else pushEvent(event, url);
           },
           onclose: (error) => {
@@ -6337,7 +6368,7 @@ var RelayPool = class {
           }).finally(() => {
             const buf = liveBuffer;
             liveBuffer = null;
-            for (const event of buf) pushEvent(event, url, true);
+            for (const entry of buf) pushEvent(entry.item.event, url, true);
             gapTasks.delete(task);
             scheduleProgress(attempt);
             p.resolve();
@@ -6477,9 +6508,9 @@ var RelayPool = class {
           else {
             const bytes = encoder10.encode(JSON.stringify(item)).byteLength;
             if (liveBuffer.length >= maxBufferedLiveEvents || bufferedBytes + bytes > maxBufferedLiveBytes) {
-              throw Object.assign(new Error("RELAY_LIVE_BUFFER_FULL"), { code: "RELAY_LIVE_BUFFER_FULL", relay: item.relay, phase: "live-buffer" });
+              throw liveBufferError({ relay: item.relay, stage: "history-wait", queue: liveBuffer, queuedBytes: bufferedBytes, incoming: item, incomingBytes: bytes, maxEvents: maxBufferedLiveEvents, maxBytes: maxBufferedLiveBytes, since: filter.since ?? 0 });
             }
-            liveBuffer.push({ item, bytes });
+            liveBuffer.push({ item, bytes, receivedAt: Date.now() });
             bufferedBytes += bytes;
           }
           liveWake.resolve();
@@ -8557,6 +8588,29 @@ function decodeSecretEntries(bytes) {
   return entries;
 }
 
+// node_modules/libp2r2p/private-messenger/helpers/recovery-retry.js
+function recoveryRetryDelay(errors, delay) {
+  let retry = false;
+  let blocked = false;
+  let retryAt = 0;
+  const seen = /* @__PURE__ */ new Set();
+  function visit(error) {
+    if (!error || seen.has(error)) return;
+    seen.add(error);
+    if (error.code === "PRIVATE_CHANNEL_HISTORY_PAGE_LIMIT" || error.name === "ValidationError" || /^(auth-required:|restricted:|blocked:|invalid:|pow:)/.test(error.message || "")) blocked = true;
+    if (["transport", "timeout"].includes(error.category) || ["QuotaExceededError", "InvalidStateError", "UnknownError"].includes(error.name) || /^(rate-limited:|error:)/.test(error.message || "") || ["RELAY_LIVE_BUFFER_FULL", "RELAY_LIVE_NOT_READY"].includes(error.code)) retry = true;
+    if (Number.isFinite(error.retryAt)) retryAt = Math.max(retryAt, Math.min(Date.now() + 3e5, error.retryAt));
+    for (const child of error.errors || []) visit(child);
+    for (const entry of error.relays || []) {
+      if (["timeout", "cutoff", "closed"].includes(entry.status)) retry = true;
+      visit(entry.error);
+    }
+    visit(error.cause);
+  }
+  errors.forEach(visit);
+  return retry && !blocked ? Math.max(delay, retryAt - Date.now()) : null;
+}
+
 // node_modules/libp2r2p/helpers/abortable-semaphore.js
 function createAbortableSemaphore(capacity, onIdle = () => {
 }) {
@@ -9000,7 +9054,7 @@ async function readHistory({ filter, relays, receiverPubkey, signal, getEvents: 
 function subscriptionError(reason, relay) {
   const message = reason?.message ?? String(reason);
   const error = reason instanceof AggregateError ? new AggregateError(reason.errors, message, { cause: reason }) : new Error(message, { cause: reason });
-  for (const key of ["name", "code", "category", "retryAfterMs", "retryAt", "closeCode", "closeReason", "wasClean"]) {
+  for (const key of ["name", "code", "category", "retryAfterMs", "retryAt", "closeCode", "closeReason", "wasClean", "phase", "buffer", "recoverySince"]) {
     if (reason?.[key] !== void 0) error[key] = reason[key];
   }
   error.operation = "private-channel.subscribe";
@@ -10765,6 +10819,7 @@ function subscribe2({ receiverSigner, iykcSigner, privateChannelSigner = receive
     timeoutAfterFirstEose: null
   });
   async function consumeEvents() {
+    let result = { status: "ended" };
     try {
       for await (const item of events) {
         if (controller.signal.aborted) continue;
@@ -10772,17 +10827,26 @@ function subscribe2({ receiverSigner, iykcSigner, privateChannelSigner = receive
         else if (item.type === "event") await processOuterEvent(item.event);
       }
     } catch (error) {
-      if (!controller.signal.aborted && error?.message !== "Aborted") onError?.(error);
+      if (!controller.signal.aborted) {
+        const diagnostic = subscriptionError(error, error?.relay);
+        result = { status: "failed", error: diagnostic };
+        try {
+          onError?.(diagnostic);
+        } catch {
+        }
+      }
     } finally {
       processOuterEvent.close();
     }
+    return controller.signal.aborted ? { status: "closed" } : result;
   }
-  const consumePromise = consumeEvents();
+  const done = consumeEvents();
   return {
     ready: events.ready || Promise.resolve(),
+    done,
     close() {
       controller.abort();
-      return consumePromise;
+      return done;
     }
   };
 }
@@ -10908,9 +10972,10 @@ async function ownPrivateChannelPubkey(signer) {
   if (!signer?.getPublicKey) throw new ValidationError("PRIVATE_CHANNEL_SIGNER_REQUIRED");
   return signer.getPublicKey();
 }
-function createPrivateMessageSession() {
+function createPrivateMessageSession({ _setTimeout = setTimeout, _clearTimeout = clearTimeout, _now = Date.now, _random = Math.random } = {}) {
   const watchesByChannel = /* @__PURE__ */ new Map();
   const subsByRelay = /* @__PURE__ */ new Map();
+  const relayRecoveries = /* @__PURE__ */ new Map();
   let nextWatchRevision = 1;
   let requestSequence = 0;
   const watchRequests = /* @__PURE__ */ new Map();
@@ -11044,11 +11109,107 @@ function createPrivateMessageSession() {
       return Promise.reject(err);
     }
   }
-  function rebuildSubscriptions({ _subscribe = subscribe2, gracefulClose = true } = {}) {
+  function reportSubscriptionError(channels, error) {
+    try {
+      watchCallbacks([...channels][0]).onError?.(error);
+    } catch {
+    }
+  }
+  function cancelRelayRecovery(relay) {
+    const recovery = relayRecoveries.get(relay);
+    if (recovery?.timer != null) _clearTimeout(recovery.timer);
+    relayRecoveries.delete(relay);
+  }
+  async function notifyInterruption(relay, recovery) {
+    const channels = desiredRelayState().get(relay) || [];
+    const outcomes = await Promise.allSettled([...channels].map(async (channel) => {
+      const watch3 = watchesByChannel.get(channel);
+      if (recovery.notified.get(channel) === watch3) return;
+      await watch3.callbacks.onSubscriptionState?.({ state: "interrupted", relay, error: recovery.error, since: recovery.since });
+      recovery.notified.set(channel, watch3);
+    }));
+    const failed = outcomes.find((result) => result.status === "rejected");
+    if (failed) throw failed.reason;
+    if (relayRecoveries.get(relay) === recovery && [...desiredRelayState().get(relay) || []].some((channel) => recovery.notified.get(channel) !== watchesByChannel.get(channel))) {
+      await notifyInterruption(relay, recovery);
+    }
+  }
+  function scheduleRelayRecovery(relay, recovery) {
+    if (relayRecoveries.get(relay) !== recovery || recovery.timer || !desiredRelayState().has(relay)) return;
+    const delay = Math.min(3e4, recovery.delay * (0.8 + _random() * 0.4));
+    recovery.delay = Math.min(3e4, recovery.delay * 2);
+    recovery.timer = _setTimeout(async () => {
+      recovery.timer = null;
+      try {
+        await notifyInterruption(relay, recovery);
+        if (relayRecoveries.get(relay) !== recovery || !desiredRelayState().has(relay)) return;
+        await rebuildSubscriptions({ retryRelay: relay });
+      } catch (error) {
+        reportSubscriptionError(desiredRelayState().get(relay) || [], error);
+        scheduleRelayRecovery(relay, recovery);
+      }
+    }, delay);
+    recovery.timer?.unref?.();
+  }
+  function subscriptionEnded(relay, entry, result) {
+    if (subsByRelay.get(relay) !== entry) return;
+    subsByRelay.delete(relay);
+    if (result.status === "closed" || !desiredRelayState().has(relay)) return;
+    const error = result.error || Object.assign(new Error("PRIVATE_CHANNEL_SUBSCRIPTION_ENDED"), { code: "PRIVATE_CHANNEL_SUBSCRIPTION_ENDED", relay });
+    const previous = relayRecoveries.get(relay);
+    const recovery = {
+      error,
+      since: Math.min(entry.since, error.recoverySince ?? entry.since, previous?.since ?? Infinity),
+      delay: entry.readyAt !== void 0 && _now() - entry.readyAt >= 6e4 ? 1e3 : previous?.delay || entry.retryDelay || 1e3,
+      notified: /* @__PURE__ */ new Map(),
+      timer: null
+    };
+    if (/^(auth-required:|restricted:|blocked:|invalid:|pow:)/.test(error.message || "") || error.name === "ValidationError" || error.code !== "RELAY_LIVE_BUFFER_FULL" && !previous) {
+      cancelRelayRecovery(relay);
+      notifyInterruption(relay, recovery).catch((error2) => reportSubscriptionError(entry.channels, error2));
+      return;
+    }
+    cancelRelayRecovery(relay);
+    relayRecoveries.set(relay, recovery);
+    recovery.preparing = notifyInterruption(relay, recovery).catch((error2) => reportSubscriptionError(entry.channels, error2));
+    recovery.preparing.finally(() => scheduleRelayRecovery(relay, recovery));
+  }
+  async function subscriptionReady(relay, entry, ready) {
+    if (subsByRelay.get(relay) !== entry) return;
+    const recovery = relayRecoveries.get(relay);
+    if (!ready?.relays?.includes(relay)) {
+      if (recovery) {
+        const error = ready?.errors?.[0]?.reason || Object.assign(new Error("RELAY_LIVE_NOT_READY"), { code: "RELAY_LIVE_NOT_READY", relay });
+        subscriptionEnded(relay, entry, { status: "failed", error });
+        await entry.sub.close();
+      }
+      return;
+    }
+    entry.readyAt = _now();
+    if (!recovery) return;
+    try {
+      const until = Math.floor(_now() / 1e3);
+      await Promise.all([...entry.channels].map(async (channel) => {
+        if (subsByRelay.get(relay) !== entry || !watchesByChannel.has(channel)) return;
+        await watchCallbacks(channel).onSubscriptionState?.({ state: "ready", relay, since: recovery.since, until });
+      }));
+      if (subsByRelay.get(relay) === entry && relayRecoveries.get(relay) === recovery) {
+        entry.retryDelay = recovery.delay;
+        cancelRelayRecovery(relay);
+        await rebuildSubscriptions();
+      }
+    } catch (error) {
+      reportSubscriptionError(entry.channels, error);
+      subscriptionEnded(relay, entry, { status: "failed", error });
+      await entry.sub.close();
+    }
+  }
+  function rebuildSubscriptions({ _subscribe = subscribe2, gracefulClose = true, retryRelay } = {}) {
     subscribe4 = _subscribe === subscribe2 ? subscribe4 : _subscribe;
     _subscribe = subscribe4;
     const desired = desiredRelayState();
     const closing = [];
+    for (const relay of relayRecoveries.keys()) if (!desired.has(relay)) cancelRelayRecovery(relay);
     for (const [relay, current] of subsByRelay) {
       const nextChannels = desired.get(relay);
       if (nextChannels && doesSubscriptionMatch(current, nextChannels)) continue;
@@ -11061,6 +11222,8 @@ function createPrivateMessageSession() {
     for (const [relay, channels] of desired) {
       const current = subsByRelay.get(relay);
       if (doesSubscriptionMatch(current, channels)) continue;
+      if (relayRecoveries.has(relay) && retryRelay !== relay) continue;
+      const since = nowSeconds3();
       const channelList = [...channels];
       const firstWatch = watchesByChannel.get(channelList[0]);
       const sub = _subscribe({
@@ -11085,7 +11248,7 @@ function createPrivateMessageSession() {
         ignoredGroupTtlMs: maxWatchNumber(channelList, "ignoredGroupTtlMs"),
         ignoredGroupMaxEntries: maxWatchNumber(channelList, "ignoredGroupMaxEntries"),
         limit: 0,
-        since: nowSeconds3(),
+        since,
         liveOnly: true,
         onChunk: handleChunk,
         onEvent: (event, outer, meta) => {
@@ -11098,13 +11261,24 @@ function createPrivateMessageSession() {
           return dispatchSeedEvent(seed);
         },
         onContentKeyUsage: dispatchContentKeyUsage,
-        onError: (err) => firstWatch.callbacks.onError?.(err)
+        onError: (err) => reportSubscriptionError(channels, err)
       });
-      subsByRelay.set(relay, {
+      const entry = {
+        since,
         channels: new Set(channels),
         revisions: watchRevisionsForChannels(channelList),
         sub
-      });
+      };
+      subsByRelay.set(relay, entry);
+      if (sub.done) sub.done.then((result) => subscriptionEnded(relay, entry, result)).catch((error) => reportSubscriptionError(channels, error));
+      if (sub.ready) {
+        sub.ready.then((ready) => subscriptionReady(relay, entry, ready)).catch((error) => {
+          reportSubscriptionError(channels, error);
+          subscriptionEnded(relay, entry, { status: "failed", error });
+          Promise.resolve(sub.close()).catch(() => {
+          });
+        });
+      }
       if (current) {
         const close = closeSubscription(current.sub, gracefulClose);
         if (close) closing.push(close);
@@ -11131,6 +11305,7 @@ function createPrivateMessageSession() {
     onSeed,
     onChunk,
     onContentKeyUsage,
+    onSubscriptionState,
     onError,
     receivedChunkTtlMs,
     receivedChunkMaxBytes,
@@ -11141,6 +11316,7 @@ function createPrivateMessageSession() {
     _subscribe = subscribe2
   }) {
     if (!relays?.length) throw new ValidationError("NO_RELAYS");
+    relays = uniq3(relays.map(normalizeRelayUrl));
     const request = ++requestSequence;
     const channelList = uniq3(channels?.length ? channels : [await ownPrivateChannelPubkey(privateChannelSigner)]);
     for (const channel of channelList) {
@@ -11149,8 +11325,7 @@ function createPrivateMessageSession() {
     const ownPubkey = receiverPubkey || await receiverSigner?.getPublicKey?.();
     if (identity !== void 0 && identity !== ownPubkey) throw new ValidationError("PRIVATE_MESSAGE_IDENTITY_MISMATCH");
     identity = ownPubkey;
-    const callbacks = { onAsk, onReply, onTell, onYell, onNym, onMessage, onSeed, onChunk, onContentKeyUsage, onError };
-    let changed = false;
+    const callbacks = { onAsk, onReply, onTell, onYell, onNym, onMessage, onSeed, onChunk, onContentKeyUsage, onSubscriptionState, onError };
     for (const channel of channelList) {
       if (watchRequests.get(channel) !== request) continue;
       const next = {
@@ -11182,9 +11357,8 @@ function createPrivateMessageSession() {
         continue;
       }
       watchesByChannel.set(channel, next);
-      changed = true;
     }
-    if (changed) await rebuildSubscriptions({ _subscribe });
+    await rebuildSubscriptions({ _subscribe });
     return () => {
       const owned = channelList.filter((channel) => watchRequests.get(channel) === request);
       return unwatch2(owned);
@@ -13658,6 +13832,8 @@ var PrivateMessenger = class _PrivateMessenger {
     this.capacityCheck = null;
     this.capacityRequiredBytes = 0;
     this.reloadGapTimers = /* @__PURE__ */ new Map();
+    this.liveInterruptions = /* @__PURE__ */ new Map();
+    this.liveRecoveryTimers = /* @__PURE__ */ new Map();
     this.watchRevisionByChannel = /* @__PURE__ */ new Map();
     this.presenceTimers = /* @__PURE__ */ new Map();
     this.stopRelayListWatcher = null;
@@ -14425,6 +14601,7 @@ var PrivateMessenger = class _PrivateMessenger {
         onContentKeyUsage: (usage) => this.handleContentKeyUsage(pubkey, usage),
         receivedChunkTtlMs: this.receivedChunkTtlMsFor(channel),
         receivedChunkIndexedDB: this._indexedDB,
+        onSubscriptionState: (state) => this.handleSubscriptionState(pubkey, state),
         onError: (err) => this.onError?.(err)
       });
       if (this.closePromise || this.pauseReasons.size || !this.desiredChannels.has(pubkey) || revision !== (this.watchRevisionByChannel.get(pubkey) || 0)) {
@@ -14457,6 +14634,78 @@ var PrivateMessenger = class _PrivateMessenger {
     this.ensureRelayListWatcher();
     return this;
   }
+  async handleSubscriptionState(pubkey, { state, relay, since, until }) {
+    if (this.closePromise || this.pauseReasons.size || !this.desiredChannels.has(pubkey)) return;
+    if (!this.offlineRecoverySecondsFor(pubkey)) return;
+    let interrupted = this.liveInterruptions.get(pubkey);
+    if (state === "interrupted") {
+      if (!interrupted) {
+        interrupted = /* @__PURE__ */ new Map();
+        this.liveInterruptions.set(pubkey, interrupted);
+      }
+      const start = Math.min(interrupted.get(relay) ?? Infinity, since);
+      interrupted.set(relay, start);
+      this.cancelReloadGap(pubkey);
+      for (const controller of this.recoveryControllers) {
+        if (controller.channelPubkey === pubkey) {
+          controller.liveInterrupted = true;
+          controller.abort();
+        }
+      }
+      this.recordInterruption([pubkey], start);
+      this.addOfflineRange(pubkey, Math.max(0, start - this.offlineSkewSeconds), nowSeconds5());
+      await this.flushStateWrites();
+    } else if (state === "ready" && interrupted?.has(relay)) {
+      const start = interrupted.get(relay);
+      this.addOfflineRange(pubkey, Math.max(0, start - this.offlineSkewSeconds), until);
+      if (interrupted.size === 1) this.closeOpenOfflineRanges([pubkey]);
+      await this.flushStateWrites();
+      if (this.closePromise || this.pauseReasons.size || !this.desiredChannels.has(pubkey) || this.liveInterruptions.get(pubkey) !== interrupted) return;
+      interrupted.delete(relay);
+      if (!interrupted.size) this.liveInterruptions.delete(pubkey);
+      this.scheduleLiveRecovery(pubkey);
+    }
+  }
+  cancelLiveRecovery(pubkey) {
+    const work = this.liveRecoveryTimers.get(pubkey);
+    if (work?.timer != null) this._clearTimeout(work.timer);
+    this.liveRecoveryTimers.delete(pubkey);
+  }
+  scheduleLiveRecovery(pubkey) {
+    const current = this.liveRecoveryTimers.get(pubkey);
+    if (current) {
+      current.again = true;
+      return;
+    }
+    const work = { delay: 1e3, timer: null, again: false };
+    this.liveRecoveryTimers.set(pubkey, work);
+    const isCurrent = () => this.liveRecoveryTimers.get(pubkey) === work && !this.closePromise && !this.pauseReasons.size && this.desiredChannels.has(pubkey);
+    const schedule = (delay) => {
+      work.timer = this._setTimeout(async () => {
+        work.timer = null;
+        if (!isCurrent()) return;
+        work.again = false;
+        let errors;
+        try {
+          await this.recoveries.get(pubkey);
+          if (!isCurrent()) return;
+          errors = await this.recoverOfflineRanges([pubkey]);
+        } catch (error) {
+          this.onError?.(error);
+          errors = [error];
+        }
+        if (!isCurrent()) return;
+        const pending = this.readState().channels[pubkey]?.offlineRanges?.length;
+        const retry = pending ? recoveryRetryDelay(errors, Math.min(3e4, work.delay * (0.8 + Math.random() * 0.4))) : null;
+        if (work.again || retry !== null) {
+          schedule(work.again ? 0 : retry);
+          work.delay = Math.min(3e4, work.delay * 2);
+        } else this.liveRecoveryTimers.delete(pubkey);
+      }, delay);
+      work.timer?.unref?.();
+    };
+    schedule(0);
+  }
   recordInterruption(channels, at = nowSeconds5()) {
     const state = this.readState();
     for (const pubkey of channels) {
@@ -14472,6 +14721,8 @@ var PrivateMessenger = class _PrivateMessenger {
     const closing = [];
     for (const pubkey of channels) {
       this.cancelReloadGap(pubkey);
+      this.cancelLiveRecovery(pubkey);
+      this.liveInterruptions.delete(pubkey);
       this.watchRevisionByChannel.set(pubkey, (this.watchRevisionByChannel.get(pubkey) || 0) + 1);
       const close = this.stopByChannel.get(pubkey)?.();
       if (close?.then) closing.push(close);
@@ -15343,6 +15594,7 @@ var PrivateMessenger = class _PrivateMessenger {
     };
   }
   async recoverOfflineRanges(channels = [...this.stopByChannel.keys()]) {
+    const failures = [];
     for (const pubkey of uniq4(channels)) {
       if (this.pauseReasons.size || this.closePromise || !this.desiredChannels.has(pubkey)) continue;
       let work = this.recoveries.get(pubkey);
@@ -15351,13 +15603,15 @@ var PrivateMessenger = class _PrivateMessenger {
         this.recoveries.set(pubkey, work);
       }
       try {
-        await work;
+        failures.push(...await work);
       } finally {
         if (this.recoveries.get(pubkey) === work) this.recoveries.delete(pubkey);
       }
     }
+    return failures;
   }
   async recoverChannelRanges(channels) {
+    const failures = [];
     const state = this.readState();
     const now = nowSeconds5();
     for (const pubkey of uniq4(channels)) {
@@ -15408,11 +15662,13 @@ var PrivateMessenger = class _PrivateMessenger {
           });
           controller.signal.throwIfAborted();
           const attempt = await this.#askSeedersForRelayLeftEdgeAttempt(pubkey, range, history.oldestCreatedAt);
-          const lifecycleChanged = this.closePromise || !this.channels.has(pubkey) || !this.stopByChannel.has(pubkey) || (this.watchRevisionByChannel.get(pubkey) || 0) !== watchRevision;
+          const lifecycleChanged = controller.signal.aborted || this.closePromise || !this.channels.has(pubkey) || !this.stopByChannel.has(pubkey) || (this.watchRevisionByChannel.get(pubkey) || 0) !== watchRevision;
+          failures.push(...attempt.failures.map((failure) => failure.error));
           if (lifecycleChanged || attempt.failures.length) remaining.push(range);
           else recoveredThrough = Math.max(recoveredThrough, range.end);
         } catch (err) {
-          this.onError?.(err);
+          if (!(controller.liveInterrupted && err === controller.signal.reason)) this.onError?.(err);
+          failures.push(err);
           remaining.push(range);
         } finally {
           this.recoveryControllers.delete(controller);
@@ -15428,6 +15684,7 @@ var PrivateMessenger = class _PrivateMessenger {
       this.writeState(fresh);
       await this.flushStateWrites();
     }
+    return failures;
   }
   async clearChannel(pubkey) {
     await this.unwatch(pubkey);

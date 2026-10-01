@@ -1,3 +1,4 @@
+import { syncErrorDetails } from '../../helpers/sync-error.js'
 import { PrivateMessenger } from 'libp2r2p/private-messenger'
 import { claimSigner } from '../signer.js'
 import { subscribeRelayListUpdates } from 'libp2r2p/relay'
@@ -29,7 +30,9 @@ const APP_ID_MAX_LENGTH = 512
 // list sync is device-scoped instead: one shared-key channel per peer signer.
 
 function defaultOnError (err) {
-  console.warn('sync failed', err?.message ?? err)
+  const details = syncErrorDetails(err)
+  if (details) console.warn('sync failed', err.message, details)
+  else console.warn('sync failed', err?.message ?? err)
 }
 
 function isPlainObject (value) {

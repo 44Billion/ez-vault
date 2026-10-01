@@ -18,8 +18,8 @@ accounts, keyPath "pubkey"
   pubkey          account public key
   type            "nsec", "npub", or "bunker"
   bunker          optional persistent bunker URL
-  name/picture    resolved profile presentation
-  profileEvent    optional latest kind 0 event
+  name/picture/about  resolved profile presentation (may be provisional)
+  profileEvent    optional latest signed kind 0 event
   relayListEvent  optional latest kind 10002 event
   writeRelays     resolved NIP-65 write relay URLs
   __order         internal account-list position; removed from records returned to callers

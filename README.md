@@ -245,3 +245,23 @@ sequence and performance-epoch receipt/return times. Old launchers can ignore
 these fields; the vault also accepts frames without them. The launcher's
 `relayPoolSnapshot().bridge` identifies vault receive overflows without recording
 message content or keys.
+
+
+Account presentation (`name`, `picture`, `about`) may come from pairing before
+signed metadata is available. Intake never fabricates Nostr profile events.
+Metadata sent to or received from the launcher must have a valid signature,
+matching account author and expected kind (0/10002). Legacy unsigned timestamp-0
+placeholders remain readable for presentation/export only; no bulk migration or
+storage reset is required. A valid signed timestamp-0 event is acceptable.
+Sync overflow warnings include only bounded operational queue diagnostics.
+
+
+The private synchronization browser regression uses two isolated Chrome profiles,
+real launcher/vault bridges and a controlled relay. It covers paired profile
+presentation, private contacts and self-chat events, secret lock/unlock, overflow
+recovery and reload without reseeding. Run it with
+`node ../44billion/bin/run-browser-tests.js -- node tests/browser/private-sync.js`.
+The runner caps the complete browser/runtime group at 3 GiB with no swap.
+
+Private synchronization uses the published `libp2r2p@0.11.8` package pinned in
+`package-lock.json`, including live-overflow recovery with durable history gaps.

@@ -1,18 +1,22 @@
 import {
+  accountProfile,
+  isAccountMetadataEvent
+} from "./chunk-RJH5JCPH.js";
+import {
   seededAvatarDataUrl,
   seededNeutralAvatarDataUrl
 } from "./chunk-3RWQBTGN.js";
 import {
   runSecretAccountMutation
-} from "./chunk-FNWJZJ6N.js";
+} from "./chunk-WPQZWNZS.js";
 import {
   add as add2,
   restore,
   snapshot
-} from "./chunk-J3J2POM2.js";
+} from "./chunk-CXZEDZVI.js";
 import {
   ensureRegistered
-} from "./chunk-QYTVNGIK.js";
+} from "./chunk-3CLKIWVO.js";
 import {
   add,
   extractBunkerClientKey,
@@ -30,7 +34,7 @@ import {
   remove,
   replace,
   setNsecSecret
-} from "./chunk-KNFWBG3L.js";
+} from "./chunk-GFIOFY6D.js";
 
 // src/services/account-intake.js
 function createIntakeToken() {
@@ -77,19 +81,6 @@ function cleanProfile(profile) {
   if (picture) out.picture = picture;
   return out;
 }
-function profileEventFromProfile(pubkey, profile) {
-  if (!Object.keys(profile).length) return void 0;
-  const tags = [];
-  if (profile.name) tags.push(["name", profile.name]);
-  if (profile.picture) tags.push(["picture", profile.picture]);
-  return {
-    kind: 0,
-    pubkey,
-    created_at: 0,
-    tags,
-    content: JSON.stringify(profile)
-  };
-}
 async function fetchOrNull(fn) {
   try {
     return await fn();
@@ -104,18 +95,19 @@ async function resolveMetadata(pubkey, {
 } = {}) {
   const paired = cleanProfile(pairedProfile);
   const fetchedRelayListEvent = await fetchOrNull(() => _fetchRelayListEvent(pubkey));
-  const relayListEvent = fetchedRelayListEvent || void 0;
+  const relayListEvent = isAccountMetadataEvent(fetchedRelayListEvent, pubkey, 10002) ? fetchedRelayListEvent : void 0;
   const parsed = relayListEvent ? parseRelayListEvent(relayListEvent) : { write: [] };
   const writeRelays = parsed.write.length ? parsed.write : freeRelays.slice(0, 2);
   const fetchedProfileEvent = await fetchOrNull(() => _fetchLatestProfile(pubkey, { writeRelays }));
-  const profileEvent = fetchedProfileEvent || profileEventFromProfile(pubkey, paired);
+  const profileEvent = isAccountMetadataEvent(fetchedProfileEvent, pubkey, 0) ? fetchedProfileEvent : void 0;
   const parsedProfile = profileEvent ? parseProfileEvent(profileEvent) : { name: "", picture: "" };
   return {
     profileEvent: profileEvent || void 0,
     relayListEvent: relayListEvent || void 0,
     writeRelays,
     name: parsedProfile.name || paired.name || "",
-    picture: parsedProfile.picture || paired.picture || ""
+    picture: parsedProfile.picture || paired.picture || "",
+    about: profileEvent ? parsedProfile.about : paired.about || ""
   };
 }
 async function prepareSeckey(raw, options = {}) {
@@ -133,8 +125,9 @@ async function prepareSeckey(raw, options = {}) {
     pubkey,
     picture,
     name: meta.name || existing?.name || "",
-    profileEvent: meta.profileEvent || existing?.profileEvent,
-    relayListEvent: meta.relayListEvent || existing?.relayListEvent,
+    about: meta.profileEvent ? meta.about : meta.about || existing && accountProfile(existing).about || "",
+    profileEvent: meta.profileEvent || (isAccountMetadataEvent(existing?.profileEvent, pubkey, 0) ? existing.profileEvent : void 0),
+    relayListEvent: meta.relayListEvent || (isAccountMetadataEvent(existing?.relayListEvent, pubkey, 10002) ? existing.relayListEvent : void 0),
     writeRelays: meta.writeRelays
   };
   return { type: "nsec", pubkey, record, seckey };
@@ -153,6 +146,7 @@ async function prepareNpub(npub, options = {}) {
     pubkey,
     picture,
     name: meta.name || "",
+    about: meta.about,
     profileEvent: meta.profileEvent,
     relayListEvent: meta.relayListEvent,
     writeRelays: meta.writeRelays
@@ -200,8 +194,9 @@ async function prepareBunker(bunkerUrlInput, token, options = {}) {
       ...publicBunkerRecord(bunkerUrl),
       picture,
       name: meta.name || existing?.name || "",
-      profileEvent: meta.profileEvent || existing?.profileEvent,
-      relayListEvent: meta.relayListEvent || existing?.relayListEvent,
+      about: meta.profileEvent ? meta.about : meta.about || existing && accountProfile(existing).about || "",
+      profileEvent: meta.profileEvent || (isAccountMetadataEvent(existing?.profileEvent, pubkey, 0) ? existing.profileEvent : void 0),
+      relayListEvent: meta.relayListEvent || (isAccountMetadataEvent(existing?.relayListEvent, pubkey, 10002) ? existing.relayListEvent : void 0),
       writeRelays: meta.writeRelays
     };
     return {

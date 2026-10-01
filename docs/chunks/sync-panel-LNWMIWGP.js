@@ -7,15 +7,18 @@ import {
   commitPrepared,
   createIntakeToken,
   prepareBareKey
-} from "./chunk-EWHOCKCG.js";
+} from "./chunk-FFDLQAIE.js";
+import {
+  accountProfile
+} from "./chunk-RJH5JCPH.js";
 import "./chunk-3RWQBTGN.js";
-import "./chunk-FNWJZJ6N.js";
-import "./chunk-J3J2POM2.js";
+import "./chunk-WPQZWNZS.js";
+import "./chunk-CXZEDZVI.js";
 import {
   detectPlatform,
   ensureRegistered,
   openSecrets
-} from "./chunk-QYTVNGIK.js";
+} from "./chunk-3CLKIWVO.js";
 import {
   Nip46Client,
   Nip46ServerSession,
@@ -32,7 +35,7 @@ import {
   nsecFromHex,
   parseNostrpairInput,
   relayPool
-} from "./chunk-KNFWBG3L.js";
+} from "./chunk-GFIOFY6D.js";
 import {
   error,
   info,
@@ -2094,22 +2097,13 @@ function buildSyncAccountEntries(accounts, secretEntries, { nsecFromHex: nsecFro
   }
   return out;
 }
-function profileContent(event) {
-  if (!event?.content) return {};
-  try {
-    const parsed = JSON.parse(event.content);
-    return isPlainObject(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
-}
 function cleanProfileField(value, maxLength) {
   const clean = typeof value === "string" ? value.trim() : "";
   return clean.length <= maxLength ? clean : "";
 }
 function profileForAccount(account) {
   const profile = {};
-  const content = profileContent(account.profileEvent);
+  const content = accountProfile(account);
   const name = cleanProfileField(account.name, PROFILE_NAME_MAX_LENGTH);
   const picture = cleanProfileField(account.picture, PROFILE_PICTURE_MAX_LENGTH);
   const contentName = cleanProfileField(content.name, PROFILE_NAME_MAX_LENGTH);

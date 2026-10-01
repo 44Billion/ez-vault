@@ -8,21 +8,24 @@ import {
 import {
   initMessenger,
   setVaultViewShell
-} from "./chunks/chunk-57KEAWVL.js";
+} from "./chunks/chunk-XMPY3BCY.js";
 import {
   init,
   startDeviceRelayListRefresh,
   startRevocationRotation
-} from "./chunks/chunk-B47TG3A6.js";
+} from "./chunks/chunk-XOJFFCSY.js";
 import {
   clearError,
   setError
 } from "./chunks/chunk-OQVZFKQZ.js";
-import "./chunks/chunk-Z3OZ5OYX.js";
+import "./chunks/chunk-NJWV4PMH.js";
 import {
   startContentKeyEventRefresh
-} from "./chunks/chunk-FPLPUQXJ.js";
-import "./chunks/chunk-C6WXKEQH.js";
+} from "./chunks/chunk-XURN5UD2.js";
+import "./chunks/chunk-ZE3Y2PVK.js";
+import {
+  isNewerAccountMetadata
+} from "./chunks/chunk-RJH5JCPH.js";
 import {
   seededAvatarDataUrl
 } from "./chunks/chunk-3RWQBTGN.js";
@@ -30,14 +33,14 @@ import {
   filterVisibleAccounts,
   recoverPendingMutation,
   runSecretAccountMutation
-} from "./chunks/chunk-FNWJZJ6N.js";
-import "./chunks/chunk-J3J2POM2.js";
+} from "./chunks/chunk-WPQZWNZS.js";
+import "./chunks/chunk-CXZEDZVI.js";
 import {
   checkForIconUpdate,
   hasPasskey,
   initializeVaultProtection,
   preparePasskeyRegistration
-} from "./chunks/chunk-QYTVNGIK.js";
+} from "./chunks/chunk-3CLKIWVO.js";
 import {
   fetchLatestProfile,
   fetchRelayListEvent,
@@ -54,7 +57,7 @@ import {
   subscribe2 as subscribe,
   transferBunkerSecret,
   update
-} from "./chunks/chunk-KNFWBG3L.js";
+} from "./chunks/chunk-GFIOFY6D.js";
 import {
   defineLocales,
   getT,
@@ -98,6 +101,7 @@ async function rehydrateOne(account) {
         relayListEvent: void 0,
         writeRelays: void 0,
         name: "",
+        about: "",
         picture: void 0
       };
       const afterAccount = { ...account, ...reset };
@@ -119,9 +123,8 @@ async function rehydrateOne(account) {
     }
   }
   const relayListEvent = await fetchRelayListEvent(account.pubkey);
-  const cachedRelayListAt = account.relayListEvent?.created_at ?? 0;
   let writeRelays = account.writeRelays;
-  if (relayListEvent && relayListEvent.created_at > cachedRelayListAt) {
+  if (isNewerAccountMetadata(relayListEvent, account.relayListEvent, account.pubkey, 10002)) {
     const parsed = parseRelayListEvent(relayListEvent);
     if (parsed.write.length) {
       writeRelays = parsed.write;
@@ -131,10 +134,10 @@ async function rehydrateOne(account) {
   }
   const targetWriteRelays = writeRelays?.length ? writeRelays : freeRelays.slice(0, 2);
   const fresh = await fetchLatestProfile(account.pubkey, { writeRelays: targetWriteRelays });
-  const cachedProfileAt = account.profileEvent?.created_at ?? 0;
-  if (fresh && fresh.created_at > cachedProfileAt) {
+  if (isNewerAccountMetadata(fresh, account.profileEvent, account.pubkey, 0)) {
     const parsed = parseProfileEvent(fresh);
     patch.profileEvent = fresh;
+    patch.about = parsed.about;
     patch.name = parsed.name || account.name || "";
     patch.picture = parsed.picture || account.picture || await seededAvatarDataUrl(account.pubkey);
   } else if (!account.picture) {
@@ -221,16 +224,16 @@ await initializeVaultProtection();
 if (!hasPasskey()) preparePasskeyRegistration().catch(() => {
 });
 await Promise.all([
-  import("./chunks/account-list-M6XCIBJS.js"),
-  import("./chunks/account-add-5VTT57YL.js"),
-  import("./chunks/sync-panel-BU2VV53N.js"),
-  import("./chunks/trusted-signers-panel-SRU4HK3I.js"),
+  import("./chunks/account-list-WR5E62S6.js"),
+  import("./chunks/account-add-3E6WOMOY.js"),
+  import("./chunks/sync-panel-LNWMIWGP.js"),
+  import("./chunks/trusted-signers-panel-Z3WXL57N.js"),
   import("./chunks/accordion-panel-AGHO422R.js"),
   import("./chunks/toast-VTWQ4NKU.js"),
-  import("./chunks/activity-log-MQQUODTP.js"),
-  import("./chunks/vault-lock-button-JI3F3XKP.js"),
-  import("./chunks/lock-overlay-YV5G76MN.js"),
-  import("./chunks/create-overlay-Y5M6V3W3.js")
+  import("./chunks/activity-log-GIB7ZNMH.js"),
+  import("./chunks/vault-lock-button-N2FQ6PNQ.js"),
+  import("./chunks/lock-overlay-OWJD3FZN.js"),
+  import("./chunks/create-overlay-CNPEWQ56.js")
 ]);
 try {
   sessionStorage.removeItem("ezVaultBootAutoReloaded");
@@ -312,7 +315,7 @@ startRevocationRotation().catch((err) => {
 });
 if (window === window.top) {
   document.body.classList.add("dev");
-  import("./chunks/dev-panel-VWRPZDKY.js").then(() => {
+  import("./chunks/dev-panel-4TJH7A5O.js").then(() => {
     document.querySelector(".diagnostics-section")?.append(document.createElement("dev-panel"));
   });
 }

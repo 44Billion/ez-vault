@@ -1,3 +1,4 @@
+import { finalizeEvent } from 'libp2r2p/event'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { generateSecretKey, getPublicKey } from 'libp2r2p/key'
@@ -21,15 +22,13 @@ function nsecAccount () {
       pubkey,
       name: 'Azure Ember',
       picture: 'https://example.test/avatar.png',
-      profileEvent: {
+      profileEvent: finalizeEvent({
         kind: 0,
         pubkey,
         created_at: 20,
         tags: [['name', 'Azure Ember']],
-        content: JSON.stringify({ name: 'Azure Ember', about: 'paired account' }),
-        id: 'profile-id',
-        sig: 'profile-sig'
-      },
+        content: JSON.stringify({ name: 'Azure Ember', about: 'paired account' })
+      }, secretKey),
       relayListEvent: {
         kind: 10002,
         pubkey,

@@ -1,3 +1,5 @@
+import { finalizeEvent } from 'libp2r2p/event'
+import { getPublicKey } from 'libp2r2p/key'
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
@@ -165,8 +167,9 @@ test('signerRequestContext keeps event-kind context scoped to signer methods tha
 })
 
 test('accountForLauncher returns the account shape expected by the launcher', () => {
-  const pubkey = 'a'.repeat(64)
-  const profileEvent = {
+  const secret = new Uint8Array(32).fill(1)
+  const pubkey = getPublicKey(secret)
+  const profileEvent = finalizeEvent({
     kind: 0,
     pubkey,
     created_at: 10,
@@ -176,8 +179,8 @@ test('accountForLauncher returns the account shape expected by the launcher', ()
       about: 'Hello',
       picture: 'https://example.test/content-picture.png'
     })
-  }
-  const relayListEvent = {
+  }, secret)
+  const relayListEvent = finalizeEvent({
     kind: 10002,
     pubkey,
     created_at: 11,
@@ -187,7 +190,7 @@ test('accountForLauncher returns the account shape expected by the launcher', ()
       ['r', 'wss://write.example', 'write']
     ],
     content: ''
-  }
+  }, secret)
 
   assert.deepEqual(accountForLauncher({
     type: 'nsec',
@@ -217,42 +220,43 @@ test('accountForLauncher returns the account shape expected by the launcher', ()
 })
 
 test('applyAccountEvents updates stored profile and relay-list events only when newer', async () => {
-  const pubkey = 'b'.repeat(64)
-  const oldProfileEvent = {
+  const secret = new Uint8Array(32).fill(2)
+  const pubkey = getPublicKey(secret)
+  const oldProfileEvent = finalizeEvent({
     kind: 0,
     pubkey,
     created_at: 10,
     tags: [],
     content: JSON.stringify({ name: 'Old', picture: 'old.png' })
-  }
-  const oldRelayListEvent = {
+  }, secret)
+  const oldRelayListEvent = finalizeEvent({
     kind: 10002,
     pubkey,
     created_at: 10,
     tags: [['r', 'wss://old.example', 'write']],
     content: ''
-  }
-  const staleProfileEvent = {
+  }, secret)
+  const staleProfileEvent = finalizeEvent({
     kind: 0,
     pubkey,
     created_at: 9,
     tags: [],
     content: JSON.stringify({ name: 'Stale', picture: 'stale.png' })
-  }
-  const newProfileEvent = {
+  }, secret)
+  const newProfileEvent = finalizeEvent({
     kind: 0,
     pubkey,
     created_at: 12,
     tags: [],
     content: JSON.stringify({ name: 'New', picture: 'new.png' })
-  }
-  const newRelayListEvent = {
+  }, secret)
+  const newRelayListEvent = finalizeEvent({
     kind: 10002,
     pubkey,
     created_at: 13,
     tags: [['r', 'wss://new.example', 'write']],
     content: ''
-  }
+  }, secret)
   await store.add({
     type: 'nsec',
     pubkey,

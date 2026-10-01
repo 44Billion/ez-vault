@@ -1,3 +1,4 @@
+import { finalizeEvent } from 'libp2r2p/event'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { generateSecretKey, getPublicKey } from 'libp2r2p/key'
@@ -8,14 +9,13 @@ function pubkey () {
   return getPublicKey(generateSecretKey())
 }
 
-function profileEvent ({ pubkey, name, createdAt }) {
-  return {
+function profileEvent ({ secret, name, createdAt }) {
+  return finalizeEvent({
     kind: 0,
-    pubkey,
     created_at: createdAt,
     tags: [['name', name]],
     content: JSON.stringify({ name })
-  }
+  }, secret)
 }
 
 test('resolveMetadata falls back to paired account profile when relays have no profile', async () => {
@@ -33,16 +33,14 @@ test('resolveMetadata falls back to paired account profile when relays have no p
   assert.equal(result.name, 'Azure Ember')
   assert.equal(result.picture, 'https://example.test/avatar.png')
   assert.deepEqual(result.writeRelays, freeRelays.slice(0, 2))
-  assert.deepEqual(JSON.parse(result.profileEvent.content), {
-    name: 'Azure Ember',
-    about: 'paired locally',
-    picture: 'https://example.test/avatar.png'
-  })
+  assert.equal(result.profileEvent, undefined)
+  assert.equal(result.about, 'paired locally')
 })
 
 test('resolveMetadata prefers relay profile over paired account profile when available', async () => {
-  const ownerPubkey = pubkey()
-  const relayProfile = profileEvent({ pubkey: ownerPubkey, name: 'Relay Name', createdAt: 10 })
+  const secret = generateSecretKey()
+  const ownerPubkey = getPublicKey(secret)
+  const relayProfile = profileEvent({ secret, name: 'Relay Name', createdAt: 10 })
   let fetchedFromRelays = null
 
   const result = await resolveMetadata(ownerPubkey, {

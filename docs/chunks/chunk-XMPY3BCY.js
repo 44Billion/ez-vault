@@ -6,18 +6,23 @@ import {
   requestNostrDbAppBackfill,
   serializeError,
   tell
-} from "./chunk-B47TG3A6.js";
+} from "./chunk-XOJFFCSY.js";
 import {
   append
-} from "./chunk-Z3OZ5OYX.js";
+} from "./chunk-NJWV4PMH.js";
 import {
   run
-} from "./chunk-FPLPUQXJ.js";
+} from "./chunk-XURN5UD2.js";
+import {
+  accountProfile,
+  isAccountMetadataEvent,
+  isNewerAccountMetadata
+} from "./chunk-RJH5JCPH.js";
 import {
   filterVisibleAccounts,
   read,
   subscribe as subscribe3
-} from "./chunk-FNWJZJ6N.js";
+} from "./chunk-WPQZWNZS.js";
 import {
   closeStorage,
   get,
@@ -31,7 +36,7 @@ import {
   subscribe,
   subscribe2,
   update
-} from "./chunk-KNFWBG3L.js";
+} from "./chunk-GFIOFY6D.js";
 import {
   launcherLocale,
   setLocale
@@ -510,25 +515,22 @@ function syncTrustedParentOrigin() {
     return null;
   }
 }
-function eventList(event) {
-  return event ? [event] : [];
+function eventList(event, pubkey, kind) {
+  return isAccountMetadataEvent(event, pubkey, kind) ? [event] : [];
 }
 function launcherProfile(account) {
-  const parsed = parseProfileEvent(account.profileEvent);
   return {
-    name: parsed.name || account.name || "",
-    about: parsed.about || "",
-    picture: parsed.picture || account.picture || "",
+    ...accountProfile(account),
     npub: npubFromPubkey(account.pubkey),
-    meta: { events: eventList(account.profileEvent) }
+    meta: { events: eventList(account.profileEvent, account.pubkey, 0) }
   };
 }
 function launcherRelays(account) {
-  const parsed = parseRelayListEvent(account.relayListEvent);
+  const parsed = parseRelayListEvent(eventList(account.relayListEvent, account.pubkey, 10002)[0]);
   return {
     read: parsed.read,
     write: parsed.write.length ? parsed.write : [...account.writeRelays || []],
-    meta: { events: eventList(account.relayListEvent) }
+    meta: { events: eventList(account.relayListEvent, account.pubkey, 10002) }
   };
 }
 function isAccountLocked(account) {
@@ -549,20 +551,18 @@ function accountForLauncher(account) {
 function snapshotAccounts() {
   return filterVisibleAccounts(list()).map(accountForLauncher);
 }
-function isNewerEvent(event, storedEvent) {
-  return Number.isFinite(event?.created_at) && event.created_at > (storedEvent?.created_at ?? 0);
-}
 async function applyAccountEvents(pubkey, events) {
   const account = pubkey ? get(pubkey) : null;
   if (!account || !Array.isArray(events) || !events.length) return false;
   const patch = {};
   for (const event of events) {
-    if (event?.kind === 0 && isNewerEvent(event, patch.profileEvent || account.profileEvent)) {
+    if (event?.kind === 0 && isNewerAccountMetadata(event, patch.profileEvent || account.profileEvent, pubkey, 0)) {
       const parsed = parseProfileEvent(event);
       patch.profileEvent = event;
+      patch.about = parsed.about;
       patch.name = parsed.name || account.name || "";
       patch.picture = parsed.picture || account.picture || "";
-    } else if (event?.kind === 10002 && isNewerEvent(event, patch.relayListEvent || account.relayListEvent)) {
+    } else if (event?.kind === 10002 && isNewerAccountMetadata(event, patch.relayListEvent || account.relayListEvent, pubkey, 10002)) {
       const relays = parseRelayListEvent(event);
       patch.relayListEvent = event;
       patch.writeRelays = relays.write;

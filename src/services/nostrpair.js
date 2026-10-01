@@ -1,3 +1,4 @@
+import { accountProfile } from '../helpers/account-metadata.js'
 import { generateSecretKey, getPublicKey } from 'libp2r2p/key'
 import { getConversationKey } from 'libp2r2p/nip44'
 import { bytesToHex } from 'libp2r2p/base16'
@@ -396,16 +397,6 @@ function buildSyncAccountEntries (accounts, secretEntries, { nsecFromHex, npubFr
   return out
 }
 
-function profileContent (event) {
-  if (!event?.content) return {}
-  try {
-    const parsed = JSON.parse(event.content)
-    return isPlainObject(parsed) ? parsed : {}
-  } catch {
-    return {}
-  }
-}
-
 function cleanProfileField (value, maxLength) {
   const clean = typeof value === 'string' ? value.trim() : ''
   return clean.length <= maxLength ? clean : ''
@@ -413,7 +404,7 @@ function cleanProfileField (value, maxLength) {
 
 function profileForAccount (account) {
   const profile = {}
-  const content = profileContent(account.profileEvent)
+  const content = accountProfile(account)
   const name = cleanProfileField(account.name, PROFILE_NAME_MAX_LENGTH)
   const picture = cleanProfileField(account.picture, PROFILE_PICTURE_MAX_LENGTH)
   const contentName = cleanProfileField(content.name, PROFILE_NAME_MAX_LENGTH)
