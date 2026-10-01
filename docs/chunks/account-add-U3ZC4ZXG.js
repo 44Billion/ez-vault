@@ -1,7 +1,7 @@
 import {
   subscribePomegranateBusy
-} from "./chunk-6FO5RWIB.js";
-import "./chunk-VGWBHTC3.js";
+} from "./chunk-UEW2QWXI.js";
+import "./chunk-PTNEYWA3.js";
 import {
   QrScanner,
   isCameraSupported
@@ -13,14 +13,14 @@ import {
   prepareBunker,
   prepareNpub,
   prepareSeckey
-} from "./chunk-O2DHMJ2W.js";
+} from "./chunk-6MEQ6O5Y.js";
 import "./chunk-3RWQBTGN.js";
-import "./chunk-BBZRPYBI.js";
-import "./chunk-526LU7DO.js";
+import "./chunk-QI4LJOOW.js";
+import "./chunk-WV5G2F7V.js";
 import {
   ensureRegistered
-} from "./chunk-AIMEACC2.js";
-import "./chunk-FQO6K2OL.js";
+} from "./chunk-3YHTJS57.js";
+import "./chunk-DF26KJGH.js";
 import {
   info
 } from "./chunk-BDYCOPAX.js";

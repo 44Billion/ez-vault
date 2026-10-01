@@ -388,7 +388,7 @@ reach onError; lifecycle suppression must not become a blanket error filter.
   dedicated launcher port; registry, routing and physical sockets stay in the
   launcher. Standalone/unsupported launchers retain native sockets.
 - Preserve FIFO when an outgoing queue exists, even if a newer small frame fits
-  the remaining credit. Keep the 64-frame/256-KiB credit window and
+  the remaining credit. Keep the outgoing 64-frame/256-KiB credit window and
   256-frame/1-MiB queue limits, including the existing string-length accounting.
 - Return trailing receive credits in a microtask. Close releases local buffers
   and suppresses pending refunds; an overflow also sends `RELAY_CLOSE` so the
@@ -397,3 +397,9 @@ reach onError; lifecycle suppression must not become a blanket error filter.
   include message contents or account keys.
 - Cover ordering, credit return and overflow cleanup in
   `tests/launcher-relay-pool.test.js`; regenerate the committed `docs/` build.
+
+- Receive refunds echo optional `sequence` as `through`, with `receivedAt` and
+  `returnedAt` from performance.timeOrigin + performance.now(). The launcher
+  owns incoming budgets, credit validation and bounded latency diagnostics;
+  these timestamps acknowledge port handling, not downstream async persistence.
+  Remain compatible with frames that carry no sequence or timing metadata.

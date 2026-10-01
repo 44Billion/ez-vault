@@ -238,6 +238,10 @@ MessagePort and shares the launcher's physical relay connections. Standalone
 vaults keep native sockets. The bridge preserves outgoing frame order under
 backpressure, returns trailing receive credits, and releases queued payloads on
 close. An outgoing overflow closes the virtual socket and releases its launcher
-attachment; it does not increase the existing queue/credit limits. The launcher's
+attachment. Outgoing limits remain 64 frames/256 KiB of credit and
+256 frames/1 MiB queued. Launcher-owned incoming budgets may be larger without
+changing the vault's publication limits. Receive refunds echo optional frame
+sequence and performance-epoch receipt/return times. Old launchers can ignore
+these fields; the vault also accepts frames without them. The launcher's
 `relayPoolSnapshot().bridge` identifies vault receive overflows without recording
 message content or keys.

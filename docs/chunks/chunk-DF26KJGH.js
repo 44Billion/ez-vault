@@ -5987,7 +5987,7 @@ var RelayPool = class {
     let draining = false;
     let failure;
     let queuedBytes = 0;
-    const encoder9 = new TextEncoder();
+    const encoder10 = new TextEncoder();
     const gapTasks = /* @__PURE__ */ new Set();
     const liveSubs = /* @__PURE__ */ new Map();
     const retryTimers2 = /* @__PURE__ */ new Map();
@@ -6034,7 +6034,7 @@ var RelayPool = class {
       teardown();
     };
     const enqueue = (item) => {
-      const bytes = encoder9.encode(JSON.stringify(item)).byteLength;
+      const bytes = encoder10.encode(JSON.stringify(item)).byteLength;
       if (queue.length >= maxBufferedLiveEvents || queuedBytes + bytes > maxBufferedLiveBytes) {
         overflow(item.relay);
         return;
@@ -6232,7 +6232,7 @@ var RelayPool = class {
             if (isDone || liveSubs.get(url) !== liveSub || attempt.closed || !liveEose) return;
             observeEvent(event, url);
             if (liveBuffer) {
-              const bytes = encoder9.encode(JSON.stringify(event)).byteLength;
+              const bytes = encoder10.encode(JSON.stringify(event)).byteLength;
               if (liveBuffer.length >= maxBufferedLiveEvents || bufferedBytes + bytes > maxBufferedLiveBytes) {
                 overflow(url);
                 return;
@@ -6401,7 +6401,7 @@ var RelayPool = class {
     if (snapshot) delete liveFilter.until;
     const liveGen = _liveGenerator(liveFilter, urls, readOptions);
     const liveBuffer = [];
-    const encoder9 = new TextEncoder();
+    const encoder10 = new TextEncoder();
     let bufferedBytes = 0;
     let liveDone = false;
     let liveFailure;
@@ -6418,7 +6418,7 @@ var RelayPool = class {
           if (inputSignal.aborted) break;
           if (item.type === "eose") initialReady.resolve();
           else {
-            const bytes = encoder9.encode(JSON.stringify(item)).byteLength;
+            const bytes = encoder10.encode(JSON.stringify(item)).byteLength;
             if (liveBuffer.length >= maxBufferedLiveEvents || bufferedBytes + bytes > maxBufferedLiveBytes) {
               throw Object.assign(new Error("RELAY_LIVE_BUFFER_FULL"), { code: "RELAY_LIVE_BUFFER_FULL", relay: item.relay, phase: "live-buffer" });
             }
@@ -8496,6 +8496,50 @@ function decodeSecretEntries(bytes) {
   return entries;
 }
 
+// node_modules/libp2r2p/helpers/abortable-semaphore.js
+function createAbortableSemaphore(capacity, onIdle = () => {
+}) {
+  const queue = [];
+  let active = 0;
+  const drain = () => {
+    while (active < capacity && queue.length) {
+      const job = queue.shift();
+      job.signal?.removeEventListener("abort", job.abort);
+      active++;
+      let released = false;
+      job.resolve(() => {
+        if (released) return;
+        released = true;
+        active--;
+        drain();
+      });
+    }
+    if (!active && !queue.length) onIdle();
+  };
+  return {
+    acquire(signal) {
+      signal?.throwIfAborted();
+      if (queue.length >= 256) return Promise.reject(Object.assign(new Error("PRIVATE_CHANNEL_HISTORY_QUEUE_FULL"), { code: "PRIVATE_CHANNEL_HISTORY_QUEUE_FULL" }));
+      return new Promise((resolve, reject) => {
+        const job = {
+          signal,
+          resolve,
+          abort: () => {
+            const index = queue.indexOf(job);
+            if (index < 0) return;
+            queue.splice(index, 1);
+            reject(signal.reason);
+            drain();
+          }
+        };
+        signal?.addEventListener("abort", job.abort, { once: true });
+        queue.push(job);
+        drain();
+      });
+    }
+  };
+}
+
 // node_modules/libp2r2p/private-message/index.js
 var private_message_exports = {};
 __export(private_message_exports, {
@@ -8527,6 +8571,7 @@ __export(private_channel_exports, {
   ROUTER_KIND: () => ROUTER_KIND,
   eventFromNymCarriers: () => eventFromNymCarriers,
   fetch: () => fetch2,
+  fetchHistory: () => fetchHistory,
   getJsonlChunkByteSize: () => getJsonlChunkByteSize,
   getNymCarrierChunkSize: () => getNymCarrierChunkSize,
   publish: () => publish,
@@ -8771,6 +8816,125 @@ function incompleteFetchError({ errors, report, request, receivedEventCount, ela
   });
 }
 
+// node_modules/libp2r2p/private-channel/helpers/history.js
+var PAGE_SIZE = 16;
+var MAX_PAGE_SIZE = 256;
+var MAX_PAGE_BYTES = 4 * 1024 * 1024;
+var TIMEOUT_MS = 5e3;
+var relayGates = /* @__PURE__ */ new Map();
+var encoder3 = new TextEncoder();
+var pageLimitError = () => Object.assign(new Error("PRIVATE_CHANNEL_HISTORY_PAGE_LIMIT"), { code: "PRIVATE_CHANNEL_HISTORY_PAGE_LIMIT" });
+function acquireRelay(relay, signal) {
+  signal?.throwIfAborted();
+  let gate = relayGates.get(relay);
+  if (!gate) {
+    gate = createAbortableSemaphore(1, () => {
+      if (relayGates.get(relay) === gate) relayGates.delete(relay);
+    });
+    relayGates.set(relay, gate);
+  }
+  return gate.acquire(signal);
+}
+async function readHistory({ filter, relays, receiverPubkey, signal, getEvents: getEvents4, processEvent, acquirePage }) {
+  const since = filter.since ?? 0;
+  const until = filter.until ?? Math.floor(Date.now() / 1e3);
+  if (![since, until].every((value) => Number.isSafeInteger(value) && value >= 0) || since > until) throw new ValidationError("INVALID_PRIVATE_CHANNEL_HISTORY_RANGE");
+  if (!Array.isArray(relays) || !relays.length) throw new ValidationError("NO_RELAYS");
+  const urls = [...new Set(relays.map(normalizeRelayUrl))];
+  const report = [];
+  const errors = [];
+  let oldestCreatedAt2 = null;
+  let receivedEventCount = 0;
+  let elapsedMs = 0;
+  const process = async (result) => {
+    result.sort((a, b) => a.event.created_at - b.event.created_at || String(a.event.id).localeCompare(String(b.event.id)));
+    for (const { event } of result) {
+      signal?.throwIfAborted();
+      await processEvent(event);
+      receivedEventCount++;
+      oldestCreatedAt2 = Math.min(oldestCreatedAt2 ?? event.created_at, event.created_at);
+    }
+  };
+  for (const relay of urls) {
+    const intervals = [{ since, until, limit: PAGE_SIZE }];
+    let outcome = { relay, status: "eose" };
+    while (intervals.length) {
+      signal?.throwIfAborted();
+      const interval = intervals.pop();
+      const started = performance.now();
+      let releaseRelay;
+      let releasePage;
+      let page;
+      try {
+        let bytes = 0;
+        try {
+          releaseRelay = await acquireRelay(relay, signal);
+          releasePage = await acquirePage?.(signal);
+          signal?.throwIfAborted();
+          page = await getEvents4({ ...filter, ...interval }, [relay], {
+            signal,
+            timeout: TIMEOUT_MS,
+            timeoutAfterFirstEose: null,
+            callback: (item) => {
+              if (item.type !== "event") return;
+              bytes += encoder3.encode(JSON.stringify(item.event)).byteLength;
+              if (bytes > MAX_PAGE_BYTES) throw pageLimitError();
+            }
+          });
+          let resultBytes = 0;
+          for (const { event } of page.result) {
+            resultBytes += encoder3.encode(JSON.stringify(event)).byteLength;
+            if (resultBytes > MAX_PAGE_BYTES) throw pageLimitError();
+          }
+        } catch (error) {
+          signal?.throwIfAborted();
+          errors.push({ relay, reason: error });
+          outcome = { relay, status: "error", error };
+          break;
+        } finally {
+          elapsedMs += performance.now() - started;
+        }
+        signal?.throwIfAborted();
+        const status = page.relays?.find((item) => item.relay === relay);
+        if (page.errors?.length || !status || !["eose", "satisfied"].includes(status.status)) {
+          await process(page.result);
+          errors.push(...page.errors ?? []);
+          outcome = status ?? { relay, status: "error" };
+          break;
+        }
+        if (status.status === "satisfied" || page.result.length >= interval.limit) {
+          if (interval.since < interval.until) {
+            const middle = Math.floor(interval.since + (interval.until - interval.since) / 2);
+            intervals.push({ since: middle + 1, until: interval.until, limit: PAGE_SIZE }, { since: interval.since, until: middle, limit: PAGE_SIZE });
+          } else if (interval.limit < MAX_PAGE_SIZE) {
+            intervals.push({ ...interval, limit: interval.limit * 2 });
+          } else {
+            await process(page.result);
+            const error = pageLimitError();
+            errors.push({ relay, reason: error });
+            outcome = { relay, status: "error", error };
+            break;
+          }
+        } else {
+          await process(page.result);
+        }
+        signal?.throwIfAborted();
+      } finally {
+        releasePage?.();
+        releaseRelay?.();
+      }
+    }
+    report.push(outcome);
+  }
+  signal?.throwIfAborted();
+  if (errors.length || report.some((item) => item.status !== "eose")) {
+    const error = incompleteFetchError({ errors, report, receivedEventCount, elapsedMs: Math.round(elapsedMs), request: { relays: urls, channelPubkeys: filter.authors ?? [], receiverPubkey, since, until, limit: PAGE_SIZE, timeoutMs: TIMEOUT_MS } });
+    error.operation = "private-channel.fetchHistory";
+    throw error;
+  }
+  return { oldestCreatedAt: oldestCreatedAt2, receivedEventCount, relays: report };
+}
+
 // node_modules/libp2r2p/private-channel/helpers/subscription-error.js
 function subscriptionError(reason, relay) {
   const message = reason?.message ?? String(reason);
@@ -8791,12 +8955,12 @@ var MAX_EVENT_BYTES = 65536;
 var EXPIRATION_SECONDS = 2 * 24 * 60 * 60;
 
 // node_modules/libp2r2p/private-channel/helpers/event.js
-var encoder3 = new TextEncoder();
+var encoder4 = new TextEncoder();
 function nowSeconds2() {
   return Math.floor(Date.now() / 1e3);
 }
 function eventByteLength(event) {
-  return encoder3.encode(JSON.stringify(event)).length;
+  return encoder4.encode(JSON.stringify(event)).length;
 }
 function readReceiverTag(event) {
   return event.tags?.find((t) => t[0] === "p")?.[1] || "";
@@ -8966,7 +9130,7 @@ function cleanupTemporaryStorage({ storageArea = globalThis.sessionStorage } = {
 }
 
 // node_modules/libp2r2p/private-channel/helpers/chunks.js
-var encoder4 = new TextEncoder();
+var encoder5 = new TextEncoder();
 var decoder3 = new TextDecoder();
 var STORAGE_PREFIX = "libp2r2p:private-channel:";
 function appendBytes(left, right) {
@@ -9038,7 +9202,7 @@ function appendLine(chunk, line, id, chunkIndex, temporaryStorage) {
   return { chunk, chunkIndex };
 }
 function appendRow(chunk, row, id, chunkIndex, temporaryStorage) {
-  return appendLine(chunk, encoder4.encode(`${row}
+  return appendLine(chunk, encoder5.encode(`${row}
 `), id, chunkIndex, temporaryStorage);
 }
 function storageFor(temporaryStorage) {
@@ -9093,7 +9257,7 @@ async function prepareEnvelopeRowsOnce({ id, senderSigner, receivers, receiverCo
         row.receiverPubkey,
         ROUTER_KIND,
         rowScope,
-        bytesToBase64(encoder4.encode(messageSeckey)),
+        bytesToBase64(encoder5.encode(messageSeckey)),
         row.iykcPubkey
       );
       ciphertext = encrypted[0];
@@ -9104,7 +9268,7 @@ async function prepareEnvelopeRowsOnce({ id, senderSigner, receivers, receiverCo
       foundOwnContentPubkey = true;
       if (nextContentPubkey) usedOwnContentPubkey = nextContentPubkey;
     } else {
-      ciphertext = await senderSigner.nip44v3Encrypt(row.receiverPubkey, ROUTER_KIND, rowScope, bytesToBase64(encoder4.encode(messageSeckey)));
+      ciphertext = await senderSigner.nip44v3Encrypt(row.receiverPubkey, ROUTER_KIND, rowScope, bytesToBase64(encoder5.encode(messageSeckey)));
     }
     const rowIndex = rowIndexes.length + 1;
     setPreparedRow(id, rowIndex, buildRecipientRow(row, ciphertext), temporaryStorage);
@@ -9704,7 +9868,7 @@ var DEFAULT_IGNORED_GROUP_TTL_MS = 30 * 60 * 1e3;
 var DEFAULT_IGNORED_GROUP_MAX_ENTRIES = 5e3;
 var HEX_SECKEY = /^[0-9a-f]{64}$/i;
 var HEX_PUBKEY4 = /^[0-9a-f]{64}$/i;
-var encoder5 = new TextEncoder();
+var encoder6 = new TextEncoder();
 var decoder5 = new TextDecoder();
 var NIP44_V3_SCOPE = "";
 var sendToRelays = (event, relays) => relayPool.sendEvent(event, relays);
@@ -9734,7 +9898,7 @@ function getNymCarrierChunkSize() {
   return NYM_CARRIER_CHUNK_CHARS;
 }
 function textToBase64(text) {
-  return bytesToBase64(encoder5.encode(text));
+  return bytesToBase64(encoder6.encode(text));
 }
 function base64ToText(b64) {
   return decoder5.decode(base64ToBytes(b64));
@@ -9864,7 +10028,7 @@ async function* wrapNymEvents({ nymSigner, privateChannelSigner, privateChannelR
   const channelReaderPubkey = privateChannelReaderPubkey || channelPubkey;
   const wireEvent = hasEventSignature(event) ? assertValidSignedInnerEvent(event) : wireNymRumor({ ...event, created_at: event?.created_at !== void 0 ? event.created_at : nowSeconds2() });
   const innerEvent = hasEventSignature(wireEvent) ? wireEvent : normalizeNymRumor(wireEvent, nymPubkey);
-  const encoded = bytesToBase64(encoder5.encode(JSON.stringify(wireEvent)));
+  const encoded = bytesToBase64(encoder6.encode(JSON.stringify(wireEvent)));
   const total = Math.max(1, Math.ceil(encoded.length / NYM_CARRIER_CHUNK_CHARS));
   const carrierCreatedAt = nowSeconds2();
   for (let index = 0; index < total; index++) {
@@ -10325,7 +10489,7 @@ function createProcessor({
           routerPubkey: nymCarrierGroupId(carrier),
           index: index2,
           total: total2,
-          contentBytes: encoder5.encode(JSON.stringify(carrier)),
+          contentBytes: encoder6.encode(JSON.stringify(carrier)),
           ttlMs: channelReceivedChunkTtlMs
         });
         const status2 = await receivedChunks.status(meta2);
@@ -10526,6 +10690,19 @@ async function fetch2({ signal, receiverSigner, iykcSigner, privateChannelSigner
       });
     }
     return events;
+  } finally {
+    processOuterEvent.close();
+  }
+}
+async function fetchHistory({ receiverSigner, privateChannelSigner = receiverSigner, _getEvents = getEvents3, _acquirePage, ...options }) {
+  const authors = privateChannelPubkeyList(options);
+  const filter = { kinds: [PRIVATE_BROADCAST_KIND], ...authors.length ? { authors } : {}, since: options.since, until: options.until };
+  const processOuterEvent = createProcessor({ ...options, receiverSigner, privateChannelSigner, onError: (error) => {
+    options.onError?.(error);
+    throw error;
+  } });
+  try {
+    return await readHistory({ filter, relays: options.relays, receiverPubkey: options.receiverPubkey, signal: options.signal, getEvents: _getEvents, processEvent: processOuterEvent, acquirePage: _acquirePage });
   } finally {
     processOuterEvent.close();
   }
@@ -11675,7 +11852,7 @@ function createSendRelayRouting({ peer, peers = [peer], relaysByPubkey: relaysBy
 }
 
 // node_modules/libp2r2p/idb-queue/index.js
-var encoder6 = new TextEncoder();
+var encoder7 = new TextEncoder();
 var ITEMS_STORE = "items";
 var STATE_STORE3 = "state";
 var STATE_KEY = "queue";
@@ -11698,7 +11875,7 @@ function transactionDone3(tx) {
   });
 }
 function byteLength2(value) {
-  return encoder6.encode(String(value)).length;
+  return encoder7.encode(String(value)).length;
 }
 function normalizeEvictionPolicy(policy) {
   if (policy === "opposite-end" || policy === void 0 || policy === null) return "opposite-end";
@@ -12967,7 +13144,7 @@ var MISSING_MESSAGES_REPLY_CODE = "missingMessages_reply_8mj8";
 var ROUTER_SEED_RECORD_TYPE = "routerEnvelopeRow_v1";
 var NYM_CARRIER_SEED_RECORD_TYPE = "nymCarrier_v1";
 var DEFAULT_EVENTS_PER_CHUNK = 100;
-var encoder7 = new TextEncoder();
+var encoder8 = new TextEncoder();
 var decoder6 = new TextDecoder();
 var HASH_PUBKEY = "0".repeat(64);
 function nowSeconds4() {
@@ -12990,7 +13167,7 @@ function decodeJsonl(content) {
   }
 }
 function encodeJsonlRows(...rows) {
-  return bytesToBase64(encoder7.encode(rows.map((row) => String(row).endsWith("\n") ? row : `${row}
+  return bytesToBase64(encoder8.encode(rows.map((row) => String(row).endsWith("\n") ? row : `${row}
 `).join("")));
 }
 function isEventInRange(event, since, until) {
@@ -13266,10 +13443,10 @@ var SEED_QUEUE_INDEXES = {
   byChannelTime: ["channelPubkey", SEED_TIME],
   byTime: SEED_TIME
 };
-var encoder8 = new TextEncoder();
+var encoder9 = new TextEncoder();
 var noContentKeys = async () => ({});
 function textToBase642(text) {
-  return bytesToBase64(encoder8.encode(text));
+  return bytesToBase64(encoder9.encode(text));
 }
 function defaultOnError(err) {
   console.warn("private-messenger failed", err?.message ?? err);
@@ -13422,6 +13599,7 @@ var PrivateMessenger = class _PrivateMessenger {
     this.deliveryReads = /* @__PURE__ */ new Set();
     this.deliveryWaiters = /* @__PURE__ */ new Set();
     this.recoveries = /* @__PURE__ */ new Map();
+    this.recoveryAdmission = createAbortableSemaphore(2);
     this.recoveryControllers = /* @__PURE__ */ new Set();
     this.resumeWork = null;
     this.capacityTimer = null;
@@ -15011,11 +15189,10 @@ var PrivateMessenger = class _PrivateMessenger {
     return { asks, failures };
   }
   async askSeedersForRelayLeftEdge(channelPubkey, range, fetchedEvents) {
-    const { asks } = await this.#askSeedersForRelayLeftEdgeAttempt(channelPubkey, range, fetchedEvents);
+    const { asks } = await this.#askSeedersForRelayLeftEdgeAttempt(channelPubkey, range, oldestCreatedAt(fetchedEvents));
     return asks;
   }
-  async #askSeedersForRelayLeftEdgeAttempt(channelPubkey, range, fetchedEvents) {
-    const oldest = oldestCreatedAt(fetchedEvents);
+  async #askSeedersForRelayLeftEdgeAttempt(channelPubkey, range, oldest) {
     const until = oldest == null ? range.end : Math.min(range.end, oldest);
     if (until < range.start) return { asks: [], failures: [] };
     return this.#askSeedersForMissingRangeAttempt(channelPubkey, range.start, until);
@@ -15151,7 +15328,8 @@ var PrivateMessenger = class _PrivateMessenger {
           if (this.pauseReasons.size || this.closePromise || !this.desiredChannels.has(pubkey)) throw new Error("PRIVATE_MESSENGER_PAUSED");
           const fetchRelays = await this.resolveWatchRelays(channel);
           controller.signal.throwIfAborted();
-          const fetchedEvents = await this._privateChannel.fetch({
+          const history = await this._privateChannel.fetchHistory({
+            _acquirePage: (signal) => this.recoveryAdmission.acquire(signal),
             signal: controller.signal,
             receivedChunkScope: this.storageLeaseId,
             receiverSigner: this.userSigner,
@@ -15175,9 +15353,9 @@ var PrivateMessenger = class _PrivateMessenger {
             onError: (err) => {
               throw err;
             }
-          }) || [];
+          });
           controller.signal.throwIfAborted();
-          const attempt = await this.#askSeedersForRelayLeftEdgeAttempt(pubkey, range, fetchedEvents);
+          const attempt = await this.#askSeedersForRelayLeftEdgeAttempt(pubkey, range, history.oldestCreatedAt);
           const lifecycleChanged = this.closePromise || !this.channels.has(pubkey) || !this.stopByChannel.has(pubkey) || (this.watchRevisionByChannel.get(pubkey) || 0) !== watchRevision;
           if (lifecycleChanged || attempt.failures.length) remaining.push(range);
           else recoveredThrough = Math.max(recoveredThrough, range.end);

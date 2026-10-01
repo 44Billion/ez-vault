@@ -6,18 +6,18 @@ import {
   requestNostrDbAppBackfill,
   serializeError,
   tell
-} from "./chunk-GLGINYRI.js";
+} from "./chunk-4X2LBMVD.js";
 import {
   append
-} from "./chunk-XBGDG3XA.js";
+} from "./chunk-XGHTKMKI.js";
 import {
   run
-} from "./chunk-PYXURPMV.js";
+} from "./chunk-FMECAVBZ.js";
 import {
   filterVisibleAccounts,
   read,
   subscribe as subscribe3
-} from "./chunk-BBZRPYBI.js";
+} from "./chunk-QI4LJOOW.js";
 import {
   closeStorage,
   get,
@@ -31,7 +31,7 @@ import {
   subscribe,
   subscribe2,
   update
-} from "./chunk-FQO6K2OL.js";
+} from "./chunk-DF26KJGH.js";
 import {
   launcherLocale,
   setLocale
@@ -262,6 +262,8 @@ function installLauncherRelayPoolShim({
     #grantedFrames = 0;
     #grantedBytes = 0;
     #creditScheduled = false;
+    #receivedAt = null;
+    #through;
     #binaryType = "blob";
     constructor(url, protocols) {
       super();
@@ -341,7 +343,7 @@ function installLauncherRelayPoolShim({
           break;
         case RELAY_BRIDGE.FRAME: {
           const data = payload.data;
-          this.#grantCredit(dataByteLength(data));
+          this.#grantCredit(dataByteLength(data), payload.sequence);
           this.#fire("message", messageEvent(data));
           break;
         }
@@ -362,7 +364,9 @@ function installLauncherRelayPoolShim({
       this.#creditFrames--;
       this.#creditBytes -= size;
     }
-    #grantCredit(size) {
+    #grantCredit(size, through) {
+      this.#receivedAt ??= performance.timeOrigin + performance.now();
+      this.#through = through;
       this.#grantedFrames++;
       this.#grantedBytes += size;
       if (this.#creditScheduled) return;
@@ -373,10 +377,12 @@ function installLauncherRelayPoolShim({
         if (this.#grantedFrames === 0 && this.#grantedBytes === 0) return;
         port.postMessage({
           code: RELAY_BRIDGE.CREDIT,
-          payload: { virtualId: this.#virtualId, frames: this.#grantedFrames, bytes: this.#grantedBytes }
+          payload: { virtualId: this.#virtualId, frames: this.#grantedFrames, bytes: this.#grantedBytes, through: this.#through, receivedAt: this.#receivedAt, returnedAt: performance.timeOrigin + performance.now() }
         });
         this.#grantedFrames = 0;
         this.#grantedBytes = 0;
+        this.#receivedAt = null;
+        this.#through = void 0;
       });
     }
     #flushQueue() {
@@ -395,6 +401,8 @@ function installLauncherRelayPoolShim({
       this.#queuedBytes = 0;
       this.#grantedFrames = 0;
       this.#grantedBytes = 0;
+      this.#receivedAt = null;
+      this.#through = void 0;
     }
     #finalizeClose(code, reason, wasClean) {
       if (this.readyState === LauncherRelayPoolWebSocket.CLOSED) return;

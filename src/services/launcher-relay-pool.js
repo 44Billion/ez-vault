@@ -137,6 +137,8 @@ export function installLauncherRelayPoolShim ({
     #grantedFrames = 0
     #grantedBytes = 0
     #creditScheduled = false
+    #receivedAt = null
+    #through
     #binaryType = 'blob'
 
     constructor (url, protocols) {
@@ -225,7 +227,7 @@ export function installLauncherRelayPoolShim ({
           break
         case RELAY_BRIDGE.FRAME: {
           const data = payload.data
-          this.#grantCredit(dataByteLength(data))
+          this.#grantCredit(dataByteLength(data), payload.sequence)
           this.#fire('message', messageEvent(data))
           break
         }
@@ -248,7 +250,9 @@ export function installLauncherRelayPoolShim ({
       this.#creditBytes -= size
     }
 
-    #grantCredit (size) {
+    #grantCredit (size, through) {
+      this.#receivedAt ??= performance.timeOrigin + performance.now()
+      this.#through = through
       this.#grantedFrames++
       this.#grantedBytes += size
       if (this.#creditScheduled) return
@@ -259,10 +263,12 @@ export function installLauncherRelayPoolShim ({
         if (this.#grantedFrames === 0 && this.#grantedBytes === 0) return
         port.postMessage({
           code: RELAY_BRIDGE.CREDIT,
-          payload: { virtualId: this.#virtualId, frames: this.#grantedFrames, bytes: this.#grantedBytes }
+          payload: { virtualId: this.#virtualId, frames: this.#grantedFrames, bytes: this.#grantedBytes, through: this.#through, receivedAt: this.#receivedAt, returnedAt: performance.timeOrigin + performance.now() }
         })
         this.#grantedFrames = 0
         this.#grantedBytes = 0
+        this.#receivedAt = null
+        this.#through = undefined
       })
     }
 
@@ -283,6 +289,8 @@ export function installLauncherRelayPoolShim ({
       this.#queuedBytes = 0
       this.#grantedFrames = 0
       this.#grantedBytes = 0
+      this.#receivedAt = null
+      this.#through = undefined
     }
 
     #finalizeClose (code, reason, wasClean) {
