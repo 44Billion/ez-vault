@@ -2,15 +2,15 @@ import {
   claimSigner,
   rotateContentKeyIfStillCanonical,
   upsertContentKeyEvent
-} from "./chunk-FMECAVBZ.js";
+} from "./chunk-FPLPUQXJ.js";
 import {
   filterVisibleAccounts,
   hasPendingMutation,
   subscribePendingMutations
-} from "./chunk-QI4LJOOW.js";
+} from "./chunk-FNWJZJ6N.js";
 import {
   trusted_signers_exports
-} from "./chunk-WV5G2F7V.js";
+} from "./chunk-J3J2POM2.js";
 import {
   NOSTRDB_SYNC,
   PrivateMessenger,
@@ -44,7 +44,7 @@ import {
   setState,
   subscribe2 as subscribe,
   subscribeRelayListUpdates
-} from "./chunk-DF26KJGH.js";
+} from "./chunk-KNFWBG3L.js";
 import {
   __export
 } from "./chunk-NZLE2WMY.js";
@@ -1193,6 +1193,8 @@ var ONLINE_RETRY_MAX_MS = 6 * 60 * 60 * 1e3;
 var STATE_PRUNE_MS = 30 * 24 * 60 * 60 * 1e3;
 var PUSH_THROTTLE_MS = 1500;
 var PUSH_EVENTS_PER_CHUNK = 100;
+var SYNC_BYTES_PER_CHUNK = 128 * 1024;
+var encoder = new TextEncoder();
 var RECENT_SYNC_EVENT_TTL_MS = 2 * 60 * 1e3;
 var SYNC_CODES = /* @__PURE__ */ new Set([
   NOSTRDB_SYNC_ADVERTISE_CODE,
@@ -1850,22 +1852,15 @@ function createNostrDbSyncController({
   async function handleAsk(ownerPubkey, message, context) {
     const ask2 = normalizeAsk(messageBody3(message));
     if (!ask2) return true;
-    let results = [];
-    let hasMore = false;
-    try {
-      const db = getDb(ownerPubkey);
-      const effectiveLimit = Math.min(ask2.limit, REQUEST_LIMIT);
-      const response = await db.query(syncQuery(ask2.sinceScore, ask2.untilScore, {
-        "!ids": ask2.excludeIds,
-        limit: effectiveLimit + 1
-      }));
-      const queried = Array.isArray(response?.results) ? response.results : [];
-      hasMore = queried.length > effectiveLimit;
-      results = queried.slice(0, effectiveLimit);
-    } catch (err) {
-      report(err);
-      return true;
-    }
+    const db = getDb(ownerPubkey);
+    const effectiveLimit = Math.min(ask2.limit, REQUEST_LIMIT);
+    const response = await db.query(syncQuery(ask2.sinceScore, ask2.untilScore, {
+      "!ids": ask2.excludeIds,
+      limit: effectiveLimit + 1
+    }));
+    const queried = Array.isArray(response?.results) ? response.results : [];
+    const hasMore = queried.length > effectiveLimit;
+    const results = queried.slice(0, effectiveLimit);
     const options = {
       channelPubkey: message.channelPubkey,
       question: message.event,
@@ -1877,15 +1872,12 @@ function createNostrDbSyncController({
         untilScore: ask2.untilScore,
         hasMore
       },
+      bytesPerChunk: SYNC_BYTES_PER_CHUNK,
       sendEmptyReply: true
     };
     const packer = typeof context.messenger?.createEventReplyPacker === "function" ? context.messenger.createEventReplyPacker(options) : createEventReplyPacker({ messenger: context.messenger, ...options });
-    try {
-      for (const event of results) await packer.update(event);
-      await packer.finalize();
-    } catch (err) {
-      report(err);
-    }
+    for (const event of results) await packer.update(event);
+    await packer.finalize();
     emitDebug2(context.debug, "reply", {
       ownerPubkey,
       receiverPubkey: message.event?.pubkey || "",
@@ -1901,20 +1893,15 @@ function createNostrDbSyncController({
     let results = [];
     let hasMore = false;
     let nextAfter = ask2.after;
-    try {
-      const db = getDb(ownerPubkey);
-      if (typeof db.exportEventsByAppPage === "function") {
-        const page = await db.exportEventsByAppPage(ask2.appId, {
-          after: ask2.after,
-          batchSize: ask2.batchSize
-        });
-        results = Array.isArray(page?.events) ? page.events.slice(0, ask2.batchSize) : [];
-        hasMore = page?.hasMore === true;
-        nextAfter = normalizeOptionalEventId(page?.nextAfter) || results.at(-1)?.id || ask2.after;
-      }
-    } catch (err) {
-      report(err);
-      return true;
+    const db = getDb(ownerPubkey);
+    if (typeof db.exportEventsByAppPage === "function") {
+      const page = await db.exportEventsByAppPage(ask2.appId, {
+        after: ask2.after,
+        batchSize: ask2.batchSize
+      });
+      results = Array.isArray(page?.events) ? page.events.slice(0, ask2.batchSize) : [];
+      hasMore = page?.hasMore === true;
+      nextAfter = normalizeOptionalEventId(page?.nextAfter) || results.at(-1)?.id || ask2.after;
     }
     const options = {
       channelPubkey: message.channelPubkey,
@@ -1928,15 +1915,12 @@ function createNostrDbSyncController({
         nextAfter,
         hasMore
       },
+      bytesPerChunk: SYNC_BYTES_PER_CHUNK,
       sendEmptyReply: true
     };
     const packer = typeof context.messenger?.createEventReplyPacker === "function" ? context.messenger.createEventReplyPacker(options) : createEventReplyPacker({ messenger: context.messenger, ...options });
-    try {
-      for (const event of results) await packer.update(event);
-      await packer.finalize();
-    } catch (err) {
-      report(err);
-    }
+    for (const event of results) await packer.update(event);
+    await packer.finalize();
     emitDebug2(context.debug, "app-reply", {
       ownerPubkey,
       appId: ask2.appId,
@@ -2109,39 +2093,55 @@ function createNostrDbSyncController({
   }
   async function flushPushQueue(ownerPubkey) {
     const queue = pushQueues.get(ownerPubkey);
-    if (!queue || queue.events.size === 0) return;
+    if (!queue || queue.flushing || queue.events.size === 0) return;
     const target = pushRuntime(ownerPubkey);
     if (!target) return;
     const current = () => pushQueues.get(ownerPubkey) === queue && runtime.messenger === target.messenger;
     const events = [...queue.events.values()];
     queue.events.clear();
+    queue.flushing = true;
+    let cursor = 0;
     let index = 0;
-    for (let i = 0; i < events.length; i += PUSH_EVENTS_PER_CHUNK) {
-      if (!current()) return;
-      const chunk = events.slice(i, i + PUSH_EVENTS_PER_CHUNK);
-      try {
-        await target.messenger.yell({
-          channelPubkey: target.channelPubkey,
-          receiverPubkeys: target.receiverPubkeys,
-          code: NOSTRDB_SYNC_PUSH_CODE,
-          payload: {
-            index: index++,
-            isLast: i + PUSH_EVENTS_PER_CHUNK >= events.length,
-            jsonl: eventsToJsonl(chunk)
-          }
-        });
-      } catch (err) {
+    try {
+      while (cursor < events.length) {
         if (!current()) return;
-        report(err);
+        const start = cursor;
+        let jsonl = "";
+        let bytes = 0;
+        while (cursor < events.length && cursor - start < PUSH_EVENTS_PER_CHUNK) {
+          const line = eventsToJsonl([events[cursor]]);
+          const length = encoder.encode(line).length;
+          if (cursor > start && bytes + length > SYNC_BYTES_PER_CHUNK) break;
+          jsonl += line;
+          bytes += length;
+          cursor++;
+        }
+        try {
+          await target.messenger.yell({
+            channelPubkey: target.channelPubkey,
+            receiverPubkeys: target.receiverPubkeys,
+            code: NOSTRDB_SYNC_PUSH_CODE,
+            payload: { index: index++, isLast: cursor === events.length, jsonl }
+          });
+        } catch (err) {
+          if (!current()) return;
+          for (const event of events.slice(start)) {
+            if (!queue.events.has(event.id)) queue.events.set(event.id, event);
+          }
+          report(err);
+          return;
+        }
       }
+      if (!current()) return;
+      emitDebug2(runtime.debug, "push", {
+        ownerPubkey,
+        channelPubkey: target.channelPubkey,
+        receiverCount: target.receiverPubkeys.length,
+        count: events.length
+      });
+    } finally {
+      queue.flushing = false;
     }
-    if (!current()) return;
-    emitDebug2(runtime.debug, "push", {
-      ownerPubkey,
-      channelPubkey: target.channelPubkey,
-      receiverCount: target.receiverPubkeys.length,
-      count: events.length
-    });
   }
   function startPushCooldown(ownerPubkey, queue) {
     if (pushQueues.get(ownerPubkey) !== queue) return;

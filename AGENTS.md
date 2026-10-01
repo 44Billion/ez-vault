@@ -403,3 +403,10 @@ reach onError; lifecycle suppression must not become a blanket error filter.
   owns incoming budgets, credit validation and bounded latency diagnostics;
   these timestamps acknowledge port handling, not downstream async persistence.
   Remain compatible with frames that carry no sequence or timing metadata.
+
+- NostrDB reply handlers must propagate database/publication failures so the
+  parent delivery drain nacks them. Pushes are serialized per owner and retain
+  failed/unsent batches for the next cooldown while their runtime stays active.
+  Sync JSONL batches target 128 KiB UTF-8 plus the 100-record cap; an indivisible
+  oversized event travels alone. Keep native errors visible and never raise
+  browser storage quotas or acknowledge an unsent final response.

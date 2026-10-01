@@ -4855,6 +4855,15 @@ function relayCloseError(event, category, cause) {
   if (event?.wasClean !== void 0) error.wasClean = event.wasClean;
   return categorizeRelayError(error, category);
 }
+function relayRejectionError(reason, extra, fallback) {
+  const error = categorizeRelayError(reason, "relay", fallback);
+  const seconds = extra?.retry_after;
+  if (error.message.startsWith("rate-limited:") && typeof seconds === "number" && Number.isFinite(seconds) && seconds > 0) {
+    error.retryAfterMs = Math.min(seconds, 300) * 1e3;
+    error.retryAt = Date.now() + error.retryAfterMs;
+  }
+  return error;
+}
 
 // node_modules/libp2r2p/relay/helpers/publish.js
 function publishTimeoutError() {
@@ -5224,6 +5233,7 @@ var RelayConnection = class {
   #publishes = /* @__PURE__ */ new Map();
   #authentications = /* @__PURE__ */ new Map();
   #counts = /* @__PURE__ */ new Map();
+  #retryAt = 0;
   constructor(url, { WebSocket: WebSocketImpl = globalThis.WebSocket } = {}) {
     this.url = url;
     this.#WebSocket = WebSocketImpl;
@@ -5301,51 +5311,92 @@ var RelayConnection = class {
       throw this.#lastTransportError;
     }
   }
+  // New work respects relay cooldowns; cleanup uses send() directly. These
+  // waits stay within the caller's existing deadline and are cancellable.
+  #dispatchWork(send, fail) {
+    let timer = null;
+    let cancelled = false;
+    const dispatch = () => {
+      if (cancelled) return;
+      const remaining = this.#retryAt - Date.now();
+      if (remaining > 0) {
+        timer = maybeUnref(setTimeout(dispatch, remaining));
+        return;
+      }
+      try {
+        send();
+      } catch (error) {
+        fail(error);
+      }
+    };
+    dispatch();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }
+  #rejection(reason, extra, fallback) {
+    const error = relayRejectionError(reason, extra, fallback);
+    this.#retryAt = Math.max(this.#retryAt, error.retryAt || 0);
+    return error;
+  }
   subscribe(filters, handlers = {}) {
     if (!Array.isArray(filters) || !filters.length) throw new ValidationError("SUBSCRIPTION_FILTERS_REQUIRED");
     const id = `p2r2p-sub:${++this.#serial}`;
     let closed = false;
+    let sent = false;
     const close = () => {
       if (closed) return;
       closed = true;
-      const subscription = this.#subscriptions.get(id);
-      if (!subscription) return;
+      const subscription2 = this.#subscriptions.get(id);
+      if (!subscription2) return;
       this.#subscriptions.delete(id);
-      try {
-        this.send(JSON.stringify(["CLOSE", id]));
-      } catch {
+      subscription2.cancelSend?.();
+      if (sent) {
+        try {
+          this.send(JSON.stringify(["CLOSE", id]));
+        } catch {
+        }
       }
       handlers.onclose?.();
     };
-    this.#subscriptions.set(id, { filters, handlers, close });
-    try {
+    const subscription = { filters, handlers, close, cancelSend: null };
+    this.#subscriptions.set(id, subscription);
+    subscription.cancelSend = this.#dispatchWork(() => {
       this.send(JSON.stringify(["REQ", id, ...filters]));
-    } catch (error) {
+      sent = true;
+    }, (error) => {
       this.#subscriptions.delete(id);
-      throw error;
-    }
+      handlers.onclose?.(error);
+    });
     return { id, close };
   }
-  publish(event) {
+  publish(event, { signal } = {}) {
     if (!isValidEvent(event)) return Promise.reject(new Error("INVALID_EVENT"));
-    return this.#sendEventOperation("EVENT", event, this.#publishes, "PUBLISH_TIMEOUT");
+    return this.#sendEventOperation("EVENT", event, this.#publishes, "PUBLISH_TIMEOUT", signal);
   }
-  async authenticate(getAuthEvent) {
+  async authenticate(getAuthEvent, { signal } = {}) {
     if (!this.#challenge) throw new Error("AUTH_CHALLENGE_MISSING");
     const event = await getAuthEvent({ relay: this.url, challenge: this.#challenge });
     if (!isValidEvent(event)) throw new ValidationError("INVALID_AUTH_EVENT");
-    return await this.#sendEventOperation("AUTH", event, this.#authentications, "AUTH_TIMEOUT");
+    return await this.#sendEventOperation("AUTH", event, this.#authentications, "AUTH_TIMEOUT", signal);
   }
-  #sendEventOperation(type, event, map, timeoutCode) {
+  #sendEventOperation(type, event, map, timeoutCode, signal) {
+    if (signal?.aborted) return Promise.reject(signal.reason || relayTimeoutError(timeoutCode));
     if (map.has(event.id)) return map.get(event.id).promise;
     const deferred6 = Promise.withResolvers();
     const timer = maybeUnref(setTimeout(() => this.#settleEvent(map, event.id, relayTimeoutError(timeoutCode, this.#lastTransportError)), this.publishTimeout));
-    map.set(event.id, { ...deferred6, timer, promise: deferred6.promise });
-    try {
+    const onAbort = () => this.#settleEvent(map, event.id, signal.reason || relayTimeoutError(timeoutCode));
+    const stopAbort = () => signal?.removeEventListener("abort", onAbort);
+    const pending = { ...deferred6, timer, promise: deferred6.promise, cancelSend: null, stopAbort };
+    map.set(event.id, pending);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    pending.cancelSend = this.#dispatchWork(() => {
+      stopAbort();
       this.send(JSON.stringify([type, event]));
-    } catch (error) {
+    }, (error) => {
       this.#settleEvent(map, event.id, error);
-    }
+    });
     return deferred6.promise;
   }
   countWithHll(filters, { signal } = {}) {
@@ -5353,19 +5404,20 @@ var RelayConnection = class {
     const id = `p2r2p-count:${++this.#serial}`;
     const deferred6 = Promise.withResolvers();
     const onAbort = () => this.#settleCount(id, null, new Error("COUNT_ABORTED"));
-    this.#counts.set(id, { ...deferred6, signal, onAbort });
+    const pending = { ...deferred6, signal, onAbort, cancelSend: null };
+    this.#counts.set(id, pending);
     signal?.addEventListener("abort", onAbort, { once: true });
-    try {
-      this.send(JSON.stringify(["COUNT", id, ...filters]));
-    } catch (error) {
+    pending.cancelSend = this.#dispatchWork(() => this.send(JSON.stringify(["COUNT", id, ...filters])), (error) => {
       this.#settleCount(id, null, error);
-    }
+    });
     return deferred6.promise;
   }
   #settleEvent(map, id, reason, value) {
     const pending = map.get(id);
     if (!pending) return;
     map.delete(id);
+    pending.cancelSend?.();
+    pending.stopAbort?.();
     clearTimeout(pending.timer);
     if (reason) pending.reject(errorFrom(reason, "OPERATION_REJECTED"));
     else pending.resolve(value);
@@ -5374,6 +5426,7 @@ var RelayConnection = class {
     const pending = this.#counts.get(id);
     if (!pending) return;
     this.#counts.delete(id);
+    pending.cancelSend?.();
     pending.signal?.removeEventListener("abort", pending.onAbort);
     if (reason) pending.reject(errorFrom(reason, "COUNT_REJECTED"));
     else pending.resolve(payload);
@@ -5402,14 +5455,16 @@ var RelayConnection = class {
     if (data[0] === "CLOSED") {
       const id = data[1];
       const subscription = this.#subscriptions.get(id);
+      const reason = this.#rejection(data[2], data[3], subscription ? "SUBSCRIPTION_CLOSED" : "COUNT_CLOSED");
       if (subscription) {
         this.#subscriptions.delete(id);
-        subscription.handlers.onclose?.(errorFrom(data[2], "SUBSCRIPTION_CLOSED"));
-      } else this.#settleCount(id, null, errorFrom(data[2], "COUNT_CLOSED"));
+        subscription.cancelSend?.();
+        subscription.handlers.onclose?.(reason);
+      } else this.#settleCount(id, null, reason);
       return;
     }
     if (data[0] === "OK") {
-      const reason = data[2] === true ? null : categorizeRelayError(data[3], "relay", "EVENT_REJECTED");
+      const reason = data[2] === true ? null : this.#rejection(data[3], data[4], "EVENT_REJECTED");
       this.#settleEvent(this.#publishes, data[1], reason, data[3]);
       this.#settleEvent(this.#authentications, data[1], reason, data[3]);
       return;
@@ -5430,6 +5485,7 @@ var RelayConnection = class {
     const reason = relayCloseError(event, "transport", this.#lastTransportError);
     for (const [id, subscription] of this.#subscriptions) {
       this.#subscriptions.delete(id);
+      subscription.cancelSend?.();
       subscription.handlers.onclose?.(reason);
     }
     for (const id of [...this.#publishes.keys()]) this.#settleEvent(this.#publishes, id, reason);
@@ -5444,6 +5500,7 @@ var RelayConnection = class {
     const reason = relayCloseError(null, "transport", this.#lastTransportError);
     for (const [id, subscription] of this.#subscriptions) {
       this.#subscriptions.delete(id);
+      subscription.cancelSend?.();
       subscription.handlers.onclose?.();
     }
     for (const id of [...this.#publishes.keys()]) this.#settleEvent(this.#publishes, id, reason);
@@ -5641,20 +5698,20 @@ var RelayPool = class {
   }
   // NIP-42 retries happen inside one relay attempt, so sendEvent still reports
   // exactly one terminal outcome for each relay URL.
-  async #publishEvent(relay, event, getAuthEvent) {
+  async #publishEvent(relay, event, getAuthEvent, signal) {
     try {
-      await relay.publish(event);
+      await relay.publish(event, { signal });
       return "published";
     } catch (error) {
       const reason = error instanceof Error ? error : new Error(String(error));
       if (!getAuthEvent || !requiresNip42Auth(reason)) throw reason;
       try {
-        await relay.authenticate(getAuthEvent);
+        await relay.authenticate(getAuthEvent, { signal });
       } catch (error2) {
         const authReason = error2 instanceof Error ? error2 : new Error(String(error2));
         throw new Nip42AuthenticationError(authReason);
       }
-      await relay.publish(event);
+      await relay.publish(event, { signal });
       return "published";
     }
   }
@@ -6505,10 +6562,12 @@ var RelayPool = class {
     }
     const eventToSend = event.meta ? { ...event } : event;
     if (eventToSend.meta) delete eventToSend.meta;
+    const sendControllers = urls.map(() => new AbortController());
     const sendDeferreds = urls.map(() => Promise.withResolvers());
     const sendPromises = sendDeferreds.map(({ promise: promise2 }) => promise2);
     const settlement = createPublishSettlements(sendPromises, timeout, {
       onSettled: (settlement2, index) => {
+        sendControllers[index].abort(settlement2.reason);
         if (settlement2.reason?.category === "timeout" && !settlement2.reason.cause) {
           const relay = this.#relays.get(normalizeRelayUrl(urls[index]));
           if (relay?.lastTransportError) settlement2.reason.cause = relay.lastTransportError;
@@ -6524,7 +6583,9 @@ var RelayPool = class {
       (async () => {
         try {
           const relay = await this.#getRelay(url);
-          return await this.#publishEvent(relay, eventToSend, getAuthEvent);
+          const signal = sendControllers[index].signal;
+          if (signal.aborted) throw signal.reason;
+          return await this.#publishEvent(relay, eventToSend, getAuthEvent, signal);
         } catch (err) {
           const reason = err instanceof Error ? err : new Error(String(err));
           if (reason instanceof Nip42AuthenticationError) throw reason;
@@ -8939,7 +9000,7 @@ async function readHistory({ filter, relays, receiverPubkey, signal, getEvents: 
 function subscriptionError(reason, relay) {
   const message = reason?.message ?? String(reason);
   const error = reason instanceof AggregateError ? new AggregateError(reason.errors, message, { cause: reason }) : new Error(message, { cause: reason });
-  for (const key of ["name", "code", "category", "closeCode", "closeReason", "wasClean"]) {
+  for (const key of ["name", "code", "category", "retryAfterMs", "retryAt", "closeCode", "closeReason", "wasClean"]) {
     if (reason?.[key] !== void 0) error[key] = reason[key];
   }
   error.operation = "private-channel.subscribe";
@@ -9098,8 +9159,9 @@ function createTemporaryStorage({ storageArea = globalThis.sessionStorage } = {}
   }
   function trackTemporaryKey(key) {
     const tracked = readTrackedKeys();
-    if (tracked.includes(key)) return;
+    if (tracked.includes(key)) return false;
     writeTrackedKeys(tracked.concat(key));
+    return true;
   }
   function untrackTemporaryKeys(keys) {
     const remove2 = new Set(normalizeKeys(keys));
@@ -9115,8 +9177,13 @@ function createTemporaryStorage({ storageArea = globalThis.sessionStorage } = {}
   }
   function setItem(key, value) {
     if (typeof key !== "string" || !key || key === TEMPORARY_STORAGE_KEYS_KEY) throw new ValidationError("INVALID_TEMPORARY_STORAGE_KEY");
-    trackTemporaryKey(key);
-    storage().setItem(key, value);
+    const newlyTracked = trackTemporaryKey(key);
+    try {
+      storage().setItem(key, value);
+    } catch (error) {
+      if (newlyTracked && storage().getItem(key) === null) untrackTemporaryKeys([key]);
+      throw error;
+    }
   }
   function removeItems(keys) {
     const normalized2 = normalizeKeys(keys);
@@ -9138,9 +9205,6 @@ function appendBytes(left, right) {
   out.set(left);
   out.set(right, left.length);
   return out;
-}
-function tempKey(id, index) {
-  return `${STORAGE_PREFIX}${id}:${index}`;
 }
 function rowTempKey(id, index) {
   return `${STORAGE_PREFIX}${id}:row:${index}`;
@@ -9189,27 +9253,8 @@ function encryptedPayload({ messageSecretKey, event }) {
   const messagePubkey = getPublicKey(messageSecretKey);
   return encrypt4(messageSecretKey, messagePubkey, ROUTER_KIND, "", JSON.stringify(event));
 }
-function appendLine(chunk, line, id, chunkIndex, temporaryStorage) {
-  while (line.length) {
-    const available = JSONL_CHUNK_BYTES - chunk.length;
-    chunk = appendBytes(chunk, line.slice(0, available));
-    line = line.slice(available);
-    if (chunk.length === JSONL_CHUNK_BYTES) {
-      temporaryStorage.setItem(tempKey(id, chunkIndex++), bytesToBase64(chunk));
-      chunk = new Uint8Array();
-    }
-  }
-  return { chunk, chunkIndex };
-}
-function appendRow(chunk, row, id, chunkIndex, temporaryStorage) {
-  return appendLine(chunk, encoder5.encode(`${row}
-`), id, chunkIndex, temporaryStorage);
-}
 function storageFor(temporaryStorage) {
   return temporaryStorage || createTemporaryStorage();
-}
-function readChunkContent(id, index, temporaryStorage) {
-  return storageFor(temporaryStorage).getItem(tempKey(id, index));
 }
 function decodeChunkLines(content) {
   return decodeChunkText(content).split("\n").filter(Boolean);
@@ -9319,29 +9364,27 @@ function preparedRowIndexesForReceivers(preparedRows, receivers) {
   }
   return indexes;
 }
-function writeChunksFromPreparedRows(preparedRows, rowIndexes = preparedRows?.rowIndexes || []) {
-  const temporaryStorage = storageFor(preparedRows?.temporaryStorage);
-  const id = temporaryId();
-  let chunk = new Uint8Array();
-  let chunkIndex = 0;
-  try {
-    ;
-    ({ chunk, chunkIndex } = appendRow(chunk, readPreparedRow(preparedRows, 0), id, chunkIndex, temporaryStorage));
-    for (const rowIndex of rowIndexes) {
-      ;
-      ({ chunk, chunkIndex } = appendRow(chunk, readPreparedRow(preparedRows, rowIndex), id, chunkIndex, temporaryStorage));
-    }
-    if (chunk.length || chunkIndex === 0) temporaryStorage.setItem(tempKey(id, chunkIndex++), bytesToBase64(chunk));
-    return { id, total: chunkIndex, ownContentPubkey: preparedRows.ownContentPubkey || "" };
-  } catch (err) {
-    cleanupChunks(id, chunkIndex + 1, temporaryStorage);
-    throw err;
-  }
+function preparedChunkCount(preparedRows, rowIndexes = preparedRows.rowIndexes) {
+  let bytes = 0;
+  for (const index of [0, ...rowIndexes]) bytes += encoder5.encode(readPreparedRow(preparedRows, index)).length + 1;
+  return Math.max(1, Math.ceil(bytes / JSONL_CHUNK_BYTES));
 }
-function cleanupChunks(id, total, temporaryStorage) {
-  const keys = [];
-  for (let i = 0; i < total; i++) keys.push(tempKey(id, i));
-  storageFor(temporaryStorage).removeItems(keys);
+function* preparedChunks(preparedRows, rowIndexes = preparedRows.rowIndexes) {
+  let chunk = new Uint8Array();
+  for (const index of [0, ...rowIndexes]) {
+    const row = encoder5.encode(`${readPreparedRow(preparedRows, index)}
+`);
+    for (let offset = 0; offset < row.length; ) {
+      const size = Math.min(JSONL_CHUNK_BYTES - chunk.length, row.length - offset);
+      chunk = appendBytes(chunk, row.subarray(offset, offset + size));
+      offset += size;
+      if (chunk.length === JSONL_CHUNK_BYTES) {
+        yield bytesToBase64(chunk);
+        chunk = new Uint8Array();
+      }
+    }
+  }
+  if (chunk.length) yield bytesToBase64(chunk);
 }
 
 // node_modules/libp2r2p/private-channel/services/received-chunks.js
@@ -9937,16 +9980,21 @@ async function prepareRoutedMessage({ senderSigner, imkcSigner, privateChannelSi
     rowScope: channelPubkey,
     temporaryStorageArea
   });
-  const imkcPubkey = preparedRows.ownContentPubkey || "";
-  const imkcProof = imkcPubkey ? await makeImkcProof({ senderSigner, senderPubkey, imkcPubkey }) : "";
-  return {
-    senderPubkey,
-    channelPubkey,
-    channelReaderPubkey,
-    preparedRows,
-    imkcPubkey,
-    imkcProof
-  };
+  try {
+    const imkcPubkey = preparedRows.ownContentPubkey || "";
+    const imkcProof = imkcPubkey ? await makeImkcProof({ senderSigner, senderPubkey, imkcPubkey }) : "";
+    return {
+      senderPubkey,
+      channelPubkey,
+      channelReaderPubkey,
+      preparedRows,
+      imkcPubkey,
+      imkcProof
+    };
+  } catch (error) {
+    cleanupEnvelopeRows(preparedRows);
+    throw error;
+  }
 }
 async function* wrapPreparedEvents({ privateChannelSigner, receivers, receiverTag, fileChunkIndex, onPreparedSeed, deletionPubkey, expirationSeconds = EXPIRATION_SECONDS, context }) {
   const routerSeckey = generateSecretKey();
@@ -9954,46 +10002,38 @@ async function* wrapPreparedEvents({ privateChannelSigner, receivers, receiverTa
   const receiverPubkeyList = receiverPubkeys(receivers);
   const routerReceiverTag = receiverTag ?? (receiverPubkeyList.length === 1 ? receiverPubkeyList[0] : "");
   const rowIndexes = preparedRowIndexesForReceivers(context.preparedRows, receivers);
-  const {
-    id,
-    total
-  } = writeChunksFromPreparedRows(context.preparedRows, rowIndexes);
-  const temporaryStorage = context.preparedRows.temporaryStorage;
-  try {
-    if (onPreparedSeed) {
-      const router = makeRouterEvent({ pubkey: routerPubkey, senderPubkey: context.senderPubkey, imkcPubkey: context.imkcPubkey, imkcProof: context.imkcProof, receiverPubkey: routerReceiverTag, chunkIndex: 0, chunkTotal: 1, fileChunkIndex, content: "" });
-      const payloadRow = readPreparedRow(context.preparedRows, 0);
-      for (const rowIndex of rowIndexes) {
-        await onPreparedSeed({ channelPubkey: context.channelPubkey, router, jsonl: `${payloadRow}
+  const total = preparedChunkCount(context.preparedRows, rowIndexes);
+  if (onPreparedSeed) {
+    const router = makeRouterEvent({ pubkey: routerPubkey, senderPubkey: context.senderPubkey, imkcPubkey: context.imkcPubkey, imkcProof: context.imkcProof, receiverPubkey: routerReceiverTag, chunkIndex: 0, chunkTotal: 1, fileChunkIndex, content: "" });
+    const payloadRow = readPreparedRow(context.preparedRows, 0);
+    for (const rowIndex of rowIndexes) {
+      await onPreparedSeed({ channelPubkey: context.channelPubkey, router, jsonl: `${payloadRow}
 ${readPreparedRow(context.preparedRows, rowIndex)}
 ` });
-      }
     }
-    for (let index = 0; index < total; index++) {
-      const content = readChunkContent(id, index, temporaryStorage);
-      const router = finalizeEvent(makeRouterEvent({
-        pubkey: routerPubkey,
-        senderPubkey: context.senderPubkey,
-        imkcPubkey: context.imkcPubkey,
-        imkcProof: context.imkcProof,
-        receiverPubkey: routerReceiverTag,
-        fileChunkIndex,
-        chunkIndex: index,
-        chunkTotal: total,
-        content
-      }), routerSeckey);
-      const createdAt = nowSeconds2();
-      const outer = await privateChannelSigner.signEvent({
-        kind: PRIVATE_BROADCAST_KIND,
-        created_at: createdAt,
-        tags: privateBroadcastTags({ deletionPubkey, createdAt, expirationSeconds }),
-        content: await nip44v3EncryptText(privateChannelSigner, context.channelReaderPubkey, PRIVATE_BROADCAST_KIND, JSON.stringify(router))
-      });
-      if (eventByteLength(outer) > MAX_EVENT_BYTES) throw new ValidationError("EVENT_TOO_LARGE");
-      yield outer;
-    }
-  } finally {
-    cleanupChunks(id, total, temporaryStorage);
+  }
+  let index = 0;
+  for (const content of preparedChunks(context.preparedRows, rowIndexes)) {
+    const router = finalizeEvent(makeRouterEvent({
+      pubkey: routerPubkey,
+      senderPubkey: context.senderPubkey,
+      imkcPubkey: context.imkcPubkey,
+      imkcProof: context.imkcProof,
+      receiverPubkey: routerReceiverTag,
+      fileChunkIndex,
+      chunkIndex: index++,
+      chunkTotal: total,
+      content
+    }), routerSeckey);
+    const createdAt = nowSeconds2();
+    const outer = await privateChannelSigner.signEvent({
+      kind: PRIVATE_BROADCAST_KIND,
+      created_at: createdAt,
+      tags: privateBroadcastTags({ deletionPubkey, createdAt, expirationSeconds }),
+      content: await nip44v3EncryptText(privateChannelSigner, context.channelReaderPubkey, PRIVATE_BROADCAST_KIND, JSON.stringify(router))
+    });
+    if (eventByteLength(outer) > MAX_EVENT_BYTES) throw new ValidationError("EVENT_TOO_LARGE");
+    yield outer;
   }
 }
 async function* wrapEvents({ senderSigner, imkcSigner, privateChannelSigner = senderSigner, privateChannelReaderPubkey, receivers, receiverTag, fileChunkIndex, onPreparedSeed, deletionPubkey, event, expirationSeconds = EXPIRATION_SECONDS, temporaryStorageArea, _getIykcProofs = getIykcProofs }) {
@@ -13143,6 +13183,7 @@ var MISSING_MESSAGES_ASK_CODE = "missingMessages_ask_8mj8";
 var MISSING_MESSAGES_REPLY_CODE = "missingMessages_reply_8mj8";
 var ROUTER_SEED_RECORD_TYPE = "routerEnvelopeRow_v1";
 var NYM_CARRIER_SEED_RECORD_TYPE = "nymCarrier_v1";
+var DEFAULT_REPLY_BYTES_PER_CHUNK = 128 * 1024;
 var DEFAULT_EVENTS_PER_CHUNK = 100;
 var encoder8 = new TextEncoder();
 var decoder6 = new TextDecoder();
@@ -13331,6 +13372,7 @@ function createEventReplyPacker({
   code,
   payload = {},
   eventsPerChunk = DEFAULT_EVENTS_PER_CHUNK,
+  bytesPerChunk = DEFAULT_REPLY_BYTES_PER_CHUNK,
   recordsFromInput = eventRecordFromInput,
   sendEmptyReply = false
 }) {
@@ -13338,16 +13380,15 @@ function createEventReplyPacker({
   if (!question?.id) throw new ValidationError("QUESTION_REQUIRED");
   if (!receiverPubkey) throw new ValidationError("RECEIVER_PUBKEY_REQUIRED");
   if (!Number.isSafeInteger(eventsPerChunk) || eventsPerChunk < 1) throw new ValidationError("INVALID_EVENTS_PER_CHUNK");
+  if (!Number.isSafeInteger(bytesPerChunk) || bytesPerChunk < 1) throw new ValidationError("INVALID_BYTES_PER_CHUNK");
   let chunk = "";
   let chunkEvents = 0;
+  let chunkBytes = 0;
   let index = 0;
   let finalized = false;
   let published = false;
   async function publish2(isLast) {
     const jsonl = chunk;
-    chunk = "";
-    chunkEvents = 0;
-    published = true;
     await messenger.reply({
       channelPubkey,
       question,
@@ -13355,17 +13396,26 @@ function createEventReplyPacker({
       code,
       payload: {
         ...payload,
-        index: index++,
+        index,
         isLast,
         jsonl
       }
     });
+    index++;
+    chunk = "";
+    chunkEvents = 0;
+    chunkBytes = 0;
+    published = true;
   }
   async function appendRecord(record, { flush = true } = {}) {
-    chunk += `${JSON.stringify(record)}
+    const line = `${JSON.stringify(record)}
 `;
+    const bytes = encoder8.encode(line).length;
+    if (chunk && (chunkBytes + bytes > bytesPerChunk || chunkEvents >= eventsPerChunk)) await publish2(false);
+    chunk += line;
+    chunkBytes += bytes;
     chunkEvents++;
-    if (flush && chunkEvents >= eventsPerChunk) await publish2(false);
+    if (flush && (chunkEvents >= eventsPerChunk || chunkBytes >= bytesPerChunk)) await publish2(false);
   }
   async function appendRecords(records, { final = false } = {}) {
     for (let i = 0; i < records.length; i++) {
@@ -13380,9 +13430,8 @@ function createEventReplyPacker({
   async function finalize(input) {
     if (finalized) return;
     if (input != null) await appendRecords(await recordsFromInput(input), { final: true });
+    if (chunk || sendEmptyReply || published) await publish2(true);
     finalized = true;
-    if (!chunk && !sendEmptyReply && !published) return;
-    await publish2(true);
   }
   return {
     update: update2,
@@ -13397,12 +13446,14 @@ function createMissingMessageReplyPacker({
   since,
   until,
   eventsPerChunk = DEFAULT_EVENTS_PER_CHUNK,
+  bytesPerChunk = DEFAULT_REPLY_BYTES_PER_CHUNK,
   sendEmptyReply = false
 }) {
   if (!messenger?.reply) throw new ValidationError("MESSENGER_REQUIRED");
   if (!question?.id) throw new ValidationError("QUESTION_REQUIRED");
   if (!receiverPubkey) throw new ValidationError("RECEIVER_PUBKEY_REQUIRED");
   if (!Number.isSafeInteger(eventsPerChunk) || eventsPerChunk < 1) throw new ValidationError("INVALID_EVENTS_PER_CHUNK");
+  if (!Number.isSafeInteger(bytesPerChunk) || bytesPerChunk < 1) throw new ValidationError("INVALID_BYTES_PER_CHUNK");
   const range = backfillRequestRange(question, since, until);
   return createEventReplyPacker({
     messenger,
@@ -13412,6 +13463,7 @@ function createMissingMessageReplyPacker({
     code: MISSING_MESSAGES_REPLY_CODE,
     payload: { since: range.since, until: range.until },
     eventsPerChunk,
+    bytesPerChunk,
     sendEmptyReply,
     recordsFromInput: (seed) => compactRecordsFromSeed(seed, { receiverPubkey, since: range.since, until: range.until })
   });

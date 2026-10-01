@@ -768,3 +768,68 @@ for (const stopped of [false, true]) {
     controller.stop()
   })
 }
+
+for (const app of [false, true]) {
+  for (const phase of ['read', 'reply']) {
+    test(`nostrdb ${app ? 'app' : 'range'} ${phase} failure reaches drain for nack and permits retry`, async () => {
+      const failure = new Error('quota or storage unavailable')
+      const msg = messenger()
+      let failing = true
+      const controller = createNostrDbSyncController({
+        getDb: () => ({
+          async query () { if (failing && phase === 'read') throw failure; return { results: [event(1)] } },
+          async exportEventsByAppPage () { if (failing && phase === 'read') throw failure; return { events: [event(1)], hasMore: false } }
+        })
+      })
+      const reply = msg.reply
+      msg.reply = async options => { if (failing && phase === 'reply') throw failure; return reply(options) }
+      const message = syncMessage({
+        code: app ? NOSTRDB_SYNC_APP_ASK_CODE : NOSTRDB_SYNC_ASK_CODE,
+        payload: app ? { requestId: 'req', appId: 'https://app.test', after: '', batchSize: 200 } : { requestId: 'req', sinceScore: 1, untilScore: 2, excludeIds: [], limit: 200 }
+      })
+      await assert.rejects(controller.handleMessage(message, context(msg)), error => error === failure)
+      assert.equal(msg.sent.length, 0)
+      failing = false
+      assert.equal(await controller.handleMessage(message, context(msg)), true)
+      assert.equal(msg.sent.at(-1).options.payload.isLast, true)
+    })
+  }
+}
+
+test('push batches bound UTF-8 bytes, retry failures and never overlap in-flight sends', async () => {
+  const timers = []
+  const errors = []
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    getDb: () => ({ subscribe: emptySubscription }),
+    onError: error => errors.push(error),
+    _setTimeout: fn => { const timer = { fn }; timers.push(timer); return timer },
+    _clearTimeout: () => {}
+  })
+  controller.ensureSubscriptions(context(msg))
+  controller.queuePush(OWNER, event(1))
+  await Promise.resolve()
+  const pending = Array.from({ length: 10 }, (_, i) => ({ ...event(i + 2), content: 'á'.repeat(20000) }))
+  for (const item of pending) controller.queuePush(OWNER, item)
+  const gate = Promise.withResolvers()
+  let active = 0
+  let maxActive = 0
+  const successfulReply = msg.yell
+  msg.yell = async () => { active++; maxActive = Math.max(maxActive, active); try { await gate.promise } finally { active-- } }
+  const flush = timers.shift().fn()
+  // New input while the earlier send is pending cannot start another send.
+  controller.queuePush(OWNER, event(100))
+  await Promise.resolve()
+  assert.equal(maxActive, 1)
+  gate.reject(new Error('rate-limited: busy'))
+  await flush
+  assert.equal(errors.length, 1)
+  msg.yell = successfulReply
+  await timers.shift().fn()
+  const replies = msg.sent.slice(1).map(({ options }) => options.payload)
+  for (const reply of replies) assert.ok(Buffer.byteLength(reply.jsonl) <= 128 * 1024)
+  const ids = replies.flatMap(reply => reply.jsonl.trim().split('\n').map(row => JSON.parse(row).id))
+  assert.deepEqual(new Set(ids), new Set([...pending.map(item => item.id), event(100).id]))
+  assert.equal(ids.length, 11)
+  controller.stop()
+})

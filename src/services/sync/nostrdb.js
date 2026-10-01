@@ -51,6 +51,8 @@ const ONLINE_RETRY_MAX_MS = 6 * 60 * 60 * 1000
 const STATE_PRUNE_MS = 30 * 24 * 60 * 60 * 1000
 const PUSH_THROTTLE_MS = 1500
 const PUSH_EVENTS_PER_CHUNK = 100
+const SYNC_BYTES_PER_CHUNK = 128 * 1024
+const encoder = new TextEncoder()
 const RECENT_SYNC_EVENT_TTL_MS = 2 * 60 * 1000
 
 const SYNC_CODES = new Set([
@@ -810,22 +812,15 @@ export function createNostrDbSyncController ({
     const ask = normalizeAsk(messageBody(message))
     if (!ask) return true
 
-    let results = []
-    let hasMore = false
-    try {
-      const db = getDb(ownerPubkey)
-      const effectiveLimit = Math.min(ask.limit, REQUEST_LIMIT)
-      const response = await db.query(syncQuery(ask.sinceScore, ask.untilScore, {
-        '!ids': ask.excludeIds,
-        limit: effectiveLimit + 1
-      }))
-      const queried = Array.isArray(response?.results) ? response.results : []
-      hasMore = queried.length > effectiveLimit
-      results = queried.slice(0, effectiveLimit)
-    } catch (err) {
-      report(err)
-      return true
-    }
+    const db = getDb(ownerPubkey)
+    const effectiveLimit = Math.min(ask.limit, REQUEST_LIMIT)
+    const response = await db.query(syncQuery(ask.sinceScore, ask.untilScore, {
+      '!ids': ask.excludeIds,
+      limit: effectiveLimit + 1
+    }))
+    const queried = Array.isArray(response?.results) ? response.results : []
+    const hasMore = queried.length > effectiveLimit
+    const results = queried.slice(0, effectiveLimit)
 
     const options = {
       channelPubkey: message.channelPubkey,
@@ -838,18 +833,16 @@ export function createNostrDbSyncController ({
         untilScore: ask.untilScore,
         hasMore
       },
+      bytesPerChunk: SYNC_BYTES_PER_CHUNK,
       sendEmptyReply: true
     }
     const packer = typeof context.messenger?.createEventReplyPacker === 'function'
       ? context.messenger.createEventReplyPacker(options)
       : createEventReplyPacker({ messenger: context.messenger, ...options })
 
-    try {
-      for (const event of results) await packer.update(event)
-      await packer.finalize()
-    } catch (err) {
-      report(err)
-    }
+    // Failures reach the parent drain, which nacks instead of acknowledging.
+    for (const event of results) await packer.update(event)
+    await packer.finalize()
     emitDebug(context.debug, 'reply', {
       ownerPubkey,
       receiverPubkey: message.event?.pubkey || '',
@@ -867,20 +860,15 @@ export function createNostrDbSyncController ({
     let results = []
     let hasMore = false
     let nextAfter = ask.after
-    try {
-      const db = getDb(ownerPubkey)
-      if (typeof db.exportEventsByAppPage === 'function') {
-        const page = await db.exportEventsByAppPage(ask.appId, {
-          after: ask.after,
-          batchSize: ask.batchSize
-        })
-        results = Array.isArray(page?.events) ? page.events.slice(0, ask.batchSize) : []
-        hasMore = page?.hasMore === true
-        nextAfter = normalizeOptionalEventId(page?.nextAfter) || results.at(-1)?.id || ask.after
-      }
-    } catch (err) {
-      report(err)
-      return true
+    const db = getDb(ownerPubkey)
+    if (typeof db.exportEventsByAppPage === 'function') {
+      const page = await db.exportEventsByAppPage(ask.appId, {
+        after: ask.after,
+        batchSize: ask.batchSize
+      })
+      results = Array.isArray(page?.events) ? page.events.slice(0, ask.batchSize) : []
+      hasMore = page?.hasMore === true
+      nextAfter = normalizeOptionalEventId(page?.nextAfter) || results.at(-1)?.id || ask.after
     }
 
     const options = {
@@ -895,18 +883,16 @@ export function createNostrDbSyncController ({
         nextAfter,
         hasMore
       },
+      bytesPerChunk: SYNC_BYTES_PER_CHUNK,
       sendEmptyReply: true
     }
     const packer = typeof context.messenger?.createEventReplyPacker === 'function'
       ? context.messenger.createEventReplyPacker(options)
       : createEventReplyPacker({ messenger: context.messenger, ...options })
 
-    try {
-      for (const event of results) await packer.update(event)
-      await packer.finalize()
-    } catch (err) {
-      report(err)
-    }
+    // Failures reach the parent drain, which nacks instead of acknowledging.
+    for (const event of results) await packer.update(event)
+    await packer.finalize()
     emitDebug(context.debug, 'app-reply', {
       ownerPubkey,
       appId: ask.appId,
@@ -1100,40 +1086,57 @@ export function createNostrDbSyncController ({
 
   async function flushPushQueue (ownerPubkey) {
     const queue = pushQueues.get(ownerPubkey)
-    if (!queue || queue.events.size === 0) return
+    if (!queue || queue.flushing || queue.events.size === 0) return
     const target = pushRuntime(ownerPubkey)
     if (!target) return
 
     const current = () => pushQueues.get(ownerPubkey) === queue && runtime.messenger === target.messenger
     const events = [...queue.events.values()]
     queue.events.clear()
+    queue.flushing = true
+    let cursor = 0
     let index = 0
-    for (let i = 0; i < events.length; i += PUSH_EVENTS_PER_CHUNK) {
-      if (!current()) return
-      const chunk = events.slice(i, i + PUSH_EVENTS_PER_CHUNK)
-      try {
-        await target.messenger.yell({
-          channelPubkey: target.channelPubkey,
-          receiverPubkeys: target.receiverPubkeys,
-          code: NOSTRDB_SYNC_PUSH_CODE,
-          payload: {
-            index: index++,
-            isLast: i + PUSH_EVENTS_PER_CHUNK >= events.length,
-            jsonl: eventsToJsonl(chunk)
-          }
-        })
-      } catch (err) {
+    try {
+      while (cursor < events.length) {
         if (!current()) return
-        report(err)
+        const start = cursor
+        let jsonl = ''
+        let bytes = 0
+        while (cursor < events.length && cursor - start < PUSH_EVENTS_PER_CHUNK) {
+          const line = eventsToJsonl([events[cursor]])
+          const length = encoder.encode(line).length
+          if (cursor > start && bytes + length > SYNC_BYTES_PER_CHUNK) break
+          jsonl += line
+          bytes += length
+          cursor++
+        }
+        try {
+          await target.messenger.yell({
+            channelPubkey: target.channelPubkey,
+            receiverPubkeys: target.receiverPubkeys,
+            code: NOSTRDB_SYNC_PUSH_CODE,
+            payload: { index: index++, isLast: cursor === events.length, jsonl }
+          })
+        } catch (err) {
+          if (!current()) return
+          // Keep the failed batch and its unsent tail for the next cooldown.
+          for (const event of events.slice(start)) {
+            if (!queue.events.has(event.id)) queue.events.set(event.id, event)
+          }
+          report(err)
+          return
+        }
       }
+      if (!current()) return
+      emitDebug(runtime.debug, 'push', {
+        ownerPubkey,
+        channelPubkey: target.channelPubkey,
+        receiverCount: target.receiverPubkeys.length,
+        count: events.length
+      })
+    } finally {
+      queue.flushing = false
     }
-    if (!current()) return
-    emitDebug(runtime.debug, 'push', {
-      ownerPubkey,
-      channelPubkey: target.channelPubkey,
-      receiverCount: target.receiverPubkeys.length,
-      count: events.length
-    })
   }
 
   function startPushCooldown (ownerPubkey, queue) {
