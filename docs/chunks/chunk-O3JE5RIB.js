@@ -4735,6 +4735,19 @@ var freeRelays = [
   "wss://relay.primal.net"
 ];
 
+// node_modules/libp2r2p/relay/helpers/failure.js
+var TRANSPORT_CATEGORIES = /* @__PURE__ */ new Set(["connection", "transport", "timeout"]);
+var RETRY_PREFIXES = /* @__PURE__ */ new Set(["rate-limited", "error"]);
+var REPLACEMENT_PREFIXES = /* @__PURE__ */ new Set(["blocked", "restricted", "auth-required", "pow", ...RETRY_PREFIXES]);
+function matches(error, prefixes) {
+  if (error?.name === "Nip42AuthenticationError") return false;
+  if (TRANSPORT_CATEGORIES.has(error?.category)) return true;
+  if (error?.category && error.category !== "relay") return false;
+  return prefixes.has(/^([a-z-]+):/.exec(error?.message || "")?.[1]);
+}
+var isRetryableRelayFailure = (error) => matches(error, RETRY_PREFIXES);
+var isReplaceableRelayFailure = (error) => matches(error, REPLACEMENT_PREFIXES);
+
 // node_modules/libp2r2p/relay/helpers/routing.js
 var DEFAULT_RELAYS_PER_PUBKEY = 2;
 function excludedRelaysFor(excludeRelaysByPubkey, pubkey) {
@@ -4972,7 +4985,7 @@ function publishSummary(settlements, relays, { includeSucceededRelays = false } 
 
 // node_modules/libp2r2p/relay/helpers/read-admission.js
 function admissionError(code, relay) {
-  return Object.assign(new Error(code), { code, relay, phase: "admission" });
+  return Object.assign(new Error(code), { code, relay, phase: "admission", ...code === "RELAY_READ_QUEUE_TIMEOUT" ? { category: "timeout" } : {} });
 }
 var ReadAdmission = class {
   constructor({ maxSubscriptionsPerRelay = 28, maxConcurrentHistoryPerRelay = 2, maxQueuedReadsPerRelay = 256 } = {}) {
@@ -5079,6 +5092,347 @@ function drainableStream(create, options = {}) {
   });
   return stream;
 }
+
+// node_modules/libp2r2p/network/index.js
+var RETRY_DELAYS = [5e3, 15e3, 3e4, 6e4];
+var CONNECTIVITY_PROBE_URLS = [
+  { url: "https://www.gstatic.com/generate_204" },
+  { url: "https://connectivitycheck.gstatic.com/generate_204" },
+  { url: "https://captive.apple.com/hotspot-detect.html" },
+  { method: "GET", url: "https://connectivity-check.ubuntu.com" }
+];
+var STRICT_CONNECTIVITY_PROBE_URLS = [
+  { url: "https://captive.apple.com/hotspot-detect.html", method: "GET", marker: "Success" },
+  { url: "https://1.1.1.1/cdn-cgi/trace", method: "GET", marker: "ip=" },
+  { url: "https://cloudflare.com/cdn-cgi/trace", method: "GET", marker: "ip=" }
+];
+var FIRST_PROBE_TIMEOUT_MS = 2500;
+var HEDGE_DELAY_MS = 1e3;
+var REMAINING_PROBE_TIMEOUT_MS = 4e3;
+var sharedChecks = /* @__PURE__ */ new Map();
+async function isOnline({ signal, strict = false } = {}) {
+  if (signal?.aborted) throw signal.reason;
+  if (globalThis.navigator?.onLine === false) return false;
+  if (signal) return hasInternetConnectivity(signal, strict);
+  const key = strict ? "strict" : "lenient";
+  if (!sharedChecks.has(key)) {
+    sharedChecks.set(key, hasInternetConnectivity(void 0, strict).finally(() => {
+      sharedChecks.delete(key);
+    }));
+  }
+  return sharedChecks.get(key);
+}
+async function hasInternetConnectivity(signal, strict) {
+  if (signal?.aborted) throw signal.reason;
+  const candidates = shuffle(strict ? STRICT_CONNECTIVITY_PROBE_URLS : CONNECTIVITY_PROBE_URLS);
+  const [first, ...rest] = candidates;
+  if (!first) return false;
+  const controller = new AbortController();
+  const onAbort = () => controller.abort(signal?.reason);
+  signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) onAbort();
+  let hedgeTimer;
+  let onHedgeAbort;
+  try {
+    let startHedge;
+    const firstAttempt = ping(first, { strict, signal: controller.signal, timeout: FIRST_PROBE_TIMEOUT_MS });
+    const hedge = new Promise((resolve, reject) => {
+      startHedge = resolve;
+      hedgeTimer = setTimeout(resolve, HEDGE_DELAY_MS);
+      if (signal) {
+        onHedgeAbort = () => reject(signal.reason);
+        signal.addEventListener("abort", onHedgeAbort, { once: true });
+        if (signal.aborted) onHedgeAbort();
+      }
+    }).then(() => Promise.any(rest.map((candidate) => ping(candidate, { strict, signal: controller.signal, timeout: REMAINING_PROBE_TIMEOUT_MS }))));
+    firstAttempt.catch(() => startHedge());
+    try {
+      await Promise.any([firstAttempt, hedge]);
+      return true;
+    } catch {
+      if (signal?.aborted) throw signal.reason;
+      return false;
+    }
+  } finally {
+    clearTimeout(hedgeTimer);
+    if (onHedgeAbort) signal?.removeEventListener("abort", onHedgeAbort);
+    controller.abort();
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+function shuffle(list2) {
+  const copy = list2.slice();
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+async function ping(candidate, { strict = false, timeout, signal } = {}) {
+  if (signal?.aborted) throw signal.reason;
+  const controller = new AbortController();
+  let timer;
+  let onAbort;
+  const stopped = new Promise((_resolve, reject) => {
+    onAbort = () => {
+      controller.abort(signal.reason);
+      reject(signal.reason);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error("PING_TIMEOUT"));
+    }, timeout);
+    if (signal?.aborted) onAbort();
+  });
+  try {
+    const response = await Promise.race([
+      fetch(candidate.url, {
+        method: candidate.method ?? (strict ? "GET" : "HEAD"),
+        mode: strict ? "cors" : "no-cors",
+        cache: "no-store",
+        redirect: "follow",
+        signal: controller.signal
+      }),
+      stopped
+    ]);
+    if (!strict) return;
+    if (!response.ok) throw new Error("PING_STATUS");
+    if (!(await response.text()).includes(candidate.marker)) throw new Error("PING_BODY");
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+function createConnectivityMonitor({
+  check,
+  strict = false,
+  eventTarget = globalThis.window,
+  document = globalThis.document,
+  _setTimeout = globalThis.setTimeout,
+  _clearTimeout = globalThis.clearTimeout,
+  _random = Math.random,
+  reportError = (error) => console.error("Online listener failed", error)
+} = {}) {
+  if (check !== void 0 && typeof check !== "function") throw new ValidationError("INVALID_CONNECTIVITY_CHECK");
+  const runCheck = check ?? ((options) => isOnline({ ...options, strict }));
+  const listeners3 = /* @__PURE__ */ new Set();
+  const setTimer = (...args) => Reflect.apply(_setTimeout, globalThis, args);
+  const clearTimer = (...args) => Reflect.apply(_clearTimeout, globalThis, args);
+  let session;
+  function deliver(entry, current) {
+    if (entry.delivered || !listeners3.has(entry) || session !== current) return;
+    entry.delivered = true;
+    try {
+      Promise.resolve(entry.handler()).catch(reportError);
+    } catch (error) {
+      reportError(error);
+    }
+  }
+  function schedule(current) {
+    if (session !== current || !listeners3.size) return;
+    const delay = current.online ? 6e4 : RETRY_DELAYS[Math.min(current.retry++, RETRY_DELAYS.length - 1)];
+    current.timer = setTimer(() => {
+      current.timer = null;
+      return probe(current);
+    }, Math.round(delay * (0.8 + _random() * 0.4)));
+    current.timer?.unref?.();
+  }
+  async function probe(current) {
+    if (session !== current || current.pending) return;
+    if (current.timer != null) clearTimer(current.timer);
+    current.timer = null;
+    current.pending = true;
+    try {
+      const online = await runCheck({ signal: current.controller.signal });
+      if (session !== current) return;
+      current.online = online === true && globalThis.navigator?.onLine !== false;
+      if (current.online) {
+        current.retry = 0;
+        for (const entry of [...listeners3]) deliver(entry, current);
+      } else {
+        for (const entry of listeners3) entry.delivered = false;
+      }
+    } catch {
+      if (session !== current) return;
+      current.online = false;
+      for (const entry of listeners3) entry.delivered = false;
+    } finally {
+      current.pending = false;
+      schedule(current);
+    }
+  }
+  function start() {
+    const current = { online: false, retry: 0, timer: null, pending: false, controller: new AbortController() };
+    session = current;
+    current.wake = () => {
+      probe(current);
+    };
+    current.connectionChanged = () => {
+      current.online = false;
+      current.retry = 0;
+      for (const entry of listeners3) entry.delivered = false;
+      current.wake();
+    };
+    current.visible = () => {
+      if (document?.visibilityState !== "hidden") current.wake();
+    };
+    eventTarget?.addEventListener("online", current.connectionChanged);
+    eventTarget?.addEventListener("offline", current.connectionChanged);
+    eventTarget?.addEventListener("focus", current.wake);
+    document?.addEventListener("visibilitychange", current.visible);
+    queueMicrotask(current.wake);
+  }
+  function stop() {
+    const current = session;
+    session = null;
+    if (current.timer != null) clearTimer(current.timer);
+    current.controller.abort();
+    eventTarget?.removeEventListener("online", current.connectionChanged);
+    eventTarget?.removeEventListener("offline", current.connectionChanged);
+    eventTarget?.removeEventListener("focus", current.wake);
+    document?.removeEventListener("visibilitychange", current.visible);
+  }
+  function onOnline2(handler) {
+    if (typeof handler !== "function") throw new ValidationError("INVALID_ONLINE_HANDLER");
+    const entry = { handler, delivered: false };
+    listeners3.add(entry);
+    if (!session) start();
+    else {
+      const current = session;
+      queueMicrotask(() => {
+        probe(current);
+      });
+    }
+    return () => {
+      if (!listeners3.delete(entry)) return;
+      if (!listeners3.size) stop();
+    };
+  }
+  return { onOnline: onOnline2 };
+}
+var defaultMonitors = /* @__PURE__ */ new Map();
+function onOnline(handler, { strict = false } = {}) {
+  const key = strict ? "strict" : "lenient";
+  let monitor = defaultMonitors.get(key);
+  if (!monitor) {
+    monitor = createConnectivityMonitor({ strict });
+    defaultMonitors.set(key, monitor);
+  }
+  return monitor.onOnline(handler);
+}
+
+// node_modules/libp2r2p/relay/helpers/read-retry.js
+var LOCAL_RETRY_CODES = /* @__PURE__ */ new Set(["RELAY_READ_QUEUE_FULL", "RELAY_READ_QUEUE_TIMEOUT", "RELAY_DISCONNECTED"]);
+function isRetryableReadFailure(error) {
+  if (error?.name === "ValidationError" || error?.name === "Nip42AuthenticationError") return false;
+  if (error?.phase === "admission") return LOCAL_RETRY_CODES.has(error.code);
+  return isRetryableRelayFailure(error);
+}
+function needsConnectivityCheck(error) {
+  return globalThis.navigator?.onLine === false || error?.phase !== "admission" && ["connection", "transport", "timeout"].includes(error?.category);
+}
+function waitUntil(deadline, signal) {
+  signal.throwIfAborted();
+  if (deadline <= Date.now()) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const finish = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", abort);
+      resolve();
+    };
+    const abort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", abort);
+      reject(signal.reason);
+    };
+    const timer = maybeUnref(setTimeout(finish, Math.max(0, deadline - Date.now())));
+    signal.addEventListener("abort", abort, { once: true });
+  });
+}
+function waitFor(promise, signal) {
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener("abort", abort);
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    promise.then((value) => {
+      signal.removeEventListener("abort", abort);
+      resolve(value);
+    }, (error) => {
+      signal.removeEventListener("abort", abort);
+      reject(error);
+    });
+  });
+}
+var ReadRetry = class {
+  #checkOnline;
+  #watchOnline;
+  #probe;
+  #monitor;
+  #waiters = /* @__PURE__ */ new Set();
+  constructor({ checkOnline = isOnline, watchOnline = onOnline } = {}) {
+    this.#checkOnline = checkOnline;
+    this.#watchOnline = watchOnline;
+  }
+  async confirmOnline(signal) {
+    signal.throwIfAborted();
+    if (globalThis.navigator?.onLine === false) return false;
+    if (!this.#probe || this.#probe.controller.signal.aborted) {
+      const controller = new AbortController();
+      const record2 = { controller, users: 0, finished: false };
+      const stopped = new Promise((resolve) => controller.signal.addEventListener("abort", () => resolve(false), { once: true }));
+      const timer = maybeUnref(setTimeout(() => controller.abort(), 6e3));
+      record2.promise = Promise.race([
+        Promise.resolve().then(() => this.#checkOnline({ signal: controller.signal })).catch(() => false),
+        stopped
+      ]).then((value) => value === true).finally(() => {
+        record2.finished = true;
+        clearTimeout(timer);
+        controller.abort();
+        if (this.#probe === record2) this.#probe = null;
+      });
+      this.#probe = record2;
+    }
+    const record = this.#probe;
+    record.users++;
+    try {
+      return await waitFor(record.promise, signal);
+    } finally {
+      if (--record.users === 0 && !record.finished) record.controller.abort();
+    }
+  }
+  waitUntilOnline(signal) {
+    signal.throwIfAborted();
+    const ready = Promise.withResolvers();
+    this.#waiters.add(ready);
+    if (!this.#monitor) {
+      const monitor = { stop: () => {
+      }, ended: false };
+      this.#monitor = monitor;
+      monitor.stop = this.#watchOnline(() => {
+        if (this.#monitor !== monitor) return;
+        for (const waiter of this.#waiters) waiter.resolve();
+        this.#waiters.clear();
+        this.#stopIfIdle();
+      });
+      if (monitor.ended) monitor.stop();
+    }
+    return waitFor(ready.promise, signal).finally(() => {
+      this.#waiters.delete(ready);
+      this.#stopIfIdle();
+    });
+  }
+  #stopIfIdle() {
+    if (this.#waiters.size || !this.#monitor) return;
+    const monitor = this.#monitor;
+    this.#monitor = null;
+    monitor.ended = true;
+    monitor.stop();
+  }
+};
 
 // node_modules/libp2r2p/url/index.js
 function isIpv4Address(hostname) {
@@ -5584,10 +5938,10 @@ function countResponseError() {
   return new Error("INVALID_COUNT_RESPONSE");
 }
 function countTimeoutError() {
-  return new Error("COUNT_TIMEOUT");
+  return relayTimeoutError("COUNT_TIMEOUT");
 }
 function getEventsTimeoutError() {
-  return new Error("GET_EVENTS_TIMEOUT");
+  return relayTimeoutError("GET_EVENTS_TIMEOUT");
 }
 function asError(error) {
   return error instanceof Error ? error : new Error(String(error));
@@ -5635,10 +5989,12 @@ var RelayPool = class {
   #createRelay;
   #WebSocket;
   #admission;
-  constructor({ _createRelay, WebSocket: WebSocketImpl, ...capacity } = {}) {
+  #readRetry;
+  constructor({ _createRelay, _isOnline, _onOnline, WebSocket: WebSocketImpl, ...capacity } = {}) {
     this.#WebSocket = WebSocketImpl;
     this.#createRelay = _createRelay ?? ((url) => new RelayConnection(url, this.#WebSocket ? { WebSocket: this.#WebSocket } : void 0));
     this.#admission = new ReadAdmission(capacity);
+    this.#readRetry = new ReadRetry({ checkOnline: _isOnline, watchOnline: _onOnline });
   }
   // Injects the WebSocket implementation used by new pooled connections (e.g.
   // a launcher-owned relay multiplexer). Existing connections keep the
@@ -6068,6 +6424,9 @@ var RelayPool = class {
     const gapTasks = /* @__PURE__ */ new Set();
     const liveSubs = /* @__PURE__ */ new Map();
     const retryTimers2 = /* @__PURE__ */ new Map();
+    const retryDelays = /* @__PURE__ */ new Map();
+    const stoppedRelays = /* @__PURE__ */ new Set();
+    const retainedRelays = /* @__PURE__ */ new Set();
     const initialPending = new Set(urls);
     const initialOutcomes = /* @__PURE__ */ new Map();
     const readyTimeouts = /* @__PURE__ */ new Map();
@@ -6170,7 +6529,7 @@ var RelayPool = class {
         clearTimeout(attempt.timer);
         attempt.stop.abort();
       }
-      for (const timer of retryTimers2.values()) clearTimeout(timer);
+      for (const retry of retryTimers2.values()) retry.abort();
       retryTimers2.clear();
       liveSubs.forEach((sub) => sub.close());
       liveSubs.clear();
@@ -6223,14 +6582,68 @@ var RelayPool = class {
         maybeFinishInitialReady();
       }
     };
-    const scheduleReconnect = (url, reconnectDelay) => {
-      if (isDone || retryTimers2.has(url)) return;
-      const nextDelay = Math.min(reconnectDelay * 2, 5 * 6e4);
-      const timer = maybeUnref(setTimeout(() => {
-        retryTimers2.delete(url);
-        subscribeToRelay(url, pendingGaps.get(url) ?? lastSeenAt.get(url) ?? openedAt.get(url) ?? null, nextDelay);
-      }, reconnectDelay));
-      retryTimers2.set(url, timer);
+    const releaseRelay = (url) => {
+      if (retainedRelays.delete(url)) this.#decrementLiveSub(url);
+    };
+    const closeAttempt = (url, attempt) => {
+      if (!attempt || attempt.closed) return;
+      attempt.closed = true;
+      clearTimeout(attempt.timer);
+      attempt.stop.abort();
+      const sub = liveSubs.get(url);
+      liveSubs.delete(url);
+      sub?.close();
+      liveLeases.get(url)?.release();
+      liveLeases.delete(url);
+      readyRelays.delete(url);
+    };
+    const stopRelay = (url) => {
+      stoppedRelays.add(url);
+      retryTimers2.get(url)?.abort();
+      retryTimers2.delete(url);
+      closeAttempt(url, attempts.get(url));
+      releaseRelay(url);
+      if (stoppedRelays.size === urls.length) {
+        finishReady();
+        teardown(true);
+      }
+    };
+    const scheduleReconnect = (url, error) => {
+      if (isDone || stoppedRelays.has(url) || retryTimers2.has(url)) return;
+      if (!isRetryableReadFailure(error)) {
+        stopRelay(url);
+        return;
+      }
+      const retry = new AbortController();
+      const retrySignal = AbortSignal.any([gapAc.signal, retry.signal]);
+      const failedAt = Date.now();
+      const delay = retryDelays.get(url) ?? 1e3;
+      const retryAt = Number.isFinite(error?.retryAt) ? error.retryAt : Number.isFinite(error?.retryAfterMs) && error.retryAfterMs > 0 ? failedAt + Math.min(error.retryAfterMs, 3e5) : 0;
+      retryTimers2.set(url, retry);
+      (async () => {
+        const online = !needsConnectivityCheck(error) || await this.#readRetry.confirmOnline(retrySignal);
+        retrySignal.throwIfAborted();
+        const deadline = Math.max(failedAt + (online ? delay : 0), retryAt);
+        if (online) retryDelays.set(url, Math.min(delay * 2, 3e5));
+        else await this.#readRetry.waitUntilOnline(retrySignal);
+        while (!retrySignal.aborted) {
+          await waitUntil(deadline, retrySignal);
+          if (needsConnectivityCheck(error) && !await this.#readRetry.confirmOnline(retrySignal)) {
+            await this.#readRetry.waitUntilOnline(retrySignal);
+            continue;
+          }
+          retrySignal.throwIfAborted();
+          if (isDone || stoppedRelays.has(url) || retryTimers2.get(url) !== retry) return;
+          retryTimers2.delete(url);
+          subscribeToRelay(url, pendingGaps.get(url) ?? lastSeenAt.get(url) ?? openedAt.get(url) ?? null);
+          return;
+        }
+      })().catch((failure2) => {
+        if (!retrySignal.aborted && !isDone) {
+          reportFailure(url, asError(failure2));
+          stopRelay(url);
+        }
+      });
     };
     if (filterUntil !== null) {
       const msUntil = filterUntil * 1e3 - Date.now();
@@ -6252,25 +6665,35 @@ var RelayPool = class {
       });
       return (async () => {
         let completed = false;
-        let failed = false;
+        let error;
         for await (const item of gapGen) {
           if (item?.type === "event") {
             observeEvent(item.event, url);
             pushEvent(item.event, url, true);
           } else if (item?.type === "error") {
-            failed = true;
+            if (!error || !isRetryableReadFailure(item.error)) error = item.error;
             if (!isDone) enqueue(item);
           } else if (item?.type === "eose") {
             completed = item.relays?.length === 1 && ["eose", "satisfied"].includes(item.relays[0].status);
+            if (!completed && !error) {
+              error = item.relays?.[0]?.error || categorizeRelayError(new Error("RELAY_RECONNECT_GAP_INCOMPLETE"), "timeout");
+              if (!isDone) enqueue({ type: "error", relay: url, error });
+            }
           }
         }
-        return completed && !failed;
+        if (!completed && !error && !attempt.stop.signal.aborted && !isDone) {
+          error = new Error("RELAY_RECONNECT_GAP_INCOMPLETE");
+          reportFailure(url, error);
+        }
+        return { recovered: completed && !error, error };
       })().catch((err) => {
-        reportFailure(url, asError(err));
-        return false;
+        const error = asError(err);
+        if (!attempt.stop.signal.aborted) reportFailure(url, error);
+        return { recovered: false, error };
       }).finally(() => slots.history.release());
     };
-    const subscribeToRelay = (url, gapSince, reconnectDelay = 1e3) => {
+    const subscribeToRelay = (url, gapSince) => {
+      if (isDone || stoppedRelays.has(url)) return;
       let now = Math.floor(Date.now() / 1e3);
       if (filterUntil !== null && now >= filterUntil) return;
       const reservation = !initialAdmissions.has(url) && _admissions?.get(url);
@@ -6280,10 +6703,10 @@ var RelayPool = class {
       attempts.set(url, attempt);
       let recoveryLease;
       initialAdmissions.add(url);
-      Promise.resolve(reservation || this.#admission.acquire(normalizeRelayUrl(url), { live: true, history: recovering, signal: gapAc.signal, queueTimeout })).then(async (slots) => {
+      Promise.resolve(reservation || this.#admission.acquire(normalizeRelayUrl(url), { live: true, history: recovering, signal: AbortSignal.any([gapAc.signal, attempt.stop.signal]), queueTimeout })).then(async (slots) => {
         const lease = slots.live;
         recoveryLease = recovering ? slots.history : null;
-        if (isDone) {
+        if (isDone || attempt.closed) {
           lease.release();
           recoveryLease?.release();
           return;
@@ -6299,7 +6722,8 @@ var RelayPool = class {
           }, timeout)));
         }
         const relay = await this.#getRelay(url);
-        if (isDone) {
+        if (isDone || attempt.closed) {
+          lease.release();
           recoveryLease?.release();
           return;
         }
@@ -6331,40 +6755,46 @@ var RelayPool = class {
           },
           onclose: (error) => {
             if (attempt.closed || attempts.get(url) !== attempt) return;
-            attempt.closed = true;
-            clearTimeout(attempt.timer);
-            attempt.stop.abort();
-            if (liveSubs.get(url) === liveSub) liveSubs.delete(url);
-            lease.release();
-            if (liveLeases.get(url) === lease) liveLeases.delete(url);
-            readyRelays.delete(url);
+            closeAttempt(url, attempt);
             if (isDone) return;
-            if (error !== void 0) reportFailure(url, asError(error));
-            else {
-              const interruption = Object.assign(categorizeRelayError(new Error("RELAY_LIVE_INTERRUPTED"), "transport"), { code: "RELAY_LIVE_INTERRUPTED" });
-              enqueue({ type: "error", relay: url, error: interruption });
-              reportClosed(url, interruption);
+            if (error !== void 0) {
+              error = asError(error);
+              reportFailure(url, error);
+            } else {
+              error = Object.assign(categorizeRelayError(new Error("RELAY_LIVE_INTERRUPTED"), "transport"), { code: "RELAY_LIVE_INTERRUPTED" });
+              enqueue({ type: "error", relay: url, error });
+              reportClosed(url, error);
             }
-            scheduleReconnect(url, reconnectDelay);
+            scheduleReconnect(url, error);
           },
           oneose: () => {
             if (isDone || attempt.closed || attempts.get(url) !== attempt || liveEose) return;
             liveEose = true;
             attempt.since = Math.max(sinceFloor, Math.floor(Date.now() / 1e3));
             markInitialEose(url);
+            if (attempt.recovered) retryDelays.delete(url);
             scheduleProgress(attempt);
           }
         });
-        if (isDone) {
+        if (isDone || attempt.closed) {
           liveSub.close();
+          lease.release();
           recoveryLease?.release();
           return;
         }
         liveSubs.set(url, liveSub);
         if (recovering) {
-          const task = runReconnectGapFill(url, gapSince, now, slots, attempt).then((recovered) => {
+          const task = runReconnectGapFill(url, gapSince, now, slots, attempt).then(({ recovered, error }) => {
             attempt.recovered = recovered;
-            if (recovered && !attempt.closed && attempts.get(url) === attempt) pendingGaps.delete(url);
+            if (!attempt.closed && attempts.get(url) === attempt) {
+              if (recovered) {
+                pendingGaps.delete(url);
+                if (liveEose) retryDelays.delete(url);
+              } else if (error && !isDone) {
+                closeAttempt(url, attempt);
+                scheduleReconnect(url, error);
+              }
+            }
           }).finally(() => {
             const buf = liveBuffer;
             liveBuffer = null;
@@ -6381,9 +6811,10 @@ var RelayPool = class {
         liveLeases.delete(url);
         readyRelays.delete(url);
         const reason = err instanceof Error ? err : new Error(String(err));
+        if (isDone || attempt.closed) return;
+        closeAttempt(url, attempt);
         reportFailure(url, reason);
-        if (isDone) return;
-        scheduleReconnect(url, reconnectDelay);
+        scheduleReconnect(url, reason);
       });
     };
     if (!urls.length) {
@@ -6400,6 +6831,7 @@ var RelayPool = class {
     }
     for (const url of urls) {
       this.#incrementLiveSub(url);
+      retainedRelays.add(url);
       subscribeToRelay(url, null);
     }
     try {
@@ -6415,7 +6847,7 @@ var RelayPool = class {
     } finally {
       signal?.removeEventListener("abort", abort);
       _stopSignal?.removeEventListener("abort", stop);
-      for (const url of urls) this.#decrementLiveSub(url);
+      for (const url of [...retainedRelays]) releaseRelay(url);
       teardown();
     }
   }
@@ -6831,32 +7263,56 @@ function subscribeRelayListUpdates(pubkeys, {
 async function loadMissingRelays(missingPubkeys, {
   getEvents: getEvents4,
   cacheMs,
-  timeout = RELAY_LIST_QUERY_TIMEOUT_MS,
-  timeoutAfterFirstEose = RELAY_LIST_QUERY_TIMEOUT_AFTER_FIRST_EOSE_MS,
+  timeout,
+  timeoutAfterFirstEose,
   relayUrlPolicy,
-  emptyRelaysFallback = freeRelays.slice(0, 2)
+  emptyRelaysFallback,
+  excludeRelays,
+  signal
 }) {
-  const { result: events } = await getEvents4({
-    kinds: [10002],
-    authors: missingPubkeys,
-    limit: missingPubkeys.length
-  }, seedRelays, {
-    timeout,
-    timeoutAfterFirstEose
-  });
+  let response;
+  try {
+    response = await getEvents4(
+      { kinds: [10002], authors: missingPubkeys, limit: missingPubkeys.length },
+      seedRelays.filter((relay) => !excludeRelays.includes(relay)),
+      { timeout, timeoutAfterFirstEose, signal }
+    );
+    signal.throwIfAborted();
+  } catch (error) {
+    return { entries: {}, report: { authors: missingPubkeys, relays: [], error } };
+  }
+  const report = { authors: missingPubkeys, relays: response.relays || [], errors: response.errors || [] };
+  const complete = response.relays ? response.relays.length > 0 && response.relays.every((item) => item.status === "eose") : !response.errors?.length;
   const latestByPubkey = {};
-  for (const { event } of events || []) {
+  for (const { event } of response.result || []) {
     if (!missingPubkeys.includes(event.pubkey)) continue;
     if (isNewerRelayListEvent(event, latestByPubkey[event.pubkey])) latestByPubkey[event.pubkey] = event;
   }
+  const entries = {};
   for (const pubkey of missingPubkeys) {
     const fetchedEvent = latestByPubkey[pubkey];
     const cachedEvent = relayCacheEventByPubkey[pubkey] || null;
     const event = isNewerRelayListEvent(fetchedEvent, cachedEvent) ? fetchedEvent : cachedEvent;
     const relays = event ? parseRelayListEvent(event, relayUrlPolicy) : { read: [...emptyRelaysFallback], write: [...emptyRelaysFallback] };
-    setCachedRelays(pubkey, relays, event, cacheMs);
+    entries[pubkey] = { ...relays, event };
+    if (fetchedEvent || complete) setCachedRelays(pubkey, relays, event, cacheMs);
   }
   pruneRelayCache();
+  return { entries, report };
+}
+function waitForDiscovery(record, signal) {
+  signal?.throwIfAborted();
+  record.users++;
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal?.addEventListener("abort", abort, { once: true });
+    record.promise.then(resolve, reject).finally(() => signal?.removeEventListener("abort", abort));
+  }).finally(() => {
+    if (--record.users === 0 && !record.finished) {
+      record.controller.abort();
+      record.remove();
+    }
+  });
 }
 async function getRelaysByPubkey(pubkeys, {
   _getEvents = getEvents,
@@ -6866,33 +7322,54 @@ async function getRelaysByPubkey(pubkeys, {
   timeout = RELAY_LIST_QUERY_TIMEOUT_MS,
   timeoutAfterFirstEose = RELAY_LIST_QUERY_TIMEOUT_AFTER_FIRST_EOSE_MS,
   relayUrlPolicy,
-  emptyRelaysFallback = freeRelays.slice(0, 2)
+  emptyRelaysFallback = freeRelays.slice(0, 2),
+  excludeRelays = [],
+  signal,
+  onQueryResult
 } = {}) {
+  signal?.throwIfAborted();
   const pubkeyList = uniquePubkeys(pubkeys, { requireHex: _getEvents === getEvents });
   if (!pubkeyList.length) return {};
+  const scope = JSON.stringify([...new Set(excludeRelays)].sort());
+  const key = (pubkey) => `${pubkey}:${scope}`;
   const loadPubkeys = forceRefresh ? pubkeyList : pubkeyList.filter((pubkey) => !hasCachedKey(relaysByPubkey, pubkey));
-  const pubkeysToLoad = loadPubkeys.filter((pubkey) => !relayRequestsByPubkey.has(pubkey));
+  const pubkeysToLoad = loadPubkeys.filter((pubkey) => !relayRequestsByPubkey.has(key(pubkey)));
   if (pubkeysToLoad.length) {
-    const request = loadMissingRelays(pubkeysToLoad, {
+    const record = { controller: new AbortController(), users: 0, finished: false };
+    record.remove = () => {
+      for (const pubkey of pubkeysToLoad) {
+        if (relayRequestsByPubkey.get(key(pubkey)) === record) relayRequestsByPubkey.delete(key(pubkey));
+      }
+    };
+    record.promise = loadMissingRelays(pubkeysToLoad, {
       getEvents: _getEvents,
       cacheMs,
       timeout,
       timeoutAfterFirstEose,
       relayUrlPolicy,
-      emptyRelaysFallback
+      emptyRelaysFallback,
+      excludeRelays,
+      signal: record.controller.signal
     }).finally(() => {
-      for (const pubkey of pubkeysToLoad) {
-        if (relayRequestsByPubkey.get(pubkey) === request) relayRequestsByPubkey.delete(pubkey);
-      }
+      record.finished = true;
+      record.remove();
     });
-    for (const pubkey of pubkeysToLoad) relayRequestsByPubkey.set(pubkey, request);
+    for (const pubkey of pubkeysToLoad) relayRequestsByPubkey.set(key(pubkey), record);
   }
-  await Promise.all([...new Set(
-    loadPubkeys.map((pubkey) => relayRequestsByPubkey.get(pubkey)).filter(Boolean)
-  )]);
-  return Object.fromEntries(pubkeyList.filter((pubkey) => hasCachedKey(relaysByPubkey, pubkey)).map((pubkey) => {
-    const entry = cloneRelays(relaysByPubkey[pubkey]);
-    if (includeEvents) entry.event = cloneRelayListEvent(relayCacheEventByPubkey[pubkey]);
+  const entries = {};
+  const records = [...new Set(loadPubkeys.map((pubkey) => relayRequestsByPubkey.get(key(pubkey))).filter(Boolean))];
+  await Promise.all(records.map(async (record) => {
+    const result = await waitForDiscovery(record, signal);
+    signal?.throwIfAborted();
+    onQueryResult?.(result.report);
+    if (result.report.error) throw result.report.error;
+    Object.assign(entries, result.entries);
+  }));
+  signal?.throwIfAborted();
+  return Object.fromEntries(pubkeyList.map((pubkey) => {
+    const source = hasCachedKey(relaysByPubkey, pubkey) ? relaysByPubkey[pubkey] : entries[pubkey];
+    const entry = cloneRelays(source || { read: emptyRelaysFallback, write: emptyRelaysFallback });
+    if (includeEvents) entry.event = cloneRelayListEvent(relayCacheEventByPubkey[pubkey] || entries[pubkey]?.event);
     return [pubkey, entry];
   }));
 }
@@ -8588,29 +9065,6 @@ function decodeSecretEntries(bytes) {
   return entries;
 }
 
-// node_modules/libp2r2p/private-messenger/helpers/recovery-retry.js
-function recoveryRetryDelay(errors, delay) {
-  let retry = false;
-  let blocked = false;
-  let retryAt = 0;
-  const seen = /* @__PURE__ */ new Set();
-  function visit(error) {
-    if (!error || seen.has(error)) return;
-    seen.add(error);
-    if (error.code === "PRIVATE_CHANNEL_HISTORY_PAGE_LIMIT" || error.name === "ValidationError" || /^(auth-required:|restricted:|blocked:|invalid:|pow:)/.test(error.message || "")) blocked = true;
-    if (["transport", "timeout"].includes(error.category) || ["QuotaExceededError", "InvalidStateError", "UnknownError"].includes(error.name) || /^(rate-limited:|error:)/.test(error.message || "") || ["RELAY_LIVE_BUFFER_FULL", "RELAY_LIVE_NOT_READY"].includes(error.code)) retry = true;
-    if (Number.isFinite(error.retryAt)) retryAt = Math.max(retryAt, Math.min(Date.now() + 3e5, error.retryAt));
-    for (const child of error.errors || []) visit(child);
-    for (const entry of error.relays || []) {
-      if (["timeout", "cutoff", "closed"].includes(entry.status)) retry = true;
-      visit(entry.error);
-    }
-    visit(error.cause);
-  }
-  errors.forEach(visit);
-  return retry && !blocked ? Math.max(delay, retryAt - Date.now()) : null;
-}
-
 // node_modules/libp2r2p/helpers/abortable-semaphore.js
 function createAbortableSemaphore(capacity, onIdle = () => {
 }) {
@@ -8653,6 +9107,48 @@ function createAbortableSemaphore(capacity, onIdle = () => {
       });
     }
   };
+}
+
+// node_modules/libp2r2p/helpers/ranges.js
+function mergeRanges(ranges = []) {
+  const sorted = (ranges || []).filter((range) => range && Number.isFinite(range.start) && Number.isFinite(range.end) && range.end >= range.start).map((range) => ({ start: range.start, end: range.end })).sort((a, b) => a.start - b.start || a.end - b.end);
+  const out = [];
+  for (const range of sorted) {
+    const last = out[out.length - 1];
+    if (!last || range.start > last.end + 1) out.push(range);
+    else last.end = Math.max(last.end, range.end);
+  }
+  return out;
+}
+function subtractRanges(range, covered = []) {
+  if (!range || range.end < range.start) return [];
+  const merged = mergeRanges(covered);
+  const out = [];
+  let cursor = range.start;
+  for (const entry of merged) {
+    if (entry.end < cursor) continue;
+    if (entry.start > range.end) break;
+    if (entry.start > cursor) out.push({ start: cursor, end: Math.min(entry.start - 1, range.end) });
+    cursor = Math.max(cursor, entry.end + 1);
+    if (cursor > range.end) break;
+  }
+  if (cursor <= range.end) out.push({ start: cursor, end: range.end });
+  return out;
+}
+function intersectRanges(left = [], right = []) {
+  const a = mergeRanges(left);
+  const b = mergeRanges(right);
+  const out = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    const start = Math.max(a[i].start, b[j].start);
+    const end = Math.min(a[i].end, b[j].end);
+    if (start <= end) out.push({ start, end });
+    if (a[i].end < b[j].end) i++;
+    else j++;
+  }
+  return out;
 }
 
 // node_modules/libp2r2p/private-message/index.js
@@ -8784,11 +9280,13 @@ function isValidIykcProof(value) {
 
 // node_modules/libp2r2p/content-key/services/iykc-proof.js
 var QUERY_CACHE_MS2 = 40 * 60 * 1e3;
+var NEGATIVE_CACHE_MS = 5 * 60 * 1e3;
 var IYKC_CACHE_MAX_ITEMS = 1e4;
 var HEX_PUBKEY3 = /^[0-9a-f]{64}$/i;
 var contentKeysByPubkey = /* @__PURE__ */ Object.create(null);
 var iykcCacheTimersByPubkey = /* @__PURE__ */ Object.create(null);
 var iykcCacheAddedAtByPubkey = /* @__PURE__ */ Object.create(null);
+var inFlightByPubkey = /* @__PURE__ */ new Map();
 var getEvents2 = (...args) => relayPool.getEvents(...args);
 function hasCachedKey2(cache, key) {
   return Object.prototype.hasOwnProperty.call(cache, key);
@@ -8830,37 +9328,24 @@ function setCachedValue(cache, timers, addedAt, key, value, cacheMs) {
     delete timers[key];
   }
 }
-async function getIykcProofs(pubkeys, {
-  _getEvents = getEvents2,
-  _getRelaysByPubkey = getRelaysByPubkey,
-  cacheMs = QUERY_CACHE_MS2
-} = {}) {
-  const pubkeyList = uniquePubkeys2(pubkeys, { requireHex: _getEvents === getEvents2 });
-  if (!pubkeyList.length) return {};
-  const out = {};
-  const missingPubkeys = [];
-  for (const pubkey of pubkeyList) {
-    if (!hasCachedKey2(contentKeysByPubkey, pubkey)) {
-      missingPubkeys.push(pubkey);
-      continue;
-    }
-    const cached = cloneContentKey(contentKeysByPubkey[pubkey]);
-    if (cached) out[pubkey] = cached;
-  }
-  if (!missingPubkeys.length) return out;
-  const relaysByPubkey2 = await _getRelaysByPubkey(missingPubkeys, { _getEvents, cacheMs });
-  const relayToAuthors = pickRelaysForPubkeys(missingPubkeys, relaysByPubkey2);
+async function queryContentKeyProofs(pubkeyList, { _getEvents, _getRelaysByPubkey, cacheMs, negativeCacheMs }) {
+  const relaysByPubkey2 = await _getRelaysByPubkey(pubkeyList, { _getEvents, cacheMs });
+  const relayToAuthors = pickRelaysForPubkeys(pubkeyList, relaysByPubkey2);
   const eventGroups = await Promise.all(
     [...relayToAuthors.entries()].map(async ([relay, authors]) => {
-      const { result } = await _getEvents({
-        kinds: [CONTENT_KEY_KIND],
-        authors,
-        limit: authors.length
-      }, [relay], {
-        timeout: 5e3,
-        timeoutAfterFirstEose: null
-      });
-      return result.map(({ event }) => event);
+      try {
+        const { result } = await _getEvents({
+          kinds: [CONTENT_KEY_KIND],
+          authors,
+          limit: authors.length
+        }, [relay], {
+          timeout: 5e3,
+          timeoutAfterFirstEose: null
+        });
+        return result.map(({ event }) => event);
+      } catch {
+        return [];
+      }
     })
   );
   const latestByPubkey = {};
@@ -8871,13 +9356,60 @@ async function getIykcProofs(pubkeys, {
       latestByPubkey[event.pubkey] = { created_at: event.created_at, ...parsed };
     }
   }
-  for (const pubkey of missingPubkeys) {
+  const out = {};
+  for (const pubkey of pubkeyList) {
     const entry = latestByPubkey[pubkey];
     const proof = entry ? { iykcPubkey: entry.iykcPubkey, iykcProof: entry.iykcProof } : null;
-    setCachedValue(contentKeysByPubkey, iykcCacheTimersByPubkey, iykcCacheAddedAtByPubkey, pubkey, cloneContentKey(proof), cacheMs);
-    if (proof) out[pubkey] = proof;
+    if (proof) {
+      setCachedValue(contentKeysByPubkey, iykcCacheTimersByPubkey, iykcCacheAddedAtByPubkey, pubkey, cloneContentKey(proof), cacheMs);
+      out[pubkey] = proof;
+    } else if (negativeCacheMs > 0) {
+      setCachedValue(contentKeysByPubkey, iykcCacheTimersByPubkey, iykcCacheAddedAtByPubkey, pubkey, null, negativeCacheMs);
+    }
   }
   pruneCache(contentKeysByPubkey, iykcCacheTimersByPubkey, iykcCacheAddedAtByPubkey, IYKC_CACHE_MAX_ITEMS);
+  return out;
+}
+async function getIykcProofs(pubkeys, {
+  _getEvents = getEvents2,
+  _getRelaysByPubkey = getRelaysByPubkey,
+  cacheMs = QUERY_CACHE_MS2,
+  negativeCacheMs = NEGATIVE_CACHE_MS
+} = {}) {
+  const pubkeyList = uniquePubkeys2(pubkeys, { requireHex: _getEvents === getEvents2 });
+  if (!pubkeyList.length) return {};
+  const out = {};
+  const waiting = [];
+  const toQuery = [];
+  for (const pubkey of pubkeyList) {
+    if (hasCachedKey2(contentKeysByPubkey, pubkey)) {
+      const cached = cloneContentKey(contentKeysByPubkey[pubkey]);
+      if (cached) out[pubkey] = cached;
+      continue;
+    }
+    const pending = inFlightByPubkey.get(pubkey);
+    if (pending) waiting.push([pubkey, pending]);
+    else toQuery.push(pubkey);
+  }
+  if (toQuery.length) {
+    const query = queryContentKeyProofs(toQuery, { _getEvents, _getRelaysByPubkey, cacheMs, negativeCacheMs });
+    for (const pubkey of toQuery) inFlightByPubkey.set(pubkey, query);
+    try {
+      Object.assign(out, await query);
+    } finally {
+      for (const pubkey of toQuery) {
+        if (inFlightByPubkey.get(pubkey) === query) inFlightByPubkey.delete(pubkey);
+      }
+    }
+  }
+  for (const [pubkey, pending] of waiting) {
+    const found = await pending.catch(() => null);
+    if (found?.[pubkey]) out[pubkey] = found[pubkey];
+    else {
+      const cached = cloneContentKey(contentKeysByPubkey[pubkey]);
+      if (cached) out[pubkey] = cached;
+    }
+  }
   return out;
 }
 
@@ -8950,7 +9482,7 @@ function acquireRelay(relay, signal) {
   }
   return gate.acquire(signal);
 }
-async function readHistory({ filter, relays, receiverPubkey, signal, getEvents: getEvents4, processEvent, acquirePage }) {
+async function readHistory({ filter, relays, receiverPubkey, signal, getEvents: getEvents4, processEvent, acquirePage, partial = false, resume = null }) {
   const since = filter.since ?? 0;
   const until = filter.until ?? Math.floor(Date.now() / 1e3);
   if (![since, until].every((value) => Number.isSafeInteger(value) && value >= 0) || since > until) throw new ValidationError("INVALID_PRIVATE_CHANNEL_HISTORY_RANGE");
@@ -8971,7 +9503,10 @@ async function readHistory({ filter, relays, receiverPubkey, signal, getEvents: 
     }
   };
   for (const relay of urls) {
-    const intervals = [{ since, until, limit: PAGE_SIZE }];
+    const relayStartCount = receivedEventCount;
+    let relayElapsedMs = 0;
+    const intervals = resumeIntervalsFor({ resume, relay, since, until }).map((interval) => ({ since: interval.start, until: interval.end, limit: PAGE_SIZE }));
+    const covered = [];
     let outcome = { relay, status: "eose" };
     while (intervals.length) {
       signal?.throwIfAborted();
@@ -9005,9 +9540,12 @@ async function readHistory({ filter, relays, receiverPubkey, signal, getEvents: 
           signal?.throwIfAborted();
           errors.push({ relay, reason: error });
           outcome = { relay, status: "error", error };
+          intervals.push(interval);
           break;
         } finally {
-          elapsedMs += performance.now() - started;
+          const took = performance.now() - started;
+          elapsedMs += took;
+          relayElapsedMs += took;
         }
         signal?.throwIfAborted();
         const status = page.relays?.find((item) => item.relay === relay);
@@ -9015,6 +9553,7 @@ async function readHistory({ filter, relays, receiverPubkey, signal, getEvents: 
           await process(page.result);
           errors.push(...page.errors ?? []);
           outcome = status ?? { relay, status: "error" };
+          intervals.push(interval);
           break;
         }
         if (status.status === "satisfied" || page.result.length >= interval.limit) {
@@ -9028,10 +9567,12 @@ async function readHistory({ filter, relays, receiverPubkey, signal, getEvents: 
             const error = pageLimitError();
             errors.push({ relay, reason: error });
             outcome = { relay, status: "error", error };
+            intervals.push(interval);
             break;
           }
         } else {
           await process(page.result);
+          covered.push({ start: interval.since, end: interval.until });
         }
         signal?.throwIfAborted();
       } finally {
@@ -9039,15 +9580,47 @@ async function readHistory({ filter, relays, receiverPubkey, signal, getEvents: 
         releaseRelay?.();
       }
     }
-    report.push(outcome);
+    report.push({
+      ...outcome,
+      ...partial ? {
+        covered: mergeRanges(covered),
+        pending: mergeRanges(intervals.map((interval) => ({ start: interval.since, end: interval.until }))),
+        events: receivedEventCount - relayStartCount,
+        elapsedMs: Math.round(relayElapsedMs)
+      } : {}
+    });
   }
   signal?.throwIfAborted();
+  if (partial) {
+    const pendingByRelay = {};
+    for (const entry of report) {
+      if (entry.pending?.length) pendingByRelay[entry.relay] = entry.pending;
+    }
+    return {
+      oldestCreatedAt: oldestCreatedAt2,
+      receivedEventCount,
+      elapsedMs: Math.round(elapsedMs),
+      relays: report,
+      pendingByRelay,
+      anyEose: report.some((entry) => entry.status === "eose"),
+      anyEoseWithEvents: report.some((entry) => entry.status === "eose" && (entry.events ?? 0) > 0),
+      allFailed: report.every((entry) => entry.status !== "eose")
+    };
+  }
   if (errors.length || report.some((item) => item.status !== "eose")) {
     const error = incompleteFetchError({ errors, report, receivedEventCount, elapsedMs: Math.round(elapsedMs), request: { relays: urls, channelPubkeys: filter.authors ?? [], receiverPubkey, since, until, limit: PAGE_SIZE, timeoutMs: TIMEOUT_MS } });
     error.operation = "private-channel.fetchHistory";
     throw error;
   }
   return { oldestCreatedAt: oldestCreatedAt2, receivedEventCount, relays: report };
+}
+function resumeIntervalsFor({ resume, relay, since, until }) {
+  const pending = resume && Object.prototype.hasOwnProperty.call(resume, relay) ? resume[relay] : null;
+  const intervals = Array.isArray(pending) ? pending : [{ start: since, end: until }];
+  return mergeRanges(intervals.map((interval) => ({
+    start: Math.max(since, Math.floor(Number(interval?.start))),
+    end: Math.min(until, Math.floor(Number(interval?.end)))
+  })).filter((interval) => Number.isSafeInteger(interval.start) && Number.isSafeInteger(interval.end) && interval.end >= interval.start));
 }
 
 // node_modules/libp2r2p/private-channel/helpers/subscription-error.js
@@ -9060,6 +9633,33 @@ function subscriptionError(reason, relay) {
   error.operation = "private-channel.subscribe";
   if (typeof relay === "string") error.relay = relay;
   return error;
+}
+
+// node_modules/libp2r2p/private-channel/helpers/lookup-warning.js
+var LOOKUP_WARNING_INTERVAL_MS = 3e4;
+function createLookupWarningLogger({
+  intervalMs = LOOKUP_WARNING_INTERVAL_MS,
+  label = "private-messenger content-key lookup failed",
+  warn = (...args) => console.warn(...args),
+  now = Date.now
+} = {}) {
+  let warnedAt = null;
+  let suppressed = 0;
+  return (error, context = "") => {
+    const current = now();
+    if (warnedAt !== null && current - warnedAt < intervalMs) {
+      suppressed++;
+      return false;
+    }
+    const count = suppressed;
+    warnedAt = current;
+    suppressed = 0;
+    warn(
+      `${label}${context ? ` (${context})` : ""}${count ? ` [${count} repeated failures suppressed]` : ""}`,
+      error?.message ?? error
+    );
+    return true;
+  };
 }
 
 // node_modules/libp2r2p/private-channel/constants/index.js
@@ -9967,6 +10567,7 @@ var HEX_SECKEY = /^[0-9a-f]{64}$/i;
 var HEX_PUBKEY4 = /^[0-9a-f]{64}$/i;
 var encoder6 = new TextEncoder();
 var decoder5 = new TextDecoder();
+var warnLookupFailure = createLookupWarningLogger();
 var NIP44_V3_SCOPE = "";
 var sendToRelays = (event, relays) => relayPool.sendEvent(event, relays);
 var getEvents3 = (...args) => relayPool.getEvents(...args);
@@ -10024,7 +10625,16 @@ async function prepareRoutedMessage({ senderSigner, imkcSigner, privateChannelSi
   const useDoubleDh = typeof senderSigner.nip44EncryptDoubleDH === "function";
   const channelPubkey = await privateChannelSigner.getPublicKey();
   const channelReaderPubkey = privateChannelReaderPubkey || channelPubkey;
-  const receiverContentKeys = useDoubleDh ? await _getIykcProofs(receiverPubkeysWithoutContentKeys(receivers)) : {};
+  let receiverContentKeys = {};
+  if (useDoubleDh) {
+    const receiversWithoutContentKeys = receiverPubkeysWithoutContentKeys(receivers);
+    try {
+      receiverContentKeys = await _getIykcProofs(receiversWithoutContentKeys) || {};
+    } catch (error) {
+      warnLookupFailure(error, `recipients: ${receiversWithoutContentKeys.length}`);
+      receiverContentKeys = {};
+    }
+  }
   const preparedRows = await prepareEnvelopeRows({
     senderSigner,
     imkcSigner: useDoubleDh ? imkcSigner : null,
@@ -10277,13 +10887,14 @@ async function unwrapRecipientEnvelope({ payloadCiphertext, envelope, receiverSi
     if (envelope.iykcPubkey) {
       assertValidEnvelopeIykcProof(envelope);
     }
+    const ownContentPubkey = envelope.iykcPubkey || (senderPubkey && receiverPubkey && senderPubkey === receiverPubkey ? imkcPubkey : "");
     messageSeckey = base64ToText(await receiverSigner.nip44DecryptDoubleDH(
       senderPubkey,
       ROUTER_KIND,
       rowScope,
       envelope.ciphertext,
       imkcPubkey,
-      envelope.iykcPubkey || ""
+      ownContentPubkey
     ));
   } else {
     if (!receiverSigner?.nip44v3Decrypt) throw new ValidationError("RECEIVER_SIGNER_NIP44V3_DECRYPT_UNSUPPORTED");
@@ -10788,7 +11399,7 @@ async function fetch2({ signal, receiverSigner, iykcSigner, privateChannelSigner
     processOuterEvent.close();
   }
 }
-async function fetchHistory({ receiverSigner, privateChannelSigner = receiverSigner, _getEvents = getEvents3, _acquirePage, ...options }) {
+async function fetchHistory({ receiverSigner, privateChannelSigner = receiverSigner, _getEvents = getEvents3, _acquirePage, partial = false, resume = null, ...options }) {
   const authors = privateChannelPubkeyList(options);
   const filter = { kinds: [PRIVATE_BROADCAST_KIND], ...authors.length ? { authors } : {}, since: options.since, until: options.until };
   const processOuterEvent = createProcessor({ ...options, receiverSigner, privateChannelSigner, onError: (error) => {
@@ -10796,7 +11407,7 @@ async function fetchHistory({ receiverSigner, privateChannelSigner = receiverSig
     throw error;
   } });
   try {
-    return await readHistory({ filter, relays: options.relays, receiverPubkey: options.receiverPubkey, signal: options.signal, getEvents: _getEvents, processEvent: processOuterEvent, acquirePage: _acquirePage });
+    return await readHistory({ filter, relays: options.relays, receiverPubkey: options.receiverPubkey, signal: options.signal, getEvents: _getEvents, processEvent: processOuterEvent, acquirePage: _acquirePage, partial, resume });
   } finally {
     processOuterEvent.close();
   }
@@ -10863,6 +11474,13 @@ function nowSeconds3() {
 }
 function uniq3(values) {
   return [...new Set((values || []).filter(Boolean))];
+}
+function isRelayPoolCapacity(error) {
+  for (let current = error, depth = 0; current && depth < 3; current = current.cause, depth++) {
+    if (current.closeCode === 1013 || current.code === "RELAY_POOL_CAPACITY") return true;
+    if (/relay pool capacity/i.test(current.message || "")) return true;
+  }
+  return false;
 }
 function normalizeDeletionPubkey2(deletionPubkey) {
   if (deletionPubkey === void 0) return void 0;
@@ -11164,7 +11782,9 @@ function createPrivateMessageSession({ _setTimeout = setTimeout, _clearTimeout =
       notified: /* @__PURE__ */ new Map(),
       timer: null
     };
-    if (/^(auth-required:|restricted:|blocked:|invalid:|pow:)/.test(error.message || "") || error.name === "ValidationError" || error.code !== "RELAY_LIVE_BUFFER_FULL" && !previous) {
+    const permanent = /^(auth-required:|restricted:|blocked:|invalid:|pow:)/.test(error.message || "") || error.name === "ValidationError";
+    const retryable = error.code === "RELAY_LIVE_BUFFER_FULL" || isRelayPoolCapacity(error) || Boolean(previous);
+    if (permanent || !retryable) {
       cancelRelayRecovery(relay);
       notifyInterruption(relay, recovery).catch((error2) => reportSubscriptionError(entry.channels, error2));
       return;
@@ -11699,238 +12319,7 @@ async function broadcastNymEvent({
   return withDelivery({ event: wireEvent }, reports, deletion.deletionSeckey);
 }
 
-// node_modules/libp2r2p/network/index.js
-var RETRY_DELAYS = [5e3, 15e3, 3e4, 6e4];
-var CONNECTIVITY_PROBE_URLS = [
-  { url: "https://www.gstatic.com/generate_204" },
-  { url: "https://connectivitycheck.gstatic.com/generate_204" },
-  { url: "https://captive.apple.com/hotspot-detect.html" },
-  { method: "GET", url: "https://connectivity-check.ubuntu.com" }
-];
-var STRICT_CONNECTIVITY_PROBE_URLS = [
-  { url: "https://captive.apple.com/hotspot-detect.html", method: "GET", marker: "Success" },
-  { url: "https://1.1.1.1/cdn-cgi/trace", method: "GET", marker: "ip=" },
-  { url: "https://cloudflare.com/cdn-cgi/trace", method: "GET", marker: "ip=" }
-];
-var FIRST_PROBE_TIMEOUT_MS = 2500;
-var HEDGE_DELAY_MS = 1e3;
-var REMAINING_PROBE_TIMEOUT_MS = 4e3;
-var sharedChecks = /* @__PURE__ */ new Map();
-async function isOnline({ signal, strict = false } = {}) {
-  if (signal?.aborted) throw signal.reason;
-  if (globalThis.navigator?.onLine === false) return false;
-  if (signal) return hasInternetConnectivity(signal, strict);
-  const key = strict ? "strict" : "lenient";
-  if (!sharedChecks.has(key)) {
-    sharedChecks.set(key, hasInternetConnectivity(void 0, strict).finally(() => {
-      sharedChecks.delete(key);
-    }));
-  }
-  return sharedChecks.get(key);
-}
-async function hasInternetConnectivity(signal, strict) {
-  if (signal?.aborted) throw signal.reason;
-  const candidates = shuffle(strict ? STRICT_CONNECTIVITY_PROBE_URLS : CONNECTIVITY_PROBE_URLS);
-  const [first, ...rest] = candidates;
-  if (!first) return false;
-  const controller = new AbortController();
-  const onAbort = () => controller.abort(signal?.reason);
-  signal?.addEventListener("abort", onAbort, { once: true });
-  if (signal?.aborted) onAbort();
-  let hedgeTimer;
-  let onHedgeAbort;
-  try {
-    let startHedge;
-    const firstAttempt = ping(first, { strict, signal: controller.signal, timeout: FIRST_PROBE_TIMEOUT_MS });
-    const hedge = new Promise((resolve, reject) => {
-      startHedge = resolve;
-      hedgeTimer = setTimeout(resolve, HEDGE_DELAY_MS);
-      if (signal) {
-        onHedgeAbort = () => reject(signal.reason);
-        signal.addEventListener("abort", onHedgeAbort, { once: true });
-        if (signal.aborted) onHedgeAbort();
-      }
-    }).then(() => Promise.any(rest.map((candidate) => ping(candidate, { strict, signal: controller.signal, timeout: REMAINING_PROBE_TIMEOUT_MS }))));
-    firstAttempt.catch(() => startHedge());
-    try {
-      await Promise.any([firstAttempt, hedge]);
-      return true;
-    } catch {
-      if (signal?.aborted) throw signal.reason;
-      return false;
-    }
-  } finally {
-    clearTimeout(hedgeTimer);
-    if (onHedgeAbort) signal?.removeEventListener("abort", onHedgeAbort);
-    controller.abort();
-    signal?.removeEventListener("abort", onAbort);
-  }
-}
-function shuffle(list2) {
-  const copy = list2.slice();
-  for (let i = copy.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [copy[i], copy[j]] = [copy[j], copy[i]];
-  }
-  return copy;
-}
-async function ping(candidate, { strict = false, timeout, signal } = {}) {
-  if (signal?.aborted) throw signal.reason;
-  const controller = new AbortController();
-  let timer;
-  let onAbort;
-  const stopped = new Promise((_resolve, reject) => {
-    onAbort = () => {
-      controller.abort(signal.reason);
-      reject(signal.reason);
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-    timer = setTimeout(() => {
-      controller.abort();
-      reject(new Error("PING_TIMEOUT"));
-    }, timeout);
-    if (signal?.aborted) onAbort();
-  });
-  try {
-    const response = await Promise.race([
-      fetch(candidate.url, {
-        method: candidate.method ?? (strict ? "GET" : "HEAD"),
-        mode: strict ? "cors" : "no-cors",
-        cache: "no-store",
-        redirect: "follow",
-        signal: controller.signal
-      }),
-      stopped
-    ]);
-    if (!strict) return;
-    if (!response.ok) throw new Error("PING_STATUS");
-    if (!(await response.text()).includes(candidate.marker)) throw new Error("PING_BODY");
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener("abort", onAbort);
-  }
-}
-function createConnectivityMonitor({
-  check,
-  strict = false,
-  eventTarget = globalThis.window,
-  document = globalThis.document,
-  _setTimeout = globalThis.setTimeout,
-  _clearTimeout = globalThis.clearTimeout,
-  _random = Math.random,
-  reportError = (error) => console.error("Online listener failed", error)
-} = {}) {
-  if (check !== void 0 && typeof check !== "function") throw new ValidationError("INVALID_CONNECTIVITY_CHECK");
-  const runCheck = check ?? ((options) => isOnline({ ...options, strict }));
-  const listeners3 = /* @__PURE__ */ new Set();
-  const setTimer = (...args) => Reflect.apply(_setTimeout, globalThis, args);
-  const clearTimer = (...args) => Reflect.apply(_clearTimeout, globalThis, args);
-  let session;
-  function deliver(entry, current) {
-    if (entry.delivered || !listeners3.has(entry) || session !== current) return;
-    entry.delivered = true;
-    try {
-      Promise.resolve(entry.handler()).catch(reportError);
-    } catch (error) {
-      reportError(error);
-    }
-  }
-  function schedule(current) {
-    if (session !== current || !listeners3.size) return;
-    const delay = current.online ? 6e4 : RETRY_DELAYS[Math.min(current.retry++, RETRY_DELAYS.length - 1)];
-    current.timer = setTimer(() => {
-      current.timer = null;
-      return probe(current);
-    }, Math.round(delay * (0.8 + _random() * 0.4)));
-    current.timer?.unref?.();
-  }
-  async function probe(current) {
-    if (session !== current || current.pending) return;
-    if (current.timer != null) clearTimer(current.timer);
-    current.timer = null;
-    current.pending = true;
-    try {
-      const online = await runCheck({ signal: current.controller.signal });
-      if (session !== current) return;
-      current.online = online === true && globalThis.navigator?.onLine !== false;
-      if (current.online) {
-        current.retry = 0;
-        for (const entry of [...listeners3]) deliver(entry, current);
-      } else {
-        for (const entry of listeners3) entry.delivered = false;
-      }
-    } catch {
-      if (session !== current) return;
-      current.online = false;
-      for (const entry of listeners3) entry.delivered = false;
-    } finally {
-      current.pending = false;
-      schedule(current);
-    }
-  }
-  function start() {
-    const current = { online: false, retry: 0, timer: null, pending: false, controller: new AbortController() };
-    session = current;
-    current.wake = () => {
-      probe(current);
-    };
-    current.connectionChanged = () => {
-      current.online = false;
-      current.retry = 0;
-      for (const entry of listeners3) entry.delivered = false;
-      current.wake();
-    };
-    current.visible = () => {
-      if (document?.visibilityState !== "hidden") current.wake();
-    };
-    eventTarget?.addEventListener("online", current.connectionChanged);
-    eventTarget?.addEventListener("offline", current.connectionChanged);
-    eventTarget?.addEventListener("focus", current.wake);
-    document?.addEventListener("visibilitychange", current.visible);
-    queueMicrotask(current.wake);
-  }
-  function stop() {
-    const current = session;
-    session = null;
-    if (current.timer != null) clearTimer(current.timer);
-    current.controller.abort();
-    eventTarget?.removeEventListener("online", current.connectionChanged);
-    eventTarget?.removeEventListener("offline", current.connectionChanged);
-    eventTarget?.removeEventListener("focus", current.wake);
-    document?.removeEventListener("visibilitychange", current.visible);
-  }
-  function onOnline2(handler) {
-    if (typeof handler !== "function") throw new ValidationError("INVALID_ONLINE_HANDLER");
-    const entry = { handler, delivered: false };
-    listeners3.add(entry);
-    if (!session) start();
-    else {
-      const current = session;
-      queueMicrotask(() => {
-        probe(current);
-      });
-    }
-    return () => {
-      if (!listeners3.delete(entry)) return;
-      if (!listeners3.size) stop();
-    };
-  }
-  return { onOnline: onOnline2 };
-}
-var defaultMonitors = /* @__PURE__ */ new Map();
-function onOnline(handler, { strict = false } = {}) {
-  const key = strict ? "strict" : "lenient";
-  let monitor = defaultMonitors.get(key);
-  if (!monitor) {
-    monitor = createConnectivityMonitor({ strict });
-    defaultMonitors.set(key, monitor);
-  }
-  return monitor.onOnline(handler);
-}
-
 // node_modules/libp2r2p/private-messenger/helpers/send-routing.js
-var REJECTION_PREFIXES = /* @__PURE__ */ new Set(["blocked", "restricted", "auth-required", "pow", "rate-limited", "error"]);
-var TRANSPORT_CATEGORIES = /* @__PURE__ */ new Set(["connection", "transport", "timeout"]);
 var EXCLUSION_MS = 5 * 60 * 1e3;
 var normalized = (relay) => {
   try {
@@ -11939,12 +12328,6 @@ var normalized = (relay) => {
     return "";
   }
 };
-function isReplaceableRelayFailure(error) {
-  if (error?.name === "Nip42AuthenticationError") return false;
-  if (TRANSPORT_CATEGORIES.has(error?.category)) return true;
-  if (error?.category && error.category !== "relay") return false;
-  return REJECTION_PREFIXES.has(/^([a-z-]+):/.exec(error?.message || "")?.[1]);
-}
 function normalizeFallbackRelays(value = []) {
   if (!Array.isArray(value)) throw new ValidationError("INVALID_FALLBACK_RELAYS");
   return [...new Set(Array.from(value, normalizeRelayUrl))];
@@ -12024,6 +12407,7 @@ function createSendRelayRouting({ peer, peers = [peer], relaysByPubkey: relaysBy
         errors: reports.flatMap((report) => report.errors || [])
       }))
     });
+    const finished = (result2) => current() ? finish(result2) : { ...finish(result2), retryWhenAvailable: !signal?.aborted, retryWhenOnline: !signal?.aborted };
     let result = { success: false };
     while (batch ||= next()) {
       signal?.throwIfAborted();
@@ -12044,18 +12428,18 @@ function createSendRelayRouting({ peer, peers = [peer], relaysByPubkey: relaysBy
         const report = await settled;
         const failed = rejected(report);
         errors.push(...report?.errors || []);
-        if (!failed.length || errors.some((item) => !isReplaceableRelayFailure(item.reason))) return finish(result);
+        if (!failed.length || errors.some((item) => !isReplaceableRelayFailure(item.reason))) return finished(result);
         if (!next()) {
           exclusions.clear();
-          return finish(result);
+          return finished(result);
         }
-        if (!await online()) return { ...finish(result), retryWhenAvailable: !signal?.aborted, retryWhenOnline: current() };
+        if (!await online()) return { ...finish(result), retryWhenAvailable: !signal?.aborted, retryWhenOnline: !signal?.aborted };
         remember(failed);
       }
-      if (!current()) return { ...finish(result), retryWhenAvailable: !signal?.aborted, retryWhenOnline: false };
+      if (!current()) return finished(result);
       batch = null;
     }
-    return finish(result);
+    return finished(result);
   }
   return {
     relayToReceivers,
@@ -12063,6 +12447,41 @@ function createSendRelayRouting({ peer, peers = [peer], relaysByPubkey: relaysBy
     recoveryRelays: recoveryRelays.filter((relay) => !candidateSet.has(normalized(relay)) || !exclusions.has(normalized(relay))),
     _publish: (options) => (options.nymSigner ? publishNymEvent2 : publish2)({ ...options, _publish: send })
   };
+}
+
+// node_modules/libp2r2p/private-messenger/helpers/recovery-retry.js
+function recoveryRetryDelay(errors, delay) {
+  let retry = false;
+  let blocked = false;
+  let retryAt = 0;
+  const seen = /* @__PURE__ */ new Set();
+  function visit(error) {
+    if (!error || seen.has(error)) return;
+    seen.add(error);
+    if (error.code === "PRIVATE_CHANNEL_HISTORY_PAGE_LIMIT" || error.name === "ValidationError" || /^(auth-required:|restricted:|blocked:|invalid:|pow:)/.test(error.message || "")) blocked = true;
+    if (["transport", "timeout"].includes(error.category) || ["QuotaExceededError", "InvalidStateError", "UnknownError"].includes(error.name) || /^(rate-limited:|error:)/.test(error.message || "") || ["RELAY_LIVE_BUFFER_FULL", "RELAY_LIVE_NOT_READY"].includes(error.code)) retry = true;
+    if (Number.isFinite(error.retryAt)) retryAt = Math.max(retryAt, Math.min(Date.now() + 3e5, error.retryAt));
+    for (const child of error.errors || []) visit(child);
+    for (const entry of error.relays || []) {
+      if (["timeout", "cutoff", "closed"].includes(entry.status)) retry = true;
+      visit(entry.error);
+    }
+    visit(error.cause);
+  }
+  errors.forEach(visit);
+  return retry && !blocked ? Math.max(delay, retryAt - Date.now()) : null;
+}
+function isPermanentRecoveryError(error) {
+  const seen = /* @__PURE__ */ new Set();
+  const visit = (value) => {
+    if (!value || seen.has(value)) return false;
+    seen.add(value);
+    if (value.code === "PRIVATE_CHANNEL_HISTORY_PAGE_LIMIT" || value.name === "ValidationError" || /^(auth-required:|restricted:|blocked:|invalid:|pow:)/.test(value.message || "")) return true;
+    for (const child of value.errors || []) if (visit(child)) return true;
+    for (const entry of value.relays || []) if (visit(entry.error)) return true;
+    return visit(value.cause);
+  };
+  return visit(error);
 }
 
 // node_modules/libp2r2p/idb-queue/index.js
@@ -12642,13 +13061,13 @@ async function createQueue({
       const records = await recordsForState(tx, state);
       const removed = /* @__PURE__ */ new Set();
       for (const record of records) {
-        let matches = false;
+        let matches2 = false;
         try {
-          matches = Boolean(predicate(record.item));
+          matches2 = Boolean(predicate(record.item));
         } catch {
-          matches = true;
+          matches2 = true;
         }
-        if (!matches) continue;
+        if (!matches2) continue;
         removed.add(record.position);
         await deleteRecord(tx, record.position);
       }
@@ -13671,6 +14090,16 @@ var SEED_QUEUE_INDEXES = {
 };
 var encoder9 = new TextEncoder();
 var noContentKeys = async () => ({});
+var RECOVERY_RELAY_RETRY_LIMITS = Object.freeze({
+  partial: 3,
+  emptyEose: 6,
+  allFailed: 10
+});
+var RECOVERY_ONLINE_CACHE_MS = 5e3;
+var DEFAULT_PRIORITY_TAIL_SECONDS = 6 * 3600;
+var DEFAULT_PRIORITY_TTL_MS = 10 * 60 * 1e3;
+var DEFAULT_PRIORITY_HEDGE_DELAY_MS = 500;
+var DEFAULT_PRIORITY_HEDGE_RELAYS = 2;
 function textToBase642(text) {
   return bytesToBase64(encoder9.encode(text));
 }
@@ -13743,6 +14172,10 @@ var PrivateMessenger = class _PrivateMessenger {
     reloadGapDelayMs = DEFAULT_RELOAD_GAP_DELAY_MS,
     seederPresenceIntervalMs = DEFAULT_SEEDER_PRESENCE_INTERVAL_MS,
     seederOnlineSeconds = DEFAULT_SEEDER_ONLINE_SECONDS,
+    priorityTailSeconds = DEFAULT_PRIORITY_TAIL_SECONDS,
+    priorityTtlMs = DEFAULT_PRIORITY_TTL_MS,
+    priorityHedgeDelayMs = DEFAULT_PRIORITY_HEDGE_DELAY_MS,
+    priorityHedgeRelays = DEFAULT_PRIORITY_HEDGE_RELAYS,
     maxDynamicRecoverySeeders = DEFAULT_MAX_DYNAMIC_RECOVERY_SEEDERS,
     messageQueueMaxBytes = DEFAULT_MESSAGE_QUEUE_MAX_BYTES,
     seedQueueMaxBytes = DEFAULT_SEED_QUEUE_MAX_BYTES,
@@ -13777,6 +14210,11 @@ var PrivateMessenger = class _PrivateMessenger {
     this.reloadGapDelayMs = reloadGapDelayMs;
     this.seederPresenceIntervalMs = seederPresenceIntervalMs;
     this.seederOnlineSeconds = seederOnlineSeconds;
+    this.priorityTailSeconds = Number.isFinite(priorityTailSeconds) && priorityTailSeconds >= 0 ? Math.floor(priorityTailSeconds) : DEFAULT_PRIORITY_TAIL_SECONDS;
+    this.priorityTtlMs = Number.isFinite(priorityTtlMs) && priorityTtlMs > 0 ? Math.floor(priorityTtlMs) : DEFAULT_PRIORITY_TTL_MS;
+    this.priorityHedgeDelayMs = Number.isFinite(priorityHedgeDelayMs) && priorityHedgeDelayMs >= 0 ? Math.floor(priorityHedgeDelayMs) : DEFAULT_PRIORITY_HEDGE_DELAY_MS;
+    const hedgeRelays = Math.floor(Number(priorityHedgeRelays));
+    this.priorityHedgeRelays = Number.isSafeInteger(hedgeRelays) && hedgeRelays >= 1 ? Math.min(hedgeRelays, 3) : DEFAULT_PRIORITY_HEDGE_RELAYS;
     this.maxDynamicRecoverySeeders = maxDynamicRecoverySeeders;
     this.messageQueueMaxBytes = messageQueueMaxBytes;
     this.seedQueueMaxBytes = seedQueueMaxBytes;
@@ -13827,6 +14265,9 @@ var PrivateMessenger = class _PrivateMessenger {
     this.recoveries = /* @__PURE__ */ new Map();
     this.recoveryAdmission = createAbortableSemaphore(2);
     this.recoveryControllers = /* @__PURE__ */ new Set();
+    this.recoveryRanges = /* @__PURE__ */ new Map();
+    this.recoveryPriority = /* @__PURE__ */ new Map();
+    this.recoveryOnline = { at: 0, value: true };
     this.resumeWork = null;
     this.capacityTimer = null;
     this.capacityCheck = null;
@@ -14198,6 +14639,7 @@ var PrivateMessenger = class _PrivateMessenger {
     }
     if (removedPubkeys.length) {
       await this.stampChannelActivity(removedPubkeys);
+      for (const pubkey of removedPubkeys) this.dropRecoveryState(pubkey);
     }
     const storageSnapshot = await activatePrivateMessengerStorage({
       userPubkey: this.userPubkey,
@@ -14671,7 +15113,307 @@ var PrivateMessenger = class _PrivateMessenger {
     if (work?.timer != null) this._clearTimeout(work.timer);
     this.liveRecoveryTimers.delete(pubkey);
   }
+  async checkRecoveryOnline() {
+    const now = Date.now();
+    if (now - this.recoveryOnline.at < RECOVERY_ONLINE_CACHE_MS) return this.recoveryOnline.value;
+    let value = true;
+    try {
+      if (globalThis.navigator?.onLine === false) value = false;
+      else if (this._isOnline !== isOnline || typeof globalThis.document !== "undefined") {
+        value = await this._isOnline() !== false;
+      }
+    } catch {
+      value = false;
+    }
+    this.recoveryOnline = { at: Date.now(), value };
+    return value;
+  }
+  recoveryRangeKey(channelPubkey, range) {
+    return `${channelPubkey}:${range.start}:${range.end}`;
+  }
+  recoveryRangeRecord(channelPubkey, range) {
+    const key = this.recoveryRangeKey(channelPubkey, range);
+    let record = this.recoveryRanges.get(key);
+    if (!record) {
+      record = {
+        key,
+        channelPubkey,
+        start: range.start,
+        end: range.end,
+        covered: [],
+        claimed: [],
+        oldestCreatedAt: null,
+        relays: /* @__PURE__ */ new Map(),
+        tier: "",
+        everEose: false,
+        everEoseWithEvents: false,
+        attempts: 0,
+        lastErrors: []
+      };
+      this.recoveryRanges.set(key, record);
+    }
+    return record;
+  }
+  reconcileRecoveryRelays(record, relays) {
+    const current = new Set(relays);
+    for (const relay of [...record.relays.keys()]) {
+      if (!current.has(relay)) record.relays.delete(relay);
+    }
+    for (const relay of current) {
+      if (record.relays.has(relay)) continue;
+      record.relays.set(relay, {
+        pending: [{ start: record.start, end: record.end }],
+        covered: [],
+        attempts: 0,
+        dead: false,
+        eose: false,
+        events: 0,
+        error: null,
+        consecutiveFailures: 0,
+        latencyMs: null,
+        lastEoseAt: 0,
+        lastErrorAt: 0
+      });
+    }
+  }
+  orderedRecoveryRelays(record) {
+    return [...record.relays.entries()].filter(([, state]) => !state.dead && !state.eose && state.pending?.length).sort((a, b) => {
+      const failures = (a[1].consecutiveFailures || 0) - (b[1].consecutiveFailures || 0);
+      if (failures) return failures;
+      const latency = (a[1].latencyMs ?? Infinity) - (b[1].latencyMs ?? Infinity);
+      if (latency) return latency;
+      return (b[1].lastEoseAt || 0) - (a[1].lastEoseAt || 0);
+    });
+  }
+  recoveryRelayPlan(record) {
+    const plan = {};
+    const ordered = this.orderedRecoveryRelays(record);
+    for (const [relay, state] of ordered) {
+      plan[relay] = state.pending;
+    }
+    return ordered.length ? plan : null;
+  }
+  hasActiveRecoveryRelays(channelPubkey) {
+    for (const record of this.recoveryRanges.values()) {
+      if (record.channelPubkey !== channelPubkey) continue;
+      if (this.recoveryRecordActive(record)) return true;
+    }
+    return false;
+  }
+  recoveryRecordActive(record) {
+    for (const state of record.relays.values()) {
+      if (!state.dead && !state.eose && state.pending?.length) return true;
+    }
+    return false;
+  }
+  hasPendingRecovery(channelPubkey) {
+    return (this.readState().channels[channelPubkey]?.offlineRanges || []).length > 0;
+  }
+  dropRecoveryRanges(channelPubkey) {
+    for (const [key, record] of this.recoveryRanges) {
+      if (record.channelPubkey === channelPubkey) this.recoveryRanges.delete(key);
+    }
+  }
+  pruneRecoveryRanges(channelPubkey, ranges) {
+    const keep = new Set((ranges || []).map((range) => this.recoveryRangeKey(channelPubkey, range)));
+    for (const [key, record] of this.recoveryRanges) {
+      if (record.channelPubkey === channelPubkey && !keep.has(key)) this.recoveryRanges.delete(key);
+    }
+  }
+  dropRecoveryState(channelPubkey) {
+    this.dropRecoveryRanges(channelPubkey);
+    this.recoveryPriority.delete(channelPubkey);
+  }
+  recoveryPriorities(channelPubkey) {
+    const entries = this.recoveryPriority.get(channelPubkey) || [];
+    if (!entries.length) return [];
+    const now = Date.now();
+    const active = entries.filter((entry) => entry.expiresAt > now);
+    if (active.length !== entries.length) {
+      if (active.length) this.recoveryPriority.set(channelPubkey, active);
+      else this.recoveryPriority.delete(channelPubkey);
+    }
+    return active;
+  }
+  async prioritizeRange(channelPubkey, { since, until, type = "unread-page", ttlMs } = {}) {
+    if (typeof channelPubkey !== "string" || !/^[0-9a-f]{64}$/i.test(channelPubkey)) throw new ValidationError("INVALID_CHANNEL_PUBKEY");
+    if (type !== "unread-page" && type !== "tail") throw new ValidationError("INVALID_PRIORITY_TYPE");
+    if (since !== void 0 && !Number.isSafeInteger(since)) throw new ValidationError("INVALID_PRIORITY_RANGE");
+    if (until !== void 0 && !Number.isSafeInteger(until)) throw new ValidationError("INVALID_PRIORITY_RANGE");
+    if (type === "unread-page" && since === void 0) throw new ValidationError("PRIORITY_SINCE_REQUIRED");
+    const now = nowSeconds5();
+    const ranges = (this.readState().channels[channelPubkey]?.offlineRanges || []).slice();
+    if (!ranges.length) return false;
+    let start = since;
+    let end = until;
+    if (type === "unread-page") {
+      const range = ranges.filter((candidate) => candidate.end >= start).sort((a, b) => a.start - b.start)[0];
+      if (!range) return false;
+      start = Math.max(start, range.start);
+      if (end === void 0) end = Math.min(range.end, now);
+    } else {
+      const range = ranges.sort((a, b) => b.end - a.end)[0];
+      if (end === void 0) end = Math.min(range.end, now);
+      if (start === void 0) start = Math.max(range.start, end - this.priorityTailSeconds);
+    }
+    const recoverySeconds = this.offlineRecoverySecondsFor(channelPubkey);
+    if (recoverySeconds) {
+      start = Math.max(start, now - recoverySeconds);
+      end = Math.min(end, now);
+    }
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end < start) return false;
+    const ttl = Number.isSafeInteger(ttlMs) && ttlMs > 0 ? ttlMs : this.priorityTtlMs;
+    const entries = this.recoveryPriority.get(channelPubkey) || [];
+    const createdAt = Date.now();
+    if (!entries.some((entry) => entry.start === start && entry.end === end && entry.type === type)) {
+      entries.push({ start, end, type, createdAt, expiresAt: createdAt + ttl });
+      this.recoveryPriority.set(channelPubkey, entries);
+    }
+    return true;
+  }
+  updateRecoveryRecord(record, history, { completeRelays = new Set((history.relays || []).map((entry) => entry.relay)) } = {}) {
+    record.covered = mergeRanges([
+      ...record.covered,
+      ...(history.relays || []).flatMap((entry) => entry.covered || [])
+    ]);
+    if (history.oldestCreatedAt != null) {
+      record.oldestCreatedAt = record.oldestCreatedAt == null ? history.oldestCreatedAt : Math.min(record.oldestCreatedAt, history.oldestCreatedAt);
+    }
+    const byRelay = new Map((history.relays || []).map((entry) => [entry.relay, entry]));
+    for (const [relay, state] of record.relays) {
+      const entry = byRelay.get(relay);
+      if (!entry) continue;
+      const relayErrors = [...entry.errors || []];
+      if (entry.error) relayErrors.push(entry.error);
+      state.error = relayErrors[0] || null;
+      const done = entry.status === "eose" && !entry.pending?.length && completeRelays.has(relay);
+      state.covered = mergeRanges([...state.covered || [], ...entry.covered || []]);
+      state.eose = done;
+      state.pending = done ? [] : subtractRanges({ start: record.start, end: record.end }, mergeRanges([...state.covered, ...record.claimed]));
+      state.events += entry.events || 0;
+      if (Number.isFinite(entry.elapsedMs)) {
+        state.latencyMs = state.latencyMs == null ? entry.elapsedMs : Math.round(state.latencyMs * 0.7 + entry.elapsedMs * 0.3);
+      }
+      if (done) {
+        state.attempts = 0;
+        state.consecutiveFailures = 0;
+        state.lastEoseAt = nowSeconds5();
+      } else if (entry.status === "eose") {
+        state.consecutiveFailures = 0;
+        state.lastEoseAt = nowSeconds5();
+      } else {
+        state.consecutiveFailures = (state.consecutiveFailures || 0) + 1;
+        state.lastErrorAt = nowSeconds5();
+      }
+      if (entry.status === "eose") {
+        record.everEose = true;
+        if (state.events > 0) record.everEoseWithEvents = true;
+      }
+    }
+    record.tier = record.everEoseWithEvents ? "partial" : record.everEose ? "emptyEose" : "allFailed";
+    record.lastErrors = (history.relays || []).flatMap((entry) => [...entry.errors || [], ...entry.error ? [entry.error] : []]);
+  }
+  applyRecoveryCoverage(record, ranges) {
+    if (!ranges?.length) return;
+    record.claimed = mergeRanges([...record.claimed, ...ranges]);
+    record.covered = mergeRanges([...record.covered, ...ranges]);
+    for (const state of record.relays.values()) {
+      if (state.eose) continue;
+      state.pending = subtractRanges({ start: record.start, end: record.end }, mergeRanges([...state.covered, ...record.claimed]));
+    }
+  }
+  activeRecoverySeeders(channelPubkey) {
+    if (!this.offlineRecoverySecondsFor(channelPubkey)) return [];
+    const channel = this.channels.get(channelPubkey);
+    if (!channel?.signer) return [];
+    const activity = this.readState().channels[channelPubkey]?.seederActivity || {};
+    const cutoff = nowSeconds5() - this.seederOnlineSeconds;
+    const candidates = /* @__PURE__ */ new Set([...channel.seeders || [], ...Object.keys(activity)]);
+    return [...candidates].filter((seeder) => {
+      if (!seeder || seeder === this.userPubkey) return false;
+      const entry = activity[seeder];
+      const recent = Math.max(entry?.announcedAt || 0, entry?.lastActiveAt || 0);
+      return recent >= cutoff;
+    });
+  }
+  prunePriorityEntries(channelPubkey) {
+    const entries = this.recoveryPriorities(channelPubkey);
+    if (!entries.length) return;
+    const records = [...this.recoveryRanges.values()].filter((record) => record.channelPubkey === channelPubkey);
+    const next = entries.filter((entry) => {
+      let intersects = false;
+      for (const record of records) {
+        const parts = intersectRanges(
+          [{ start: entry.start, end: entry.end }],
+          [{ start: record.start, end: record.end }]
+        );
+        if (!parts.length) continue;
+        intersects = true;
+        if (subtractRanges(parts[0], record.covered).length) return true;
+      }
+      return !intersects;
+    });
+    if (next.length) this.recoveryPriority.set(channelPubkey, next);
+    else this.recoveryPriority.delete(channelPubkey);
+  }
+  applyRecoveryRetryBudget(record) {
+    const limit = RECOVERY_RELAY_RETRY_LIMITS[record.tier] ?? RECOVERY_RELAY_RETRY_LIMITS.allFailed;
+    for (const state of record.relays.values()) {
+      if (state.eose || state.dead || !state.pending?.length) continue;
+      state.attempts++;
+      if (state.attempts >= limit || isPermanentRecoveryError(state.error)) state.dead = true;
+    }
+    record.attempts++;
+  }
+  recoveryIncompleteError(record, history, range) {
+    const errors = [];
+    for (const entry of history.relays || []) {
+      for (const reason of entry.errors || []) errors.push({ relay: entry.relay, reason });
+      if (entry.error) errors.push({ relay: entry.relay, reason: entry.error });
+    }
+    const error = incompleteFetchError({
+      errors,
+      report: (history.relays || []).map((entry) => ({
+        relay: entry.relay,
+        status: entry.status,
+        ...entry.error ? { error: entry.error } : {}
+      })),
+      receivedEventCount: history.receivedEventCount || 0,
+      elapsedMs: history.elapsedMs || 0,
+      request: {
+        relays: [...record.relays.keys()],
+        channelPubkeys: [record.channelPubkey],
+        receiverPubkey: this.userPubkey,
+        since: range.start,
+        until: range.end,
+        limit: 16,
+        timeoutMs: 5e3
+      }
+    });
+    error.operation = "private-channel.fetchHistory";
+    return error;
+  }
+  isPartialRecoveryHistory(history) {
+    return Boolean(history) && !Array.isArray(history) && Array.isArray(history.relays) && history.pendingByRelay !== void 0 && typeof history.anyEose === "boolean";
+  }
+  async finalizeRecoveryRange({ channelPubkey, range, record }) {
+    if (!await this.checkRecoveryOnline()) return { complete: false, failures: [], offline: true };
+    const uncovered = subtractRanges({ start: range.start, end: range.end }, record.covered);
+    const oldest = record.oldestCreatedAt;
+    const leftEdge = oldest == null ? [{ start: range.start, end: range.end }] : oldest > range.start ? [{ start: range.start, end: Math.min(oldest, range.end) }] : [];
+    const seedRanges = mergeRanges([...uncovered, ...leftEdge]);
+    const failures = [];
+    for (const seedRange of seedRanges) {
+      const attempt = await this.#askSeedersForMissingRangeAttempt(channelPubkey, seedRange.start, seedRange.end);
+      failures.push(...attempt.failures.map((failure) => failure.error));
+    }
+    record.lastErrors = failures;
+    return { complete: failures.length === 0, failures };
+  }
   scheduleLiveRecovery(pubkey) {
+    return this.scheduleOfflineRecovery(pubkey);
+  }
+  scheduleOfflineRecovery(pubkey, { startDelayMs = 0 } = {}) {
     const current = this.liveRecoveryTimers.get(pubkey);
     if (current) {
       current.again = true;
@@ -14696,7 +15438,11 @@ var PrivateMessenger = class _PrivateMessenger {
         }
         if (!isCurrent()) return;
         const pending = this.readState().channels[pubkey]?.offlineRanges?.length;
-        const retry = pending ? recoveryRetryDelay(errors, Math.min(3e4, work.delay * (0.8 + Math.random() * 0.4))) : null;
+        let retry = null;
+        if (pending) {
+          retry = recoveryRetryDelay(errors, Math.min(3e4, work.delay * (0.8 + Math.random() * 0.4)));
+          if (retry === null && this.hasActiveRecoveryRelays(pubkey)) retry = Math.min(3e4, work.delay);
+        }
         if (work.again || retry !== null) {
           schedule(work.again ? 0 : retry);
           work.delay = Math.min(3e4, work.delay * 2);
@@ -14704,7 +15450,7 @@ var PrivateMessenger = class _PrivateMessenger {
       }, delay);
       work.timer?.unref?.();
     };
-    schedule(0);
+    schedule(startDelayMs);
   }
   recordInterruption(channels, at = nowSeconds5()) {
     const state = this.readState();
@@ -14736,6 +15482,7 @@ var PrivateMessenger = class _PrivateMessenger {
     const pubkeys = channels ? uniq4(Array.isArray(channels) ? channels : [channels]) : [...this.desiredChannels];
     for (const extension of this.extensions) extension.unwatch?.(pubkeys);
     for (const pubkey of pubkeys) this.desiredChannels.delete(pubkey);
+    for (const pubkey of pubkeys) this.dropRecoveryState(pubkey);
     this.recordInterruption(pubkeys);
     for (const controller of this.recoveryControllers) {
       if (pubkeys.includes(controller.channelPubkey)) controller.abort();
@@ -14770,6 +15517,9 @@ var PrivateMessenger = class _PrivateMessenger {
       if (this.pauseReasons.size || this.closePromise) return;
       await this.reconcilePresencePublishers();
       await this.recoverOfflineRanges(channels);
+      for (const pubkey of channels) {
+        if (this.hasPendingRecovery(pubkey)) this.scheduleOfflineRecovery(pubkey, { startDelayMs: 1e3 });
+      }
       for (const extension of this.extensions) await extension.resume?.();
     })();
     this.resumeWork = work;
@@ -14836,6 +15586,9 @@ var PrivateMessenger = class _PrivateMessenger {
     }
     await this.watch(channelPubkeys, { scheduleReloadGap: false });
     await this.recoverOfflineRanges(channelPubkeys);
+    for (const pubkey of channelPubkeys) {
+      if (this.hasPendingRecovery(pubkey)) this.scheduleOfflineRecovery(pubkey, { startDelayMs: 1e3 });
+    }
   }
   async handleAsk(channelPubkey, message) {
     if (message.provenance === "hearsay") return this.enqueueRumor("message", channelPubkey, message);
@@ -15394,6 +16147,9 @@ var PrivateMessenger = class _PrivateMessenger {
       }
       this.writeState(state);
       await this.flushStateWrites();
+      for (const channel of channels) {
+        if (!this.offlineRecoverySecondsFor(channel)) this.dropRecoveryState(channel.pubkey);
+      }
       for (const channel of channels) await this.pruneStoredSeeds(channel.pubkey);
     });
   }
@@ -15434,6 +16190,9 @@ var PrivateMessenger = class _PrivateMessenger {
       } catch (err) {
         this.onError?.(err);
       }
+      if (!this.closePromise && !this.pauseReasons.size && this.desiredChannels.has(pubkey) && this.hasPendingRecovery(pubkey)) {
+        this.scheduleOfflineRecovery(pubkey, { startDelayMs: 1e3 });
+      }
     }, this.reloadGapDelayMs);
     this.reloadGapTimers.set(pubkey, { timer, token, revision });
   }
@@ -15464,14 +16223,14 @@ var PrivateMessenger = class _PrivateMessenger {
     const { asks } = await this.#askSeedersForMissingRangeAttempt(channelPubkey, since, until);
     return asks;
   }
-  async #askSeedersForMissingRangeAttempt(channelPubkey, since, until) {
+  async #askSeedersForMissingRangeAttempt(channelPubkey, since, until, { seeders } = {}) {
     if (!this.offlineRecoverySecondsFor(channelPubkey)) return { asks: [], failures: [] };
     if (!this.channels.get(channelPubkey)?.signer) return { asks: [], failures: [] };
-    const seeders = this.recoverySeeders(channelPubkey);
-    if (!seeders.length || until < since) return { asks: [], failures: [] };
+    const candidates = seeders ?? this.recoverySeeders(channelPubkey);
+    if (!candidates.length || until < since) return { asks: [], failures: [] };
     const asks = [];
     const failures = [];
-    for (const seeder of seeders) {
+    for (const seeder of candidates) {
       try {
         const ask2 = await this.ask({
           channelPubkey,
@@ -15610,22 +16369,175 @@ var PrivateMessenger = class _PrivateMessenger {
     }
     return failures;
   }
+  recoveryFetchOptions({ channelPubkey, channel, relays, since, until, signal, partial = false, resume = null }) {
+    return {
+      _acquirePage: (pageSignal) => this.recoveryAdmission.acquire(pageSignal),
+      signal,
+      receivedChunkScope: this.storageLeaseId,
+      receiverSigner: this.userSigner,
+      iykcSigner: this.contentKeySigner,
+      privateChannelSigner: channel.signer,
+      privateChannelReaderSigner: channel.readerSigner,
+      privateChannelReaderPubkey: channel.readerPubkey,
+      privateChannelPubkeys: [channelPubkey],
+      receiverPubkey: this.userPubkey,
+      relays,
+      since: Math.max(0, since),
+      until,
+      partial,
+      resume,
+      mode: channel.mode,
+      modeByPubkey: { [channelPubkey]: channel.mode },
+      receivedChunkTtlMs: this.receivedChunkTtlMsFor(channel),
+      receivedChunkIndexedDB: this._indexedDB,
+      onEvent: (event, outer, meta) => this.receive(channelPubkey, () => this.enqueueRumor(eventType(event), channelPubkey, { event, outer, meta, payload: parseEventContent2(event) }), { event, outer }),
+      onNymEvent: (event, outer, meta) => this.receive(channelPubkey, () => this.enqueueRumor("nym", channelPubkey, { event, outer, meta, payload: parseEventContent2(event) }), { event, outer }),
+      onSeedEvent: (seed) => this.receive(channelPubkey, () => this.enqueueSeed(channelPubkey, seed), seed),
+      onContentKeyUsage: (usage) => this.handleContentKeyUsage(channelPubkey, usage),
+      onError: (err) => {
+        throw err;
+      }
+    };
+  }
+  async hedgedPriorityFetch({ channelPubkey, channel, candidates, since, until }) {
+    const launched = [];
+    let hedgeTimer = null;
+    let secondStarted = false;
+    const launch = (candidate) => {
+      const controller = new AbortController();
+      const promise = this._privateChannel.fetchHistory(this.recoveryFetchOptions({
+        channelPubkey,
+        channel,
+        relays: [candidate.relay],
+        since,
+        until,
+        signal: controller.signal,
+        partial: true,
+        resume: { [candidate.relay]: candidate.pending }
+      })).then(
+        (history) => ({ ok: true, relay: candidate.relay, controller, history }),
+        (error) => ({ ok: false, relay: candidate.relay, controller, error })
+      );
+      promise.catch(() => {
+      });
+      launched.push({ promise, controller });
+      return promise;
+    };
+    try {
+      const first = launch(candidates[0]);
+      const hedge = candidates.length > 1 ? new Promise((resolve) => {
+        hedgeTimer = this._setTimeout(() => {
+          secondStarted = true;
+          resolve(launch(candidates[1]));
+        }, this.priorityHedgeDelayMs);
+      }) : null;
+      let settled = hedge ? await Promise.race([first, hedge]) : await first;
+      if (!settled.ok) {
+        if (secondStarted && launched.length > 1) settled = await launched[launched.length - 1].promise;
+        else if (candidates.length > 1) settled = await launch(candidates[1]);
+      }
+      if (!settled.ok) return null;
+      for (const entry of launched) {
+        if (entry.controller === settled.controller) continue;
+        try {
+          entry.controller.abort();
+        } catch {
+        }
+      }
+      return settled;
+    } finally {
+      if (hedgeTimer) this._clearTimeout(hedgeTimer);
+    }
+  }
+  async askPrioritySeeders(channelPubkey, intervals) {
+    if (!intervals.length) return [];
+    if (!await this.checkRecoveryOnline()) return [];
+    const seeders = this.activeRecoverySeeders(channelPubkey);
+    if (!seeders.length) return [];
+    const failures = [];
+    const claimed = [];
+    for (const interval of mergeRanges(intervals)) {
+      const attempt = await this.#askSeedersForMissingRangeAttempt(channelPubkey, interval.start, interval.end, { seeders });
+      failures.push(...attempt.failures.map((failure) => failure.error));
+      if (!attempt.failures.length) claimed.push(interval);
+    }
+    if (claimed.length) {
+      for (const record of this.recoveryRanges.values()) {
+        if (record.channelPubkey !== channelPubkey) continue;
+        const applied = intersectRanges(claimed, [{ start: record.start, end: record.end }]);
+        if (applied.length) this.applyRecoveryCoverage(record, applied);
+      }
+    }
+    return failures;
+  }
+  async runPriorityLane(channelPubkey, channel, ranges) {
+    const priorities = this.recoveryPriorities(channelPubkey);
+    if (!priorities.length) return;
+    const fetchRelays = await this.resolveWatchRelays(channel);
+    for (const range of ranges) {
+      const record = this.recoveryRangeRecord(channelPubkey, range);
+      this.reconcileRecoveryRelays(record, fetchRelays);
+      const priorityIntervals = intersectRanges(
+        priorities.map((entry) => ({ start: entry.start, end: entry.end })),
+        [{ start: range.start, end: range.end }]
+      );
+      if (!priorityIntervals.length) continue;
+      const pending = subtractRanges({ start: range.start, end: range.end }, record.covered);
+      const wanted = intersectRanges(priorityIntervals, pending);
+      if (!wanted.length) continue;
+      const candidates = this.orderedRecoveryRelays(record).map(([relay, state]) => ({ relay, pending: intersectRanges(state.pending, wanted) })).filter((candidate) => candidate.pending.length).slice(0, this.priorityHedgeRelays);
+      if (candidates.length) {
+        const winner = await this.hedgedPriorityFetch({
+          channelPubkey,
+          channel,
+          candidates,
+          since: wanted[0].start,
+          until: wanted[wanted.length - 1].end
+        });
+        if (winner?.history) {
+          if (this.isPartialRecoveryHistory(winner.history)) this.updateRecoveryRecord(record, winner.history, { completeRelays: /* @__PURE__ */ new Set() });
+          else this.applyRecoveryCoverage(record, wanted);
+        }
+      }
+      const uncovered = intersectRanges(wanted, subtractRanges({ start: range.start, end: range.end }, record.covered));
+      if (uncovered.length) await this.askPrioritySeeders(channelPubkey, uncovered);
+    }
+    this.prunePriorityEntries(channelPubkey);
+  }
   async recoverChannelRanges(channels) {
     const failures = [];
     const state = this.readState();
     const now = nowSeconds5();
+    const online = await this.checkRecoveryOnline();
     for (const pubkey of uniq4(channels)) {
       const channel = this.channels.get(pubkey);
       const current = state.channels[pubkey];
-      if (!channel || !current?.offlineRanges?.length) continue;
+      if (!channel || !current?.offlineRanges?.length) {
+        this.dropRecoveryState(pubkey);
+        continue;
+      }
       const recoverySeconds = this.offlineRecoverySecondsFor(channel);
-      if (!recoverySeconds) continue;
+      if (!recoverySeconds) {
+        this.dropRecoveryState(pubkey);
+        continue;
+      }
       const minStart = now - recoverySeconds;
       const processedRanges = new Set(current.offlineRanges.map((range) => `${range.start}:${range.end}`));
+      if (online) {
+        try {
+          await this.runPriorityLane(pubkey, channel, current.offlineRanges);
+        } catch (error) {
+          this.onError?.(error);
+        }
+      }
       const remaining = [];
       let recoveredThrough = current.recoveredThrough || 0;
       for (const range of current.offlineRanges) {
         if (range.end < minStart) continue;
+        if (!online) {
+          remaining.push(range);
+          continue;
+        }
         const watchRevision = this.watchRevisionByChannel.get(pubkey) || 0;
         const controller = new AbortController();
         controller.channelPubkey = pubkey;
@@ -15634,39 +16546,60 @@ var PrivateMessenger = class _PrivateMessenger {
           if (this.pauseReasons.size || this.closePromise || !this.desiredChannels.has(pubkey)) throw new Error("PRIVATE_MESSENGER_PAUSED");
           const fetchRelays = await this.resolveWatchRelays(channel);
           controller.signal.throwIfAborted();
-          const history = await this._privateChannel.fetchHistory({
-            _acquirePage: (signal) => this.recoveryAdmission.acquire(signal),
-            signal: controller.signal,
-            receivedChunkScope: this.storageLeaseId,
-            receiverSigner: this.userSigner,
-            iykcSigner: this.contentKeySigner,
-            privateChannelSigner: channel.signer,
-            privateChannelReaderSigner: channel.readerSigner,
-            privateChannelReaderPubkey: channel.readerPubkey,
-            privateChannelPubkeys: [pubkey],
-            receiverPubkey: this.userPubkey,
-            relays: fetchRelays,
-            since: Math.max(0, range.start),
-            until: range.end,
-            mode: channel.mode,
-            modeByPubkey: { [pubkey]: channel.mode },
-            receivedChunkTtlMs: this.receivedChunkTtlMsFor(channel),
-            receivedChunkIndexedDB: this._indexedDB,
-            onEvent: (event, outer, meta) => this.receive(pubkey, () => this.enqueueRumor(eventType(event), pubkey, { event, outer, meta, payload: parseEventContent2(event) }), { event, outer }),
-            onNymEvent: (event, outer, meta) => this.receive(pubkey, () => this.enqueueRumor("nym", pubkey, { event, outer, meta, payload: parseEventContent2(event) }), { event, outer }),
-            onSeedEvent: (seed) => this.receive(pubkey, () => this.enqueueSeed(pubkey, seed), seed),
-            onContentKeyUsage: (usage) => this.handleContentKeyUsage(pubkey, usage),
-            onError: (err) => {
-              throw err;
+          const record = this.recoveryRangeRecord(pubkey, range);
+          this.reconcileRecoveryRelays(record, fetchRelays);
+          const plan = this.recoveryRelayPlan(record);
+          if (plan) {
+            const history = await this._privateChannel.fetchHistory(this.recoveryFetchOptions({
+              channelPubkey: pubkey,
+              channel,
+              relays: Object.keys(plan),
+              since: range.start,
+              until: range.end,
+              signal: controller.signal,
+              partial: true,
+              resume: plan
+            }));
+            controller.signal.throwIfAborted();
+            if (this.isPartialRecoveryHistory(history)) {
+              this.updateRecoveryRecord(record, history);
+              this.applyRecoveryRetryBudget(record);
+              if ((history.relays || []).some((entry) => entry.status !== "eose" || entry.pending?.length)) {
+                const error = this.recoveryIncompleteError(record, history, range);
+                this.onError?.(error);
+                failures.push(error);
+              }
+            } else {
+              record.covered = mergeRanges([...record.covered, { start: range.start, end: range.end }]);
+              if (history?.oldestCreatedAt != null) {
+                record.oldestCreatedAt = record.oldestCreatedAt == null ? history.oldestCreatedAt : Math.min(record.oldestCreatedAt, history.oldestCreatedAt);
+              }
+              for (const state2 of record.relays.values()) {
+                state2.eose = true;
+                state2.pending = [];
+              }
+              record.tier = "partial";
+              record.lastErrors = [];
             }
-          });
-          controller.signal.throwIfAborted();
-          const attempt = await this.#askSeedersForRelayLeftEdgeAttempt(pubkey, range, history.oldestCreatedAt);
+          }
           const lifecycleChanged = controller.signal.aborted || this.closePromise || !this.channels.has(pubkey) || !this.stopByChannel.has(pubkey) || (this.watchRevisionByChannel.get(pubkey) || 0) !== watchRevision;
-          failures.push(...attempt.failures.map((failure) => failure.error));
-          if (lifecycleChanged || attempt.failures.length) remaining.push(range);
-          else recoveredThrough = Math.max(recoveredThrough, range.end);
+          if (lifecycleChanged) {
+            remaining.push(range);
+            continue;
+          }
+          if (this.recoveryRecordActive(record)) {
+            remaining.push(range);
+            continue;
+          }
+          const result = await this.finalizeRecoveryRange({ channelPubkey: pubkey, range, record });
+          failures.push(...result.failures);
+          if (result.complete) recoveredThrough = Math.max(recoveredThrough, range.end);
+          else remaining.push(range);
         } catch (err) {
+          const record = this.recoveryRanges.get(this.recoveryRangeKey(pubkey, range));
+          if (record && isPermanentRecoveryError(err)) {
+            for (const state2 of record.relays.values()) state2.dead = true;
+          }
           if (!(controller.liveInterrupted && err === controller.signal.reason)) this.onError?.(err);
           failures.push(err);
           remaining.push(range);
@@ -15681,6 +16614,7 @@ var PrivateMessenger = class _PrivateMessenger {
         recoveredThrough: Math.max(fresh.channels[pubkey]?.recoveredThrough || 0, recoveredThrough),
         offlineRanges: mergeRanges(concurrentRanges.concat(remaining))
       };
+      this.pruneRecoveryRanges(pubkey, remaining);
       this.writeState(fresh);
       await this.flushStateWrites();
     }
@@ -15689,6 +16623,7 @@ var PrivateMessenger = class _PrivateMessenger {
   async clearChannel(pubkey) {
     await this.unwatch(pubkey);
     await this._privateMessage.clearChannelState?.(pubkey);
+    this.dropRecoveryState(pubkey);
     return this.runQueueOperation(async () => {
       this.channels.delete(pubkey);
       this.removeChannelState(pubkey);
@@ -15720,6 +16655,7 @@ var PrivateMessenger = class _PrivateMessenger {
         await this.queue?.removeBy("byChannel", pubkey);
         await (this.seedStorage ? this.seedStorage.removeLocal({ channelPubkey: pubkey }) : this.seedQueue?.removeBy("byChannel", pubkey));
       }
+      for (const pubkey of stalePubkeys) this.dropRecoveryState(pubkey);
       this.state = state;
       if (stalePubkeys.length) await this.removeChannelStates(stalePubkeys);
     });
@@ -15820,20 +16756,13 @@ var PrivateMessenger = class _PrivateMessenger {
           temporaryStorageArea: this.temporaryStorageArea
         });
       }
+      this.recoveryRanges.clear();
+      this.recoveryPriority.clear();
       if (unwatchError) throw unwatchError;
     })();
     return this.closePromise;
   }
 };
-function mergeRanges(ranges) {
-  const out = [];
-  for (const range of ranges) {
-    const last = out[out.length - 1];
-    if (!last || range.start > last.end + 1) out.push({ ...range });
-    else last.end = Math.max(last.end, range.end);
-  }
-  return out;
-}
 function eventType(event) {
   if (event.kind === ASK_KIND) return "ask";
   if (event.kind === REPLY_KIND) return "reply";
@@ -16590,6 +17519,8 @@ export {
   decryptWithConversationKey,
   seedRelays,
   freeRelays,
+  isOnline,
+  onOnline,
   relayPool,
   subscribeRelayListUpdates,
   fetchRelayListEvent,
@@ -16637,8 +17568,6 @@ export {
   makeContentKeyEvent,
   parseContentKeyEvent,
   getIykcProofs,
-  isOnline,
-  onOnline,
   createEventReplyPacker,
   PrivateMessenger,
   beginVaultTransition,

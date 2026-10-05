@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { copyFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { inlineBootFiles, loadBootFiles } from './inline-boot-files.js'
+import { createDeployHash } from './deploy-hash.js'
 
 const { dirname } = import.meta
 const srcDir = path.join(dirname, '..', 'src')
@@ -15,25 +16,12 @@ const outDir = isDev
   ? path.join(dirname, '..', '.dev')
   : path.join(dirname, '..', 'docs')
 
-async function hashTree (dir, hash) {
-  const entries = (await readdir(dir, { withFileTypes: true }))
-    .sort((a, b) => a.name.localeCompare(b.name))
-  for (const entry of entries) {
-    hash.update(entry.name)
-    const fullPath = path.join(dir, entry.name)
-    if (entry.isDirectory()) await hashTree(fullPath, hash)
-    else hash.update(await readFile(fullPath))
-  }
-}
-
-// Deploy hash: content hash of the vault sources in src/. Injected into the
+// Deploy hash: content hash of vault sources and locked dependencies. Injected into the
 // worker so its bytes change on every deploy — the browser detects a new
 // worker and the (non-dismissible) update banner appears even when only the
 // app's own files changed. The worker's cache name is NOT derived from this
 // hash, so deploys don't churn the runtime cache.
-const deployHash = createHash('sha256')
-await hashTree(srcDir, deployHash)
-const launcherDeployHash = deployHash.digest('hex').slice(0, 10)
+const launcherDeployHash = await createDeployHash(srcDir, path.join(dirname, '..', 'package-lock.json'))
 
 // Logic hash: content hash of the worker source (excluding the injected
 // VERSION line) — the cache name changes exactly when the worker's own

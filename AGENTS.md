@@ -35,7 +35,7 @@ Because the signer custodies private keys, the overriding design principle is **
 
 ## Service Worker & Updates
 
-- The service worker source is `src/sw.src.js`, built to `docs/sw.js`. The build injects `LAUNCHER_SW_VERSION` (content hash of the worker logic → cache name) and `LAUNCHER_DEPLOY_HASH` (content hash of the vault sources → the script's bytes change on every deploy so a new worker is detected).
+- The service worker source is `src/sw.src.js`, built to `docs/sw.js`. The build injects `LAUNCHER_SW_VERSION` (content hash of the worker logic → cache name) and `LAUNCHER_DEPLOY_HASH` (content hash of the vault sources and package-lock.json → dependency-only deploys also announce an update). Keep the two hashes independent.
 - Entries (`index.html`, `app.js`) are network-first; hashed chunks are cache-first. GitHub Pages serves every file with `Cache-Control: max-age=600` (10 min); the worker fetches with revalidation headers (legacy 44b-vault mitigation), and a first load shortly after a deploy may serve the previous — coherent — version for up to ~10 minutes (accepted).
 - Updates are **never applied automatically**: once a new worker is waiting, a non-dismissible banner (main UI) and compact indicators (lock/create overlays) stay visible until the user clicks "Update" (`SKIP_WAITING` → one guarded reload). The vault's `launcherPort` handshake re-runs on that reload, so the connection to 44billion recovers automatically.
 - Register with `updateViaCache: 'none'` and check hourly + on `visibilitychange` (see `src/services/sw-manager.js`).
@@ -383,6 +383,14 @@ reach onError; lifecycle suppression must not become a blanket error filter.
 
 
 ## Launcher relay bridge
+
+- Use the coordinated published libp2r2p 0.11.15 release, pinned exactly in the
+  dev dependency and lockfile. Its live readers stop definitive per-route refusals
+  and recover transient errors through bounded offline-aware backoff/cooldowns.
+  Keep the existing facade/protocol and standalone fallback. Validate sync,
+  NIP-46 and bridge regressions, then regenerate the committed production build.
+  The private-sync browser fixture must answer connectivity probes at the HTTP
+  boundary while keeping the real monitor and recovery code active.
 
 - `src/services/launcher-relay-pool.js` is only a WebSocket facade over the
   dedicated launcher port; registry, routing and physical sockets stay in the

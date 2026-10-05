@@ -19,6 +19,7 @@ const retained = new Map()
 const pending = new Map()
 let flushTimer
 const failures = []
+let connectivityProbes = 0
 const fixture = await esbuild.build({ absWorkingDir: root, entryPoints: ['tests/browser/private-sync-fixture.js'], bundle: true, write: false, platform: 'browser', format: 'esm', define: { IS_DEVELOPMENT: 'true', IS_PRODUCTION: 'false' } })
 const script = fixture.outputFiles[0].text
 const matches = (event, filter) => (!filter.authors || filter.authors.includes(event.pubkey)) && (!filter.kinds || filter.kinds.includes(event.kind)) && event.created_at >= (filter.since ?? 0) && event.created_at <= (filter.until ?? Infinity) && Object.entries(filter).every(([key, values]) => !key.startsWith('#') || event.tags.some(tag => tag[0] === key.slice(1) && values.includes(tag[1])))
@@ -117,7 +118,15 @@ try {
   const identities = []
   for (let device = 0; device < 2; device++) {
     const browser = await launchChrome({
-      intercept: request => request.url === vaultOrigin + '/app.js' ? { responseCode: 200, responseHeaders: [{ name: 'Content-Type', value: 'text/javascript' }], body: Buffer.from(script).toString('base64') } : null,
+      intercept: request => {
+        if (request.url === vaultOrigin + '/app.js') return { responseCode: 200, responseHeaders: [{ name: 'Content-Type', value: 'text/javascript' }], body: Buffer.from(script).toString('base64') }
+        const { hostname } = new URL(request.url)
+        if (['www.gstatic.com', 'connectivitycheck.gstatic.com', 'captive.apple.com', 'connectivity-check.ubuntu.com'].includes(hostname)) {
+          connectivityProbes++
+          return { responseCode: 204, responseHeaders: [{ name: 'Access-Control-Allow-Origin', value: '*' }], body: '' }
+        }
+        return null
+      },
       onEvent: event => { if (event.method === 'Runtime.bindingCalled' && event.params.name === 'relayFrame') relayFrame(device, event) }
     })
     browsers.push(browser)
@@ -165,6 +174,7 @@ try {
     assert.ok(!logs.includes('Event shape or signature is invalid.'))
   }
   assert.deepEqual(failures, [])
+  assert.ok(connectivityProbes > 0, 'native connectivity checks received controlled HTTP responses')
   console.log('Two isolated real launcher/vault contexts: provisional profiles, private contact and self-chat synchronization, lock/unlock, live burst and reload passed.')
 } catch (error) {
   for (const [index, browser] of browsers.entries()) await browser.diagnose(root + '/tmp/browser-failures/private-sync-' + index)

@@ -263,5 +263,10 @@ recovery and reload without reseeding. Run it with
 `node ../44billion/bin/run-browser-tests.js -- node tests/browser/private-sync.js`.
 The runner caps the complete browser/runtime group at 3 GiB with no swap.
 
-Private synchronization uses the published `libp2r2p@0.11.8` package pinned in
+Private synchronization uses the published `libp2r2p@0.11.15` package pinned in
 `package-lock.json`, including live-overflow recovery with durable history gaps.
+Live readers stop definitive per-route refusals and recover transient failures
+with bounded offline-aware backoff and relay cooldowns. The launcher facade and
+standalone transport keep the same wire protocol and identity boundaries.
+The deployment announcement hash includes the lockfile, so a dependency-only
+update also offers the existing manual update banner without changing cache identity.
