@@ -263,7 +263,7 @@ recovery and reload without reseeding. Run it with
 `node ../44billion/bin/run-browser-tests.js -- node tests/browser/private-sync.js`.
 The runner caps the complete browser/runtime group at 3 GiB with no swap.
 
-Private synchronization uses the published `libp2r2p@0.11.16` package pinned in
+Private synchronization uses the published `libp2r2p@0.11.17` package pinned in
 `package-lock.json`, including live-overflow recovery with durable history gaps.
 Live readers stop definitive per-route refusals and recover transient failures
 with bounded offline-aware backoff and relay cooldowns. The launcher facade and
@@ -274,3 +274,7 @@ update also offers the existing manual update banner without changing cache iden
 Delegated sockets preserve optional Nostr `retry_at` timing through the launcher
 bridge. WebSocket events carry no custom provenance; bridge overflow reports are
 internal, unverified consumer diagnostics and do not accuse a relay of failure.
+
+The 0.11.17 messenger status snapshots distinguish pause causes; internally
+observed network/storage recovery leaves explicit signer/lock pauses owned by
+their caller. Production artifacts are regenerated from this locked release.

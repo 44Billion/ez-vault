@@ -8,24 +8,24 @@ import {
 import {
   initMessenger,
   setVaultViewShell
-} from "./chunks/chunk-6WTYUH2Z.js";
+} from "./chunks/chunk-V2JBFEWZ.js";
 import {
   init,
   startDeviceRelayListRefresh,
   startRevocationRotation
-} from "./chunks/chunk-6FTPLREO.js";
+} from "./chunks/chunk-56OUPOOF.js";
 import {
   clearError,
   setError
 } from "./chunks/chunk-OQVZFKQZ.js";
-import "./chunks/chunk-FUMFBX4Z.js";
+import "./chunks/chunk-KLQNR4BT.js";
 import {
   startContentKeyEventRefresh
-} from "./chunks/chunk-TJREILHJ.js";
-import "./chunks/chunk-AHTW4AOC.js";
+} from "./chunks/chunk-MILQZ4P4.js";
+import "./chunks/chunk-4PBPOW46.js";
 import {
   isNewerAccountMetadata
-} from "./chunks/chunk-UAFHBWUF.js";
+} from "./chunks/chunk-OZY4SMRQ.js";
 import {
   seededAvatarDataUrl
 } from "./chunks/chunk-3RWQBTGN.js";
@@ -33,14 +33,14 @@ import {
   filterVisibleAccounts,
   recoverPendingMutation,
   runSecretAccountMutation
-} from "./chunks/chunk-FOWJZWFP.js";
-import "./chunks/chunk-5KL4QXMU.js";
+} from "./chunks/chunk-NWWK3JOF.js";
+import "./chunks/chunk-AW5FJAGI.js";
 import {
   checkForIconUpdate,
   hasPasskey,
   initializeVaultProtection,
   preparePasskeyRegistration
-} from "./chunks/chunk-EZ2RMQKV.js";
+} from "./chunks/chunk-PJSSMSW6.js";
 import {
   fetchLatestProfile,
   fetchRelayListEvent,
@@ -57,7 +57,7 @@ import {
   subscribe2 as subscribe,
   transferBunkerSecret,
   update
-} from "./chunks/chunk-AOOKD7QI.js";
+} from "./chunks/chunk-LIPK6YBN.js";
 import {
   defineLocales,
   getT,
@@ -224,16 +224,16 @@ await initializeVaultProtection();
 if (!hasPasskey()) preparePasskeyRegistration().catch(() => {
 });
 await Promise.all([
-  import("./chunks/account-list-AYUMFDLS.js"),
-  import("./chunks/account-add-IPSLNOEJ.js"),
-  import("./chunks/sync-panel-LCKAE565.js"),
-  import("./chunks/trusted-signers-panel-35SM6CJC.js"),
+  import("./chunks/account-list-ZI2USESE.js"),
+  import("./chunks/account-add-4RY745H6.js"),
+  import("./chunks/sync-panel-IUNW5L3R.js"),
+  import("./chunks/trusted-signers-panel-GDBJFY7P.js"),
   import("./chunks/accordion-panel-AGHO422R.js"),
   import("./chunks/toast-VTWQ4NKU.js"),
-  import("./chunks/activity-log-SZV64H3J.js"),
-  import("./chunks/vault-lock-button-367UELZM.js"),
-  import("./chunks/lock-overlay-JOLB2NOE.js"),
-  import("./chunks/create-overlay-ZTIDRVO6.js")
+  import("./chunks/activity-log-OX257QAX.js"),
+  import("./chunks/vault-lock-button-E4XXW4NB.js"),
+  import("./chunks/lock-overlay-2RT2K7N2.js"),
+  import("./chunks/create-overlay-J7GSUCRS.js")
 ]);
 try {
   sessionStorage.removeItem("ezVaultBootAutoReloaded");
@@ -315,7 +315,7 @@ startRevocationRotation().catch((err) => {
 });
 if (window === window.top) {
   document.body.classList.add("dev");
-  import("./chunks/dev-panel-VCRNCHA3.js").then(() => {
+  import("./chunks/dev-panel-PD7CCA7E.js").then(() => {
     document.querySelector(".diagnostics-section")?.append(document.createElement("dev-panel"));
   });
 }

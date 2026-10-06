@@ -12327,6 +12327,105 @@ async function broadcastNymEvent({
   return withDelivery({ event: wireEvent }, reports, deletion.deletionSeckey);
 }
 
+// node_modules/libp2r2p/private-messenger/helpers/pause-recovery.js
+var isRecoverableStorageFailure = (error) => error != null && typeof error === "object" && error?.name !== "ValidationError" && error?.category !== "validation" && !["SecurityError", "NotAllowedError", "TypeError", "RangeError", "SyntaxError", "DataError", "DataCloneError"].includes(error?.name) && !/DENIED|PERMISSION|REVOKED|READ_ONLY|INVALID|NOT_IN_PERSONA/.test(`${error?.code || ""} ${error?.name || ""} ${error?.message || ""}`);
+function createPauseRecovery({ attempt, online, onOnline: onOnline2, retryable, onError, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, random = Math.random }) {
+  let current;
+  function stop() {
+    const job = current;
+    current = null;
+    if (!job) return;
+    job.controller.abort();
+    if (job.timer != null) clearTimer(job.timer);
+    job.stopOnline?.();
+  }
+  function start({ immediate = false, retryAt = 0 } = {}) {
+    const advice = Number.isFinite(retryAt) && retryAt > 0 ? retryAt : 0;
+    if (current) {
+      if (advice > current.retryAt) {
+        current.retryAt = advice;
+        current.wake?.();
+      }
+      return immediate ? current.retry?.() : current.work;
+    }
+    const job = { controller: new AbortController(), delay: 1e3, retryAt: advice, timer: null, nextAt: 0, wake: null, retry: null, stopOnline: null, work: null };
+    current = job;
+    const active = () => current === job && !job.controller.signal.aborted;
+    const schedule = (delay) => {
+      if (!active()) return;
+      job.nextAt = Math.max(now() + delay, job.retryAt);
+      job.timer = setTimer(() => {
+        job.timer = null;
+        return run2();
+      }, Math.max(job.nextAt - now(), 0));
+      job.timer?.unref?.();
+    };
+    const run2 = () => {
+      if (!active() || job.work) return job.work;
+      const work = (async () => {
+        if (online && !await online({ signal: job.controller.signal })) {
+          if (!active()) return;
+          job.stopOnline = onOnline2(() => {
+            if (!active()) return;
+            job.stopOnline?.();
+            job.stopOnline = null;
+            schedule(0);
+          });
+          return;
+        }
+        if (!active()) return;
+        try {
+          await attempt(job.controller.signal);
+          if (active()) stop();
+        } catch (error) {
+          if (!active()) return;
+          onError(error);
+          if (!retryable(error)) {
+            stop();
+            return;
+          }
+          job.retryAt = Math.max(job.retryAt, Number.isFinite(error?.retryAt) ? error.retryAt : 0);
+          schedule(Math.min(3e4, job.delay * (0.8 + random() * 0.4)));
+          job.delay = Math.min(3e4, job.delay * 2);
+        }
+      })().catch((error) => {
+        if (active()) {
+          onError(error);
+          stop();
+        }
+      }).finally(() => {
+        if (job.work === work) job.work = null;
+      });
+      job.work = work;
+      return work;
+    };
+    job.wake = () => {
+      if (!active() || job.work) return job.work;
+      if (job.timer != null) clearTimer(job.timer);
+      job.timer = null;
+      if (job.nextAt > now()) {
+        schedule(job.nextAt - now());
+        return;
+      }
+      return run2();
+    };
+    job.retry = () => {
+      if (!active() || job.work) return job.work;
+      if (job.timer != null) clearTimer(job.timer);
+      job.timer = null;
+      if (job.retryAt > now()) {
+        schedule(job.retryAt - now());
+        return;
+      }
+      return run2();
+    };
+    if (immediate) return run2();
+    schedule(1e3);
+    job.delay = 2e3;
+  }
+  return { start, stop, wake: () => current?.wake?.() };
+}
+
 // node_modules/libp2r2p/private-messenger/helpers/send-routing.js
 var EXCLUSION_MS = 5 * 60 * 1e3;
 var normalized = (relay) => {
@@ -14194,6 +14293,7 @@ var PrivateMessenger = class _PrivateMessenger {
     useContentKeys = true,
     onContentKeyChange,
     onMessageQueued,
+    onStateChanged,
     onDebug,
     onError = defaultOnError,
     _privateMessage = private_message_exports,
@@ -14202,6 +14302,8 @@ var PrivateMessenger = class _PrivateMessenger {
     _pickRelaysForPubkeys = pickRelaysForPubkeys,
     _subscribeRelayListUpdates = subscribeRelayListUpdates,
     _isOnline = isOnline,
+    _onOnline = onOnline,
+    _random = Math.random,
     _setTimeout = globalThis.setTimeout.bind(globalThis),
     _clearTimeout = globalThis.clearTimeout.bind(globalThis),
     _setInterval = globalThis.setInterval.bind(globalThis),
@@ -14210,6 +14312,7 @@ var PrivateMessenger = class _PrivateMessenger {
     _storageClearInterval = globalThis.clearInterval.bind(globalThis),
     _BroadcastChannel = _indexedDB === globalThis.indexedDB ? globalThis.BroadcastChannel : void 0
   } = {}) {
+    if (onStateChanged != null && typeof onStateChanged !== "function") throw new ValidationError("INVALID_ON_STATE_CHANGED");
     this.fallbackRelays = normalizeFallbackRelays(fallbackRelays);
     this.offlineRecoverySeconds = normalizeOfflineRecoverySeconds(offlineRecoverySeconds);
     this.staleChannelSeconds = normalizeStaleChannelSeconds(staleChannelSeconds);
@@ -14232,6 +14335,16 @@ var PrivateMessenger = class _PrivateMessenger {
     this._indexedDB = _indexedDB;
     this.useContentKeys = useContentKeys;
     this.onContentKeyChange = onContentKeyChange;
+    this.onStateChanged = onStateChanged;
+    this.statusFingerprint = null;
+    this.automaticPauses = /* @__PURE__ */ new Set();
+    this.pendingStorageWrites = /* @__PURE__ */ new Map();
+    this.pauseRecoveries = /* @__PURE__ */ new Map();
+    this.watchRecoveries = /* @__PURE__ */ new Map();
+    this.pauseOnlineWork = null;
+    this.pauseOnlineController = null;
+    this._onOnline = _onOnline;
+    this._random = _random;
     this.onMessageQueued = onMessageQueued;
     this.onDebug = onDebug;
     this.onError = onError;
@@ -14305,6 +14418,7 @@ var PrivateMessenger = class _PrivateMessenger {
     this.closePromise = null;
     this.initSettledPromise = null;
     this.initialized = false;
+    this.notifyStatus();
   }
   async init({ userSigner, contentKeySigner, nymSigner, channels = [], relays = [], mode = "leecher" }) {
     if (!userSigner?.getPublicKey) throw new ValidationError("USER_SIGNER_REQUIRED");
@@ -14619,6 +14733,7 @@ var PrivateMessenger = class _PrivateMessenger {
       relays = [],
       mode = "leecher"
     } = options;
+    const readerIdentityChanged = userSigner !== this.userSigner || contentKeySigner !== this.contentKeySigner || nymSigner !== this.nymSigner;
     const updatesStalePolicy = Object.hasOwn(options, "staleChannelSeconds");
     const updatesIdentityPolicy = Object.hasOwn(options, "identityStorageRetentionSeconds");
     let nextStaleChannelSeconds = updatesStalePolicy ? normalizeStaleChannelSeconds(options.staleChannelSeconds) : this.staleChannelSeconds;
@@ -14635,7 +14750,11 @@ var PrivateMessenger = class _PrivateMessenger {
     const nextChannels = await this.normalizeChannels(channels, { relays, mode });
     this.assertOpen();
     const nextPubkeys = new Set(nextChannels.map((channel) => channel.pubkey));
-    const watchPubkeys = [...nextPubkeys].filter((pubkey) => !this.channels.has(pubkey) || this.desiredChannels.has(pubkey));
+    const changedChannel = (channel) => {
+      const previous = this.channels.get(channel.pubkey);
+      return !previous || ["signer", "readerSigner", "readerPubkey", "nymSigner", "mode", "usesNip65WatchRelays", "offlineRecoverySeconds", "autoDeletionCapability"].some((key) => previous[key] !== channel[key]) || ["relays", "sendRelays", "seeders"].some((key) => JSON.stringify(previous[key]) !== JSON.stringify(channel[key]));
+    };
+    const watchPubkeys = nextChannels.filter((channel) => !this.channels.has(channel.pubkey) || this.desiredChannels.has(channel.pubkey) && (readerIdentityChanged || Object.hasOwn(options, "staleChannelSeconds") || Object.hasOwn(options, "identityStorageRetentionSeconds") || changedChannel(channel) || !this.stopByChannel.has(channel.pubkey))).map((channel) => channel.pubkey);
     const removedPubkeys = [...this.channels.keys()].filter((pubkey) => !nextPubkeys.has(pubkey));
     const updatesStoragePolicy = updatesStalePolicy || updatesIdentityPolicy;
     if (updatesStoragePolicy) {
@@ -15029,31 +15148,54 @@ var PrivateMessenger = class _PrivateMessenger {
       this.watchRevisionByChannel.set(pubkey, revision);
       this.recordRecoveryWindow(pubkey);
       await this.flushStateWrites();
-      const watchRelays = await this.resolveWatchRelays(channel);
-      this.assertOpen();
-      if (this.pauseReasons.size || !this.desiredChannels.has(pubkey) || revision !== (this.watchRevisionByChannel.get(pubkey) || 0)) continue;
-      const stop = await this._privateMessage.watch({
-        channels: [pubkey],
-        relays: watchRelays,
-        receiverSigner: this.userSigner,
-        iykcSigner: this.contentKeySigner,
-        privateChannelSigner: channel.signer,
-        privateChannelReaderSigner: channel.readerSigner,
-        privateChannelReaderPubkey: channel.readerPubkey,
-        mode: channel.mode,
-        onAsk: (message) => this.receive(pubkey, () => this.handleAsk(pubkey, message), message),
-        onReply: (message) => this.receive(pubkey, () => this.handleReply(pubkey, message), message),
-        onTell: (message) => this.receive(pubkey, () => this.handleTell(pubkey, message), message),
-        onYell: (message) => this.receive(pubkey, () => this.handleYell(pubkey, message), message),
-        onNym: (message) => this.receive(pubkey, () => this.handleNym(pubkey, message), message),
-        onMessage: (message) => this.receive(pubkey, () => this.handleMessage(pubkey, message), message),
-        onSeed: (seed) => this.receive(pubkey, () => this.enqueueSeed(pubkey, seed), seed),
-        onContentKeyUsage: (usage) => this.handleContentKeyUsage(pubkey, usage),
-        receivedChunkTtlMs: this.receivedChunkTtlMsFor(channel),
-        receivedChunkIndexedDB: this._indexedDB,
-        onSubscriptionState: (state) => this.handleSubscriptionState(pubkey, state),
-        onError: (err) => this.onError?.(err)
-      });
+      let stop;
+      let watchRelays;
+      try {
+        watchRelays = await this.resolveWatchRelays(channel);
+        this.assertOpen();
+        if (this.pauseReasons.size || !this.desiredChannels.has(pubkey) || revision !== (this.watchRevisionByChannel.get(pubkey) || 0)) continue;
+        stop = await this._privateMessage.watch({
+          channels: [pubkey],
+          relays: watchRelays,
+          receiverSigner: this.userSigner,
+          iykcSigner: this.contentKeySigner,
+          privateChannelSigner: channel.signer,
+          privateChannelReaderSigner: channel.readerSigner,
+          privateChannelReaderPubkey: channel.readerPubkey,
+          mode: channel.mode,
+          onAsk: (message) => this.receive(pubkey, () => this.handleAsk(pubkey, message), message),
+          onReply: (message) => this.receive(pubkey, () => this.handleReply(pubkey, message), message),
+          onTell: (message) => this.receive(pubkey, () => this.handleTell(pubkey, message), message),
+          onYell: (message) => this.receive(pubkey, () => this.handleYell(pubkey, message), message),
+          onNym: (message) => this.receive(pubkey, () => this.handleNym(pubkey, message), message),
+          onMessage: (message) => this.receive(pubkey, () => this.handleMessage(pubkey, message), message),
+          onSeed: (seed) => this.receive(pubkey, () => this.enqueueSeed(pubkey, seed), seed),
+          onContentKeyUsage: (usage) => this.handleContentKeyUsage(pubkey, usage),
+          receivedChunkTtlMs: this.receivedChunkTtlMsFor(channel),
+          receivedChunkIndexedDB: this._indexedDB,
+          onSubscriptionState: (state) => this.handleSubscriptionState(pubkey, state),
+          onError: (err) => this.onError?.(err)
+        });
+      } catch (error) {
+        const transient = isRetryableRelayFailure(error);
+        const remote = error?.name !== "Nip42AuthenticationError" && (error?.category === "relay" || isReplaceableRelayFailure(error));
+        if (!transient && !remote) throw error;
+        this.onError?.(error);
+        if (!transient) continue;
+        if (!this.watchRecoveries.has(pubkey)) {
+          const task = this.recoveryTask(async (signal) => {
+            signal.throwIfAborted();
+            if (this.closePromise || this.pauseReasons.size || !this.desiredChannels.has(pubkey)) return;
+            await this.watch([pubkey]);
+            if (!this.stopByChannel.has(pubkey)) throw error;
+          }, { network: true, retryable: isRetryableRelayFailure });
+          this.watchRecoveries.set(pubkey, task);
+        }
+        this.watchRecoveries.get(pubkey).start({ retryAt: error.retryAt });
+        continue;
+      }
+      this.watchRecoveries.get(pubkey)?.stop();
+      this.watchRecoveries.delete(pubkey);
       if (this.closePromise || this.pauseReasons.size || !this.desiredChannels.has(pubkey) || revision !== (this.watchRevisionByChannel.get(pubkey) || 0)) {
         await stop?.();
         this.assertOpen();
@@ -15095,6 +15237,8 @@ var PrivateMessenger = class _PrivateMessenger {
       }
       const start = Math.min(interrupted.get(relay) ?? Infinity, since);
       interrupted.set(relay, start);
+      this.watchRecoveries.get(pubkey)?.stop();
+      this.watchRecoveries.delete(pubkey);
       this.cancelReloadGap(pubkey);
       for (const controller of this.recoveryControllers) {
         if (controller.channelPubkey === pubkey) {
@@ -15490,6 +15634,8 @@ var PrivateMessenger = class _PrivateMessenger {
     const pubkeys = channels ? uniq4(Array.isArray(channels) ? channels : [channels]) : [...this.desiredChannels];
     for (const extension of this.extensions) extension.unwatch?.(pubkeys);
     for (const pubkey of pubkeys) this.desiredChannels.delete(pubkey);
+    for (const [key, pending] of this.pendingStorageWrites) if (pubkeys.includes(pending.record.channelPubkey)) this.pendingStorageWrites.delete(key);
+    this.syncPauseRecovery();
     for (const pubkey of pubkeys) this.dropRecoveryState(pubkey);
     this.recordInterruption(pubkeys);
     for (const controller of this.recoveryControllers) {
@@ -15497,10 +15643,117 @@ var PrivateMessenger = class _PrivateMessenger {
     }
     return Promise.all([this.stopWatches(pubkeys), this.flushStateWrites()]);
   }
+  readStatus() {
+    return { closed: Boolean(this.closePromise), paused: this.pauseReasons.size > 0, pauseReasons: [...this.pauseReasons].sort() };
+  }
+  notifyStatus() {
+    const status = this.readStatus();
+    const fingerprint = JSON.stringify(status);
+    if (fingerprint !== this.statusFingerprint) {
+      this.statusFingerprint = fingerprint;
+      try {
+        this.onStateChanged?.(status);
+      } catch (error) {
+        this.onError?.(error);
+      }
+    }
+    this.syncPauseRecovery();
+  }
+  pausedError() {
+    return Object.assign(new Error("PRIVATE_MESSENGER_PAUSED"), { pauseReasons: this.readStatus().pauseReasons });
+  }
+  recoveryTask(attempt, { network = false, retryable = isRecoverableStorageFailure } = {}) {
+    return createPauseRecovery({
+      attempt,
+      retryable,
+      onError: (error) => this.onError?.(error),
+      ...network ? { online: () => this.checkPauseOnline(), onOnline: this._onOnline } : {},
+      setTimer: this._setTimeout,
+      clearTimer: this._clearTimeout,
+      random: this._random
+    });
+  }
+  checkPauseOnline() {
+    if (!this.pauseOnlineWork) {
+      const controller = new AbortController();
+      this.pauseOnlineController = controller;
+      const work = Promise.resolve().then(() => this._isOnline({ signal: controller.signal })).finally(() => {
+        if (this.pauseOnlineWork === work) {
+          this.pauseOnlineWork = null;
+          this.pauseOnlineController = null;
+        }
+      });
+      this.pauseOnlineWork = work;
+    }
+    return this.pauseOnlineWork;
+  }
+  syncPauseRecovery() {
+    if (!this.pauseRecoveries) return;
+    const blocked = this.closePromise || !this.desiredChannels.size || [...this.pauseReasons].some((reason) => !["network", "storage", "capacity", "session-storage"].includes(reason));
+    for (const [reason, task] of this.pauseRecoveries) {
+      if (blocked || !this.automaticPauses.has(reason) || !this.pauseReasons.has(reason)) task.stop();
+    }
+    if (blocked) {
+      this.pauseOnlineController?.abort();
+      this.pauseOnlineWork = null;
+      this.pauseOnlineController = null;
+      return;
+    }
+    for (const reason of this.automaticPauses) {
+      if (!this.pauseReasons.has(reason)) continue;
+      let task = this.pauseRecoveries.get(reason);
+      if (!task) {
+        task = this.recoveryTask(async (signal) => {
+          if (reason === "storage") await this.retryStorageWrites(signal);
+          await this.flushStateWrites();
+          signal.throwIfAborted();
+          await this.resume(reason);
+        }, {
+          network: reason === "network",
+          retryable: (error) => {
+            const retry = reason === "network" ? isRetryableRelayFailure(error) : isRecoverableStorageFailure(error);
+            if (!retry) this.automaticPauses.delete(reason);
+            return retry;
+          }
+        });
+        this.pauseRecoveries.set(reason, task);
+      }
+      task.start();
+    }
+  }
+  async retryStorageWrites(signal) {
+    for (const [key, pending] of this.pendingStorageWrites) {
+      signal.throwIfAborted();
+      const pubkey = pending.record.channelPubkey;
+      if (!this.channels.has(pubkey) || !this.desiredChannels.has(pubkey)) {
+        this.pendingStorageWrites.delete(key);
+        continue;
+      }
+      try {
+        if (!pending.dedupeKey || !await this.queue.someBy("byChannelTypeEventId", pending.dedupeKey)) await this.queue.enqueue(pending.record);
+      } catch (error) {
+        if (error?.name !== "ConstraintError") throw error;
+      }
+      signal.throwIfAborted();
+      this.pendingStorageWrites.delete(key);
+      this.markSeen(pubkey, pending.at || nowSeconds5());
+      this.wakeDeliveries();
+      this.onMessageQueued?.();
+    }
+  }
+  pauseInternally(reason) {
+    if (!this.pauseReasons.has(reason) || this.automaticPauses.has(reason)) this.automaticPauses.add(reason);
+    return this.applyPause(reason);
+  }
   pause(reason) {
+    this.automaticPauses.delete(reason);
+    return this.applyPause(reason);
+  }
+  applyPause(reason) {
     if (typeof reason !== "string" || !reason.trim()) throw new ValidationError("PAUSE_REASON_REQUIRED");
     this.assertOpen();
     this.pauseReasons.add(reason);
+    this.notifyStatus();
     for (const extension of this.extensions) extension.pause?.();
     this.recordInterruption(this.desiredChannels);
     for (const controller of this.recoveryControllers) controller.abort();
@@ -15509,7 +15762,13 @@ var PrivateMessenger = class _PrivateMessenger {
   async resume(reason) {
     if (typeof reason !== "string" || !reason.trim()) throw new ValidationError("PAUSE_REASON_REQUIRED");
     this.assertOpen();
+    if (reason === "storage" && this.pendingStorageWrites.size) await this.retryStorageWrites(this.sendRoutingLifetime.signal);
+    await this.flushStateWrites();
+    this.assertOpen();
+    const wasAutomatic = this.automaticPauses.has(reason);
     const removed = this.pauseReasons.delete(reason);
+    this.automaticPauses.delete(reason);
+    this.notifyStatus();
     if (reason === "capacity" && removed) {
       clearInterval(this.capacityTimer);
       this.capacityTimer = null;
@@ -15534,7 +15793,10 @@ var PrivateMessenger = class _PrivateMessenger {
     try {
       await work;
     } catch (err) {
-      if (!this.closePromise) await this.pause(reason);
+      if (!this.closePromise) {
+        if (wasAutomatic && (reason === "network" ? isRetryableRelayFailure(err) : isRecoverableStorageFailure(err))) this.automaticPauses.add(reason);
+        await this.applyPause(reason);
+      }
       throw err;
     } finally {
       if (this.resumeWork === work) this.resumeWork = null;
@@ -15548,7 +15810,7 @@ var PrivateMessenger = class _PrivateMessenger {
     return this.queueIncoming(async () => {
       if (this.pauseReasons.size || !this.desiredChannels.has(pubkey)) {
         this.recordInterruption([pubkey], messageTime(message));
-        throw new Error("PRIVATE_MESSENGER_PAUSED");
+        throw this.pausedError();
       }
       return operation();
     });
@@ -15646,19 +15908,20 @@ var PrivateMessenger = class _PrivateMessenger {
       this.debug("dedupe", debugMessageInfo(type, channelPubkey, message));
       return;
     }
+    const record = {
+      type,
+      channelPubkey,
+      receivedAt: nowSeconds5(),
+      event: message.event,
+      ...info,
+      payload: message.payload,
+      question: message.question || null,
+      questionId: message.questionId || null,
+      outer: message.outer || null,
+      meta: message.meta || null
+    };
     try {
-      await this.queue.enqueue({
-        type,
-        channelPubkey,
-        receivedAt: nowSeconds5(),
-        event: message.event,
-        ...info,
-        payload: message.payload,
-        question: message.question || null,
-        questionId: message.questionId || null,
-        outer: message.outer || null,
-        meta: message.meta || null
-      });
+      await this.queue.enqueue(record);
     } catch (err) {
       if (dedupeKey && err?.name === "ConstraintError") {
         this.markSeen(channelPubkey, message.outer?.created_at || message.event?.created_at || nowSeconds5());
@@ -15667,7 +15930,8 @@ var PrivateMessenger = class _PrivateMessenger {
       }
       this.recordInterruption([channelPubkey], message.outer?.created_at || message.event?.created_at || nowSeconds5());
       const atCapacity = err.message === "QUEUE_CAPACITY_EXCEEDED";
-      this.pause(atCapacity ? "capacity" : "storage").catch((error) => this.onError?.(error));
+      if (!atCapacity && isRecoverableStorageFailure(err)) this.pendingStorageWrites.set(JSON.stringify(dedupeKey || [channelPubkey, type]), { record, dedupeKey, at: message.outer?.created_at || message.event?.created_at });
+      (atCapacity ? this.pause("capacity") : isRecoverableStorageFailure(err) ? this.pauseInternally("storage") : this.pause("storage")).catch((error) => this.onError?.(error));
       if (atCapacity) {
         this.capacityRequiredBytes = Math.max(this.capacityRequiredBytes, err.requiredBytes || 0);
         if (!this.capacityTimer) {
@@ -16102,7 +16366,7 @@ var PrivateMessenger = class _PrivateMessenger {
   }
   requireWritableChannel(pubkey) {
     this.assertOpen();
-    if (this.pauseReasons.size) throw new Error("PRIVATE_MESSENGER_PAUSED");
+    if (this.pauseReasons.size) throw this.pausedError();
     const channel = this.requireChannel(pubkey);
     if (!channel.signer) throw new ValidationError("PRIVATE_CHANNEL_WRITER_REQUIRED");
     return channel;
@@ -16214,14 +16478,15 @@ var PrivateMessenger = class _PrivateMessenger {
     if (typeof window === "undefined") return;
     if (!this.stopOffline) {
       const offline = () => {
-        this.pause("network").catch((err) => this.onError?.(err));
+        this.pauseInternally("network").catch((err) => this.onError?.(err));
       };
       window.addEventListener("offline", offline);
       this.stopOffline = () => window.removeEventListener("offline", offline);
     }
     if (!this.stopOnline) {
       const online = () => {
-        this.resume("network").catch((err) => this.onError?.(err));
+        this.syncPauseRecovery();
+        this.pauseRecoveries.get("network")?.wake();
       };
       window.addEventListener("online", online);
       this.stopOnline = () => window.removeEventListener("online", online);
@@ -16551,7 +16816,7 @@ var PrivateMessenger = class _PrivateMessenger {
         controller.channelPubkey = pubkey;
         this.recoveryControllers.add(controller);
         try {
-          if (this.pauseReasons.size || this.closePromise || !this.desiredChannels.has(pubkey)) throw new Error("PRIVATE_MESSENGER_PAUSED");
+          if (this.pauseReasons.size || this.closePromise || !this.desiredChannels.has(pubkey)) throw this.pausedError();
           const fetchRelays = await this.resolveWatchRelays(channel);
           controller.signal.throwIfAborted();
           const record = this.recoveryRangeRecord(pubkey, range);
@@ -16702,6 +16967,9 @@ var PrivateMessenger = class _PrivateMessenger {
     const initSettledPromise = this.initSettledPromise;
     this.sendRoutingLifetime.abort();
     this.sendRelayExclusions.clear();
+    this.pendingStorageWrites.clear();
+    for (const task of this.pauseRecoveries.values()) task.stop();
+    for (const task of this.watchRecoveries.values()) task.stop();
     let unwatchPromise;
     try {
       unwatchPromise = Promise.resolve(this.unwatch());
@@ -16768,6 +17036,7 @@ var PrivateMessenger = class _PrivateMessenger {
       this.recoveryPriority.clear();
       if (unwatchError) throw unwatchError;
     })();
+    this.notifyStatus();
     return this.closePromise;
   }
 };

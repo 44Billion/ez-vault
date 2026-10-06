@@ -18,12 +18,15 @@ const transports = new Map()
 const retained = new Map()
 const pending = new Map()
 let flushTimer
+let holdLiveBurst = false
+const heldLiveBurst = []
 const failures = []
 let connectivityProbes = 0
 const fixture = await esbuild.build({ absWorkingDir: root, entryPoints: ['tests/browser/private-sync-fixture.js'], bundle: true, write: false, platform: 'browser', format: 'esm', define: { IS_DEVELOPMENT: 'true', IS_PRODUCTION: 'false' } })
 const script = fixture.outputFiles[0].text
 const matches = (event, filter) => (!filter.authors || filter.authors.includes(event.pubkey)) && (!filter.kinds || filter.kinds.includes(event.kind)) && event.created_at >= (filter.since ?? 0) && event.created_at <= (filter.until ?? Infinity) && Object.entries(filter).every(([key, values]) => !key.startsWith('#') || event.tags.some(tag => tag[0] === key.slice(1) && values.includes(tag[1])))
 function deliver (transport, frame) {
+  if (holdLiveBurst && frame[0] === 'EVENT') { heldLiveBurst.push({ transport, frame }); return }
   const key = `${transport.device}:${transport.contextId}`
   if (!pending.has(key)) pending.set(key, { transport, frames: [] })
   pending.get(key).frames.push([transport.socket, frame])
@@ -159,7 +162,15 @@ try {
   assert.equal(await b.evaluate('syncProbe.unlocked()', vaultOrigin), false)
   await b.evaluate('syncProbe.unlock()', vaultOrigin)
   await b.evaluate('syncProbe.limit(2)', vaultOrigin)
+  // Batch actual upstream EVENT frames so overflow does not depend on CPU/
+  // MessagePort timing; publication OKs and ordinary control frames stay live.
+  holdLiveBurst = true
   await evaluateApp(0, 'syncApp.burst()')
+  const burstDeadline = Date.now() + 30000
+  while (heldLiveBurst.filter(item => item.transport.device === 1).length < 4 && Date.now() < burstDeadline) await new Promise(resolve => setTimeout(resolve, 20))
+  assert.ok(heldLiveBurst.filter(item => item.transport.device === 1).length >= 4, 'upstream burst reached the paired device')
+  holdLiveBurst = false
+  for (const { transport, frame } of heldLiveBurst.splice(0)) deliver(transport, frame)
   await b.until(async () => (await evaluateApp(1, 'syncApp.contents(9)')).filter(event => event.content.startsWith('Burst ')).length === 12, 'burst messages synchronized', 90000)
   assert.ok((await b.evaluate('JSON.stringify(syncProbe.errors)', vaultOrigin)).includes('RELAY_LIVE_BUFFER_FULL'), 'controlled burst exercised live overflow')
   console.log('All 12 burst messages recovered after a real live overflow.')

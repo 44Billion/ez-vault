@@ -1,7 +1,7 @@
 import {
   isValidEvent,
   parseProfileEvent
-} from "./chunk-AOOKD7QI.js";
+} from "./chunk-LIPK6YBN.js";
 
 // src/helpers/account-metadata.js
 function isAccountMetadataEvent(event, pubkey, kind) {

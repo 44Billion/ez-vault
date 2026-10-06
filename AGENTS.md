@@ -384,7 +384,7 @@ reach onError; lifecycle suppression must not become a blanket error filter.
 
 ## Launcher relay bridge
 
-- Use the coordinated published libp2r2p 0.11.16 release, pinned exactly in the
+- Use the coordinated published libp2r2p 0.11.17 release, pinned exactly in the
   dev dependency and lockfile. Its live readers stop definitive per-route refusals
   and recover transient errors through bounded offline-aware backoff/cooldowns.
   Keep the existing facade/protocol and standalone fallback. Validate sync,
@@ -433,3 +433,9 @@ Sync overflow warnings include only bounded operational queue diagnostics.
   Outgoing overflow may report operational facts over the internal bridge; the
   launcher treats consumer reports as unverified. Remote origin/policy fields
   do not supply trusted local-failure attribution.
+
+- The 0.11.17 private messenger exposes readStatus/onStateChanged and recovers
+  internally owned network/storage pauses. Preserve explicit vault lock ownership,
+  durable ACK/NACK ordering and local sync seed storage. Session factory state
+  observation is mandatory; do not introduce polling compatibility or custom
+  WebSocket properties. Rebuild docs/ from the published lockfile.
