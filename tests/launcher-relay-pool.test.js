@@ -186,6 +186,9 @@ for (const limit of ['frames', 'bytes']) {
     const frame = limit === 'frames' ? 'small' : 'x'.repeat(256 * 1024)
     for (let i = 0; i < count; i++) socket.send(frame)
     assert.deepEqual(closes, [[1013, 'relay bridge queue overflow']])
+    assert.deepEqual(port.sent.find(message => message.code === 'RELAY_FAILURE'), {
+      code: 'RELAY_FAILURE', payload: { url: socket.url, code: 1013, phase: 'bridge', wasClean: false }
+    })
     assert.equal(socket.readyState, socket.CLOSED)
     assert.equal(socket.bufferedAmount, 0)
     assert.deepEqual(port.sent.at(-1), { code: 'RELAY_CLOSE', payload: { virtualId, code: 1000, reason: '' } })
@@ -198,6 +201,22 @@ for (const limit of ['frames', 'bytes']) {
     shim.dispose()
   })
 }
+
+it('forwards Nostr timing metadata unchanged without exposing internal context on events', () => {
+  const { port, shim } = createFixture()
+  const socket = new shim.WebSocket('wss://relay.example')
+  const { virtualId } = attachFrame(port)
+  port.emit({ code: 'RELAY_ATTACHED', payload: { virtualId } })
+  const data = JSON.stringify(['CLOSED', 'sub', 'rate-limited: busy', { retry_after: 10, retry_at: 20 }])
+  let received
+  socket.onmessage = event => { received = event }
+  port.emit({ code: 'RELAY_FRAME', payload: { virtualId, data, context: { origin: 'local', retryable: false } } })
+  assert.equal(received.data, data)
+  assert.deepEqual(Object.getOwnPropertyNames(received), Object.getOwnPropertyNames(new MessageEvent('message')))
+  assert.equal(received.context, undefined)
+  assert.equal(received.relayContext, undefined)
+  shim.dispose()
+})
 
 it('returns trailing receive credit but suppresses it after close', async () => {
   const { port, shim } = createFixture()

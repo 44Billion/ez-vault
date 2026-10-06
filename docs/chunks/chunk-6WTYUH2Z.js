@@ -6,23 +6,23 @@ import {
   requestNostrDbAppBackfill,
   serializeError,
   tell
-} from "./chunk-ACGLIWW7.js";
+} from "./chunk-6FTPLREO.js";
 import {
   append
-} from "./chunk-CEKEFMMB.js";
+} from "./chunk-FUMFBX4Z.js";
 import {
   run
-} from "./chunk-IW2J4CAJ.js";
+} from "./chunk-TJREILHJ.js";
 import {
   accountProfile,
   isAccountMetadataEvent,
   isNewerAccountMetadata
-} from "./chunk-LGPEC2OJ.js";
+} from "./chunk-UAFHBWUF.js";
 import {
   filterVisibleAccounts,
   read,
   subscribe as subscribe3
-} from "./chunk-5GGW7CA5.js";
+} from "./chunk-FOWJZWFP.js";
 import {
   closeStorage,
   get,
@@ -36,7 +36,7 @@ import {
   subscribe,
   subscribe2,
   update
-} from "./chunk-O3JE5RIB.js";
+} from "./chunk-AOOKD7QI.js";
 import {
   launcherLocale,
   setLocale
@@ -168,7 +168,8 @@ var RELAY_BRIDGE = {
   CREDIT: "RELAY_CREDIT",
   CLOSE: "RELAY_CLOSE",
   CLOSED: "RELAY_CLOSED",
-  DETACH: "RELAY_DETACH"
+  DETACH: "RELAY_DETACH",
+  FAILURE: "RELAY_FAILURE"
 };
 var BRIDGE_CREDIT_FRAMES = 64;
 var BRIDGE_CREDIT_BYTES = 256 * 1024;
@@ -311,6 +312,7 @@ function installLauncherRelayPoolShim({
         this.#queue.push(data);
         this.#queuedBytes += size;
         if (this.#queue.length > MAX_QUEUED_FRAMES || this.#queuedBytes > MAX_QUEUED_BYTES) {
+          port.postMessage({ code: RELAY_BRIDGE.FAILURE, payload: { url: this.url, code: 1013, phase: "bridge", wasClean: false } });
           port.postMessage({ code: RELAY_BRIDGE.CLOSE, payload: { virtualId: this.#virtualId, code: 1e3, reason: "" } });
           this.#finalizeClose(1013, "relay bridge queue overflow", false);
         }

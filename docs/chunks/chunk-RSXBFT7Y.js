@@ -1,22 +1,22 @@
 import {
   accountProfile,
   isAccountMetadataEvent
-} from "./chunk-LGPEC2OJ.js";
+} from "./chunk-UAFHBWUF.js";
 import {
   seededAvatarDataUrl,
   seededNeutralAvatarDataUrl
 } from "./chunk-3RWQBTGN.js";
 import {
   runSecretAccountMutation
-} from "./chunk-5GGW7CA5.js";
+} from "./chunk-FOWJZWFP.js";
 import {
   add as add2,
   restore,
   snapshot
-} from "./chunk-FDXZPGXX.js";
+} from "./chunk-5KL4QXMU.js";
 import {
   ensureRegistered
-} from "./chunk-XAURLY2B.js";
+} from "./chunk-EZ2RMQKV.js";
 import {
   add,
   extractBunkerClientKey,
@@ -34,7 +34,7 @@ import {
   remove,
   replace,
   setNsecSecret
-} from "./chunk-O3JE5RIB.js";
+} from "./chunk-AOOKD7QI.js";
 
 // src/services/account-intake.js
 function createIntakeToken() {

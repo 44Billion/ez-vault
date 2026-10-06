@@ -12,7 +12,8 @@ const RELAY_BRIDGE = {
   CREDIT: 'RELAY_CREDIT',
   CLOSE: 'RELAY_CLOSE',
   CLOSED: 'RELAY_CLOSED',
-  DETACH: 'RELAY_DETACH'
+  DETACH: 'RELAY_DETACH',
+  FAILURE: 'RELAY_FAILURE'
 }
 
 const BRIDGE_CREDIT_FRAMES = 64
@@ -188,6 +189,7 @@ export function installLauncherRelayPoolShim ({
         this.#queue.push(data)
         this.#queuedBytes += size
         if (this.#queue.length > MAX_QUEUED_FRAMES || this.#queuedBytes > MAX_QUEUED_BYTES) {
+          port.postMessage({ code: RELAY_BRIDGE.FAILURE, payload: { url: this.url, code: 1013, phase: 'bridge', wasClean: false } })
           port.postMessage({ code: RELAY_BRIDGE.CLOSE, payload: { virtualId: this.#virtualId, code: 1000, reason: '' } })
           this.#finalizeClose(1013, 'relay bridge queue overflow', false)
         }

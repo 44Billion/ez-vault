@@ -4748,6 +4748,18 @@ function matches(error, prefixes) {
 var isRetryableRelayFailure = (error) => matches(error, RETRY_PREFIXES);
 var isReplaceableRelayFailure = (error) => matches(error, REPLACEMENT_PREFIXES);
 
+// node_modules/libp2r2p/relay/helpers/retry-advice.js
+function parseRelayRetryAdvice(reason, extra, { now = Date.now() } = {}) {
+  if (typeof reason !== "string" || !reason.startsWith("rate-limited:") || !extra || typeof extra !== "object" || Array.isArray(extra) || !Number.isFinite(now)) return null;
+  const after = extra.retry_after;
+  const retryAfterMs = typeof after === "number" && Number.isFinite(after) && after > 0 ? Math.min(after, 300) * 1e3 : void 0;
+  const at = extra.retry_at;
+  const absolute = typeof at === "number" && Number.isFinite(at) && at > 0 && Number.isFinite(at * 1e3) ? Math.min(at * 1e3, now + 3e5) : void 0;
+  const retryAt = absolute ?? (retryAfterMs === void 0 ? void 0 : now + retryAfterMs);
+  if (retryAt === void 0) return null;
+  return { ...retryAfterMs === void 0 ? {} : { retryAfterMs }, retryAt };
+}
+
 // node_modules/libp2r2p/relay/helpers/routing.js
 var DEFAULT_RELAYS_PER_PUBKEY = 2;
 function excludedRelaysFor(excludeRelaysByPubkey, pubkey) {
@@ -4890,11 +4902,7 @@ function relayCloseError(event, category, cause) {
 }
 function relayRejectionError(reason, extra, fallback) {
   const error = categorizeRelayError(reason, "relay", fallback);
-  const seconds = extra?.retry_after;
-  if (error.message.startsWith("rate-limited:") && typeof seconds === "number" && Number.isFinite(seconds) && seconds > 0) {
-    error.retryAfterMs = Math.min(seconds, 300) * 1e3;
-    error.retryAt = Date.now() + error.retryAfterMs;
-  }
+  Object.assign(error, parseRelayRetryAdvice(error.message, extra));
   return error;
 }
 
