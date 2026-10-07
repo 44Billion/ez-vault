@@ -102,15 +102,18 @@ async function evaluateApp (device, expression) {
     return result.result.value
   } finally { await browser.send('Runtime.releaseObjectGroup', { objectGroup }, context.sessionId).catch(() => {}) }
 }
-const appScript = `globalThis.syncApp={
-  async owner(){return nostr.peekPublicKey()},
-  async seed(peer){const owner=await nostr.peekPublicKey(); const now=Math.floor(Date.now()/1000);
+// A fulfilled permission is followed by the native dialog close event. Yield
+// between fixture API calls so that event finishes before asking for another
+// permission; all grants still go through the real launcher UI.
+const appScript = `const settlePermission=()=>new Promise(resolve=>setTimeout(resolve,50));globalThis.syncApp={
+  async owner(){const owner=await nostr.peekPublicKey();await settlePermission();return owner},
+  async seed(peer){const owner=await this.owner(); const now=Math.floor(Date.now()/1000);
     const contact=await napp.eventStore.addPersonalCopy({kind:30000,created_at:now,tags:[['d','+zillion:contacts'],['p',peer,'','','1']],content:''},{context:''});
-    const message=await napp.eventStore.addPersonalCopy({kind:9,created_at:now,tags:[],content:'Self chat synchronization'},{context:'dm:'+owner});
+    await settlePermission();const message=await napp.eventStore.addPersonalCopy({kind:9,created_at:now,tags:[],content:'Self chat synchronization'},{context:'dm:'+owner});
     return [contact.result.ok,message.result.ok]
   },
-  async contents(kind){const owner=await nostr.peekPublicKey();const {results}=await napp.eventStore.query({kinds:[1006],authors:[owner],'#k':[String(kind)]});return Promise.all(results.map(async event=>JSON.parse(new TextDecoder().decode(await nostr.nip44v3.decrypt(owner,kind,'',event.content)))))},
-  async burst(){const owner=await nostr.peekPublicKey();return Promise.all(Array.from({length:12},(_,i)=>napp.eventStore.addPersonalCopy({kind:9,created_at:Math.floor(Date.now()/1000),tags:[],content:'Burst '+i+' '+ 'x'.repeat(18000)},{context:'dm:'+owner})))}
+  async contents(kind){const owner=await this.owner();const {results}=await napp.eventStore.query({kinds:[1006],authors:[owner],'#k':[String(kind)]});await settlePermission();return Promise.all(results.map(async event=>JSON.parse(new TextDecoder().decode(await nostr.nip44v3.decrypt(owner,kind,'',event.content)))))},
+  async burst(){const owner=await this.owner();return Promise.all(Array.from({length:12},(_,i)=>napp.eventStore.addPersonalCopy({kind:9,created_at:Math.floor(Date.now()/1000),tags:[],content:'Burst '+i+' '+ 'x'.repeat(18000)},{context:'dm:'+owner})))}
 };`
 try {
   const app = await prepareTestApp([

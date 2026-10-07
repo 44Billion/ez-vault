@@ -6,23 +6,23 @@ import {
   requestNostrDbAppBackfill,
   serializeError,
   tell
-} from "./chunk-56OUPOOF.js";
+} from "./chunk-R2P5KHSO.js";
 import {
   append
-} from "./chunk-KLQNR4BT.js";
+} from "./chunk-UV3LSGA5.js";
 import {
   run
-} from "./chunk-MILQZ4P4.js";
+} from "./chunk-5SL24256.js";
 import {
   accountProfile,
   isAccountMetadataEvent,
   isNewerAccountMetadata
-} from "./chunk-OZY4SMRQ.js";
+} from "./chunk-NA2W33DL.js";
 import {
   filterVisibleAccounts,
   read,
   subscribe as subscribe3
-} from "./chunk-NWWK3JOF.js";
+} from "./chunk-MLBZCNP2.js";
 import {
   closeStorage,
   get,
@@ -36,7 +36,7 @@ import {
   subscribe,
   subscribe2,
   update
-} from "./chunk-LIPK6YBN.js";
+} from "./chunk-D6GTPFRA.js";
 import {
   launcherLocale,
   setLocale

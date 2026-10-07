@@ -4972,7 +4972,11 @@ function createPublishSettlements(promises, timeout, { onSettled } = {}) {
       );
     });
   }
-  return { promise, timeout: timeoutPending };
+  const cancel = (reason) => {
+    if (isFinished) return;
+    for (let index = 0; index < settlements.length; index++) settle(index, { status: "rejected", outcome: "failed", reason });
+  };
+  return { promise, timeout: timeoutPending, cancel };
 }
 function publishSummary(settlements, relays, { includeSucceededRelays = false } = {}) {
   const succeededRelays = [];
@@ -5764,21 +5768,33 @@ var RelayConnection = class {
     return await this.#sendEventOperation("AUTH", event, this.#authentications, "AUTH_TIMEOUT", signal);
   }
   #sendEventOperation(type, event, map, timeoutCode, signal) {
-    if (signal?.aborted) return Promise.reject(signal.reason || relayTimeoutError(timeoutCode));
-    if (map.has(event.id)) return map.get(event.id).promise;
+    if (signal?.aborted) return Promise.reject(signal.reason);
+    let pending = map.get(event.id);
+    const created = !pending;
+    if (created) {
+      const timer = maybeUnref(setTimeout(() => this.#settleEvent(map, event.id, relayTimeoutError(timeoutCode, this.#lastTransportError)), this.publishTimeout));
+      pending = { timer, waiters: /* @__PURE__ */ new Set(), cancelSend: null };
+      map.set(event.id, pending);
+    }
     const deferred6 = Promise.withResolvers();
-    const timer = maybeUnref(setTimeout(() => this.#settleEvent(map, event.id, relayTimeoutError(timeoutCode, this.#lastTransportError)), this.publishTimeout));
-    const onAbort = () => this.#settleEvent(map, event.id, signal.reason || relayTimeoutError(timeoutCode));
-    const stopAbort = () => signal?.removeEventListener("abort", onAbort);
-    const pending = { ...deferred6, timer, promise: deferred6.promise, cancelSend: null, stopAbort };
-    map.set(event.id, pending);
+    const onAbort = () => {
+      pending.waiters.delete(waiter);
+      signal.removeEventListener("abort", onAbort);
+      deferred6.reject(signal.reason);
+      if (!pending.waiters.size && map.get(event.id) === pending) {
+        map.delete(event.id);
+        pending.cancelSend?.();
+        clearTimeout(pending.timer);
+      }
+    };
+    const waiter = { ...deferred6, stopAbort: () => signal?.removeEventListener("abort", onAbort) };
+    pending.waiters.add(waiter);
     signal?.addEventListener("abort", onAbort, { once: true });
-    pending.cancelSend = this.#dispatchWork(() => {
-      stopAbort();
-      this.send(JSON.stringify([type, event]));
-    }, (error) => {
-      this.#settleEvent(map, event.id, error);
-    });
+    if (created) {
+      pending.cancelSend = this.#dispatchWork(() => {
+        this.send(JSON.stringify([type, event]));
+      }, (error) => this.#settleEvent(map, event.id, error));
+    }
     return deferred6.promise;
   }
   countWithHll(filters, { signal } = {}) {
@@ -5799,10 +5815,13 @@ var RelayConnection = class {
     if (!pending) return;
     map.delete(id);
     pending.cancelSend?.();
-    pending.stopAbort?.();
     clearTimeout(pending.timer);
-    if (reason) pending.reject(errorFrom(reason, "OPERATION_REJECTED"));
-    else pending.resolve(value);
+    for (const waiter of pending.waiters) {
+      waiter.stopAbort();
+      if (reason) waiter.reject(errorFrom(reason, "OPERATION_REJECTED"));
+      else waiter.resolve(value);
+    }
+    pending.waiters.clear();
   }
   #settleCount(id, payload, reason) {
     const pending = this.#counts.get(id);
@@ -7022,8 +7041,10 @@ var RelayPool = class {
     timeout = SEND_TIMEOUT_MS,
     timeoutUntilFirstFulfillment = null,
     getAuthEvent,
-    onRelayResult
+    onRelayResult,
+    signal
   } = {}) {
+    if (signal != null && (typeof signal.aborted !== "boolean" || typeof signal.addEventListener !== "function" || typeof signal.removeEventListener !== "function")) throw new ValidationError("INVALID_RELAY_SIGNAL");
     const urls = normalizedRelayUrls(relays);
     if (!urls.length) {
       const promise2 = Promise.resolve(publishSummary([], urls, {
@@ -7046,17 +7067,21 @@ var RelayPool = class {
         notifyRelayResult(onRelayResult, relayResultForSettlement(urls[index], settlement2));
       }
     });
-    const promise = settlement.promise.then((settlements) => publishSummary(settlements, urls, {
+    const cancel = () => settlement.cancel(signal.reason);
+    if (signal?.aborted) cancel();
+    else signal?.addEventListener("abort", cancel, { once: true });
+    const promise = settlement.promise.finally(() => signal?.removeEventListener("abort", cancel)).then((settlements) => publishSummary(settlements, urls, {
       includeSucceededRelays: true
     }));
     urls.forEach((url, index) => {
       const deferred6 = sendDeferreds[index];
       (async () => {
         try {
+          const operationSignal = sendControllers[index].signal;
+          if (operationSignal.aborted) throw operationSignal.reason;
           const relay = await this.#getRelay(url);
-          const signal = sendControllers[index].signal;
-          if (signal.aborted) throw signal.reason;
-          return await this.#publishEvent(relay, eventToSend, getAuthEvent, signal);
+          if (operationSignal.aborted) throw operationSignal.reason;
+          return await this.#publishEvent(relay, eventToSend, getAuthEvent, operationSignal);
         } catch (err) {
           const reason = err instanceof Error ? err : new Error(String(err));
           if (reason instanceof Nip42AuthenticationError) throw reason;
@@ -12426,6 +12451,164 @@ function createPauseRecovery({ attempt, online, onOnline: onOnline2, retryable, 
   return { start, stop, wake: () => current?.wake?.() };
 }
 
+// node_modules/libp2r2p/private-messenger/helpers/fallback-race.js
+function publishWithEarlyFallback({ event, receivers, first, mirrors, tried, nextPrimary, nextFallback, sendEvent, isOnline: isOnline2, isCurrent, signal, pauseSignal, remember, delay, now, setTimer, clearTimer }) {
+  const pending = new Set(receivers);
+  const summaries = [];
+  const transportSignal = signal && pauseSignal ? AbortSignal.any([signal, pauseSignal]) : signal || pauseSignal;
+  const outcome = Promise.withResolvers();
+  let primaryRunning = true;
+  let fallbackRunning = false;
+  let fallbackScheduled = true;
+  let done = false;
+  let blocked = false;
+  let offline = false;
+  let timer = null;
+  let onlineWork;
+  const current = () => !transportSignal?.aborted && isCurrent();
+  const summary = (success) => Promise.all(summaries).then((reports) => ({
+    success,
+    total: tried.size,
+    fulfilled: reports.reduce((total, report) => total + (report.fulfilled || 0), 0),
+    succeededRelays: [...new Set(reports.flatMap((report) => report.succeededRelays || []))],
+    errors: reports.flatMap((report) => report.errors || [])
+  }));
+  const finish = (success) => {
+    if (done) return;
+    done = true;
+    clearTimer(timer);
+    timer = null;
+    transportSignal?.removeEventListener("abort", interrupted);
+    const interruptedWork = !success && (offline || !current());
+    outcome.resolve({
+      success,
+      total: tried.size,
+      promise: summary(success),
+      ...interruptedWork && !signal?.aborted ? { retryWhenAvailable: true, ...offline ? { retryWhenOnline: true } : {} } : {}
+    });
+  };
+  const check = () => {
+    if (done) return;
+    if (!pending.size) finish(true);
+    else if (!primaryRunning && !fallbackRunning && !fallbackScheduled) finish(false);
+  };
+  const interrupted = () => finish(false);
+  const online = async () => {
+    if (done || !current()) return false;
+    try {
+      if (!onlineWork) {
+        const work = Promise.resolve().then(() => isOnline2({ signal: transportSignal })).finally(() => {
+          if (onlineWork === work) onlineWork = null;
+        });
+        onlineWork = work;
+      }
+      const connected = await onlineWork;
+      if (done || !current()) return false;
+      if (!connected) offline = true;
+      return connected;
+    } catch {
+      if (!done && current()) offline = true;
+      return false;
+    }
+  };
+  const launch = async (batch, extra = []) => {
+    const relays = [.../* @__PURE__ */ new Set([...batch.relays, ...extra])].filter((relay) => !tried.has(relay));
+    if (!relays.length) return;
+    for (const relay of relays) tried.add(relay);
+    const slot = Promise.withResolvers();
+    summaries.push(slot.promise);
+    let result;
+    try {
+      result = await sendEvent(event, relays, { signal: transportSignal });
+    } catch (reason) {
+      result = { success: false, promise: Promise.resolve({ fulfilled: 0, errors: [{ reason }] }) };
+    }
+    const settled = Promise.resolve(result.promise).catch((reason) => ({ fulfilled: 0, errors: [{ reason }] }));
+    slot.resolve(settled);
+    settled.then(async (report2) => {
+      const failed2 = (report2.errors || []).filter((item) => isReplaceableRelayFailure(item.reason));
+      if (failed2.length && (result.success || done && !pending.size) && !transportSignal?.aborted && isCurrent()) {
+        try {
+          if (await isOnline2({ signal: transportSignal }) && isCurrent()) remember(failed2);
+        } catch {
+        }
+      }
+    }).catch(() => {
+    });
+    if (result.success) {
+      if (!done) for (const receiver of batch.receivers) pending.delete(receiver);
+      check();
+      return;
+    }
+    const report = await settled;
+    if (done) return;
+    const errors = report.errors || [];
+    if (!errors.length || errors.some((item) => !isReplaceableRelayFailure(item.reason))) blocked = true;
+    else if (await online()) remember(errors);
+  };
+  async function fallback() {
+    if (done || fallbackRunning || !fallbackScheduled) return;
+    clearTimer(timer);
+    fallbackScheduled = false;
+    fallbackRunning = true;
+    try {
+      if (blocked || offline || !pending.size || !current()) return;
+      let batch = nextFallback(pending);
+      if (!batch || !await online()) return;
+      while (batch) {
+        if (done || blocked || offline || !current()) break;
+        await launch(batch);
+        batch = nextFallback(pending);
+      }
+    } finally {
+      fallbackRunning = false;
+      check();
+    }
+  }
+  async function primary() {
+    try {
+      let batch = first || nextPrimary(pending);
+      let opening = true;
+      while (batch) {
+        if (done || blocked || offline || !current()) break;
+        await launch(batch, opening ? mirrors : []);
+        opening = false;
+        batch = nextPrimary(pending);
+      }
+    } finally {
+      primaryRunning = false;
+      if (!done && fallbackScheduled) {
+        if (!blocked && !offline && current()) await fallback();
+        else {
+          clearTimer(timer);
+          fallbackScheduled = false;
+        }
+      }
+      check();
+    }
+  }
+  if (transportSignal?.aborted || !isCurrent()) {
+    finish(false);
+    return outcome.promise;
+  }
+  transportSignal?.addEventListener("abort", interrupted, { once: true });
+  const deadline = now() + delay;
+  const failed = (reason) => {
+    if (done) return;
+    done = true;
+    clearTimer(timer);
+    timer = null;
+    transportSignal?.removeEventListener("abort", interrupted);
+    outcome.reject(reason);
+  };
+  timer = setTimer(() => {
+    fallback().catch(failed);
+  }, Math.max(0, deadline - now()));
+  timer?.unref?.();
+  primary().catch(failed);
+  return outcome.promise;
+}
+
 // node_modules/libp2r2p/private-messenger/helpers/send-routing.js
 var EXCLUSION_MS = 5 * 60 * 1e3;
 var normalized = (relay) => {
@@ -12439,6 +12622,10 @@ function normalizeFallbackRelays(value = []) {
   if (!Array.isArray(value)) throw new ValidationError("INVALID_FALLBACK_RELAYS");
   return [...new Set(Array.from(value, normalizeRelayUrl))];
 }
+function normalizeFallbackDelay(value = null) {
+  if (value !== null && (!Number.isSafeInteger(value) || value < 0 || value > 2147483647)) throw new ValidationError("INVALID_FALLBACK_DELAY");
+  return value;
+}
 function routeEntries(routes) {
   return routes instanceof Map ? [...routes] : Object.entries(routes || {});
 }
@@ -12451,7 +12638,9 @@ function routeGroups(routes) {
   }
   return [...groups.values()];
 }
-function createSendRelayRouting({ peer, peers = [peer], relaysByPubkey: relaysByPubkey2, primaryRelays, primaryRelayToReceivers, fallbackRelays = [], exclusions, pickRelays, recoveryRelays, publish: publish2, publishNymEvent: publishNymEvent2, sendEvent, isOnline: isOnline2, isCurrent, signal, now = Date.now }) {
+function createSendRelayRouting({ peer, peers = [peer], relaysByPubkey: relaysByPubkey2, primaryRelays, primaryRelayToReceivers, fallbackRelays = [], fallbackDelayMs = null, exclusions, pickRelays, recoveryRelays, publish: publish2, publishNymEvent: publishNymEvent2, sendEvent, isOnline: isOnline2, isCurrent, signal, pauseSignal, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
+  fallbackDelayMs = normalizeFallbackDelay(fallbackDelayMs);
+  const transportSignal = signal && pauseSignal ? AbortSignal.any([signal, pauseSignal]) : signal || pauseSignal;
   const explicit = Boolean(primaryRelays || primaryRelayToReceivers);
   const primaryRoutes = primaryRelayToReceivers || (primaryRelays ? new Map(primaryRelays.map((relay) => [relay, peers])) : pickRelays(peers, relaysByPubkey2, { relayType: "read", maxPerPubkey: Infinity }));
   const primaryByPeer = Object.fromEntries(peers.map((pubkey) => [pubkey, { read: [] }]));
@@ -12478,15 +12667,15 @@ function createSendRelayRouting({ peer, peers = [peer], relaysByPubkey: relaysBy
     return routes;
   };
   const relayToReceivers = primaryRelayToReceivers || select(peers, exclusions.keys());
-  const current = () => !signal?.aborted && isCurrent();
+  const current = () => !transportSignal?.aborted && isCurrent();
   const rejected = (report) => (report?.errors || []).filter((item) => candidateSet.has(normalized(item.relay)) && isReplaceableRelayFailure(item.reason));
   const remember = (errors) => {
-    for (const item of errors) exclusions.set(normalized(item.relay), now() + EXCLUSION_MS);
+    for (const item of errors) if (candidateSet.has(normalized(item.relay))) exclusions.set(normalized(item.relay), now() + EXCLUSION_MS);
   };
   const online = async () => {
     if (!current()) return false;
     try {
-      return await isOnline2({ signal }) && current();
+      return await isOnline2({ signal: transportSignal }) && current();
     } catch {
       return false;
     }
@@ -12497,6 +12686,35 @@ function createSendRelayRouting({ peer, peers = [peer], relaysByPubkey: relaysBy
     const mirrors = initialRelays.filter((relay) => !candidateSet.has(normalized(relay)));
     const initialPrimary = context.primaryRelays || (primaryRelays || peers.length === 1 ? routeEntries(relayToReceivers).map(([relay]) => relay) : []);
     const first = [...new Set(initialPrimary.map(normalizeRelayUrl))].filter((relay) => !exclusions.has(relay));
+    if (!explicit && fallbackDelayMs !== null && fallbackRelays.length) {
+      const tried2 = /* @__PURE__ */ new Set();
+      const pick = (pending2, fallback) => {
+        const excluded = [.../* @__PURE__ */ new Set([...exclusions.keys(), ...tried2])];
+        const routes = pickRelays([...pending2], fallback ? Object.fromEntries([...pending2].map((pubkey) => [pubkey, { read: fallbackRelays }])) : primaryByPeer, { relayType: "read", maxPerPubkey: 2, excludeRelaysByPubkey: new Map([...pending2].map((pubkey) => [pubkey, excluded])), emptyRelaysFallback: [] });
+        return routeGroups(routes)[0];
+      };
+      const result2 = await publishWithEarlyFallback({
+        event,
+        receivers,
+        first: first.length ? { receivers, relays: first } : null,
+        mirrors,
+        tried: tried2,
+        nextPrimary: (pending2) => pick(pending2, false),
+        nextFallback: (pending2) => pick(pending2, true),
+        sendEvent,
+        isOnline: isOnline2,
+        isCurrent,
+        signal,
+        pauseSignal,
+        remember,
+        delay: fallbackDelayMs,
+        now,
+        setTimer,
+        clearTimer
+      });
+      if (!result2.success && current()) exclusions.clear();
+      return result2;
+    }
     let batch = first.length ? { receivers, relays: first } : null;
     const tried = /* @__PURE__ */ new Set();
     const errors = [];
@@ -12520,7 +12738,7 @@ function createSendRelayRouting({ peer, peers = [peer], relaysByPubkey: relaysBy
       signal?.throwIfAborted();
       const relays = [.../* @__PURE__ */ new Set([...batch.relays, ...summaries.length ? [] : mirrors])];
       for (const relay of relays) tried.add(normalized(relay));
-      result = await sendEvent(event, relays);
+      result = await sendEvent(event, relays, { signal: transportSignal });
       const settled = Promise.resolve(result.promise);
       summaries.push(settled);
       if (result.success) {
@@ -14272,6 +14490,7 @@ var PrivateMessenger = class _PrivateMessenger {
   }
   constructor({
     fallbackRelays = [],
+    fallbackDelayMs = null,
     offlineRecoverySeconds = DEFAULT_OFFLINE_RECOVERY_SECONDS,
     staleChannelSeconds = DEFAULT_STALE_CHANNEL_SECONDS,
     identityStorageRetentionSeconds = DEFAULT_IDENTITY_STORAGE_RETENTION_SECONDS,
@@ -14314,6 +14533,7 @@ var PrivateMessenger = class _PrivateMessenger {
   } = {}) {
     if (onStateChanged != null && typeof onStateChanged !== "function") throw new ValidationError("INVALID_ON_STATE_CHANGED");
     this.fallbackRelays = normalizeFallbackRelays(fallbackRelays);
+    this.fallbackDelayMs = normalizeFallbackDelay(fallbackDelayMs);
     this.offlineRecoverySeconds = normalizeOfflineRecoverySeconds(offlineRecoverySeconds);
     this.staleChannelSeconds = normalizeStaleChannelSeconds(staleChannelSeconds);
     this.identityStorageRetentionSeconds = normalizeIdentityStorageRetentionSeconds(identityStorageRetentionSeconds);
@@ -14356,6 +14576,7 @@ var PrivateMessenger = class _PrivateMessenger {
     this._isOnline = _isOnline;
     this.sendRelayExclusions = /* @__PURE__ */ new Map();
     this.sendRoutingLifetime = new AbortController();
+    this.sendRoutingPause = new AbortController();
     this._setTimeout = _setTimeout;
     this._clearTimeout = _clearTimeout;
     this._setInterval = _setInterval;
@@ -14879,6 +15100,10 @@ var PrivateMessenger = class _PrivateMessenger {
       fallbackRelays: this.fallbackRelays,
       signal: signal ? AbortSignal.any([this.sendRoutingLifetime.signal, signal]) : this.sendRoutingLifetime.signal,
       exclusions: this.sendRelayExclusions.get(key).exclusions,
+      fallbackDelayMs: this.fallbackDelayMs,
+      pauseSignal: this.sendRoutingPause.signal,
+      setTimer: this._setTimeout,
+      clearTimer: this._clearTimeout,
       pickRelays: this._pickRelaysForPubkeys,
       publish: this._privateChannel.publish || publish,
       publishNymEvent: this._privateChannel.publishNymEvent || publishNymEvent,
@@ -15753,6 +15978,7 @@ var PrivateMessenger = class _PrivateMessenger {
     if (typeof reason !== "string" || !reason.trim()) throw new ValidationError("PAUSE_REASON_REQUIRED");
     this.assertOpen();
     this.pauseReasons.add(reason);
+    this.sendRoutingPause.abort(this.pausedError());
     this.notifyStatus();
     for (const extension of this.extensions) extension.pause?.();
     this.recordInterruption(this.desiredChannels);
@@ -15768,6 +15994,7 @@ var PrivateMessenger = class _PrivateMessenger {
     const wasAutomatic = this.automaticPauses.has(reason);
     const removed = this.pauseReasons.delete(reason);
     this.automaticPauses.delete(reason);
+    if (!this.pauseReasons.size && this.sendRoutingPause.signal.aborted) this.sendRoutingPause = new AbortController();
     this.notifyStatus();
     if (reason === "capacity" && removed) {
       clearInterval(this.capacityTimer);

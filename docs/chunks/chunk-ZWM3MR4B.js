@@ -4,25 +4,25 @@ import {
 } from "./chunk-OQVZFKQZ.js";
 import {
   removeForPubkey
-} from "./chunk-KLQNR4BT.js";
+} from "./chunk-UV3LSGA5.js";
 import {
   claimSigner
-} from "./chunk-MILQZ4P4.js";
+} from "./chunk-5SL24256.js";
 import {
   publishAccountBootstrap,
   randomAccountName
-} from "./chunk-HJTCAACA.js";
+} from "./chunk-QBLWNLOJ.js";
 import {
   seededAvatarDataUrl
 } from "./chunk-3RWQBTGN.js";
 import {
   runSecretAccountMutation
-} from "./chunk-NWWK3JOF.js";
+} from "./chunk-MLBZCNP2.js";
 import {
   ensureRegistered,
   hasPasskey,
   openSecrets
-} from "./chunk-PJSSMSW6.js";
+} from "./chunk-474G4KSX.js";
 import {
   add,
   applyRecords,
@@ -38,7 +38,7 @@ import {
   resolveWriteRelays,
   setNsecSecret,
   update
-} from "./chunk-LIPK6YBN.js";
+} from "./chunk-D6GTPFRA.js";
 import {
   error
 } from "./chunk-BDYCOPAX.js";
