@@ -263,7 +263,7 @@ recovery and reload without reseeding. Run it with
 `node ../44billion/bin/run-browser-tests.js -- node tests/browser/private-sync.js`.
 The runner caps the complete browser/runtime group at 3 GiB with no swap.
 
-Private synchronization uses the published `libp2r2p@0.11.18` package pinned in
+Private synchronization uses the published `libp2r2p@0.11.19` package pinned in
 `package-lock.json`, including live-overflow recovery with durable history gaps.
 Live readers stop definitive per-route refusals and recover transient failures
 with bounded offline-aware backoff and relay cooldowns. The launcher facade and
@@ -275,13 +275,18 @@ Delegated sockets preserve optional Nostr `retry_at` timing through the launcher
 bridge. WebSocket events carry no custom provenance; bridge overflow reports are
 internal, unverified consumer diagnostics and do not accuse a relay of failure.
 
-The 0.11.18 messenger status snapshots distinguish pause causes; internally
+The 0.11.19 messenger status snapshots distinguish pause causes; internally
 observed network/storage recovery leaves explicit signer/lock pauses owned by
 their caller. Production artifacts are regenerated from this locked release.
 
-The pinned 0.11.18 patch supports cancellable publications and optional early
+The pinned 0.11.19 patch supports cancellable publications and optional early
 fallback. Private synchronization keeps the default sequential relay policy;
 shared connections, signer restrictions and the launcher bridge are unchanged.
 
 The private-sync browser fixture allows each granted permission dialog to finish
 closing before requesting the next app permission; it uses the real launcher UI.
+
+Messenger initialization and updates now resolve after local preparation. Sync
+publishes its channel-to-account snapshot before draining newly queued deliveries;
+subscriptions and historical recovery continue in the background. ACK still
+requires successful persistence, and the vault keeps its local recovery seed store.

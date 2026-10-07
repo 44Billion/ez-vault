@@ -364,6 +364,12 @@ weaken sealed fields to reduce rendering memory.
 
 ## Private-messenger delivery contract
 
+- Messenger init/update default to local readiness in 0.11.19. Hold inbox drain
+  while applying local channels and publish the corresponding account/channel
+  snapshot before processing initial callbacks. Do not await remote recovery to
+  enable sync; background errors never imply account unavailability. Preserve
+  ACK/NACK, local seed storage, lock generations and queued initial deliveries.
+
 `nextMessage()` returns `{ message, ack, nack }` in libp2r2p 0.10.20. Sync must
 finish its handler before acknowledging, and nack failed or superseded work.
 Never destructively drain a reservation on lock, shutdown or handler failure.
@@ -384,7 +390,7 @@ reach onError; lifecycle suppression must not become a blanket error filter.
 
 ## Launcher relay bridge
 
-- Use the coordinated published libp2r2p 0.11.18 release, pinned exactly in the
+- Use the coordinated published libp2r2p 0.11.19 release, pinned exactly in the
   dev dependency and lockfile. Its live readers stop definitive per-route refusals
   and recover transient errors through bounded offline-aware backoff/cooldowns.
   Keep the existing facade/protocol and standalone fallback. Validate sync,
@@ -434,13 +440,13 @@ Sync overflow warnings include only bounded operational queue diagnostics.
   launcher treats consumer reports as unverified. Remote origin/policy fields
   do not supply trusted local-failure attribution.
 
-- The 0.11.18 private messenger exposes readStatus/onStateChanged and recovers
+- The 0.11.19 private messenger exposes readStatus/onStateChanged and recovers
   internally owned network/storage pauses. Preserve explicit vault lock ownership,
   durable ACK/NACK ordering and local sync seed storage. Session factory state
   observation is mandatory; do not introduce polling compatibility or custom
   WebSocket properties. Rebuild docs/ from the published lockfile.
 
-- Consume the published 0.11.18 patch for cancellable shared publications and
+- Consume the published 0.11.19 patch for cancellable shared publications and
   optional early fallback. Vault sync retains fallbackDelayMs: null, durable
   ACK/NACK ordering and existing lock/pause ownership; no bridge or signer API
   changes. Regenerate docs/ only from the registry-resolved dependency.

@@ -2,15 +2,15 @@ import {
   claimSigner,
   rotateContentKeyIfStillCanonical,
   upsertContentKeyEvent
-} from "./chunk-5SL24256.js";
+} from "./chunk-ODWYKDK7.js";
 import {
   filterVisibleAccounts,
   hasPendingMutation,
   subscribePendingMutations
-} from "./chunk-MLBZCNP2.js";
+} from "./chunk-JKFX5B2W.js";
 import {
   trusted_signers_exports
-} from "./chunk-HUZFP4KU.js";
+} from "./chunk-US43LBHN.js";
 import {
   NOSTRDB_SYNC,
   PrivateMessenger,
@@ -44,7 +44,7 @@ import {
   setState,
   subscribe2 as subscribe,
   subscribeRelayListUpdates
-} from "./chunk-D6GTPFRA.js";
+} from "./chunk-H4GRMQPD.js";
 import {
   __export
 } from "./chunk-NZLE2WMY.js";
@@ -2461,6 +2461,7 @@ function createSyncController({
   let drainQueued = false;
   let drainScheduled = false;
   let draining = false;
+  let channelConfiguration = null;
   let announceTimer = null;
   let announceInterval = null;
   let pendingResetInterval = false;
@@ -2708,13 +2709,14 @@ function createSyncController({
     if (!initialized) return;
     const id = lifecycleId;
     drainQueued = true;
-    if (draining || drainScheduled) return;
+    if (channelConfiguration || draining || drainScheduled) return;
     drainScheduled = true;
     Promise.resolve().then(() => drainMessages(id));
   }
   async function drainMessages(id = lifecycleId) {
     drainScheduled = false;
     if (!isCurrentLifecycle(id)) return;
+    if (channelConfiguration) return;
     if (draining) return;
     draining = true;
     try {
@@ -2723,14 +2725,14 @@ function createSyncController({
         let handled = 0;
         emitDebug3("drain", { phase: "start" });
         let reachedEmptyQueue = false;
-        while (isCurrentLifecycle(id) && messenger && _secrets.isUnlocked()) {
+        while (isCurrentLifecycle(id) && messenger && !channelConfiguration && _secrets.isUnlocked()) {
           const delivery = await messenger.nextMessage?.();
           if (!delivery) {
             reachedEmptyQueue = true;
             break;
           }
           const { message, ack, nack } = delivery;
-          if (!isCurrentLifecycle(id) || !_secrets.isUnlocked()) {
+          if (!isCurrentLifecycle(id) || channelConfiguration || !_secrets.isUnlocked()) {
             await nack();
             break;
           }
@@ -2772,6 +2774,7 @@ function createSyncController({
         }
         if (reachedEmptyQueue) drainQueued = false;
         emitDebug3("drain", { phase: "end", handled });
+        if (channelConfiguration) break;
       }
     } catch (err) {
       onError(err);
@@ -2952,6 +2955,7 @@ function createSyncController({
   function stop2() {
     const currentMessenger = messenger;
     messenger = null;
+    channelConfiguration = null;
     drainQueued = false;
     drainScheduled = false;
     clearRelayListWatcher();
@@ -3001,29 +3005,35 @@ function createSyncController({
       relays: [],
       mode: "seeder"
     };
-    if (!messenger) {
-      const nextMessenger = new MessengerClass({ onMessageQueued: scheduleDrain, onError, useContentKeys: false, onDebug: debug });
-      messenger = nextMessenger;
-      try {
-        await nextMessenger.init(options);
-      } catch (err) {
-        if (messenger === nextMessenger) messenger = null;
-        await Promise.resolve(nextMessenger.close?.()).catch(onError);
-        throw err;
-      }
-      if (!isCurrentLifecycle(id)) {
-        if (messenger === nextMessenger) {
-          messenger = null;
-          await nextMessenger.close?.();
+    const configuration = {};
+    channelConfiguration = configuration;
+    try {
+      if (!messenger) {
+        const nextMessenger = new MessengerClass({ onMessageQueued: scheduleDrain, onError, useContentKeys: false, onDebug: debug });
+        messenger = nextMessenger;
+        try {
+          await nextMessenger.init(options);
+        } catch (err) {
+          if (messenger === nextMessenger) messenger = null;
+          await Promise.resolve(nextMessenger.close?.()).catch(onError);
+          throw err;
         }
-        return null;
+        if (!isCurrentLifecycle(id)) {
+          if (messenger === nextMessenger) {
+            messenger = null;
+            await nextMessenger.close?.();
+          }
+          return null;
+        }
+      } else {
+        const currentMessenger = messenger;
+        await currentMessenger.update(options);
+        if (!isCurrentLifecycle(id) || messenger !== currentMessenger) return null;
       }
-    } else {
-      const currentMessenger = messenger;
-      await currentMessenger.update(options);
-      if (!isCurrentLifecycle(id) || messenger !== currentMessenger) return null;
+      publishChannelSnapshot(snapshot);
+    } finally {
+      if (channelConfiguration === configuration) channelConfiguration = null;
     }
-    publishChannelSnapshot(snapshot);
     ensureRelayListWatcher();
     nostrDbSync.ensureSubscriptions(nostrDbRuntimeContext());
     ensureAnnouncementInterval();

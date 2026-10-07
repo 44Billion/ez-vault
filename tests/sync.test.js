@@ -861,6 +861,48 @@ test('sync drains messages enqueued while another message is being handled', asy
   controller.close()
 })
 
+test('sync defers initial deliveries until their local channel snapshot is installed', async t => {
+  const handled = []; const acknowledgments = []
+  let account = 'nsec1'
+  class LocalReadyMessenger {
+    constructor (options) { this.options = options; this.queue = [] }
+    async init (options) { return this.update(options) }
+    async update (options) {
+      const channel = options.channels[0]
+      this.queue.push({ channelPubkey: channel.pubkey })
+      this.options.onMessageQueued()
+      await flushMicrotasks()
+      assert.equal(handled.length, acknowledgments.length)
+      assert.equal(this.queue.length, 1, 'initial callback must not consume a new channel before its routing snapshot')
+      return this
+    }
+    async nextMessage () {
+      const message = this.queue.shift()
+      return message ? { message, ack: async () => acknowledgments.push(message), nack: async () => this.queue.unshift(message) } : null
+    }
+    close () {}
+  }
+  const controller = createSyncController({
+    MessengerClass: LocalReadyMessenger,
+    _store: createSubscribable({ list: () => [{ type: 'nsec', pubkey: account }] }),
+    _secrets: createSubscribable({ isUnlocked: () => true, getDeviceSigner: async () => signer('device') }),
+    _trustedSigners: createSubscribable({ list: () => [] }),
+    _claimSigner: value => signer(value.pubkey),
+    _contentKeys: {
+      resetDebugSources () {}, announceContentKeys: async () => {},
+      handleMessage: async (message, context) => { handled.push(context.ownerPubkeyForChannel(message.channelPubkey)); return true }
+    },
+    _setTimeout: () => ({}), _clearTimeout () {}, _setInterval: () => ({}), _clearInterval () {}
+  })
+  t.after(() => controller.close())
+  await controller.init(); await flushMicrotasks()
+  assert.deepEqual(handled, ['nsec1'])
+  account = 'nsec2'
+  await controller.refresh(); await flushMicrotasks()
+  assert.deepEqual(handled, ['nsec1', 'nsec2'])
+  assert.equal(acknowledgments.length, 2)
+})
+
 test('sync announces content-key changes immediately and restarts the four-hour cadence', async () => {
   const storeStub = createSubscribable({
     list: () => [{ type: 'nsec', pubkey: 'nsec1' }]

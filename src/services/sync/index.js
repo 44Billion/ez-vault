@@ -142,6 +142,7 @@ export function createSyncController ({
   let drainQueued = false
   let drainScheduled = false
   let draining = false
+  let channelConfiguration = null
   let announceTimer = null
   let announceInterval = null
   let pendingResetInterval = false
@@ -416,7 +417,7 @@ export function createSyncController ({
     if (!initialized) return
     const id = lifecycleId
     drainQueued = true
-    if (draining || drainScheduled) return
+    if (channelConfiguration || draining || drainScheduled) return
     drainScheduled = true
     Promise.resolve().then(() => drainMessages(id))
   }
@@ -424,6 +425,7 @@ export function createSyncController ({
   async function drainMessages (id = lifecycleId) {
     drainScheduled = false
     if (!isCurrentLifecycle(id)) return
+    if (channelConfiguration) return
     if (draining) return
     draining = true
     try {
@@ -433,14 +435,14 @@ export function createSyncController ({
         emitDebug('drain', { phase: 'start' })
         let reachedEmptyQueue = false
         // eslint-disable-next-line no-unmodified-loop-condition
-        while (isCurrentLifecycle(id) && messenger && _secrets.isUnlocked()) {
+        while (isCurrentLifecycle(id) && messenger && !channelConfiguration && _secrets.isUnlocked()) {
           const delivery = await messenger.nextMessage?.()
           if (!delivery) {
             reachedEmptyQueue = true
             break
           }
           const { message, ack, nack } = delivery
-          if (!isCurrentLifecycle(id) || !_secrets.isUnlocked()) { await nack(); break }
+          if (!isCurrentLifecycle(id) || channelConfiguration || !_secrets.isUnlocked()) { await nack(); break }
           handled += 1
           emitDebug('handle', messageDebugInfo(message))
           try {
@@ -481,6 +483,7 @@ export function createSyncController ({
         }
         if (reachedEmptyQueue) drainQueued = false
         emitDebug('drain', { phase: 'end', handled })
+        if (channelConfiguration) break
       }
     } catch (err) {
       onError(err)
@@ -679,6 +682,7 @@ export function createSyncController ({
   function stop () {
     const currentMessenger = messenger
     messenger = null
+    channelConfiguration = null
     drainQueued = false
     drainScheduled = false
     clearRelayListWatcher()
@@ -732,30 +736,38 @@ export function createSyncController ({
       mode: 'seeder'
     }
 
-    if (!messenger) {
-      const nextMessenger = new MessengerClass({ onMessageQueued: scheduleDrain, onError, useContentKeys: false, onDebug: debug })
-      messenger = nextMessenger
-      try {
-        await nextMessenger.init(options)
-      } catch (err) {
-        if (messenger === nextMessenger) messenger = null
-        await Promise.resolve(nextMessenger.close?.()).catch(onError)
-        throw err
-      }
-      if (!isCurrentLifecycle(id)) {
-        if (messenger === nextMessenger) {
-          messenger = null
-          await nextMessenger.close?.()
+    // Deliveries can arrive as soon as local messenger initialization finishes.
+    // Publish the corresponding routing snapshot before allowing their ACKs.
+    const configuration = {}
+    channelConfiguration = configuration
+    try {
+      if (!messenger) {
+        const nextMessenger = new MessengerClass({ onMessageQueued: scheduleDrain, onError, useContentKeys: false, onDebug: debug })
+        messenger = nextMessenger
+        try {
+          await nextMessenger.init(options)
+        } catch (err) {
+          if (messenger === nextMessenger) messenger = null
+          await Promise.resolve(nextMessenger.close?.()).catch(onError)
+          throw err
         }
-        return null
+        if (!isCurrentLifecycle(id)) {
+          if (messenger === nextMessenger) {
+            messenger = null
+            await nextMessenger.close?.()
+          }
+          return null
+        }
+      } else {
+        const currentMessenger = messenger
+        await currentMessenger.update(options)
+        if (!isCurrentLifecycle(id) || messenger !== currentMessenger) return null
       }
-    } else {
-      const currentMessenger = messenger
-      await currentMessenger.update(options)
-      if (!isCurrentLifecycle(id) || messenger !== currentMessenger) return null
-    }
 
-    publishChannelSnapshot(snapshot)
+      publishChannelSnapshot(snapshot)
+    } finally {
+      if (channelConfiguration === configuration) channelConfiguration = null
+    }
     ensureRelayListWatcher()
     nostrDbSync.ensureSubscriptions(nostrDbRuntimeContext())
     ensureAnnouncementInterval()
