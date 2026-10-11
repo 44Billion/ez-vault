@@ -207,7 +207,7 @@ it('forwards Nostr timing metadata unchanged without exposing internal context o
   const socket = new shim.WebSocket('wss://relay.example')
   const { virtualId } = attachFrame(port)
   port.emit({ code: 'RELAY_ATTACHED', payload: { virtualId } })
-  const data = JSON.stringify(['CLOSED', 'sub', 'rate-limited: busy', { retry_after: 10, retry_at: 20 }])
+  const data = JSON.stringify(['CLOSED', 'sub', 'rate-limited: busy', '@20000'])
   let received
   socket.onmessage = event => { received = event }
   port.emit({ code: 'RELAY_FRAME', payload: { virtualId, data, context: { origin: 'local', retryable: false } } })

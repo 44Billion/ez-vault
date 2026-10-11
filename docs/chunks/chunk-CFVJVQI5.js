@@ -4749,15 +4749,14 @@ var isRetryableRelayFailure = (error) => matches(error, RETRY_PREFIXES);
 var isReplaceableRelayFailure = (error) => matches(error, REPLACEMENT_PREFIXES);
 
 // node_modules/libp2r2p/relay/helpers/retry-advice.js
-function parseRelayRetryAdvice(reason, extra, { now = Date.now() } = {}) {
-  if (typeof reason !== "string" || !reason.startsWith("rate-limited:") || !extra || typeof extra !== "object" || Array.isArray(extra) || !Number.isFinite(now)) return null;
-  const after = extra.retry_after;
-  const retryAfterMs = typeof after === "number" && Number.isFinite(after) && after > 0 ? Math.min(after, 300) * 1e3 : void 0;
-  const at = extra.retry_at;
-  const absolute = typeof at === "number" && Number.isFinite(at) && at > 0 && Number.isFinite(at * 1e3) ? Math.min(at * 1e3, now + 3e5) : void 0;
-  const retryAt = absolute ?? (retryAfterMs === void 0 ? void 0 : now + retryAfterMs);
-  if (retryAt === void 0) return null;
-  return { ...retryAfterMs === void 0 ? {} : { retryAfterMs }, retryAt };
+function parseRelayRetryAdvice(reason, params, { now = Date.now() } = {}) {
+  if (typeof reason !== "string" || !reason.startsWith("rate-limited:") || typeof params !== "string" || params.match(/^@?[1-9]\d*$/)?.[0] !== params || !Number.isFinite(now)) return null;
+  const absolute = params.startsWith("@");
+  const value = Number(absolute ? params.slice(1) : params);
+  if (!Number.isSafeInteger(value)) return null;
+  if (absolute) return { retryAt: Math.min(value, now + 3e5) };
+  const retryAfterMs = Math.min(value, 3e5);
+  return { retryAfterMs, retryAt: now + retryAfterMs };
 }
 
 // node_modules/libp2r2p/relay/helpers/routing.js
@@ -4900,9 +4899,9 @@ function relayCloseError(event, category, cause) {
   if (event?.wasClean !== void 0) error.wasClean = event.wasClean;
   return categorizeRelayError(error, category);
 }
-function relayRejectionError(reason, extra, fallback) {
+function relayRejectionError(reason, params, fallback) {
   const error = categorizeRelayError(reason, "relay", fallback);
-  Object.assign(error, parseRelayRetryAdvice(error.message, extra));
+  Object.assign(error, parseRelayRetryAdvice(error.message, params));
   return error;
 }
 
@@ -5619,7 +5618,7 @@ var RelayConnection = class {
   #publishes = /* @__PURE__ */ new Map();
   #authentications = /* @__PURE__ */ new Map();
   #counts = /* @__PURE__ */ new Map();
-  #retryAt = 0;
+  #retryAtByType = /* @__PURE__ */ new Map();
   constructor(url, { WebSocket: WebSocketImpl = globalThis.WebSocket } = {}) {
     this.url = url;
     this.#WebSocket = WebSocketImpl;
@@ -5699,12 +5698,12 @@ var RelayConnection = class {
   }
   // New work respects relay cooldowns; cleanup uses send() directly. These
   // waits stay within the caller's existing deadline and are cancellable.
-  #dispatchWork(send, fail) {
+  #dispatchWork(type, send, fail) {
     let timer = null;
     let cancelled = false;
     const dispatch = () => {
       if (cancelled) return;
-      const remaining = this.#retryAt - Date.now();
+      const remaining = (this.#retryAtByType.get(type) ?? 0) - Date.now();
       if (remaining > 0) {
         timer = maybeUnref(setTimeout(dispatch, remaining));
         return;
@@ -5721,9 +5720,9 @@ var RelayConnection = class {
       clearTimeout(timer);
     };
   }
-  #rejection(reason, extra, fallback) {
-    const error = relayRejectionError(reason, extra, fallback);
-    this.#retryAt = Math.max(this.#retryAt, error.retryAt || 0);
+  #rejection(type, reason, params, fallback) {
+    const error = relayRejectionError(reason, params, fallback);
+    if (error.retryAt !== void 0) this.#retryAtByType.set(type, Math.max(this.#retryAtByType.get(type) ?? 0, error.retryAt));
     return error;
   }
   subscribe(filters, handlers = {}) {
@@ -5748,7 +5747,7 @@ var RelayConnection = class {
     };
     const subscription = { filters, handlers, close, cancelSend: null };
     this.#subscriptions.set(id, subscription);
-    subscription.cancelSend = this.#dispatchWork(() => {
+    subscription.cancelSend = this.#dispatchWork("REQ", () => {
       this.send(JSON.stringify(["REQ", id, ...filters]));
       sent = true;
     }, (error) => {
@@ -5791,7 +5790,7 @@ var RelayConnection = class {
     pending.waiters.add(waiter);
     signal?.addEventListener("abort", onAbort, { once: true });
     if (created) {
-      pending.cancelSend = this.#dispatchWork(() => {
+      pending.cancelSend = this.#dispatchWork(type, () => {
         this.send(JSON.stringify([type, event]));
       }, (error) => this.#settleEvent(map, event.id, error));
     }
@@ -5805,7 +5804,7 @@ var RelayConnection = class {
     const pending = { ...deferred6, signal, onAbort, cancelSend: null };
     this.#counts.set(id, pending);
     signal?.addEventListener("abort", onAbort, { once: true });
-    pending.cancelSend = this.#dispatchWork(() => this.send(JSON.stringify(["COUNT", id, ...filters])), (error) => {
+    pending.cancelSend = this.#dispatchWork("COUNT", () => this.send(JSON.stringify(["COUNT", id, ...filters])), (error) => {
       this.#settleCount(id, null, error);
     });
     return deferred6.promise;
@@ -5856,7 +5855,8 @@ var RelayConnection = class {
     if (data[0] === "CLOSED") {
       const id = data[1];
       const subscription = this.#subscriptions.get(id);
-      const reason = this.#rejection(data[2], data[3], subscription ? "SUBSCRIPTION_CLOSED" : "COUNT_CLOSED");
+      if (!subscription && !this.#counts.has(id)) return;
+      const reason = this.#rejection(subscription ? "REQ" : "COUNT", data[2], data[3], subscription ? "SUBSCRIPTION_CLOSED" : "COUNT_CLOSED");
       if (subscription) {
         this.#subscriptions.delete(id);
         subscription.cancelSend?.();
@@ -5865,9 +5865,11 @@ var RelayConnection = class {
       return;
     }
     if (data[0] === "OK") {
-      const reason = data[2] === true ? null : this.#rejection(data[3], data[4], "EVENT_REJECTED");
-      this.#settleEvent(this.#publishes, data[1], reason, data[3]);
-      this.#settleEvent(this.#authentications, data[1], reason, data[3]);
+      for (const [type, pending] of [["EVENT", this.#publishes], ["AUTH", this.#authentications]]) {
+        if (!pending.has(data[1])) continue;
+        const reason = data[2] === true ? null : this.#rejection(type, data[3], data[4], "EVENT_REJECTED");
+        this.#settleEvent(pending, data[1], reason, data[3]);
+      }
       return;
     }
     if (data[0] === "AUTH" && typeof data[1] === "string") {
