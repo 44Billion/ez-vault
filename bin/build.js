@@ -9,12 +9,13 @@ const { dirname } = import.meta
 const srcDir = path.join(dirname, '..', 'src')
 const watch = process.argv.includes('--watch')
 const isDev = watch || process.env.NODE_ENV === 'development'
-// `npm run build` writes the committed docs/ (GitHub Pages root); watch/dev
-// writes to the untracked .dev/ so it never dirties git or conflicts with a
-// production build.
+// Production builds write to dist/ for the GitHub Pages artifact; watch/dev
+// writes to .dev/ so it never conflicts with a production build. Both outputs
+// are ignored by git; docs/ is reserved for authored documentation.
 const outDir = isDev
   ? path.join(dirname, '..', '.dev')
-  : path.join(dirname, '..', 'docs')
+  : path.join(dirname, '..', 'dist')
+const outputName = path.basename(outDir)
 
 // Deploy hash: content hash of vault sources and locked dependencies. Injected into the
 // worker so its bytes change on every deploy — the browser detects a new
@@ -88,7 +89,7 @@ for (const entry of await readdir(path.join(srcDir, 'styles'))) {
   }
 }
 
-// Copy static assets (e.g. favicon.png) to the docs root.
+// Copy static assets (e.g. favicon.png) to the output root.
 const assetsDir = path.join(srcDir, 'assets')
 for (const entry of await readdir(assetsDir)) {
   await copyFile(path.join(assetsDir, entry), path.join(outDir, entry))
@@ -115,14 +116,14 @@ await copyDataFiles(path.join(srcDir, 'services'))
 if (watch) {
   await Promise.all([appContext.watch(), swContext.watch()])
   const devPort = process.env.PORT || '4000'
-  console.log(`watching src/ -> docs/ (sw version ${versionHash}, deploy ${launcherDeployHash})...`)
+  console.log(`watching src/ -> ${outputName}/ (sw version ${versionHash}, deploy ${launcherDeployHash})...`)
   if (process.env.EZ_VAULT_DEV !== '1') {
     // Standalone `npm run build:watch`: point at the dev server URLs.
     console.log(`  open http://localhost:${devPort}/ (peer: http://localhost:4001 via "npm run start:peer")`)
-    console.log('  run "npm start" in another terminal to serve docs/; the service worker and the update banner are disabled in dev (IS_DEVELOPMENT).')
+    console.log('  run "npm start" in another terminal to serve .dev/; the service worker and the update banner are disabled in dev (IS_DEVELOPMENT).')
   }
 } else {
   await Promise.all([appContext.rebuild(), swContext.rebuild()])
   await Promise.all([appContext.dispose(), swContext.dispose()])
-  console.log(`built docs/app.js, docs/chunks/, docs/sw.js (sw version ${versionHash}, deploy ${launcherDeployHash})`)
+  console.log(`built ${outputName}/app.js, ${outputName}/chunks/, ${outputName}/sw.js (sw version ${versionHash}, deploy ${launcherDeployHash})`)
 }

@@ -22,7 +22,8 @@ todo
 .codex
 .kilo
 
-# Dev watcher output — never committed (docs/ is the committed build output)
+# Generated production and development output — never committed
+/dist/
 .dev/
 
 # Disposable protected browser diagnostics

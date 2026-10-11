@@ -1,9 +1,9 @@
-// Dev orchestrator: runs the esbuild watcher (src/ -> docs/) and the static
+// Dev orchestrator: runs the esbuild watcher (src/ -> .dev/) and the static
 // server (server.py) together, so `npm start` gives a working dev environment
 // in one command. Ctrl+C stops both children.
 //
 // start:peer intentionally does NOT run its own watcher — it serves the same
-// docs/ the main watcher is already rebuilding, just on a second port.
+// .dev/ the main watcher is already rebuilding, just on a second port.
 import { spawn } from 'node:child_process'
 
 const port = process.env.PORT || '4000'

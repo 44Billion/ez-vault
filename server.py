@@ -45,9 +45,9 @@ if __name__ == "__main__":
     # Set up signal handler for CTRL+C
     signal.signal(signal.SIGINT, signal_handler)
 
-    # Serve the requested output directory (docs/ for production, .dev/ for
-    # the dev watcher — see bin/dev.js). Defaults to docs/.
-    serve_dir = os.environ.get("EZ_VAULT_SERVE_DIR", "docs")
+    # Serve the requested output directory (dist/ for production, .dev/ for
+    # the dev watcher — see bin/dev.js). Defaults to dist/.
+    serve_dir = os.environ.get("EZ_VAULT_SERVE_DIR", "dist")
     serve_dir = os.path.abspath(serve_dir)
     handler = partial(NoCacheHTTPRequestHandler, directory=serve_dir)
 

@@ -1,4 +1,4 @@
-// Vault service worker — built to docs/sw.js by bin/build.js (defines are
+// Vault service worker — built to dist/sw.js by bin/build.js (defines are
 // injected there). Served from the same directory as the vault page, so it
 // works both on GitHub Pages (repo subpath, e.g. /ez-vault/) and on the
 // vault.44billion.net subdomain (root path).

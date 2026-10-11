@@ -1,5 +1,5 @@
 // Best-effort fetch of the vault's favicon (src/assets/favicon.png, copied to
-// docs/favicon.png by the build), returned as a base64 data URL. Used by
+// dist/favicon.png by the build), returned as a base64 data URL. Used by
 // passkey.js to populate `user.iconURL` at registration and to detect favicon
 // changes between sessions. Silently returns null on any failure (404,
 // non-image content, oversized payload, network error) — the caller treats

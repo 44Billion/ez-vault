@@ -12,12 +12,29 @@ to private-channel/private-messenger consumers. Activity-log buffers retain a
 Base64 representation inside encrypted JSON fields. NIP-04 and NIP-44 v2 keep
 their text contracts; stored ciphertext formats are unchanged.
 
-The project is intentionally simple: vanilla JavaScript, no bundler, and a small set of explicit browser dependencies, so that anyone can read the source and verify what it does with their keys.
+The project is intentionally simple: vanilla JavaScript, readable esbuild bundles, and a small set of explicit dependencies, so that anyone can read the source and verify what it does with their keys.
 
 ## Hosting and deploy coherence (GitHub Pages)
 
-The vault is served from the committed `docs/` directory on GitHub Pages
-(`https://44billion.github.io/ez-vault`). GitHub Pages serves every file with
+The vault is published at `https://44billion.github.io/ez-vault` by
+`.github/workflows/pages.yml`. The workflow installs locked dependencies with
+`npm ci`, runs `npm test`, builds production with `npm run build`, and deploys
+the contents of `dist/` as a GitHub Pages artifact. It runs on pushes to `main`
+that change sources, build scripts, package manifests, `.npmrc`, or the workflow
+itself, and can also be run manually from Actions on `main`.
+
+Before pushing the migration to `main`, set **Settings → Pages → Build and
+deployment → Source** to **GitHub Actions**, replacing the branch's `/docs`
+source. The `github-pages` environment must allow deployments from `main`.
+After the first deploy, check the workflow result and the existing public URL,
+including the vault handshake with the launcher.
+
+Production output in `dist/` and development output in `.dev/` are ignored by
+Git; `docs/` is reserved for authored documentation. For a local production
+preview, run `npm run build` and `python3 server.py`. `npm start` continues to
+build and serve `.dev/`.
+
+GitHub Pages serves every file with
 `Cache-Control: max-age=600` and does not support custom headers, so a reload
 shortly after a deploy can pair a stale `index.html` with chunk URLs that no
 longer exist — a 404 inside the module graph leaves a blank page while the
@@ -43,7 +60,11 @@ Three mechanisms keep this self-healing:
   unreachable or never signals ready.
 
 The vault is also served by the 44billion server at `vault.44billion.net`,
-which sends proper cache headers; GitHub Pages remains the default host.
+which serves the sibling `ez-vault/dist/` with proper cache headers; GitHub
+Pages remains the default host. After updating that checkout, run `npm ci`
+and `NODE_ENV=production npm run build` in ez-vault before starting or
+restarting the production server. GitHub Actions builds only the Pages artifact;
+the self-hosted checkout needs its own build.
 
 Account secrets are normally NIP-44 encrypted under a key derived from the
 passkey PRF extension. The passkey unlocks that encryption key; it does not
