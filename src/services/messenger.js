@@ -135,6 +135,7 @@ export function accountForLauncher (account) {
     pubkey: account.pubkey,
     profile: launcherProfile(account),
     relays: launcherRelays(account),
+    supportsContentKeyMethods: account.type === 'nsec',
     isReadOnly: account.type === 'npub',
     isLocked: isAccountLocked(account)
   }

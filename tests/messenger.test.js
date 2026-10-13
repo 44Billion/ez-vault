@@ -214,9 +214,17 @@ test('accountForLauncher returns the account shape expected by the launcher', ()
       write: ['wss://both.example', 'wss://write.example'],
       meta: { events: [relayListEvent] }
     },
+    supportsContentKeyMethods: true,
     isReadOnly: false,
     isLocked: true
   })
+})
+
+test('only local nsec accounts advertise content-key methods, even while locked', () => {
+  for (const type of ['nsec', 'bunker', 'npub']) {
+    const account = accountForLauncher({ type, pubkey: 'a'.repeat(64) })
+    assert.equal(account.supportsContentKeyMethods, type === 'nsec')
+  }
 })
 
 test('applyAccountEvents updates stored profile and relay-list events only when newer', async () => {

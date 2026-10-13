@@ -251,6 +251,16 @@ replaced. An in-flight shutdown cannot send subsequent chunks or restart its
 cooldown, and shutdown errors are not reported as active synchronization failures.
 Errors from the current messenger remain visible.
 
+### Deferred bunker synchronization
+
+Trusted-device synchronization currently includes local `nsec` accounts only.
+Ordinary `bunker://` accounts omit double signing and Double DH from the launcher's
+injected signer API. Full content-key synchronization and a possible continuous
+backup role belong to future vault-like wrappers that join device pairing;
+legacy bunker URLs would be an optional separate interface. See the
+[bunker sync TODO](docs/bunker-sync-todo.md) for findings, prerequisites and
+validation criteria.
+
 
 ### Launcher relay bridge
 
