@@ -393,7 +393,7 @@ reach onError; lifecycle suppression must not become a blanket error filter.
 
 ## Launcher relay bridge
 
-- Use the coordinated published libp2r2p 0.11.20 release, pinned exactly in the
+- Use the coordinated libp2r2p 0.11.21 release, pinned exactly in the
   dev dependency and lockfile. Its live readers stop definitive per-route refusals
   and recover transient errors through bounded offline-aware backoff/cooldowns.
   Keep the existing facade/protocol and standalone fallback. Validate sync,
@@ -461,6 +461,10 @@ Sync overflow warnings include only bounded operational queue diagnostics.
 
 ## Prepared relay package validation
 
-Before registry publication, validate and rebuild with the exact prepared 0.11.20
+Before registry publication, validate and rebuild with the exact prepared 0.11.21
 tarball through public imports. Final lockfiles retain npm URLs and its real
 integrity; publish that same archive. The facade preserves params unchanged.
+
+Import kind 18716 as `CONTENT_KEY_ANNOUNCEMENT` from `libp2r2p/kind`; content-key
+event helpers no longer export a separate kind constant. Do not add a legacy alias
+to the vault's content-key service.

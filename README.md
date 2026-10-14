@@ -294,13 +294,17 @@ recovery and reload without reseeding. Run it with
 `node ../44billion/bin/run-browser-tests.js -- node tests/browser/private-sync.js`.
 The runner caps the complete browser/runtime group at 3 GiB with no swap.
 
-Private synchronization uses the published `libp2r2p@0.11.20` package pinned in
+Private synchronization uses the `libp2r2p@0.11.21` package pinned in
 `package-lock.json`, including live-overflow recovery with durable history gaps.
 Live readers stop definitive per-route refusals and recover transient failures
 with bounded offline-aware backoff and relay cooldowns. The launcher facade and
 standalone transport keep the same wire protocol and identity boundaries.
 The deployment announcement hash includes the lockfile, so a dependency-only
 update also offers the existing manual update banner without changing cache identity.
+
+Content-key announcements use `CONTENT_KEY_ANNOUNCEMENT` (18716), imported from
+`libp2r2p/kind`. Event builders and parsers remain in `libp2r2p/content-key/event`;
+that subpath no longer exports a separate kind constant.
 
 Delegated sockets preserve optional Nostr `params` strings, including absolute
 `@<Unix milliseconds>` deadlines, through the launcher bridge. The library scopes

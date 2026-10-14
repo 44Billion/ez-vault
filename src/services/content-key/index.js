@@ -2,7 +2,8 @@ import { generateSecretKey } from 'libp2r2p/key'
 import { getIykcProofs } from 'libp2r2p/content-key'
 import { bytesToHex } from 'libp2r2p/base16'
 import { isOnline, onOnline } from 'libp2r2p/network'
-import { makeContentKeyEvent, makeContentKeyEventForPubkey, parseContentKeyEvent, CONTENT_KEY_KIND } from 'libp2r2p/content-key/event'
+import { makeContentKeyEvent, makeContentKeyEventForPubkey, parseContentKeyEvent } from 'libp2r2p/content-key/event'
+import { CONTENT_KEY_ANNOUNCEMENT } from 'libp2r2p/kind'
 import { freeRelays, relayPool, seedRelays } from 'libp2r2p/relay'
 import * as store from '../accounts-store.js'
 import * as secrets from '../secrets.js'
@@ -10,7 +11,7 @@ import { filterVisibleAccounts } from '../account-mutations.js'
 import { fetchRelayListEvent, parseRelayListEvent, resolveWriteRelays } from '../relay.js'
 import { getState, setState } from '../storage/index.js'
 
-export { CONTENT_KEY_KIND, getIykcProofs }
+export { getIykcProofs }
 
 export const CONTENT_KEY_EVENT_REFRESH_INTERVAL_MS = 4 * 60 * 60 * 1000
 
@@ -157,7 +158,7 @@ async function resolveContentKeyWriteRelays ({
 async function fetchLatestContentKeyEventFromRelay ({ ownerPubkey, relay, _relayPool }) {
   try {
     const response = await _relayPool.getEvents({
-      kinds: [CONTENT_KEY_KIND],
+      kinds: [CONTENT_KEY_ANNOUNCEMENT],
       authors: [ownerPubkey],
       limit: 1
     }, [relay], {

@@ -4,7 +4,8 @@ import { getEventHash, isValidEvent } from 'libp2r2p/event'
 import { generateSecretKey, getPublicKey } from 'libp2r2p/key'
 import NsecSigner from '../src/services/nsec-signer.js'
 import { doubleSignEvent, refreshStoredContentKeyEvents, refreshStoredContentKeyEventsIfDue, rotateContentKeyIfStillCanonical, startContentKeyEventRefresh, upsertContentKeyEvent } from '../src/services/content-key/index.js'
-import { makeContentKeyEvent, makeContentKeyEventForPubkey, parseContentKeyEvent, isValidContentKeyProof, isValidIykcProof, CONTENT_KEY_KIND } from 'libp2r2p/content-key/event'
+import { makeContentKeyEvent, makeContentKeyEventForPubkey, parseContentKeyEvent, isValidContentKeyProof, isValidIykcProof } from 'libp2r2p/content-key/event'
+import { CONTENT_KEY_ANNOUNCEMENT } from 'libp2r2p/kind'
 import * as store from '../src/services/accounts-store.js'
 import * as secrets from '../src/services/secrets.js'
 import { freeRelays, seedRelays } from 'libp2r2p/relay'
@@ -81,7 +82,7 @@ test('makeContentKeyEvent publishes a signed content pubkey', async () => {
   const event = await makeContentKeyEvent({ userSigner: user, contentKeySigner: contentKey, createdAt: 7 })
   const parsed = parseContentKeyEvent(event)
 
-  assert.equal(event.kind, CONTENT_KEY_KIND)
+  assert.equal(event.kind, CONTENT_KEY_ANNOUNCEMENT)
   assert.equal(event.pubkey, userPubkey)
   assert.deepEqual(event.tags, [['cp', contentPubkey]])
   assert.equal(parsed.iykcPubkey, contentPubkey)
