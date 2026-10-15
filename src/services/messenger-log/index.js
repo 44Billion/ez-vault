@@ -19,6 +19,7 @@ export const PAGE_SIZE = 100
 // `ez-vault` id remains a separate app like any other.
 
 const listeners = new Set()
+const pending = new Set()
 // appKey -> JSON of the richest app metadata already propagated to older
 // entries this session. Skips repeat backfill scans for busy apps.
 const propagatedAppMetadata = new Map()
@@ -104,12 +105,32 @@ export async function append (entry) {
   }
 }
 
+// Snapshot binary fields before replying: callers may release or mutate buffers
+// while the transition barrier and ordinary encrypted log persistence continue.
+export function appendInBackground (entry) {
+  try {
+    const work = append(structuredClone(entry))
+      .catch(err => console.warn('messenger-log write failed', err?.name || 'Error'))
+    pending.add(work)
+    work.then(() => pending.delete(work), () => pending.delete(work))
+    return work
+  } catch (err) {
+    console.warn('messenger-log snapshot failed', err?.name || 'Error')
+    return Promise.resolve()
+  }
+}
+
+export async function flush () {
+  await Promise.all([...pending])
+}
+
 export async function list (options = {}) {
   return (await listMessengerLogs({ limit: PAGE_SIZE, ...options })).map(inflate)
 }
 
 export async function removeForPubkey (pubkey) {
   try {
+    await flush()
     if (await removeMessengerLogsForPubkey(pubkey)) notify()
   } catch (err) {
     console.warn('messenger-log removal failed', err?.message ?? err)
@@ -118,6 +139,7 @@ export async function removeForPubkey (pubkey) {
 
 export async function clear () {
   try {
+    await flush()
     await clearMessengerLogs()
     notify()
   } catch (err) {

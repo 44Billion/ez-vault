@@ -24,6 +24,17 @@ Because the signer custodies private keys, the overriding design principle is **
   Only bunker adapters convert local plaintext to/from standard Base64 for
   remote NIP-46. Keep Base64 signer methods for private-channel/private-messenger
   consumers; activity logs represent buffers as Base64 inside sealed JSON.
+- Local signer success/error replies never await activity-log persistence.
+  `messenger-log.appendInBackground` snapshots each complete entry, including
+  binary fields, before the reply; encryption still respects the vault transition
+  barrier and persists only sealed params/results. Pending writes are best-effort
+  on page termination. `flush` waits for already queued background work, and
+  explicit log clearing/account-log removal drains that work before deleting it.
+  Audit write/snapshot failures cannot change the signer result. Keep disclosure
+  methods unlogged and preserve the existing reply/error protocol and context.
+  `node ../44billion/bin/run-browser-tests.js -- node tests/browser/signer-log.js`
+  verifies real binary signer success/error replies while audit writes are held,
+  followed by complete encrypted records after the transition barrier releases.
 - **Small, readable surface area.** Prefer straightforward code over clever abstractions — the code is the documentation for our security claims.
 
 ## Hosting & Entry Point

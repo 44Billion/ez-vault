@@ -409,7 +409,7 @@ function handleNostrDbAppBackfill (e) {
   if (e.data.reqId) reply(e, { payload: { accepted } }, { to: launcherPort })
 }
 
-async function handleSignerRequest (e, { code, run }) {
+export async function handleSignerRequest (e, { code, run, sendReply = message => reply(e, message, { to: launcherPort }) }) {
   const { pubkey, method, params = [], app = {}, with_shared_key: withSharedKey = null, context: requestContext = '' } = e.data.payload ?? {}
   const signerContext = signerRequestContext(method, params)
   const context = typeof requestContext === 'string' && requestContext ? requestContext : ''
@@ -433,20 +433,20 @@ async function handleSignerRequest (e, { code, run }) {
   try {
     const payload = await run({ pubkey, method, params, withSharedKey })
     if (shouldLog) {
-      await log.append({ ...logBase, status: 'success', params, result: payload })
+      log.appendInBackground({ ...logBase, status: 'success', params, result: payload })
     }
-    reply(e, { payload }, { to: launcherPort })
+    sendReply({ payload })
   } catch (err) {
     const serialized = serializeError(err, errorContext)
     if (shouldLog) {
-      await log.append({
+      log.appendInBackground({
         ...logBase,
         status: 'failure',
         params,
         error: { message: err.message }
       })
     }
-    reply(e, { error: serialized }, { to: launcherPort })
+    sendReply({ error: serialized })
   }
 }
 

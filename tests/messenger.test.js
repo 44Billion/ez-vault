@@ -7,6 +7,7 @@ import {
   applyAccountEvents,
   handleLocalDevWipe,
   handleLegacyViewMessage,
+  handleSignerRequest,
   isTrustedOrigin,
   requestVaultClose,
   signerRequestApp,
@@ -16,6 +17,8 @@ import {
 import * as store from '../src/services/accounts-store.js'
 import * as secrets from '../src/services/secrets.js'
 import * as journal from '../src/services/account-mutation-journal.js'
+import * as log from '../src/services/messenger-log/index.js'
+import { listMessengerLogs } from '../src/services/storage/index.js'
 import { npubFromPubkey } from 'libp2r2p/key'
 
 if (!globalThis.localStorage) {
@@ -304,4 +307,79 @@ test('snapshotAccounts follows the account-mutation journal visibility window', 
 
   await journal.clear()
   assert.deepEqual(snapshotAccounts().map(a => a.pubkey), [pubkey])
+})
+
+test('signer success replies before a blocked audit write and preserves transferred binary fields', async () => {
+  secrets.unlock(new Uint8Array(32).fill(1), null)
+  const release = secrets.beginVaultTransition()
+  const plaintext = new Uint8Array([1, 2, 3])
+  const result = new Uint8Array([5, 6, 7]).buffer
+  const replies = []
+  const event = { data: { payload: { pubkey: 'owner', method: 'nip44v3_decrypt', params: ['peer', 9, 'cache', plaintext.buffer], app: { id: 'background-test' } } } }
+  let handled = false
+  const handling = handleSignerRequest(event, {
+    code: 'NIP07', run: async () => result,
+    sendReply: message => replies.push(structuredClone(message, { transfer: [result] }))
+  }).then(() => { handled = true })
+  try {
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(handled, true, 'the transition/log barrier does not delay the reply')
+    assert.deepEqual(new Uint8Array(replies[0].payload), new Uint8Array([5, 6, 7]))
+    assert.equal(result.byteLength, 0)
+    assert.deepEqual(await listMessengerLogs(), [])
+    plaintext.fill(99)
+    release()
+    await log.flush()
+    const [record] = await log.list()
+    assert.equal(record.status, 'success')
+    assert.equal(record.result, 'BQYH')
+    assert.deepEqual(record.params, ['peer', 9, 'cache', 'AQID'])
+    const [stored] = await listMessengerLogs()
+    assert.equal(typeof stored.sealed, 'string')
+    assert.equal(Object.hasOwn(stored, 'params'), false)
+    assert.equal(Object.hasOwn(stored, 'result'), false)
+  } finally {
+    release()
+    await handling
+    await log.flush()
+  }
+})
+
+test('signer failures also reply independently of audit persistence with their original context', async () => {
+  secrets.unlock(new Uint8Array(32).fill(1), null)
+  const release = secrets.beginVaultTransition()
+  const replies = []
+  let handled = false
+  const handling = handleSignerRequest({ data: { payload: { pubkey: 'owner', method: 'nip44v3_encrypt', params: ['peer', 9, 'cache', new ArrayBuffer(0)] } } }, {
+    code: 'NIP07',
+    run: async () => { throw Object.assign(new Error('SIGNER_FAILED'), { code: 'TEST_ERROR' }) },
+    sendReply: message => replies.push(message)
+  }).then(() => { handled = true })
+  try {
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(handled, true)
+    assert.equal(replies[0].error.message, 'SIGNER_FAILED')
+    assert.equal(replies[0].error.type, 'error')
+    assert.deepEqual(replies[0].error.context, { eventKind: 9, eventScope: 'cache' })
+    assert.deepEqual(await listMessengerLogs(), [])
+    release()
+    await log.flush()
+    const [record] = await log.list()
+    assert.equal(record.status, 'failure')
+    assert.deepEqual(record.error, { message: 'SIGNER_FAILED' })
+  } finally {
+    release()
+    await handling
+    await log.flush()
+  }
+})
+
+test('unlogged disclosures still avoid the activity log', async () => {
+  const replies = []
+  await handleSignerRequest({ data: { payload: { pubkey: 'owner', method: 'obfuscate', params: ['value', '9', ''] } } }, {
+    code: 'NIP07', run: async () => 'opaque-id', sendReply: message => replies.push(message)
+  })
+  await log.flush()
+  assert.deepEqual(replies, [{ payload: 'opaque-id' }])
+  assert.deepEqual(await listMessengerLogs(), [])
 })

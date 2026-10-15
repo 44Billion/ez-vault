@@ -89,3 +89,24 @@ test('binary plaintext stays Base64 inside sealed log fields, including empty bu
     secrets.lock()
   }
 })
+
+for (const action of ['clear', 'removeForPubkey']) {
+  test(`${action} waits for already queued background writes before removing their records`, async () => {
+    secrets.unlock(new Uint8Array(32).fill(1), null)
+    const release = secrets.beginVaultTransition()
+    let removed = false
+    const writing = log.appendInBackground({ pubkey: 'owner', method: 'nip44v3_encrypt', params: ['private'] })
+    const removing = (action === 'clear' ? log.clear() : log.removeForPubkey('owner')).then(() => { removed = true })
+    try {
+      await new Promise(resolve => setImmediate(resolve))
+      assert.equal(removed, false)
+      release()
+      await Promise.all([writing, removing])
+      assert.deepEqual(await listMessengerLogs(), [])
+    } finally {
+      release()
+      await Promise.all([writing, removing])
+      secrets.lock()
+    }
+  })
+}
