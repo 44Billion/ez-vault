@@ -190,15 +190,15 @@ test('doubleSignEvent signs event with per-event imkc proof', async () => {
   assert.equal(isValidEvent(signed), true)
 })
 
-test('refreshStoredContentKeyEvents republishes newest remote key only where absent or older with another pubkey', async () => {
+test('refreshStoredContentKeyEvents advertises the active local key where absent or different, even if a remote announcement is newer', async () => {
   secrets.unlock(generateSecretKey(), null)
   const account = await addNsecAccount()
-  await addContentKey(account.pubkey, 50)
+  const localContentKey = await addContentKey(account.pubkey, 50)
   const userSigner = secrets.getNsecSigner(account.pubkey)
   const remoteContentPubkey = pubkeyFixture(11)
   const staleContentPubkey = pubkeyFixture(12)
   const newest = await makeContentKeyEventForPubkey({ userSigner, contentPubkey: remoteContentPubkey, createdAt: 100 })
-  const olderSame = await makeContentKeyEventForPubkey({ userSigner, contentPubkey: remoteContentPubkey, createdAt: 80 })
+  const olderSame = await makeContentKeyEventForPubkey({ userSigner, contentPubkey: localContentKey.pubkey, createdAt: 80 })
   const olderOther = await makeContentKeyEventForPubkey({ userSigner, contentPubkey: staleContentPubkey, createdAt: 70 })
   const relayList = await userSigner.signEvent({
     kind: 10002,
@@ -215,7 +215,7 @@ test('refreshStoredContentKeyEvents republishes newest remote key only where abs
 
   const result = await refreshStoredContentKeyEvents({
     _isOnline: async () => true,
-    _nowSeconds: () => 200,
+    _nowSeconds: () => 100,
     _fetchRelayListEvent: async () => relayList,
     _relayPool: relayPoolStub({
       events: async (_filter, relays) => {
@@ -233,11 +233,12 @@ test('refreshStoredContentKeyEvents republishes newest remote key only where abs
   })
 
   assert.equal(result.checked, 1)
-  assert.equal(result.published, 2)
+  assert.equal(result.published, 3)
   assert.equal(published.length, 1)
-  assert.deepEqual(published[0].relays, ['wss://absent.example', 'wss://older.example'])
-  assert.equal(published[0].event.created_at, 200)
-  assert.equal(parseContentKeyEvent(published[0].event).iykcPubkey, remoteContentPubkey)
+  assert.deepEqual(published[0].relays, ['wss://newest.example', 'wss://absent.example', 'wss://older.example'])
+  assert.equal(published[0].event.created_at, 101)
+  assert.equal(parseContentKeyEvent(published[0].event).iykcPubkey, localContentKey.pubkey)
+  assert.equal(secrets.listContentKeys(account.pubkey)[0].createdAt, 50)
 })
 
 test('refreshStoredContentKeyEvents publishes local key only when no valid event is found', async () => {
@@ -268,6 +269,43 @@ test('refreshStoredContentKeyEvents publishes local key only when no valid event
   assert.equal(published.length, 1)
   assert.deepEqual(published[0].relays, ['wss://one.example', 'wss://two.example'])
   assert.equal(parseContentKeyEvent(published[0].event).iykcPubkey, localContentKey.pubkey)
+})
+
+test('refresh keeps the local selection despite a delayed historical import and skips matching or failed routes', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const account = await addNsecAccount()
+  const older = await addContentKey(account.pubkey, Math.floor(Date.now() / 1000))
+  const userSigner = secrets.getNsecSigner(account.pubkey)
+  const relayList = await userSigner.signEvent({
+    kind: 10002, created_at: 6,
+    tags: [['r', 'wss://matching.example', 'write'], ['r', 'wss://different.example', 'write'], ['r', 'wss://failed.example', 'write']], content: ''
+  })
+  const active = await secrets.createContentKeySecret(account.pubkey)
+  const matching = await makeContentKeyEvent({ userSigner, contentKeySigner: active, createdAt: 100 })
+  const different = await makeContentKeyEventForPubkey({ userSigner, contentPubkey: older.pubkey, createdAt: 100 })
+  const publications = []
+  const result = await refreshStoredContentKeyEvents({
+    _isOnline: async () => true,
+    _nowSeconds: () => 100,
+    _fetchRelayListEvent: async () => relayList,
+    _relayPool: relayPoolStub({
+      events: async (_filter, [relay]) => {
+        if (relay === 'wss://failed.example') throw new Error('relay unavailable')
+        // A delayed historical import must not become the selected key.
+        if (relay === 'wss://different.example') await secrets.setContentKeySecret(account.pubkey, older.secret, older.createdAt)
+        return [relay === 'wss://matching.example' ? matching : different]
+      },
+      send: async (event, relays) => {
+        publications.push({ event, relays })
+        return { success: true }
+      }
+    })
+  })
+  assert.equal(result.published, 1)
+  assert.deepEqual(publications[0].relays, ['wss://different.example'])
+  assert.equal(parseContentKeyEvent(publications[0].event).iykcPubkey, active.getPublicKey())
+  const noRead = { _getEvents: async () => assert.fail('Confirmed refresh should update cache'), _getRelaysByPubkey: async () => assert.fail('No discovery needed') }
+  assert.equal((await getIykcProofs([account.pubkey], noRead))[account.pubkey].iykcPubkey, active.getPublicKey())
 })
 
 test('refreshStoredContentKeyEvents skips offline instead of treating missing relay results as absence', async () => {
@@ -356,7 +394,8 @@ test('refreshStoredContentKeyEvents adds fallback write relays without duplicate
 test('rotateContentKeyIfStillCanonical rotates when relays still advertise removed-known key', async () => {
   secrets.unlock(generateSecretKey(), null)
   const account = await addNsecAccount()
-  const oldContent = await addContentKey(account.pubkey, 50)
+  const now = Math.floor(Date.now() / 1000)
+  const oldContent = await addContentKey(account.pubkey, now)
   const userSigner = secrets.getNsecSigner(account.pubkey)
   const relayList = await userSigner.signEvent({
     kind: 10002,
@@ -374,7 +413,7 @@ test('rotateContentKeyIfStillCanonical rotates when relays still advertise remov
   const result = await rotateContentKeyIfStillCanonical({
     ownerPubkey: account.pubkey,
     removedKnownContentPubkey: oldContent.pubkey,
-    _nowSeconds: () => 100,
+    _nowSeconds: () => now,
     _fetchRelayListEvent: async () => relayList,
     _relayPool: relayPoolStub({
       events: async () => [oldEvent],
@@ -390,7 +429,9 @@ test('rotateContentKeyIfStillCanonical rotates when relays still advertise remov
   assert.equal(published.length, 1)
   assert.deepEqual(published[0].relays, ['wss://one.example'])
   assert.notEqual(parseContentKeyEvent(published[0].event).iykcPubkey, oldContent.pubkey)
-  assert.equal(secrets.listContentKeys(account.pubkey).length, 1)
+  assert.equal(secrets.listContentKeys(account.pubkey).length, 2)
+  assert.ok(secrets.getContentKeySigner(account.pubkey, oldContent.pubkey))
+  assert.equal(secrets.listContentKeys(account.pubkey).find(key => key.pubkey === result.contentPubkey).createdAt, now + 1)
 })
 
 test('rotateContentKeyIfStillCanonical clears when relays already advertise another key', async () => {
@@ -426,6 +467,47 @@ test('rotateContentKeyIfStillCanonical clears when relays already advertise anot
   assert.equal(result.reason, 'already-rotated')
   assert.equal(published, false)
   assert.equal(secrets.listContentKeys(account.pubkey)[0].pubkey, oldContent.pubkey)
+})
+
+test('failed rotation publication retains old decryption material and retries the same new active key', async () => {
+  const vaultKey = generateSecretKey()
+  secrets.unlock(vaultKey, null)
+  const account = await addNsecAccount()
+  const now = Math.floor(Date.now() / 1000)
+  const oldContent = await addContentKey(account.pubkey, now)
+  const userSigner = secrets.getNsecSigner(account.pubkey)
+  const peer = signer()
+  const encrypted = await peer.nip44EncryptDoubleDH(account.pubkey, 26300, '', btoa('late historical message'), oldContent.pubkey)
+  const oldEvent = await makeContentKeyEventForPubkey({ userSigner, contentPubkey: oldContent.pubkey, createdAt: now })
+  const relayList = await userSigner.signEvent({ kind: 10002, created_at: now, tags: [['r', 'wss://one.example', 'write']], content: '' })
+  let success = false
+  const attempts = []
+  const options = {
+    ownerPubkey: account.pubkey, removedKnownContentPubkey: oldContent.pubkey,
+    _nowSeconds: () => now,
+    _fetchRelayListEvent: async () => relayList,
+    _relayPool: relayPoolStub({
+      events: async () => [oldEvent],
+      send: async event => {
+        attempts.push(parseContentKeyEvent(event).iykcPubkey)
+        return { success }
+      }
+    })
+  }
+  const failed = await rotateContentKeyIfStillCanonical(options)
+  assert.equal(failed.status, 'retry')
+  assert.notEqual(failed.contentPubkey, oldContent.pubkey)
+  const blob = secrets.sealCurrentEntries()
+  secrets.lock()
+  secrets.unlock(vaultKey, blob)
+  success = true
+  const retried = await rotateContentKeyIfStillCanonical(options)
+  assert.equal(retried.status, 'rotated')
+  assert.equal(retried.rotated, false)
+  assert.deepEqual(attempts, [failed.contentPubkey, failed.contentPubkey])
+  assert.equal(secrets.listContentKeys(account.pubkey).length, 2)
+  const decrypted = await secrets.getNsecSigner(account.pubkey).nip44DecryptDoubleDH(peer.getPublicKey(), 26300, '', encrypted[0], encrypted[1], oldContent.pubkey)
+  assert.equal(atob(decrypted), 'late historical message')
 })
 
 test('refreshStoredContentKeyEventsIfDue persists a four-hour cadence across visits', async () => {

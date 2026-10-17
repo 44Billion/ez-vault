@@ -482,23 +482,23 @@ test('stale content keys are pruned once a newer key is stored', async () => {
   assert.deepEqual(secrets.listContentKeys(alice.pubkey).map(key => key.pubkey), [freshPubkey])
 })
 
-test('content key replacement rotates the owner to the new persisted key', async () => {
+test('local rotation retains historical secrets across visits and advances same-second creation timestamps', async () => {
   const vaultKey = generateSecretKey()
   secrets.unlock(vaultKey, null)
   const alice = await addNsecAccount()
   const oldContent = await addContentKey(alice.pubkey)
-  const newSecret = seckey()
-  const newPubkey = getPublicKey(hexToBytes(newSecret))
-
-  await secrets.replaceContentKeySecret(alice.pubkey, newSecret, 8)
+  const createdAt = secrets.listContentKeys(alice.pubkey)[0].createdAt
+  const nextSigner = await secrets.createContentKeySecret(alice.pubkey, createdAt)
+  const newPubkey = nextSigner.getPublicKey()
   const accountBlob = secrets.sealCurrentEntries()
 
-  assert.equal(secrets.getContentKeySigner(alice.pubkey, oldContent.pubkey), null)
+  assert.ok(secrets.getContentKeySigner(alice.pubkey, oldContent.pubkey))
   assert.equal(secrets.getLatestContentKeySigner(alice.pubkey)?.getPublicKey(), newPubkey)
+  assert.equal(secrets.listContentKeys(alice.pubkey).find(key => key.pubkey === newPubkey).createdAt, createdAt + 1)
 
   secrets.lock()
   secrets.unlock(vaultKey, accountBlob)
-  assert.equal(secrets.getContentKeySigner(alice.pubkey, oldContent.pubkey), null)
+  assert.ok(secrets.getContentKeySigner(alice.pubkey, oldContent.pubkey))
   assert.equal(secrets.getLatestContentKeySigner(alice.pubkey)?.getPublicKey(), newPubkey)
 })
 
@@ -519,4 +519,215 @@ test('personal-copy double signing persists and reuses a local key without any r
   assert.equal(second.tags.find(tag => tag[0] === 'imkc')[1], contentPubkey)
   assert.ok(secrets.getContentKeySigner(alice.pubkey, contentPubkey))
   assert.ok(await getState(CONTENT_KEYS_STORAGE_KEY))
+})
+
+test('concurrent local creation advances timestamps without replacing historical keys', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const alice = await addNsecAccount()
+  const createdAt = nowSeconds()
+  const [first, second] = await Promise.all([
+    secrets.createContentKeySecret(alice.pubkey, createdAt),
+    secrets.createContentKeySecret(alice.pubkey, createdAt)
+  ])
+  const keys = secrets.listContentKeys(alice.pubkey)
+  assert.equal(keys.find(key => key.pubkey === first.getPublicKey()).createdAt, createdAt)
+  assert.equal(keys.find(key => key.pubkey === second.getPublicKey()).createdAt, createdAt + 1)
+  assert.equal(secrets.getLatestContentKeySigner(alice.pubkey), second)
+})
+
+test('importing a historical key last cannot change active encryption, including after unlock', async () => {
+  const vaultKey = generateSecretKey()
+  secrets.unlock(vaultKey, null)
+  const alice = await addNsecAccount()
+  const bob = await addNsecAccount()
+  const active = await addContentKey(alice.pubkey)
+  const historicalSecret = seckey()
+  await secrets.setContentKeySecret(alice.pubkey, historicalSecret, nowSeconds() - 10)
+  const accountBlob = secrets.sealCurrentEntries()
+
+  for (const restore of [false, true]) {
+    if (restore) {
+      secrets.lock()
+      secrets.unlock(vaultKey, accountBlob)
+    }
+    const encrypted = await secrets.getNsecSigner(alice.pubkey).nip44EncryptDoubleDH(
+      bob.pubkey, DOUBLE_DH_KIND, '', textToBase64('latest by creation time')
+    )
+    assert.equal(encrypted[1], active.pubkey)
+    const decrypted = await secrets.getNsecSigner(bob.pubkey).nip44DecryptDoubleDH(
+      alice.pubkey, DOUBLE_DH_KIND, '', encrypted[0], active.pubkey
+    )
+    assert.equal(base64ToText(decrypted), 'latest by creation time')
+  }
+})
+
+test('equal timestamps select the smallest pubkey across opposite import orders and restoration', async () => {
+  const vaultKey = generateSecretKey()
+  secrets.unlock(vaultKey, null)
+  const alice = await addNsecAccount()
+  const bob = await addNsecAccount()
+  const keys = [seckey(), seckey()].map(secret => ({ secret, pubkey: getPublicKey(hexToBytes(secret)) }))
+    .sort((a, b) => a.pubkey < b.pubkey ? -1 : 1)
+  const createdAt = nowSeconds()
+  for (const key of keys) await secrets.setContentKeySecret(alice.pubkey, key.secret, createdAt)
+  for (const key of [...keys].reverse()) await secrets.setContentKeySecret(bob.pubkey, key.secret, createdAt)
+  const accountBlob = secrets.sealCurrentEntries()
+
+  for (const restore of [false, true]) {
+    if (restore) {
+      secrets.lock()
+      secrets.unlock(vaultKey, accountBlob)
+    }
+    for (const owner of [alice, bob]) {
+      assert.equal(secrets.getLatestContentKeySigner(owner.pubkey).getPublicKey(), keys[0].pubkey)
+      const encrypted = await secrets.getNsecSigner(owner.pubkey).nip44EncryptDoubleDH(
+        alice.pubkey, DOUBLE_DH_KIND, '', textToBase64('same selection')
+      )
+      assert.equal(encrypted[1], keys[0].pubkey)
+    }
+  }
+})
+
+test('encryption and public signatures republish the active local key even when the advertised historical secret is available', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const alice = await addNsecAccount()
+  const older = await addContentKey(alice.pubkey)
+  const active = await secrets.createContentKeySecret(alice.pubkey)
+  const activePubkey = active.getPublicKey()
+  const remoteTimestamp = nowSeconds() + 10
+  const publications = []
+  const internals = {
+    _getIykcProofs: async () => ({ [alice.pubkey]: { iykcPubkey: older.pubkey, iykcProof: `${remoteTimestamp}:proof` } }),
+    _upsertContentKeyEvent: async options => {
+      publications.push(options)
+      return { result: { success: true } }
+    }
+  }
+
+  const encrypted = await run({
+    pubkey: alice.pubkey, method: 'nip44EncryptDoubleDH',
+    params: [alice.pubkey, DOUBLE_DH_KIND, '', textToBuffer('active key'), activePubkey], internals
+  })
+  assert.equal(encrypted[1], activePubkey)
+  const signed = await run({
+    pubkey: alice.pubkey, method: 'doubleSignEvent',
+    params: [{ kind: 1, created_at: 9, tags: [], content: 'public' }], internals
+  })
+  assert.equal(signed.tags.find(tag => tag[0] === 'imkc')[1], activePubkey)
+  assert.equal(isValidEvent(signed), true)
+  assert.equal(publications.length, 2)
+  for (const publication of publications) {
+    assert.equal(publication.contentKeySigner, active)
+    assert.equal(publication.createdAt, remoteTimestamp + 1)
+  }
+
+  const noNetwork = async () => assert.fail('Personal copies must not require an announcement')
+  const personal = await run({
+    pubkey: alice.pubkey, method: 'doubleSignEvent',
+    params: [{ kind: 1006, created_at: 9, tags: [['k', '9'], ['imkc']], content: 'private ciphertext' }],
+    internals: { _getIykcProofs: noNetwork, _upsertContentKeyEvent: noNetwork }
+  })
+  assert.equal(personal.tags.find(tag => tag[0] === 'imkc')[1], activePubkey)
+})
+
+test('encryption keeps its selected key when newer keys arrive during discovery and publication', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const alice = await addNsecAccount()
+  const bob = await addNsecAccount()
+  const selected = await addContentKey(alice.pubkey)
+  let published = null
+  const encrypted = await run({
+    pubkey: alice.pubkey, method: 'nip44EncryptDoubleDH',
+    params: [bob.pubkey, DOUBLE_DH_KIND, '', textToBuffer('pinned key')],
+    internals: {
+      _getIykcProofs: async () => {
+        await secrets.createContentKeySecret(alice.pubkey)
+        return {}
+      },
+      _upsertContentKeyEvent: async ({ contentKeySigner }) => {
+        published = contentKeySigner.getPublicKey()
+        await secrets.createContentKeySecret(alice.pubkey)
+        return { result: { success: true } }
+      }
+    }
+  })
+  assert.notEqual(secrets.getLatestContentKeySigner(alice.pubkey).getPublicKey(), selected.pubkey)
+  assert.equal(published, selected.pubkey)
+  assert.equal(encrypted[1], selected.pubkey)
+  assert.equal(bufferToText(await run({
+    pubkey: bob.pubkey, method: 'nip44DecryptDoubleDH',
+    params: [alice.pubkey, DOUBLE_DH_KIND, '', encrypted[0], encrypted[1]]
+  })), 'pinned key')
+})
+
+test('public signing keeps the published selection when a newer secret arrives during the send', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const alice = await addNsecAccount()
+  const selected = await addContentKey(alice.pubkey)
+  const signed = await run({
+    pubkey: alice.pubkey, method: 'doubleSignEvent',
+    params: [{ kind: 1, created_at: 9, tags: [], content: 'pinned signature' }],
+    internals: {
+      _getIykcProofs: async () => ({}),
+      _upsertContentKeyEvent: async ({ contentKeySigner }) => {
+        assert.equal(contentKeySigner.getPublicKey(), selected.pubkey)
+        await secrets.createContentKeySecret(alice.pubkey)
+        return { result: { success: true } }
+      }
+    }
+  })
+  assert.equal(signed.tags.find(tag => tag[0] === 'imkc')[1], selected.pubkey)
+  assert.equal(isValidEvent(signed), true)
+})
+
+test('failed discovery or publication preserves best-effort encryption with the selected local key', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const alice = await addNsecAccount()
+  const bob = await addNsecAccount()
+  const active = await addContentKey(alice.pubkey)
+  for (const discoveryFails of [true, false]) {
+    const encrypted = await run({
+      pubkey: alice.pubkey, method: 'nip44EncryptDoubleDH',
+      params: [bob.pubkey, DOUBLE_DH_KIND, '', textToBuffer('best effort')],
+      internals: {
+        _isOnline: async () => false,
+        _getIykcProofs: async () => {
+          if (discoveryFails) throw new Error('offline')
+          return {}
+        },
+        _upsertContentKeyEvent: async () => ({ result: { success: false } })
+      }
+    })
+    assert.equal(encrypted[1], active.pubkey)
+    assert.equal(bufferToText(await run({
+      pubkey: bob.pubkey, method: 'nip44DecryptDoubleDH',
+      params: [alice.pubkey, DOUBLE_DH_KIND, '', encrypted[0], encrypted[1]]
+    })), 'best effort')
+  }
+})
+
+test('retention protects an active key older than 45 days and prunes only the historical loser on restoration', async () => {
+  const vaultKey = generateSecretKey()
+  secrets.unlock(vaultKey, null)
+  const alice = await addNsecAccount()
+  const activeSecret = seckey()
+  const historicalSecret = seckey()
+  const activePubkey = getPublicKey(hexToBytes(activeSecret))
+  const historicalPubkey = getPublicKey(hexToBytes(historicalSecret))
+  const createdAt = nowSeconds()
+  await secrets.setContentKeySecret(alice.pubkey, activeSecret, createdAt)
+  await secrets.setContentKeySecret(alice.pubkey, historicalSecret, createdAt - 10)
+  // Move the clock past the retention boundary only for restore/pruning.
+  const originalNow = Date.now
+  const accountBlob = secrets.sealCurrentEntries()
+  try {
+    Date.now = () => (createdAt + DEFAULT_STALE_CHANNEL_SECONDS + 1) * 1000
+    secrets.lock()
+    secrets.unlock(vaultKey, accountBlob)
+    assert.ok(secrets.getContentKeySigner(alice.pubkey, activePubkey))
+    assert.equal(secrets.getContentKeySigner(alice.pubkey, historicalPubkey), null)
+    assert.equal(secrets.getLatestContentKeySigner(alice.pubkey).getPublicKey(), activePubkey)
+  } finally {
+    Date.now = originalNow
+  }
 })

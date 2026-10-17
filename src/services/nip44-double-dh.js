@@ -1,6 +1,4 @@
-import { generateSecretKey } from 'libp2r2p/key'
 import { isOnline } from 'libp2r2p/network'
-import { bytesToHex } from 'libp2r2p/base16'
 import { getIykcProofs, upsertContentKeyEvent } from './content-key/index.js'
 import * as secrets from './secrets.js'
 import { normalizeKind } from 'libp2r2p/nip44-v3'
@@ -16,7 +14,9 @@ function publishSucceeded (result) {
 async function lookupContentPubkey (pubkey, warnings, { _getIykcProofs = getIykcProofs, _isOnline = isOnline } = {}) {
   try {
     const found = await _getIykcProofs([pubkey])
-    return { pubkey: found?.[pubkey]?.iykcPubkey || '', failed: false }
+    const proof = found?.[pubkey]
+    const timestamp = Number(proof?.iykcProof?.split(':')[0])
+    return { pubkey: proof?.iykcPubkey || '', createdAt: Number.isSafeInteger(timestamp) && timestamp >= 0 ? timestamp : 0, failed: false }
   } catch (err) {
     const online = await _isOnline().catch(() => false)
     warning(warnings, online ? 'CONTENT_KEY_LOOKUP_FAILED' : 'OFFLINE_CONTENT_KEY_LOOKUP_SKIPPED', err?.message || '')
@@ -24,9 +24,9 @@ async function lookupContentPubkey (pubkey, warnings, { _getIykcProofs = getIykc
   }
 }
 
-async function publishLocalContentKey ({ userSigner, contentKeySigner, warnings, _upsertContentKeyEvent = upsertContentKeyEvent }) {
+async function publishLocalContentKey ({ userSigner, contentKeySigner, createdAt, warnings, _upsertContentKeyEvent = upsertContentKeyEvent }) {
   try {
-    const { result } = await _upsertContentKeyEvent({ userSigner, contentKeySigner })
+    const { result } = await _upsertContentKeyEvent({ userSigner, contentKeySigner, createdAt })
     if (publishSucceeded(result)) return true
     warning(warnings, 'CONTENT_KEY_PUBLISH_FAILED')
   } catch (err) {
@@ -37,7 +37,7 @@ async function publishLocalContentKey ({ userSigner, contentKeySigner, warnings,
 
 async function createPersistedContentSigner ({ ownerPubkey, warnings }) {
   try {
-    return await secrets.setContentKeySecret(ownerPubkey, bytesToHex(generateSecretKey()))
+    return await secrets.createContentKeySecret(ownerPubkey)
   } catch (err) {
     warning(warnings, 'CONTENT_KEY_PERSIST_FAILED', err?.message || '')
     return null
@@ -55,25 +55,23 @@ export async function localOwnContentSigner ({ account, warnings = [] }) {
     await createPersistedContentSigner({ ownerPubkey: account.pubkey, warnings })
 }
 
-export async function publishedOwnContentSigner ({ account, userSigner, warnings = [], internals = {} }) {
+export async function publishedOwnContentSigner ({ account, userSigner, contentKeySigner, warnings = [], internals = {} }) {
   if (account.type !== 'nsec') {
     warning(warnings, 'OWN_CONTENT_KEY_UNSUPPORTED')
     return null
   }
 
   const ownerPubkey = account.pubkey
+  const localSigner = contentKeySigner === undefined
+    ? await localOwnContentSigner({ account, warnings })
+    : contentKeySigner
+  if (!localSigner) return null
   const advertised = await lookupContentPubkey(ownerPubkey, warnings, internals)
   if (advertised.failed) return null
-  const advertisedPubkey = advertised.pubkey
-  if (advertisedPubkey) {
-    const advertisedSigner = secrets.getContentKeySigner(ownerPubkey, advertisedPubkey)
-    if (advertisedSigner) return advertisedSigner
-  }
+  if (advertised.pubkey === await localSigner.getPublicKey()) return localSigner
 
-  const localSigner = secrets.getLatestContentKeySigner(ownerPubkey) ||
-    await createPersistedContentSigner({ ownerPubkey, warnings, ...internals })
-  if (!localSigner) return null
-  return await publishLocalContentKey({ userSigner, contentKeySigner: localSigner, warnings, ...internals })
+  const createdAt = Math.max(Math.floor(Date.now() / 1000), advertised.createdAt + 1)
+  return await publishLocalContentKey({ userSigner, contentKeySigner: localSigner, createdAt, warnings, ...internals })
     ? localSigner
     : null
 }
@@ -95,14 +93,16 @@ async function encrypt ({ account, signer, params, internals }) {
   const normalizedKind = normalizeKind(kind)
 
   const warnings = []
-  await publishedOwnContentSigner({ account, userSigner: signer, warnings, internals })
+  const contentKeySigner = await localOwnContentSigner({ account, warnings })
+  await publishedOwnContentSigner({ account, userSigner: signer, contentKeySigner, warnings, internals })
 
   const [ciphertext, senderContentPubkey = ''] = await signer.nip44EncryptDoubleDHBytes(
     peerPubkey,
     normalizedKind,
     scope,
     plaintextBytes,
-    peerContentPubkey
+    peerContentPubkey,
+    contentKeySigner
   )
   return [ciphertext, senderContentPubkey]
 }

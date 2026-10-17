@@ -1,9 +1,9 @@
-import { generateSecretKey, getPublicKey } from 'libp2r2p/key'
+import { getPublicKey } from 'libp2r2p/key'
 import * as store from '../accounts-store.js'
 import * as secrets from '../secrets.js'
 import { filterVisibleAccounts } from '../account-mutations.js'
 import { upsertContentKeyEvent } from '../content-key/index.js'
-import { bytesToHex, hexToBytes } from 'libp2r2p/base16'
+import { hexToBytes } from 'libp2r2p/base16'
 
 // Flow notes:
 // - This trusted-device layer only syncs content-key material for local nsec
@@ -30,10 +30,6 @@ const HEX32 = /^[0-9a-f]{64}$/i
 const listeners = new Set()
 const debugSourceByKey = new Map()
 const publishStatusByOwner = new Map()
-
-function nowSeconds () {
-  return Math.floor(Date.now() / 1000)
-}
 
 function sourceKey (ownerPubkey, contentPubkey) {
   return `${ownerPubkey}:${contentPubkey}`
@@ -85,14 +81,6 @@ function contentKeysForOwner (ownerPubkey) {
   return secrets.listContentKeys(ownerPubkey)
     .map(normalizeMetaKey)
     .filter(Boolean)
-}
-
-function latestKey (keys) {
-  let latest = null
-  for (const key of keys || []) {
-    if (!latest || (key.createdAt || 0) >= (latest.createdAt || 0)) latest = key
-  }
-  return latest
 }
 
 function shortPubkey (pubkey) {
@@ -169,7 +157,8 @@ export function getDebugSnapshot () {
     .filter(account => account.type === 'nsec')
     .map(account => {
       const keys = secrets.isUnlocked() ? contentKeysForOwner(account.pubkey) : []
-      const latest = latestKey(keys)
+      const activePubkey = secrets.getLatestContentKeySigner(account.pubkey)?.getPublicKey()
+      const latest = keys.find(key => key.pubkey === activePubkey) || null
       const source = latest
         ? debugSourceByKey.get(sourceKey(account.pubkey, latest.pubkey)) || 'persisted local'
         : ''
@@ -225,10 +214,9 @@ export async function generateAndPublishContentKey ({
   const userSigner = secrets.getNsecSigner(ownerPubkey)
   if (!userSigner) throw new Error('VAULT_LOCKED')
 
-  const seckey = bytesToHex(generateSecretKey())
-  const createdAt = nowSeconds()
-  const contentKeySigner = await secrets.setContentKeySecret(ownerPubkey, seckey, createdAt)
+  const contentKeySigner = await secrets.createContentKeySecret(ownerPubkey)
   const pubkey = await contentKeySigner.getPublicKey()
+  const createdAt = contentKeysForOwner(ownerPubkey).find(key => key.pubkey === pubkey).createdAt
 
   setDebugSource(ownerPubkey, pubkey, 'generated locally')
   setPublishStatus(ownerPubkey, { state: 'publishing', message: '' })
@@ -236,7 +224,7 @@ export async function generateAndPublishContentKey ({
   let result = null
   let error = null
   try {
-    result = await _upsertContentKeyEvent({ userSigner, contentKeySigner })
+    result = await _upsertContentKeyEvent({ userSigner, contentKeySigner, createdAt })
     setPublishStatus(ownerPubkey, { state: 'published', message: '' })
   } catch (err) {
     error = err

@@ -35,6 +35,11 @@ state, keyPath "key"
   value  passkey metadata, encrypted vault/sidecars, mutation journal,
          refresh timestamps, hints, or the messenger-log byte counter
 
+  ez-vault:content-keys is an encrypted array of { ownerPubkey, seckey, createdAt }.
+  Active selection: greatest createdAt, then smallest derived pubkey. Rotations
+  retain history; retention removes only historical keys older than 45 days and
+  always protects the active key. Announcements are not persisted in NostrDB.
+
 revocationRotations, keyPath "key"
   key    stable rotation-intent coordinate
   value  content-key rotation intent and retry state

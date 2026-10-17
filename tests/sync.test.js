@@ -1337,6 +1337,29 @@ test('content-key replies import valid keys, keep older keys, and notify the syn
   assert.equal(row.source, 'synced from Tablet')
 })
 
+test('a historical key received last leaves debug selection and encryption on the newer local key', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const owner = await addNsecAccount()
+  const active = await addContentKey(owner.pubkey, freshCreatedAt())
+  const historicalSecret = seckey()
+  const historicalPubkey = pubkeyFromSecret(historicalSecret)
+  const trusted = '6'.repeat(64)
+  await handleMessage(syncMessage({
+    channelPubkey: owner.pubkey,
+    senderPubkey: trusted,
+    code: CONTENT_KEYS_REPLY_CODE,
+    payload: { keys: [{ pubkey: historicalPubkey, seckey: historicalSecret, createdAt: freshCreatedAt(10) }] }
+  }), {
+    messenger: fakeMessenger(),
+    trustedByPubkey: new Map([[trusted, { pubkey: trusted, platform: 'Tablet' }]])
+  })
+
+  assert.ok(secrets.getContentKeySigner(owner.pubkey, historicalPubkey))
+  assert.equal(getDebugSnapshot().accounts.find(row => row.account.pubkey === owner.pubkey).latest.pubkey, active.pubkey)
+  const encrypted = await secrets.getNsecSigner(owner.pubkey).nip44EncryptDoubleDH(owner.pubkey, 26300, '', btoa('local key'))
+  assert.equal(encrypted[1], active.pubkey)
+})
+
 test('content-key replies keep a stale key only until a newer key exists', async () => {
   secrets.unlock(generateSecretKey(), null)
   const owner = await addNsecAccount()
@@ -1413,6 +1436,7 @@ test('dev content-key generation persists, publishes, updates debug source, and 
     assert.ok(secrets.getContentKeySigner(owner.pubkey, first.pubkey))
     assert.equal(calls.length, 1)
     assert.equal(calls[0].contentKeySigner.getPublicKey(), first.pubkey)
+    assert.equal(calls[0].createdAt, first.createdAt)
     assert.deepEqual(scheduled, [])
     assert.deepEqual(notified, [owner.pubkey])
     assert.equal(getDebugSnapshot().accounts[0].source, 'generated locally')

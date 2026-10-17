@@ -1,8 +1,6 @@
-import { generateSecretKey } from 'libp2r2p/key'
 import { getIykcProofs, rememberContentKeyEvent } from 'libp2r2p/content-key'
-import { bytesToHex } from 'libp2r2p/base16'
 import { isOnline, onOnline } from 'libp2r2p/network'
-import { makeContentKeyEvent, makeContentKeyEventForPubkey, parseContentKeyEvent } from 'libp2r2p/content-key/event'
+import { makeContentKeyEvent, parseContentKeyEvent } from 'libp2r2p/content-key/event'
 import { CONTENT_KEY_ANNOUNCEMENT } from 'libp2r2p/kind'
 import { freeRelays, relayPool, seedRelays } from 'libp2r2p/relay'
 import * as store from '../accounts-store.js'
@@ -43,6 +41,11 @@ function nowSeconds () {
   return Math.floor(Date.now() / 1000)
 }
 
+function newerAnnouncement (event, previous) {
+  return event.created_at > previous.created_at ||
+    (event.created_at === previous.created_at && event.id < previous.id)
+}
+
 function maybeUnref (timer) {
   timer?.unref?.()
   return timer
@@ -50,14 +53,6 @@ function maybeUnref (timer) {
 
 function unique (values) {
   return [...new Set((values || []).filter(Boolean))]
-}
-
-function latestKey (keys) {
-  let latest = null
-  for (const key of keys || []) {
-    if (!latest || (key.createdAt || 0) >= (latest.createdAt || 0)) latest = key
-  }
-  return latest
 }
 
 function readLastContentKeyEventRefresh () {
@@ -170,7 +165,7 @@ async function fetchLatestContentKeyEventFromRelay ({ ownerPubkey, relay, _relay
     for (const { event } of response.result) {
       const parsed = parseContentKeyEvent(event)
       if (!parsed) continue
-      if (!latest || event.created_at > latest.event.created_at) latest = { event, parsed }
+      if (!latest || newerAnnouncement(event, latest.event)) latest = { event, parsed }
     }
     return { relay, latest, error: null }
   } catch (err) {
@@ -187,8 +182,7 @@ async function refreshAccountContentKeyEvent ({
   const userSigner = secrets.getNsecSigner(account.pubkey)
   if (!userSigner) return { pubkey: account.pubkey, skipped: 'locked' }
 
-  const localLatest = latestKey(secrets.listContentKeys(account.pubkey))
-  if (!localLatest) return { pubkey: account.pubkey, skipped: 'no-local-content-key' }
+  if (!secrets.getLatestContentKeySigner(account.pubkey)) return { pubkey: account.pubkey, skipped: 'no-local-content-key' }
 
   const relayList = await resolveContentKeyWriteRelays({
     account,
@@ -207,35 +201,22 @@ async function refreshAccountContentKeyEvent ({
   const found = checkedResults.map(result => result.latest).filter(Boolean)
   if (!checkedResults.length) return { pubkey: account.pubkey, skipped: 'relay-check-failed', relayList, relayResults }
 
-  let canonicalPubkey = localLatest.pubkey
-  let canonicalCreatedAt = localLatest.createdAt || 0
-  if (found.length) {
-    let newest = null
-    for (const result of found) {
-      if (!newest || result.event.created_at > newest.event.created_at) newest = result
-    }
-    canonicalPubkey = newest.parsed.iykcPubkey
-    canonicalCreatedAt = newest.event.created_at
-  }
-
-  const relaysToPublish = found.length
-    ? checkedResults
-      .filter(result => {
-        if (!result.latest) return true
-        if (result.latest.parsed.iykcPubkey === canonicalPubkey) return false
-        return result.latest.event.created_at < canonicalCreatedAt
-      })
-      .map(result => result.relay)
-    : checkedResults.map(result => result.relay)
+  // Relay observations decide where to publish, never which local key to use.
+  const contentKeySigner = secrets.getLatestContentKeySigner(account.pubkey)
+  if (!contentKeySigner) return { pubkey: account.pubkey, skipped: 'no-local-content-key' }
+  const canonicalPubkey = await contentKeySigner.getPublicKey()
+  const relaysToPublish = checkedResults
+    .filter(result => result.latest?.parsed.iykcPubkey !== canonicalPubkey)
+    .map(result => result.relay)
 
   if (!relaysToPublish.length) {
     return { pubkey: account.pubkey, canonicalPubkey, relayList, relayResults, publishedRelays: [] }
   }
 
-  const event = await makeContentKeyEventForPubkey({
+  const event = await makeContentKeyEvent({
     userSigner,
-    contentPubkey: canonicalPubkey,
-    createdAt: _nowSeconds()
+    contentKeySigner,
+    createdAt: Math.max(_nowSeconds(), ...found.map(result => result.event.created_at + 1))
   })
   const result = await _relayPool.sendEvent(event, relaysToPublish)
   if (result?.success) rememberContentKeyEvent(event)
@@ -250,11 +231,11 @@ async function refreshAccountContentKeyEvent ({
   }
 }
 
-export async function upsertContentKeyEvent ({ userSigner, contentKeySigner, relays, _relayPool = relayPool, _resolveWriteRelays = resolveWriteRelays }) {
+export async function upsertContentKeyEvent ({ userSigner, contentKeySigner, createdAt, relays, _relayPool = relayPool, _resolveWriteRelays = resolveWriteRelays }) {
   if (!userSigner?.getPublicKey) throw new Error('USER_SIGNER_REQUIRED')
   const pubkey = await userSigner.getPublicKey()
   const writeRelays = relays?.length ? relays : await _resolveWriteRelays(pubkey)
-  const event = await makeContentKeyEvent({ userSigner, contentKeySigner })
+  const event = await makeContentKeyEvent({ userSigner, contentKeySigner, createdAt })
   const result = await _relayPool.sendEvent(event, writeRelays)
   if (result?.success) rememberContentKeyEvent(event)
   return { event, result }
@@ -292,7 +273,7 @@ export async function rotateContentKeyIfStillCanonical ({
 
   let canonical = null
   for (const result of checkedResults.map(result => result.latest).filter(Boolean)) {
-    if (!canonical || result.event.created_at > canonical.event.created_at) canonical = result
+    if (!canonical || newerAnnouncement(result.event, canonical.event)) canonical = result
   }
   if (!canonical) return { status: 'retry', reason: 'missing-canonical', relayList, relayResults }
   if (canonical.parsed.iykcPubkey !== removedKnownContentPubkey) {
@@ -311,8 +292,7 @@ export async function rotateContentKeyIfStillCanonical ({
   let contentPubkey = await contentKeySigner.getPublicKey()
   let rotated = false
   if (contentPubkey === removedKnownContentPubkey) {
-    const seckey = bytesToHex(generateSecretKey())
-    contentKeySigner = await secrets.replaceContentKeySecret(ownerPubkey, seckey, _nowSeconds())
+    contentKeySigner = await secrets.createContentKeySecret(ownerPubkey, _nowSeconds())
     contentPubkey = await contentKeySigner.getPublicKey()
     rotated = true
   }
@@ -320,7 +300,7 @@ export async function rotateContentKeyIfStillCanonical ({
   const event = await makeContentKeyEvent({
     userSigner,
     contentKeySigner,
-    createdAt: _nowSeconds()
+    createdAt: Math.max(_nowSeconds(), canonical.event.created_at + 1)
   })
   const result = await _relayPool.sendEvent(event, writeRelays)
   if (result?.success) rememberContentKeyEvent(event)

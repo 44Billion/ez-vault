@@ -110,14 +110,15 @@ export default class NsecSigner {
     for (const pubkey of Object.keys(this.#signersByPubkey)) this.release(pubkey)
   }
 
-  static setContentSigners (ownerSigner, contentSigners = []) {
+  static setContentSigners (ownerSigner, contentSigners = [], activeSigner = null) {
     if (!secretKeys.has(ownerSigner)) throw new Error('OWNER_SIGNER_UNSUPPORTED')
     const signers = new Map()
     for (const signer of contentSigners || []) {
       if (!secretKeys.has(signer)) throw new Error('CONTENT_SIGNER_UNSUPPORTED')
       signers.set(signer.getPublicKey(), signer)
     }
-    if (signers.size) this.#contentSignersByOwnerSigner.set(ownerSigner, signers)
+    if (activeSigner && signers.get(activeSigner.getPublicKey()) !== activeSigner) throw new Error('ACTIVE_CONTENT_SIGNER_UNSUPPORTED')
+    if (signers.size) this.#contentSignersByOwnerSigner.set(ownerSigner, { signers, activeSigner })
     else this.#contentSignersByOwnerSigner.delete(ownerSigner)
   }
 
@@ -206,7 +207,7 @@ export default class NsecSigner {
 
   async #contentKeyMaterial (contentSigner, requestedContentPubkey = '') {
     if (!contentSigner && requestedContentPubkey) {
-      contentSigner = NsecSigner.#contentSignersByOwnerSigner.get(this)?.get(requestedContentPubkey) || null
+      contentSigner = NsecSigner.#contentSignersByOwnerSigner.get(this)?.signers.get(requestedContentPubkey) || null
     }
     if (!contentSigner) return { contentPubkey: requestedContentPubkey || '', contentSecretKey: null }
     if (!secretKeys.has(contentSigner)) throw new Error('CONTENT_SIGNER_UNSUPPORTED')
@@ -219,8 +220,7 @@ export default class NsecSigner {
   }
 
   async #latestContentKeyMaterial () {
-    const signers = NsecSigner.#contentSignersByOwnerSigner.get(this)
-    const contentSigner = signers?.size ? [...signers.values()].at(-1) : null
+    const contentSigner = NsecSigner.#contentSignersByOwnerSigner.get(this)?.activeSigner
     return this.#contentKeyMaterial(contentSigner)
   }
 
@@ -228,9 +228,13 @@ export default class NsecSigner {
     return this.nip44EncryptDoubleDHBytes(peerPubkey, kind, scope, nip44v3.b64decode(plaintextB64), peerContentPubkey)
   }
 
-  async nip44EncryptDoubleDHBytes (peerPubkey, kind, scope = '', plaintextBytes, peerContentPubkey = '') {
+  async nip44EncryptDoubleDHBytes (peerPubkey, kind, scope = '', plaintextBytes, peerContentPubkey = '', contentSigner = undefined) {
     const normalizedKind = nip44v3.normalizeKind(kind)
-    const { contentPubkey, contentSecretKey } = await this.#latestContentKeyMaterial()
+    // Local dispatch pins the signer selected before asynchronous relay work.
+    // Private-messenger callers omit it and use the centrally bound active key.
+    const { contentPubkey, contentSecretKey } = await (contentSigner === undefined
+      ? this.#latestContentKeyMaterial()
+      : this.#contentKeyMaterial(contentSigner))
     const { conversationKey } = deriveDoubleDhConversationKey({
       role: 'sender',
       identitySecretKey: this.#secretKey,

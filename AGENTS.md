@@ -364,6 +364,20 @@ still require a published content key. Account locks, read-only restrictions
 and signer permissions are unchanged. Bunker accounts delegate to their remote
 signer and therefore do not gain offline signing.
 
+Content-key selection belongs to secrets.getLatestContentKeySigner: greatest
+secret createdAt, then smallest pubkey. Bind that selection explicitly into the
+NsecSigner; never infer it from Map insertion order or a relay announcement.
+Local dispatch pins the selected signer through discovery/publication and crypto;
+the internal optional signer argument is not part of the launcher/app wire API.
+Local rotations use createContentKeySecret, advancing past the prior creation
+timestamp and retaining historical secrets in the encrypted sidecar. Prune only
+historical keys older than 45 days, protecting the same deterministically selected
+active key. Imports preserve their timestamps. Public announcement checks and
+periodic maintenance advertise this local selection, including when another
+device advertises an unavailable secret. Personal copies remain offline-capable.
+Do not persist announcements in NostrDB or introduce a separate active pointer.
+Preserve best-effort encryption and publication-required public signing on errors.
+
 
 The Python development server resolves its output directory explicitly instead
 of changing its working directory. Rebuilding generated output can replace the

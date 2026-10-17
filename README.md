@@ -223,6 +223,28 @@ still require a published content key. Account locks, read-only restrictions
 and signer permissions are unchanged. Bunker accounts delegate to their remote
 signer and therefore do not gain offline signing.
 
+Content-key selection is shared by encryption, double signing and announcement
+maintenance: choose the greatest secret `createdAt` (Unix seconds), breaking ties
+by the smallest public key. Import order and announcement timestamps do not select
+the active key. Local creation advances past the current creation timestamp,
+including same-second rotations; imported keys retain their original metadata.
+Each local operation keeps its selected signer through asynchronous relay work.
+
+Rotation adds an encrypted secret to the existing content-key sidecar rather than
+replacing the owner's history. Historical keys older than 45 days are pruned while
+the active key is always retained, including on unlock. Successful persistence
+precedes content-key notifications. No new database, active-key pointer or NostrDB
+announcement persistence is required; existing encrypted records load unchanged.
+
+Public signing/encryption checks the announcement against the selected local key,
+and periodic maintenance repairs missing/different announcements with that key.
+Replacement announcements advance past observed timestamps without changing the
+secret's creation time. Confirmed publication updates the discovery cache;
+personal-copy signing remains independent of relay access. Encryption retains its
+existing best-effort behavior on discovery/publication failure, while public double
+signing still requires successful publication. Devices with different secrets may
+alternate announcements until synchronization shares the historical material.
+
 
 The Python development server resolves its output directory explicitly instead
 of changing its working directory. Rebuilding generated output can replace the

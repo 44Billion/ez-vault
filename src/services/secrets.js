@@ -1,4 +1,4 @@
-import { getPublicKey } from 'libp2r2p/key'
+import { generateSecretKey, getPublicKey } from 'libp2r2p/key'
 import NsecSigner from './nsec-signer.js'
 import { BunkerHandle, buildBunkerUrl, persistHandleState, publicBunkerRecord } from './bunker.js'
 import * as store from './accounts-store.js'
@@ -207,7 +207,11 @@ function dropPriorEntry (pubkey) {
 function refreshContentSignerBindings (ownerPubkey) {
   const ownerSigner = nsecSignersByPubkey.get(ownerPubkey)
   if (!ownerSigner) return
-  NsecSigner.setContentSigners(ownerSigner, [...(contentKeySignersByOwnerPubkey.get(ownerPubkey)?.values() || [])])
+  NsecSigner.setContentSigners(
+    ownerSigner,
+    [...(contentKeySignersByOwnerPubkey.get(ownerPubkey)?.values() || [])],
+    getLatestContentKeySigner(ownerPubkey)
+  )
 }
 
 function clearContentSignerBindings () {
@@ -266,7 +270,8 @@ function isStaleContentKeyCreatedAt (createdAt, now = nowSeconds()) {
 function newestContentKeyPubkey (entries) {
   let best = null
   for (const [pubkey, entry] of entries) {
-    if (!best || (entry.createdAt || 0) >= best.createdAt) {
+    const createdAt = entry.createdAt || 0
+    if (!best || createdAt > best.createdAt || (createdAt === best.createdAt && pubkey < best.pubkey)) {
       best = { pubkey, createdAt: entry.createdAt || 0 }
     }
   }
@@ -525,12 +530,21 @@ function adoptContentKey (ownerPubkey, seckey, createdAt = Math.floor(Date.now()
   return signer
 }
 
-export async function setContentKeySecret (ownerPubkey, seckey, createdAt = Math.floor(Date.now() / 1000)) {
+export function setContentKeySecret (ownerPubkey, seckey, createdAt = Math.floor(Date.now() / 1000)) {
+  return storeContentKeySecret(ownerPubkey, seckey, createdAt)
+}
+
+async function storeContentKeySecret (ownerPubkey, seckey, createdAt, advanceCreatedAt = false) {
   await waitForVaultTransition()
   if (!isUnlocked()) throw new Error('VAULT_LOCKED')
   const prior = listRawContentKeyEntriesInternal()
   try {
-    const normalizedCreatedAt = Math.max(0, Math.floor(Number(createdAt) || 0))
+    let normalizedCreatedAt = Math.max(0, Math.floor(Number(createdAt) || 0))
+    if (advanceCreatedAt) {
+      const raw = rawContentKeyHexByOwnerPubkey.get(ownerPubkey)
+      const latest = raw?.get(newestContentKeyPubkey(raw))
+      normalizedCreatedAt = Math.max(normalizedCreatedAt, (latest?.createdAt ?? -1) + 1)
+    }
     if (shouldSkipContentKeyStorage(ownerPubkey, normalizedCreatedAt)) return null
     const signer = adoptContentKey(ownerPubkey, seckey, normalizedCreatedAt)
     // Content keys can rotate during quiet background sync. Keep them in
@@ -544,20 +558,10 @@ export async function setContentKeySecret (ownerPubkey, seckey, createdAt = Math
   }
 }
 
-export async function replaceContentKeySecret (ownerPubkey, seckey, createdAt = Math.floor(Date.now() / 1000)) {
-  await waitForVaultTransition()
-  if (!isUnlocked()) throw new Error('VAULT_LOCKED')
-  const prior = listRawContentKeyEntriesInternal()
-  try {
-    dropContentKeysForOwner(ownerPubkey)
-    const signer = adoptContentKey(ownerPubkey, seckey, Math.max(0, Math.floor(Number(createdAt) || 0)))
-    await persistContentKeyEntries({ pruneStale: false })
-    notifyContentKeys(ownerPubkey)
-    return signer
-  } catch (err) {
-    replaceContentKeyEntries(prior, { pruneStale: false })
-    throw err
-  }
+// A local rotation must advance even when two keys are created in one second.
+// Imported keys keep their original timestamps through setContentKeySecret.
+export function createContentKeySecret (ownerPubkey, createdAt = Math.floor(Date.now() / 1000)) {
+  return storeContentKeySecret(ownerPubkey, bytesToHex(generateSecretKey()), createdAt, true)
 }
 
 export function getContentKeySigner (ownerPubkey, contentPubkey) {
@@ -569,11 +573,7 @@ export function getLatestContentKeySigner (ownerPubkey) {
   const signers = contentKeySignersByOwnerPubkey.get(ownerPubkey)
   const raw = rawContentKeyHexByOwnerPubkey.get(ownerPubkey)
   if (!signers?.size || !raw?.size) return null
-  let best = null
-  for (const [pubkey, entry] of raw) {
-    if (!best || (entry.createdAt || 0) >= (best.createdAt || 0)) best = { pubkey, ...entry }
-  }
-  return best ? signers.get(best.pubkey) || null : null
+  return signers.get(newestContentKeyPubkey(raw)) || null
 }
 
 export function listContentKeys (ownerPubkey) {
