@@ -1,5 +1,13 @@
 # EZ Vault
 
+The coordinated libp2r2p 0.11.22 patch automatically migrates the known private
+message queue index and persists indecipherable packets separately (16 MiB FIFO,
+ciphertext only, no per-item TTL). Committed content-key changes resume the
+vault messenger and notify authorized launcher consumers without reloads.
+Confirmed announcements refresh the library discovery cache without allowing
+older in-flight queries to undo them. Decryption errors retain selected public
+coordinates and structured codes across the signer bridge.
+
 A minimal, auditable [Nostr](https://github.com/nostr-protocol/nostr) signer that runs as a static Single Page Application on GitHub Pages.
 
 It is designed to be embedded as an iframe by a host app launcher and talks to clients over `window.postMessage` — so the launcher and client apps never touch your private keys directly.

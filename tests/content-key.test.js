@@ -6,6 +6,7 @@ import NsecSigner from '../src/services/nsec-signer.js'
 import { doubleSignEvent, refreshStoredContentKeyEvents, refreshStoredContentKeyEventsIfDue, rotateContentKeyIfStillCanonical, startContentKeyEventRefresh, upsertContentKeyEvent } from '../src/services/content-key/index.js'
 import { makeContentKeyEvent, makeContentKeyEventForPubkey, parseContentKeyEvent, isValidContentKeyProof, isValidIykcProof } from 'libp2r2p/content-key/event'
 import { CONTENT_KEY_ANNOUNCEMENT } from 'libp2r2p/kind'
+import { getIykcProofs } from 'libp2r2p/content-key'
 import * as store from '../src/services/accounts-store.js'
 import * as secrets from '../src/services/secrets.js'
 import { freeRelays, seedRelays } from 'libp2r2p/relay'
@@ -34,6 +35,17 @@ afterEach(() => {
 function signer () {
   return NsecSigner.getOrCreate(bytesToHex(generateSecretKey()))
 }
+
+test('only a confirmed content-key publication refreshes discovery without another relay read', async () => {
+  const user = signer()
+  const content = signer()
+  const owner = await user.getPublicKey()
+  await upsertContentKeyEvent({ userSigner: user, contentKeySigner: content, relays: ['wss://fixture.example'], _relayPool: { sendEvent: async () => ({ success: true }) } })
+  const noRead = { _getEvents: async () => assert.fail('Published proof should already be cached'), _getRelaysByPubkey: async () => assert.fail('No discovery needed') }
+  assert.equal((await getIykcProofs([owner], noRead))[owner].iykcPubkey, await content.getPublicKey())
+  await upsertContentKeyEvent({ userSigner: user, contentKeySigner: signer(), relays: ['wss://fixture.example'], _relayPool: { sendEvent: async () => ({ success: false }) } })
+  assert.equal((await getIykcProofs([owner], noRead))[owner].iykcPubkey, await content.getPublicKey())
+})
 
 function pubkeyFixture (index) {
   return index.toString(16).padStart(64, '0')

@@ -1,5 +1,5 @@
 import { generateSecretKey } from 'libp2r2p/key'
-import { getIykcProofs } from 'libp2r2p/content-key'
+import { getIykcProofs, rememberContentKeyEvent } from 'libp2r2p/content-key'
 import { bytesToHex } from 'libp2r2p/base16'
 import { isOnline, onOnline } from 'libp2r2p/network'
 import { makeContentKeyEvent, makeContentKeyEventForPubkey, parseContentKeyEvent } from 'libp2r2p/content-key/event'
@@ -238,6 +238,7 @@ async function refreshAccountContentKeyEvent ({
     createdAt: _nowSeconds()
   })
   const result = await _relayPool.sendEvent(event, relaysToPublish)
+  if (result?.success) rememberContentKeyEvent(event)
   return {
     pubkey: account.pubkey,
     canonicalPubkey,
@@ -255,6 +256,7 @@ export async function upsertContentKeyEvent ({ userSigner, contentKeySigner, rel
   const writeRelays = relays?.length ? relays : await _resolveWriteRelays(pubkey)
   const event = await makeContentKeyEvent({ userSigner, contentKeySigner })
   const result = await _relayPool.sendEvent(event, writeRelays)
+  if (result?.success) rememberContentKeyEvent(event)
   return { event, result }
 }
 
@@ -321,6 +323,7 @@ export async function rotateContentKeyIfStillCanonical ({
     createdAt: _nowSeconds()
   })
   const result = await _relayPool.sendEvent(event, writeRelays)
+  if (result?.success) rememberContentKeyEvent(event)
   return {
     status: result?.success ? 'rotated' : 'retry',
     reason: result?.success ? '' : 'publish-failed',

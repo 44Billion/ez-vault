@@ -14,6 +14,12 @@ IndexedDB schema, shared by the ez-vault application:
 
 database "ez-vault", version 1
 
+PrivateMessenger additionally owns the separate identity/device-scoped
+`libp2r2p:private-messenger:<pubkey>:pending-decryption:idb-queue` database.
+It has the library's items/state schema, 16 MiB FIFO ciphertext-only budget,
+persisted MAC-attempt counts and no per-item TTL. Channel/identity cleanup is
+owned by libp2r2p; content-key changes never clear pending ciphertext.
+
 accounts, keyPath "pubkey"
   pubkey          account public key
   type            "nsec", "npub", or "bunker"

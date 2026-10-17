@@ -378,6 +378,14 @@ weaken sealed fields to reduce rendering memory.
 
 ## Private-messenger delivery contract
 
+- Consume the prepared 0.11.22 library patch: automatic legacy-index migration,
+  separate bounded pending-decryption FIFO and event-driven retries. Keep vault
+  sync seed storage local. Only committed subscribeContentKeys notifications
+  request retries and forward CONTENT_KEYS_CHANGED to the trusted launcher port;
+  never include key inventory or secrets. Generic handler/storage failures retain
+  their ACK/NACK behavior. Successful content-key publication remembers the
+  authenticated event in the shared library cache; failed sends never do.
+
 - Messenger init/update default to local readiness in 0.11.20. Hold inbox drain
   while applying local channels and publish the corresponding account/channel
   snapshot before processing initial callbacks. Do not await remote recovery to
@@ -404,7 +412,7 @@ reach onError; lifecycle suppression must not become a blanket error filter.
 
 ## Launcher relay bridge
 
-- Use the coordinated libp2r2p 0.11.21 release, pinned exactly in the
+- Use the coordinated libp2r2p 0.11.22 release, pinned exactly in the
   dev dependency and lockfile. Its live readers stop definitive per-route refusals
   and recover transient errors through bounded offline-aware backoff/cooldowns.
   Keep the existing facade/protocol and standalone fallback. Validate sync,
@@ -472,7 +480,7 @@ Sync overflow warnings include only bounded operational queue diagnostics.
 
 ## Prepared relay package validation
 
-Before registry publication, validate and rebuild with the exact prepared 0.11.21
+Before registry publication, validate and rebuild with the exact prepared 0.11.22
 tarball through public imports. Final lockfiles retain npm URLs and its real
 integrity; publish that same archive. The facade preserves params unchanged.
 

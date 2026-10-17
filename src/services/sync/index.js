@@ -615,6 +615,7 @@ export function createSyncController ({
   function onContentKeyChange (ownerPubkey) {
     if (!_secrets.isUnlocked()) return
     if (!messenger) refresh()
+    else messenger.retryPendingDecryptions?.().catch(onError)
     scheduleAnnounce(ownerPubkey, { immediate: true, resetInterval: true })
   }
 

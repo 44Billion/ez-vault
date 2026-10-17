@@ -105,7 +105,7 @@ async function evaluateApp (device, expression) {
 // A fulfilled permission is followed by the native dialog close event. Yield
 // between fixture API calls so that event finishes before asking for another
 // permission; all grants still go through the real launcher UI.
-const appScript = `const settlePermission=()=>new Promise(resolve=>setTimeout(resolve,50));globalThis.syncApp={
+const appScript = `import { pendingProbe } from './tests/browser/pending-decryption-app.js';globalThis.pendingProbe=pendingProbe;const settlePermission=()=>new Promise(resolve=>setTimeout(resolve,50));globalThis.syncApp={
   async owner(){const owner=await nostr.peekPublicKey();await settlePermission();return owner},
   async seed(peer){const owner=await this.owner(); const now=Math.floor(Date.now()/1000);
     const contact=await napp.eventStore.addPersonalCopy({kind:30000,created_at:now,tags:[['d','+zillion:contacts'],['p',peer,'','','1']],content:''},{context:''});
@@ -116,9 +116,10 @@ const appScript = `const settlePermission=()=>new Promise(resolve=>setTimeout(re
   async burst(){const owner=await this.owner();return Promise.all(Array.from({length:12},(_,i)=>napp.eventStore.addPersonalCopy({kind:9,created_at:Math.floor(Date.now()/1000),tags:[],content:'Burst '+i+' '+ 'x'.repeat(18000)},{context:'dm:'+owner})))}
 };`
 try {
+  const appBundle = await esbuild.build({ absWorkingDir: root, stdin: { contents: appScript, resolveDir: root, sourcefile: 'private-sync-app.js' }, bundle: true, write: false, platform: 'browser', format: 'esm' })
   const app = await prepareTestApp([
     { name: 'index.html', bytes: new TextEncoder().encode('<!doctype html><title>Private sync regression</title><script type="module" src="./app.js"></script>') },
-    { name: 'app.js', bytes: new TextEncoder().encode(appScript) }
+    { name: 'app.js', bytes: appBundle.outputFiles[0].contents }
   ], { identifier: 'private-sync-regression', name: 'Private sync regression' })
   const secret = generateSecretKey()
   const identities = []
@@ -156,11 +157,22 @@ try {
   const [a, b] = browsers
   const peer = getPublicKey(generateSecretKey())
   assert.deepEqual(await evaluateApp(0, `syncApp.seed(${JSON.stringify(peer)})`), [true, true])
+  for (let device = 0; device < 2; device++) await evaluateApp(device, 'pendingProbe.start()')
+  await evaluateApp(0, 'pendingProbe.send("Old content key message")')
+  await b.until(async () => await evaluateApp(1, 'pendingProbe.count()') === 1, 'missing content key saved as pending ciphertext', 45000)
+  await evaluateApp(1, 'pendingProbe.send("Newer valid message")')
+  await b.until(() => evaluateApp(1, 'pendingProbe.delivered.includes("Newer valid message")'), 'newer message delivered while older key is missing', 45000)
+  assert.equal(await evaluateApp(1, 'pendingProbe.delivered.includes("Old content key message")'), false)
   await a.evaluate(`syncProbe.trust(${JSON.stringify(identities[1].device)})`, vaultOrigin)
   await b.evaluate(`syncProbe.trust(${JSON.stringify(identities[0].device)})`, vaultOrigin)
   await b.until(async () => (await evaluateApp(1, 'syncApp.contents(30000)')).some(event => event.tags.some(tag => tag[0] === 'p' && tag[1] === peer)), 'private contact synchronized', 90000)
   await b.until(async () => (await evaluateApp(1, 'syncApp.contents(9)')).some(event => event.content === 'Self chat synchronization'), 'self chat synchronized', 90000)
   console.log('Private contact and self chat arrived on the paired device.')
+  await b.until(() => evaluateApp(1, 'pendingProbe.delivered.includes("Old content key message")'), 'new content-key notification replays pending ciphertext without reload', 90000)
+  await b.until(async () => await evaluateApp(1, 'pendingProbe.count()') === 0, 'pending ciphertext removed after inbox persistence')
+  assert.ok(await evaluateApp(1, 'pendingProbe.changes.length') > 1)
+  assert.equal(await evaluateApp(1, 'pendingProbe.delivered.filter(value=>value==="Old content key message").length'), 1)
+  console.log('Old ciphertext recovered through committed key notifications; newer delivery was never blocked.')
   await b.evaluate('syncProbe.lock()', vaultOrigin)
   assert.equal(await b.evaluate('syncProbe.unlocked()', vaultOrigin), false)
   await b.evaluate('syncProbe.unlock()', vaultOrigin)
@@ -170,8 +182,19 @@ try {
   holdLiveBurst = true
   await evaluateApp(0, 'syncApp.burst()')
   const burstDeadline = Date.now() + 30000
-  while (heldLiveBurst.filter(item => item.transport.device === 1).length < 4 && Date.now() < burstDeadline) await new Promise(resolve => setTimeout(resolve, 20))
-  assert.ok(heldLiveBurst.filter(item => item.transport.device === 1).length >= 4, 'upstream burst reached the paired device')
+  const largestBurst = () => {
+    const sizes = new Map()
+    for (const { transport, frame } of heldLiveBurst) {
+      if (transport.device !== 1) continue
+      const key = `${transport.contextId}:${transport.socket}:${frame[1]}`
+      sizes.set(key, (sizes.get(key) || 0) + 1)
+    }
+    return Math.max(0, ...sizes.values())
+  }
+  // Overflow is per subscription, rather than the combined volume of the
+  // device messenger and the app's additional ciphertext-recovery channel.
+  while (largestBurst() < 4 && Date.now() < burstDeadline) await new Promise(resolve => setTimeout(resolve, 20))
+  assert.ok(largestBurst() >= 4, 'upstream burst reached one paired-device subscription')
   holdLiveBurst = false
   for (const { transport, frame } of heldLiveBurst.splice(0)) deliver(transport, frame)
   await b.until(async () => (await evaluateApp(1, 'syncApp.contents(9)')).filter(event => event.content.startsWith('Burst ')).length === 12, 'burst messages synchronized', 90000)
@@ -181,7 +204,7 @@ try {
   await b.navigate(`http://localhost:10000/${app.app}`)
   await b.until(() => b.evaluate('!!globalThis.syncProbe', vaultOrigin), 'vault after reload')
   await b.until(async () => (await evaluateApp(1, 'syncApp.contents(30000)')).some(event => event.tags.some(tag => tag[0] === 'p' && tag[1] === peer)), 'contact after reload', 45000)
-  await b.until(async () => (await evaluateApp(1, 'syncApp.contents(9)')).length === 13, 'messages after reload', 45000)
+  await b.until(async () => (await evaluateApp(1, 'syncApp.contents(9)')).length === 15, 'messages after reload', 45000)
   for (const browser of browsers) {
     const logs = JSON.stringify(browser.logs)
     assert.ok(!logs.includes('Cached account metadata storage failed: invalid'))
@@ -191,6 +214,9 @@ try {
   assert.ok(connectivityProbes > 0, 'native connectivity checks received controlled HTTP responses')
   console.log('Two isolated real launcher/vault contexts: provisional profiles, private contact and self-chat synchronization, lock/unlock, live burst and reload passed.')
 } catch (error) {
+  for (const device of appContexts.keys()) {
+    console.error('Pending-decryption fixture', device, await evaluateApp(device, 'pendingProbe.snapshot()').catch(error => error.message))
+  }
   for (const [index, browser] of browsers.entries()) await browser.diagnose(root + '/tmp/browser-failures/private-sync-' + index)
   throw error
 } finally {

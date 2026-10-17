@@ -174,6 +174,7 @@ let launcherOrigin = null
 let handshakeComplete = false
 let unsubscribeStore = null
 let unsubscribeSecrets = null
+let unsubscribeContentKeys = null
 let unsubscribeJournal = null
 let accountsStateQueued = false
 let lastAccountsStateFingerprint = null
@@ -232,6 +233,10 @@ function startAccountStateSubscriptions () {
   unsubscribeJournal?.()
   unsubscribeStore = store.subscribe(scheduleAccountsState)
   unsubscribeSecrets = secrets.subscribe(scheduleAccountsState)
+  unsubscribeContentKeys?.()
+  unsubscribeContentKeys = secrets.subscribeContentKeys(pubkey => {
+    if (handshakeComplete && launcherPort) tell(launcherPort, { code: 'CONTENT_KEYS_CHANGED', payload: { pubkey } })
+  })
   unsubscribeJournal = accountMutationJournal.subscribe(scheduleAccountsState)
 }
 

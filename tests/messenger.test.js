@@ -360,7 +360,7 @@ test('signer failures also reply independently of audit persistence with their o
     assert.equal(handled, true)
     assert.equal(replies[0].error.message, 'SIGNER_FAILED')
     assert.equal(replies[0].error.type, 'error')
-    assert.deepEqual(replies[0].error.context, { eventKind: 9, eventScope: 'cache' })
+    assert.deepEqual(replies[0].error.context, { code: 'TEST_ERROR', eventKind: 9, eventScope: 'cache' })
     assert.deepEqual(await listMessengerLogs(), [])
     release()
     await log.flush()

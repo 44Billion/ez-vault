@@ -113,15 +113,21 @@ async function decrypt ({ account, signer, params }) {
   if (typeof ciphertext !== 'string') throw new Error('CIPHERTEXT_REQUIRED')
   const normalizedKind = normalizeKind(kind)
 
-  if (ownContentPubkey && !secrets.getContentKeySigner(account.pubkey, ownContentPubkey)) throw new Error('CONTENT_KEY_NOT_FOUND')
-  return signer.nip44DecryptDoubleDHBytes(
-    peerPubkey,
-    normalizedKind,
-    scope,
-    ciphertext,
-    peerContentPubkey,
-    ownContentPubkey
-  )
+  const hasOwnContentKey = !ownContentPubkey || Boolean(secrets.getContentKeySigner(account.pubkey, ownContentPubkey))
+  const context = { stage: 'double-dh', ownContentPubkey, peerContentPubkey, receiverPubkey: account.pubkey, senderPubkey: peerPubkey, hasOwnContentKey }
+  if (!hasOwnContentKey) throw Object.assign(new Error('CONTENT_KEY_NOT_FOUND'), { code: 'CONTENT_KEY_NOT_FOUND', ...context })
+  try {
+    return await signer.nip44DecryptDoubleDHBytes(
+      peerPubkey,
+      normalizedKind,
+      scope,
+      ciphertext,
+      peerContentPubkey,
+      ownContentPubkey
+    )
+  } catch (cause) {
+    throw Object.assign(new Error(cause.message, { cause }), { name: cause.name, ...(cause.code ? { code: cause.code } : {}), ...context })
+  }
 }
 
 export async function nip44EncryptDoubleDH ({ account, signer, params = [], internals = {} }) {
