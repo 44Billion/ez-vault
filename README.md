@@ -255,6 +255,24 @@ while opening a row exposes its complete JSON and Copy action. Log refreshes
 are serialized to avoid overlapping large decrypted snapshots during bursts of
 signing/decryption. This does not change the persisted audit records.
 
+Audit writes prepare and commit one at a time; concurrent app-name/icon backfills
+share one worker per app. A failed backfill does not block new audit entries or
+UI notifications. Storage failures suspend the affected writer or app backfill
+for 5, 10, 20, 40, then at most 60 seconds. Only new activity drives another
+attempt; there is no recurring retry timer. Writer cooldown skips new/queued
+audit entries rather than retaining an unbounded backlog, and diagnostics count
+those audit gaps. Skipped entries are not replayed later. Successful recovery or
+explicit log cleanup resets the cooldown. Existing unreadable records are never
+automatically deleted, and the original retention limits/transaction rollback
+remain in force.
+
+Warnings contain copyable JSON with phase, database/store, operation, stage,
+known record ID, allowlisted error name/message and retry/skipped counts. They
+omit request parameters/results, ciphertext, raw scope and arbitrary error text.
+For example, `phase: "metadata", stage: "metadata", operation: "get", recordId: 123`
+identifies a failed historical-entry read during app metadata backfill; a
+`retention-app` or `retention-global` stage identifies a pruning failure.
+
 ### Persistent private-message consumption
 
 Vault sync uses libp2r2p 0.10.20 delivery reservations. It awaits its sync handler

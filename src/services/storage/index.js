@@ -327,15 +327,39 @@ function idRangeForApp (appKey) {
   return keyRange.bound([appKey, 0], [appKey, Number.MAX_SAFE_INTEGER])
 }
 
-async function readLogUsage (tx) {
-  const record = (await run('get', [LOG_USAGE_KEY], STATE_STORE, null, { tx })).result
+function logStorageError (error, stage, operation, store, recordId) {
+  const wrapped = new Error(error?.message || 'ACTIVITY_LOG_STORAGE_FAILED', { cause: error })
+  wrapped.name = error?.name || 'Error'
+  wrapped.activityLog = { stage, operation, store, ...(Number.isSafeInteger(recordId) ? { recordId } : {}) }
+  return wrapped
+}
+
+async function logRequest (tx, stage, operation, args, { store = MESSENGER_LOG_STORE, index = null, recordId } = {}) {
+  try {
+    return (await run(operation, args, store, index, { tx })).result
+  } catch (error) {
+    throw logStorageError(error, stage, operation, store, recordId)
+  }
+}
+
+async function logMutation (stage, work) {
+  try {
+    return await enqueueMutation(() => transaction([MESSENGER_LOG_STORE, STATE_STORE], 'readwrite', work))
+  } catch (error) {
+    if (error?.activityLog) throw error
+    throw logStorageError(error, stage, 'transaction', MESSENGER_LOG_STORE)
+  }
+}
+
+async function readLogUsage (tx, stage = 'usage-read') {
+  const record = await logRequest(tx, stage, 'get', [LOG_USAGE_KEY], { store: STATE_STORE })
   return Number.isSafeInteger(record?.value) && record.value >= 0 ? record.value : 0
 }
 
-async function removeLogInTransaction (tx, id, usage) {
-  const record = (await run('get', [id], MESSENGER_LOG_STORE, null, { tx })).result
+async function removeLogInTransaction (tx, id, usage, stage = 'retention') {
+  const record = await logRequest(tx, stage, 'get', [id], { recordId: id })
   if (!record) return usage
-  await run('delete', [id], MESSENGER_LOG_STORE, null, { tx })
+  await logRequest(tx, stage, 'delete', [id], { recordId: id })
   return Math.max(0, usage - (Number(record.byteSize) || byteLength(record)))
 }
 
@@ -351,26 +375,24 @@ export async function appendMessengerLog (entry, {
     prepared.byteSize = nextSize
   }
   await initializeStorage()
-  return enqueueMutation(async () => {
-    return transaction([MESSENGER_LOG_STORE, STATE_STORE], 'readwrite', async tx => {
-      let usage = await readLogUsage(tx)
-      const id = (await run('add', [prepared], MESSENGER_LOG_STORE, null, { tx })).result
-      usage += prepared.byteSize
+  return logMutation('append', async tx => {
+    let usage = await readLogUsage(tx)
+    const id = await logRequest(tx, 'append', 'add', [prepared])
+    usage += prepared.byteSize
 
-      const appKeys = (await run('getAllKeys', [idRangeForApp(prepared.appKey)], MESSENGER_LOG_STORE, 'byApp', { tx })).result
-      const perAppExcess = Math.max(0, appKeys.length - maxEntriesPerApp)
-      for (let index = 0; index < perAppExcess; index++) {
-        usage = await removeLogInTransaction(tx, appKeys[index], usage)
-      }
+    const appKeys = await logRequest(tx, 'retention-app', 'getAllKeys', [idRangeForApp(prepared.appKey)], { index: 'byApp' })
+    const perAppExcess = Math.max(0, appKeys.length - maxEntriesPerApp)
+    for (let index = 0; index < perAppExcess; index++) {
+      usage = await removeLogInTransaction(tx, appKeys[index], usage, 'retention-app')
+    }
 
-      while (usage > maxBytes) {
-        const oldest = (await run('getAll', [undefined, 1], MESSENGER_LOG_STORE, null, { tx })).result[0]
-        if (!oldest) break
-        usage = await removeLogInTransaction(tx, oldest.id, usage)
-      }
-      await run('put', [{ key: LOG_USAGE_KEY, value: usage }], STATE_STORE, null, { tx })
-      return id
-    })
+    while (usage > maxBytes) {
+      const oldestId = (await logRequest(tx, 'retention-global', 'getAllKeys', [undefined, 1]))[0]
+      if (oldestId === undefined) break
+      usage = await removeLogInTransaction(tx, oldestId, usage, 'retention-global')
+    }
+    await logRequest(tx, 'usage-write', 'put', [{ key: LOG_USAGE_KEY, value: usage }], { store: STATE_STORE })
+    return id
   })
 }
 
@@ -394,28 +416,26 @@ function mergeLogAppMetadata (existing, incoming) {
 // of an app bucket, keeping the global byte budget accurate.
 export async function updateMessengerLogAppMetadata (appKey, app) {
   await initializeStorage()
-  return enqueueMutation(async () => {
-    return transaction([MESSENGER_LOG_STORE, STATE_STORE], 'readwrite', async tx => {
-      let usage = await readLogUsage(tx)
-      const keys = (await run('getAllKeys', [idRangeForApp(appKey)], MESSENGER_LOG_STORE, 'byApp', { tx })).result
-      let updated = 0
-      for (const id of keys) {
-        const record = (await run('get', [id], MESSENGER_LOG_STORE, null, { tx })).result
-        if (!record) continue
-        const patchedApp = mergeLogAppMetadata(record.app, app)
-        if (patchedApp === record.app) continue
-        usage = Math.max(0, usage - (Number(record.byteSize) || byteLength(record)))
-        record.app = patchedApp
-        record.byteSize = byteLength(record)
-        usage += record.byteSize
-        await run('put', [record], MESSENGER_LOG_STORE, null, { tx })
-        updated++
-      }
-      if (updated > 0) {
-        await run('put', [{ key: LOG_USAGE_KEY, value: usage }], STATE_STORE, null, { tx })
-      }
-      return updated
-    })
+  return logMutation('metadata', async tx => {
+    let usage = await readLogUsage(tx, 'metadata')
+    const keys = await logRequest(tx, 'metadata', 'getAllKeys', [idRangeForApp(appKey)], { index: 'byApp' })
+    let updated = 0
+    for (const id of keys) {
+      const record = await logRequest(tx, 'metadata', 'get', [id], { recordId: id })
+      if (!record) continue
+      const patchedApp = mergeLogAppMetadata(record.app, app)
+      if (patchedApp === record.app) continue
+      usage = Math.max(0, usage - (Number(record.byteSize) || byteLength(record)))
+      record.app = patchedApp
+      record.byteSize = byteLength(record)
+      usage += record.byteSize
+      await logRequest(tx, 'metadata', 'put', [record], { recordId: id })
+      updated++
+    }
+    if (updated > 0) {
+      await logRequest(tx, 'metadata', 'put', [{ key: LOG_USAGE_KEY, value: usage }], { store: STATE_STORE })
+    }
+    return updated
   })
 }
 
@@ -427,7 +447,7 @@ function cursorPage (tx, { beforeId, limit }) {
   return new Promise((resolve, reject) => {
     const records = []
     const request = store.openCursor(range, 'prev')
-    request.onerror = () => reject(request.error || new Error('IDB_REQUEST_FAILED'))
+    request.onerror = () => reject(logStorageError(request.error || new Error('IDB_REQUEST_FAILED'), 'list', 'openCursor', MESSENGER_LOG_STORE))
     request.onsuccess = () => {
       const cursor = request.result
       if (!cursor || records.length >= limit) return resolve(records)
@@ -446,24 +466,20 @@ export async function listMessengerLogs ({ beforeId, limit = 100 } = {}) {
 export async function removeMessengerLogsForPubkey (pubkey) {
   if (!pubkey) return 0
   await initializeStorage()
-  return enqueueMutation(async () => {
-    return transaction([MESSENGER_LOG_STORE, STATE_STORE], 'readwrite', async tx => {
-      let usage = await readLogUsage(tx)
-      const keys = (await run('getAllKeys', [pubkey], MESSENGER_LOG_STORE, 'byPubkey', { tx })).result
-      for (const id of keys) usage = await removeLogInTransaction(tx, id, usage)
-      await run('put', [{ key: LOG_USAGE_KEY, value: usage }], STATE_STORE, null, { tx })
-      return keys.length
-    })
+  return logMutation('remove', async tx => {
+    let usage = await readLogUsage(tx, 'remove')
+    const keys = await logRequest(tx, 'remove', 'getAllKeys', [pubkey], { index: 'byPubkey' })
+    for (const id of keys) usage = await removeLogInTransaction(tx, id, usage, 'remove')
+    await logRequest(tx, 'remove', 'put', [{ key: LOG_USAGE_KEY, value: usage }], { store: STATE_STORE })
+    return keys.length
   })
 }
 
 export async function clearMessengerLogs () {
   await initializeStorage()
-  return enqueueMutation(async () => {
-    await transaction([MESSENGER_LOG_STORE, STATE_STORE], 'readwrite', async tx => {
-      await run('clear', [], MESSENGER_LOG_STORE, null, { tx })
-      await run('put', [{ key: LOG_USAGE_KEY, value: 0 }], STATE_STORE, null, { tx })
-    })
+  return logMutation('clear', async tx => {
+    await logRequest(tx, 'clear', 'clear', [])
+    await logRequest(tx, 'clear', 'put', [{ key: LOG_USAGE_KEY, value: 0 }], { store: STATE_STORE })
   })
 }
 

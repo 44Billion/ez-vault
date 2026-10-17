@@ -1,6 +1,7 @@
 import * as secrets from '../secrets.js'
 import { bytesToBase64 } from 'libp2r2p/base64'
 import { arrayBufferBytes } from '../../helpers/array-buffer.js'
+import { createLogBackoff, reportLogFailure } from './recovery.js'
 import {
   appendMessengerLog,
   clearMessengerLogs,
@@ -20,9 +21,11 @@ export const PAGE_SIZE = 100
 
 const listeners = new Set()
 const pending = new Set()
-// appKey -> JSON of the richest app metadata already propagated to older
-// entries this session. Skips repeat backfill scans for busy apps.
-const propagatedAppMetadata = new Map()
+let writeTail = Promise.resolve()
+const writeBackoff = createLogBackoff({ phase: 'append' })
+// One worker per app coalesces concurrent requests and follows richer metadata
+// arriving during its scan. A failed scan has its own cooldown, not the writer's.
+const appMetadata = new Map()
 
 // Keep the existing sealed JSON representation readable by the activity UI.
 // Binary plaintext is represented as standard Base64 only inside the sealed
@@ -67,7 +70,9 @@ export function subscribe (fn) {
   return () => listeners.delete(fn)
 }
 
-export async function append (entry) {
+async function writeEntry (entry) {
+  if (!writeBackoff.allow()) return null
+  let stored
   try {
     await secrets.waitForVaultTransition()
     const { params, result, ...rest } = entry
@@ -75,7 +80,7 @@ export async function append (entry) {
     if (params !== undefined) sealedFields.params = params
     if (result !== undefined) sealedFields.result = result
 
-    const stored = {
+    stored = {
       ts: Math.floor(Date.now() / 1000),
       ...rest,
       appKey: appKey(entry)
@@ -83,39 +88,83 @@ export async function append (entry) {
     if (Object.keys(sealedFields).length && secrets.isUnlocked()) {
       stored.sealed = secrets.vaultEncrypt(JSON.stringify(sealedFields, binaryReplacer))
     }
-
+  } catch (error) {
+    reportLogFailure(error, { phase: 'prepare', appKey: appKey(entry) })
+    return null
+  }
+  try {
     await appendMessengerLog(stored, {
       maxEntriesPerApp: MAX_ENTRIES_PER_APP,
       maxBytes: MAX_LOG_BYTES
     })
-    // A launcher may progressively learn app metadata (name/icon), so once
-    // a richer app identity arrives, patch older entries of the same app.
-    const richApp = stored.app && (stored.app.name || stored.app.icon || stored.app.alias)
-    if (richApp) {
-      const cacheKey = JSON.stringify([stored.app.name, stored.app.icon, stored.app.alias])
-      if (propagatedAppMetadata.get(stored.appKey) !== cacheKey) {
-        await updateMessengerLogAppMetadata(stored.appKey, stored.app)
-        propagatedAppMetadata.set(stored.appKey, cacheKey)
+    writeBackoff.success()
+    return stored
+  } catch (error) {
+    writeBackoff.fail(error)
+    return null
+  }
+}
+
+function metadataKey (app) {
+  return JSON.stringify([app.name, app.icon, app.alias])
+}
+
+function propagateMetadata (stored) {
+  if (!stored.app || ![stored.app.name, stored.app.icon, stored.app.alias].some(Boolean)) return
+  let state = appMetadata.get(stored.appKey)
+  if (!state) {
+    state = { app: {}, completed: null, running: null, retry: createLogBackoff({ phase: 'metadata', appKey: stored.appKey }) }
+    appMetadata.set(stored.appKey, state)
+  }
+  for (const field of ['name', 'icon', 'alias']) {
+    if (stored.app[field]) state.app[field] = stored.app[field]
+  }
+  if (state.running) return state.running
+  if (state.completed === metadataKey(state.app) || !state.retry.allow()) return
+  state.running = (async () => {
+    while (state.completed !== metadataKey(state.app)) {
+      const app = { ...state.app }
+      try {
+        await updateMessengerLogAppMetadata(stored.appKey, app)
+        state.completed = metadataKey(app)
+        state.retry.success()
+      } catch (error) {
+        state.retry.fail(error)
+        return
       }
     }
+  })().finally(() => { state.running = null })
+  return state.running
+}
+
+export async function append (entry) {
+  try {
+    // Check the cooldown inside the serialized work as well as before cloning:
+    // a failure must stop calls already queued by the same startup burst.
+    const writing = writeTail.then(() => writeEntry(entry))
+    writeTail = writing.then(() => {}, () => {})
+    const stored = await writing
+    if (!stored) return
+    await propagateMetadata(stored)
     notify()
-  } catch (err) {
+  } catch (error) {
     // Audit history must never make a signing request fail.
-    console.warn('messenger-log write failed', err?.message ?? err)
+    reportLogFailure(error, { phase: 'append' })
   }
 }
 
 // Snapshot binary fields before replying: callers may release or mutate buffers
 // while the transition barrier and ordinary encrypted log persistence continue.
 export function appendInBackground (entry) {
+  if (!writeBackoff.allow()) return Promise.resolve()
   try {
     const work = append(structuredClone(entry))
-      .catch(err => console.warn('messenger-log write failed', err?.name || 'Error'))
+      .catch(error => reportLogFailure(error, { phase: 'append' }))
     pending.add(work)
     work.then(() => pending.delete(work), () => pending.delete(work))
     return work
-  } catch (err) {
-    console.warn('messenger-log snapshot failed', err?.name || 'Error')
+  } catch (error) {
+    reportLogFailure(error, { phase: 'snapshot' })
     return Promise.resolve()
   }
 }
@@ -131,9 +180,12 @@ export async function list (options = {}) {
 export async function removeForPubkey (pubkey) {
   try {
     await flush()
-    if (await removeMessengerLogsForPubkey(pubkey)) notify()
-  } catch (err) {
-    console.warn('messenger-log removal failed', err?.message ?? err)
+    const removed = await removeMessengerLogsForPubkey(pubkey)
+    writeBackoff.reset()
+    appMetadata.clear()
+    if (removed) notify()
+  } catch (error) {
+    reportLogFailure(error, { phase: 'remove' })
   }
 }
 
@@ -141,8 +193,10 @@ export async function clear () {
   try {
     await flush()
     await clearMessengerLogs()
+    writeBackoff.reset()
+    appMetadata.clear()
     notify()
-  } catch (err) {
-    console.warn('messenger-log clear failed', err?.message ?? err)
+  } catch (error) {
+    reportLogFailure(error, { phase: 'clear' })
   }
 }

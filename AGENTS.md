@@ -35,6 +35,19 @@ Because the signer custodies private keys, the overriding design principle is **
   `node ../44billion/bin/run-browser-tests.js -- node tests/browser/signer-log.js`
   verifies real binary signer success/error replies while audit writes are held,
   followed by complete encrypted records after the transition barrier releases.
+- Activity-log writes serialize preparation/commit, while metadata backfills use
+  one coalescing worker per app. A metadata read failure must not prevent new log
+  entries from committing or notifying the UI. Storage failures use independent
+  writer/per-app-metadata cooldowns of 5/10/20/40/60 seconds, driven by new activity
+  without recurring timers. During writer cooldown, skip entries before cloning
+  when possible and count the audit gap; do not retain an unbounded retry queue.
+  Existing queued writes check the gate again. Successful recovery, explicit
+  clear or account-log removal resets cooldowns; never auto-delete an unreadable record.
+  JSON diagnostics identify phase, database/store, operation, stage and known
+  record ID, plus retry/skipped counts. Allowlist error names/messages; never emit
+  params/results, ciphertext, raw scope, arbitrary exception text or stack/cause.
+  Successful writes remain complete and sealed. Flush/removal must still drain
+  pending background writes and metadata workers before deleting data.
 - **Small, readable surface area.** Prefer straightforward code over clever abstractions — the code is the documentation for our security claims.
 
 ## Hosting & Entry Point

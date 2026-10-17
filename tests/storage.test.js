@@ -1,5 +1,6 @@
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
+import { IDBObjectStore } from 'fake-indexeddb'
 import * as accounts from '../src/services/accounts-store.js'
 import * as messengerLog from '../src/services/messenger-log/index.js'
 import * as secrets from '../src/services/secrets.js'
@@ -90,6 +91,34 @@ test('messenger log prunes the globally oldest records to its byte budget', asyn
   assert.equal(records.some(record => record.marker === 'oldest'), false)
   assert.equal(records[0]?.marker, 'newest')
 })
+
+for (const stage of ['retention-app', 'retention-global']) {
+  test(`${stage} identifies an unreadable record and rolls back without deleting existing data`, async t => {
+    await appendMessengerLog({ appKey: 'app:retention', marker: 'existing', payload: 'x'.repeat(160) })
+    const existing = (await listMessengerLogs())[0]
+    const previousUsage = getState('messenger-log:usage')
+    const originalGet = IDBObjectStore.prototype.get
+    const readError = new DOMException('Data lost due to missing file. Affected record should be considered irrecoverable', 'NotReadableError')
+    t.mock.method(IDBObjectStore.prototype, 'get', function (key) {
+      if (this.name === 'messengerLog' && key === existing.id) throw readError
+      return originalGet.call(this, key)
+    })
+    await assert.rejects(
+      appendMessengerLog({ appKey: 'app:retention', marker: 'rolled back', payload: 'x'.repeat(400) }, {
+        maxEntriesPerApp: stage === 'retention-app' ? 1 : 500,
+        maxBytes: stage === 'retention-global' ? 600 : 64 * 1024 * 1024
+      }),
+      error => {
+        assert.equal(error.name, 'NotReadableError')
+        assert.equal(error.cause, readError)
+        assert.deepEqual(error.activityLog, { stage, operation: 'get', store: 'messengerLog', recordId: existing.id })
+        return true
+      }
+    )
+    assert.deepEqual(await listMessengerLogs(), [existing])
+    assert.equal(getState('messenger-log:usage'), previousUsage)
+  })
+}
 
 test('messenger log pages newest-first in bounded windows without overlap', async () => {
   for (let index = 0; index < 105; index++) await appendLog('app:paged', String(index))
