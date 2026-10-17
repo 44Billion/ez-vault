@@ -259,14 +259,30 @@ Audit writes prepare and commit one at a time; concurrent app-name/icon backfill
 share one worker per app. A failed backfill does not block new audit entries or
 UI notifications. Storage failures suspend the affected writer or app backfill
 for 5, 10, 20, 40, then at most 60 seconds. Only new activity drives another
-attempt; there is no recurring retry timer. Writer cooldown skips new/queued
+attempt; there is no recurring retry timer. Per-app retention failures suspend
+only that app's audit writes: another app's successful write neither resets the
+failed app's cooldown nor reports its recovery. Shared append, usage-counter and
+global-retention failures retain a global writer cooldown. Metadata backfills
+have their own per-app cooldowns. Writer cooldown skips new/queued
 audit entries rather than retaining an unbounded backlog, and diagnostics count
 those audit gaps. Skipped entries are not replayed later. Successful recovery or
-explicit log cleanup resets the cooldown. Existing unreadable records are never
-automatically deleted, and the original retention limits/transaction rollback
-remain in force.
+explicit log cleanup resets the applicable cooldown.
 
-Warnings contain copyable JSON with phase, database/store, operation, stage,
+If a FIFO-eligible or explicitly selected entry fails to read with Chromium's
+`UnknownError: Failed to read large IndexedDB value`, the failed transaction is
+rolled back and retried. The retry applies the same selection rules, removes the
+selected unreadable entry by ID, and rebuilds the exact byte count by summing the
+survivors. If another audit entry fails with that same error during recount, it
+is also removed by ID and counting continues. Healthy survivors retain their
+order and complete sealed payloads. Other read/storage errors roll back all
+deletions, admission and accounting and retain normal backoff behavior.
+No new store, index, database version or reset is needed, and the
+500-entry/64-MiB limits remain unchanged.
+One bounded JSON warning after commit reports the count and up to ten IDs/stages
+of unreadable entries actually removed; rolled-back deletions are never reported
+as completed. No payloads or secrets appear in these diagnostics.
+
+Warnings contain copyable JSON with phase, appKey when known, database/store, operation, stage,
 known record ID, allowlisted error name/message and retry/skipped counts. They
 omit request parameters/results, ciphertext, raw scope and arbitrary error text.
 For example, `phase: "metadata", stage: "metadata", operation: "get", recordId: 123`

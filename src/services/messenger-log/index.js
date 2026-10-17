@@ -23,6 +23,7 @@ const listeners = new Set()
 const pending = new Set()
 let writeTail = Promise.resolve()
 const writeBackoff = createLogBackoff({ phase: 'append' })
+const appWriteBackoffs = new Map()
 // One worker per app coalesces concurrent requests and follows richer metadata
 // arriving during its scan. A failed scan has its own cooldown, not the writer's.
 const appMetadata = new Map()
@@ -49,6 +50,10 @@ function appKey (entry) {
   return id ? `app:${id}` : 'launcher'
 }
 
+function allowWrite (entry) {
+  return writeBackoff.allow() && (appWriteBackoffs.get(appKey(entry))?.allow() ?? true)
+}
+
 function inflate (entry) {
   const publicEntry = { ...entry }
   delete publicEntry.appKey
@@ -71,7 +76,7 @@ export function subscribe (fn) {
 }
 
 async function writeEntry (entry) {
-  if (!writeBackoff.allow()) return null
+  if (!allowWrite(entry)) return null
   let stored
   try {
     await secrets.waitForVaultTransition()
@@ -98,9 +103,20 @@ async function writeEntry (entry) {
       maxBytes: MAX_LOG_BYTES
     })
     writeBackoff.success()
+    appWriteBackoffs.get(stored.appKey)?.success()
+    appWriteBackoffs.delete(stored.appKey)
     return stored
   } catch (error) {
-    writeBackoff.fail(error)
+    if (error?.activityLog?.stage === 'retention-app') {
+      let backoff = appWriteBackoffs.get(stored.appKey)
+      if (!backoff) {
+        backoff = createLogBackoff({ phase: 'append', appKey: stored.appKey })
+        appWriteBackoffs.set(stored.appKey, backoff)
+      }
+      backoff.fail(error)
+    } else {
+      writeBackoff.fail(error, { appKey: stored.appKey })
+    }
     return null
   }
 }
@@ -156,7 +172,7 @@ export async function append (entry) {
 // Snapshot binary fields before replying: callers may release or mutate buffers
 // while the transition barrier and ordinary encrypted log persistence continue.
 export function appendInBackground (entry) {
-  if (!writeBackoff.allow()) return Promise.resolve()
+  if (!allowWrite(entry)) return Promise.resolve()
   try {
     const work = append(structuredClone(entry))
       .catch(error => reportLogFailure(error, { phase: 'append' }))
@@ -182,6 +198,7 @@ export async function removeForPubkey (pubkey) {
     await flush()
     const removed = await removeMessengerLogsForPubkey(pubkey)
     writeBackoff.reset()
+    appWriteBackoffs.clear()
     appMetadata.clear()
     if (removed) notify()
   } catch (error) {
@@ -194,6 +211,7 @@ export async function clear () {
     await flush()
     await clearMessengerLogs()
     writeBackoff.reset()
+    appWriteBackoffs.clear()
     appMetadata.clear()
     notify()
   } catch (error) {

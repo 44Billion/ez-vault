@@ -94,7 +94,11 @@ try {
   assert.equal((await browser.evaluate('auditProbe.records()', vaultOrigin)).length, 2)
   await browser.evaluate('auditProbe.release();auditProbe.flush()', vaultOrigin)
   assert.equal((await browser.evaluate('auditProbe.records()', vaultOrigin))[0].status, 'failure')
+  assert.deepEqual(await browser.evaluate('auditProbe.retention()', vaultOrigin), {
+    failedReads: 1, largeValue: true, replaced: true, originalSchema: true, usageMatches: true
+  })
   console.log('Real binary signer success/error replies completed with audit writes held; complete encrypted activity records persisted after release.')
+  console.log('An unreadable FIFO-eligible encrypted audit entry was removed by key; survivor byte accounting matched, with no schema change.')
 } catch (error) {
   await browser?.evaluate('auditProbe.release()', vaultOrigin).catch(() => {})
   await browser?.diagnose(fileURLToPath(new URL('../../tmp/browser-failures/signer-log/', import.meta.url)))

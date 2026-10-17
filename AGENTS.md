@@ -38,16 +38,32 @@ Because the signer custodies private keys, the overriding design principle is **
 - Activity-log writes serialize preparation/commit, while metadata backfills use
   one coalescing worker per app. A metadata read failure must not prevent new log
   entries from committing or notifying the UI. Storage failures use independent
-  writer/per-app-metadata cooldowns of 5/10/20/40/60 seconds, driven by new activity
-  without recurring timers. During writer cooldown, skip entries before cloning
+  global-writer/per-app-retention/per-app-metadata cooldowns of 5/10/20/40/60
+  seconds, driven by new activity without recurring timers. During writer
+  cooldown, skip entries before cloning
   when possible and count the audit gap; do not retain an unbounded retry queue.
-  Existing queued writes check the gate again. Successful recovery, explicit
-  clear or account-log removal resets cooldowns; never auto-delete an unreadable record.
-  JSON diagnostics identify phase, database/store, operation, stage and known
-  record ID, plus retry/skipped counts. Allowlist error names/messages; never emit
+  Existing queued writes check the gate again. A different app's successful write
+  must not reset a failed app-retention gate or announce its recovery. Shared
+  append, usage and global-retention failures still use the global writer gate.
+  Explicit clear or account-log removal resets cooldowns. Never delete a record
+  on arbitrary read errors. The specific large-value recovery policy below may
+  discard unreadable audit entries during retention/removal and recount.
+  JSON diagnostics identify phase, appKey when known, database/store, operation,
+  stage and known record ID, plus retry/skipped counts. Allowlist error names/messages; never emit
   params/results, ciphertext, raw scope, arbitrary exception text or stack/cause.
   Successful writes remain complete and sealed. Flush/removal must still drain
   pending background writes and metadata workers before deleting data.
+- Keep the activity-log schema unchanged. For the specific Chromium
+  `UnknownError: Failed to read large IndexedDB value`, an ID selected by
+  FIFO/explicit removal may be deleted without reading its payload.
+  `idb.run()` aborts on request failure: retry the transaction under the same
+  selection rules, delete that selected ID by key, and sum surviving entries to
+  rebuild the exact usage counter before commit. Additional audit entries failing
+  with the same error during recount are also discarded by ID. Other errors roll
+  back admission, deletions and bookkeeping; never guess sizes or purge healthy
+  entries. Keep this limited to the audit store, never account/secret data.
+  Emit a bounded removal diagnostic only after commit, including count and up
+  to ten public IDs/stages.
 - **Small, readable surface area.** Prefer straightforward code over clever abstractions — the code is the documentation for our security claims.
 
 ## Hosting & Entry Point

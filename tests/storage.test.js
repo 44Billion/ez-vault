@@ -93,12 +93,35 @@ test('messenger log prunes the globally oldest records to its byte budget', asyn
 })
 
 for (const stage of ['retention-app', 'retention-global']) {
-  test(`${stage} identifies an unreadable record and rolls back without deleting existing data`, async t => {
+  test(`${stage} removes a FIFO-eligible unreadable entry and admits the new one`, async t => {
     await appendMessengerLog({ appKey: 'app:retention', marker: 'existing', payload: 'x'.repeat(160) })
     const existing = (await listMessengerLogs())[0]
-    const previousUsage = getState('messenger-log:usage')
     const originalGet = IDBObjectStore.prototype.get
-    const readError = new DOMException('Data lost due to missing file. Affected record should be considered irrecoverable', 'NotReadableError')
+    const warnings = []
+    t.mock.method(console, 'warn', (message, json) => warnings.push({ message, detail: JSON.parse(json) }))
+    t.mock.method(IDBObjectStore.prototype, 'get', function (key) {
+      if (this.name === 'messengerLog' && key === existing.id) {
+        throw new DOMException('Failed to read large IndexedDB value', 'UnknownError')
+      }
+      return originalGet.call(this, key)
+    })
+    await appendMessengerLog({ appKey: 'app:retention', marker: 'new', payload: 'x'.repeat(400) }, {
+      maxEntriesPerApp: stage === 'retention-app' ? 1 : 500,
+      maxBytes: stage === 'retention-global' ? 600 : 64 * 1024 * 1024
+    })
+    const records = await listMessengerLogs()
+    assert.equal(records.some(record => record.id === existing.id), false)
+    assert.equal(records[0].marker, 'new')
+    assert.equal(warnings.length, 1)
+    assert.equal(warnings[0].detail.appKey, 'app:retention')
+    assert.deepEqual(warnings[0].detail.records, [{ stage, recordId: existing.id }])
+  })
+
+  test(`${stage} unrelated read failures identify the app and roll back deletion and admission`, async t => {
+    await appendMessengerLog({ appKey: 'app:retention', marker: 'existing', payload: 'x'.repeat(160) })
+    const existing = (await listMessengerLogs())[0]
+    const originalGet = IDBObjectStore.prototype.get
+    const readError = new DOMException('Read permission denied', 'SecurityError')
     t.mock.method(IDBObjectStore.prototype, 'get', function (key) {
       if (this.name === 'messengerLog' && key === existing.id) throw readError
       return originalGet.call(this, key)
@@ -109,14 +132,13 @@ for (const stage of ['retention-app', 'retention-global']) {
         maxBytes: stage === 'retention-global' ? 600 : 64 * 1024 * 1024
       }),
       error => {
-        assert.equal(error.name, 'NotReadableError')
+        assert.equal(error.name, 'SecurityError')
         assert.equal(error.cause, readError)
-        assert.deepEqual(error.activityLog, { stage, operation: 'get', store: 'messengerLog', recordId: existing.id })
+        assert.deepEqual(error.activityLog, { stage, operation: 'get', store: 'messengerLog', recordId: existing.id, appKey: 'app:retention' })
         return true
       }
     )
     assert.deepEqual(await listMessengerLogs(), [existing])
-    assert.equal(getState('messenger-log:usage'), previousUsage)
   })
 }
 

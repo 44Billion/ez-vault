@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { IDBObjectStore } from 'fake-indexeddb'
 import * as secrets from '../src/services/secrets.js'
 import * as log from '../src/services/messenger-log/index.js'
-import { listMessengerLogs } from '../src/services/storage/index.js'
+import { appendMessengerLog, listMessengerLogs } from '../src/services/storage/index.js'
 
 afterEach(async () => {
   await log.clear()
@@ -167,6 +167,49 @@ test('persistent write failures reach a 60-second retry cap without recurring ti
     now += delay
   }
   assert.equal(warnings.length, 6)
+})
+
+test('per-app retention failures do not block other apps or report false recovery', async t => {
+  let now = Date.now()
+  t.mock.method(Date, 'now', () => now)
+  const { warnings, recovered } = diagnostics(t)
+  for (let index = 0; index < 500; index++) {
+    await appendMessengerLog({ appKey: 'app:affected', method: 'probe' })
+  }
+  const originalGet = IDBObjectStore.prototype.get
+  let failing = true
+  let attempts = 0
+  t.mock.method(IDBObjectStore.prototype, 'get', function (key) {
+    if (this.name === 'messengerLog' && key === 1) {
+      attempts++
+      if (failing) throw new DOMException('Storage is temporarily unavailable', 'UnknownError')
+    }
+    return originalGet.call(this, key)
+  })
+  await log.appendInBackground(entry('affected'))
+  await log.appendInBackground(entry('healthy'))
+  assert.equal(recovered.length, 0)
+  assert.equal(warnings[0].appKey, 'app:affected')
+  assert.equal(warnings[0].recordId, 1)
+  assert.equal(warnings[0].stage, 'retention-app')
+  assert.equal(warnings[0].store, 'messengerLog')
+  assert.equal((await listMessengerLogs())[0].appKey, 'app:healthy', 'other apps are not held by the cooldown')
+  now += 5000
+  await log.appendInBackground(entry('healthy'))
+  await log.appendInBackground(entry('affected'))
+  assert.equal(warnings[1].failures, 2, 'unrelated success does not reset the affected app')
+  assert.equal(warnings[1].retryInMs, 10000)
+  assert.equal(recovered.length, 0)
+  await log.appendInBackground(entry('affected'))
+  assert.equal(attempts, 2)
+  now += 10000
+  failing = false
+  await log.appendInBackground(entry('affected'))
+  assert.equal(attempts, 3)
+  assert.equal(recovered.length, 1)
+  assert.equal(recovered[0].appKey, 'app:affected')
+  assert.equal(recovered[0].failures, 2)
+  assert.equal(recovered[0].skipped, 1)
 })
 
 for (const action of ['clear', 'removeForPubkey']) {

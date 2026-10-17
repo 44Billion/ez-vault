@@ -21,9 +21,10 @@ const SAFE_MESSAGES = new Set([
 export function reportLogFailure (error, context, retry = {}) {
   const storage = error?.activityLog
   const name = error?.name
+  const appKey = context.appKey || storage?.appKey
   const detail = {
     phase: context.phase,
-    ...(context.appKey ? { appKey: String(context.appKey).slice(0, 256) } : {}),
+    ...(appKey ? { appKey: String(appKey).slice(0, 256) } : {}),
     database: 'ez-vault',
     store: storage?.store || 'messengerLog',
     stage: storage?.stage || context.phase,
@@ -48,11 +49,11 @@ export function createLogBackoff (context) {
       skipped++
       return false
     },
-    fail (error) {
+    fail (error, detail = {}) {
       const retryInMs = Math.min(MAX_RETRY_MS, INITIAL_RETRY_MS * (2 ** Math.min(failures, 4)))
       failures++
       retryAt = Date.now() + retryInMs
-      reportLogFailure(error, context, { failures, retryInMs, skipped })
+      reportLogFailure(error, { ...context, ...detail }, { failures, retryInMs, skipped })
       skipped = 0
     },
     success () {

@@ -342,12 +342,39 @@ async function logRequest (tx, stage, operation, args, { store = MESSENGER_LOG_S
   }
 }
 
-async function logMutation (stage, work) {
+async function logMutation (stage, work, appKey) {
   try {
-    return await enqueueMutation(() => transaction([MESSENGER_LOG_STORE, STATE_STORE], 'readwrite', work))
+    return await enqueueMutation(async () => {
+      const unreadable = new Set()
+      while (true) {
+        const discarded = { count: 0, records: [] }
+        let result
+        try {
+          result = await transaction([MESSENGER_LOG_STORE, STATE_STORE], 'readwrite', tx => work(tx, discarded, unreadable))
+        } catch (error) {
+          const id = error?.activityLog?.recordId
+          if (!error?.activityLog?.discardUnreadable || !isUnreadableLogValue(error) || unreadable.has(id)) throw error
+          // run() aborts a failed request's transaction. Retry with the same
+          // FIFO rules, deleting unreadable audit entries by key this time.
+          unreadable.add(id)
+          continue
+        }
+        // Only report deletions after commit, never for rolled-back transactions.
+        if (discarded.count) {
+          console.warn('messenger-log unreadable entries removed', JSON.stringify({
+            phase: 'cleanup', database: DATABASE_NAME, store: MESSENGER_LOG_STORE,
+            ...(appKey ? { appKey: String(appKey).slice(0, 256) } : {}), operation: 'delete',
+            count: discarded.count, records: discarded.records,
+            errorName: 'UnknownError', message: 'Failed to read large IndexedDB value'
+          }))
+        }
+        return result
+      }
+    })
   } catch (error) {
-    if (error?.activityLog) throw error
-    throw logStorageError(error, stage, 'transaction', MESSENGER_LOG_STORE)
+    const failure = error?.activityLog ? error : logStorageError(error, stage, 'transaction', MESSENGER_LOG_STORE)
+    if (appKey) failure.activityLog.appKey = appKey
+    throw failure
   }
 }
 
@@ -356,11 +383,50 @@ async function readLogUsage (tx, stage = 'usage-read') {
   return Number.isSafeInteger(record?.value) && record.value >= 0 ? record.value : 0
 }
 
-async function removeLogInTransaction (tx, id, usage, stage = 'retention') {
-  const record = await logRequest(tx, stage, 'get', [id], { recordId: id })
-  if (!record) return usage
+function isUnreadableLogValue (error) {
+  return error?.name === 'UnknownError' && error.message === 'Failed to read large IndexedDB value'
+}
+
+async function removeLogInTransaction (tx, id, usage, stage, discarded, unreadable) {
+  let record
+  if (unreadable.has(id)) {
+    discarded.count++
+    if (discarded.records.length < 10) discarded.records.push({ stage, recordId: id })
+    usage = null
+  } else {
+    try {
+      record = await logRequest(tx, stage, 'get', [id], { recordId: id })
+    } catch (error) {
+      // Permission, quota and unrelated storage failures still abort.
+      if (isUnreadableLogValue(error)) error.activityLog.discardUnreadable = true
+      throw error
+    }
+  }
+  if (record === undefined && usage !== null) return usage
   await logRequest(tx, stage, 'delete', [id], { recordId: id })
-  return Math.max(0, usage - (Number(record.byteSize) || byteLength(record)))
+  return usage === null ? null : Math.max(0, usage - (Number(record.byteSize) || byteLength(record)))
+}
+
+async function reconcileLogUsage (tx, stage, discarded, unreadable, admitted) {
+  const keys = await logRequest(tx, stage, 'getAllKeys', [])
+  let usage = 0
+  for (const id of keys) {
+    if (id === admitted?.id) {
+      // The new payload and size are already known; don't reread a large value.
+      usage += admitted.byteSize
+    } else if (unreadable.has(id)) {
+      await removeLogInTransaction(tx, id, null, stage, discarded, unreadable)
+    } else {
+      try {
+        const record = await logRequest(tx, stage, 'get', [id], { recordId: id })
+        usage += Number(record.byteSize) || byteLength(record)
+      } catch (error) {
+        if (isUnreadableLogValue(error)) error.activityLog.discardUnreadable = true
+        throw error
+      }
+    }
+  }
+  return usage
 }
 
 export async function appendMessengerLog (entry, {
@@ -375,7 +441,7 @@ export async function appendMessengerLog (entry, {
     prepared.byteSize = nextSize
   }
   await initializeStorage()
-  return logMutation('append', async tx => {
+  return logMutation('append', async (tx, discarded, unreadable) => {
     let usage = await readLogUsage(tx)
     const id = await logRequest(tx, 'append', 'add', [prepared])
     usage += prepared.byteSize
@@ -383,17 +449,19 @@ export async function appendMessengerLog (entry, {
     const appKeys = await logRequest(tx, 'retention-app', 'getAllKeys', [idRangeForApp(prepared.appKey)], { index: 'byApp' })
     const perAppExcess = Math.max(0, appKeys.length - maxEntriesPerApp)
     for (let index = 0; index < perAppExcess; index++) {
-      usage = await removeLogInTransaction(tx, appKeys[index], usage, 'retention-app')
+      usage = await removeLogInTransaction(tx, appKeys[index], usage, 'retention-app', discarded, unreadable)
     }
+    if (usage === null) usage = await reconcileLogUsage(tx, 'retention-app', discarded, unreadable, { id, byteSize: prepared.byteSize })
 
     while (usage > maxBytes) {
       const oldestId = (await logRequest(tx, 'retention-global', 'getAllKeys', [undefined, 1]))[0]
       if (oldestId === undefined) break
-      usage = await removeLogInTransaction(tx, oldestId, usage, 'retention-global')
+      usage = await removeLogInTransaction(tx, oldestId, usage, 'retention-global', discarded, unreadable)
+      if (usage === null) usage = await reconcileLogUsage(tx, 'retention-global', discarded, unreadable, { id, byteSize: prepared.byteSize })
     }
     await logRequest(tx, 'usage-write', 'put', [{ key: LOG_USAGE_KEY, value: usage }], { store: STATE_STORE })
     return id
-  })
+  }, prepared.appKey)
 }
 
 // Fill presentation gaps (name/icon/alias) in an existing app identity with
@@ -436,7 +504,7 @@ export async function updateMessengerLogAppMetadata (appKey, app) {
       await logRequest(tx, 'metadata', 'put', [{ key: LOG_USAGE_KEY, value: usage }], { store: STATE_STORE })
     }
     return updated
-  })
+  }, appKey)
 }
 
 function cursorPage (tx, { beforeId, limit }) {
@@ -466,10 +534,11 @@ export async function listMessengerLogs ({ beforeId, limit = 100 } = {}) {
 export async function removeMessengerLogsForPubkey (pubkey) {
   if (!pubkey) return 0
   await initializeStorage()
-  return logMutation('remove', async tx => {
+  return logMutation('remove', async (tx, discarded, unreadable) => {
     let usage = await readLogUsage(tx, 'remove')
     const keys = await logRequest(tx, 'remove', 'getAllKeys', [pubkey], { index: 'byPubkey' })
-    for (const id of keys) usage = await removeLogInTransaction(tx, id, usage, 'remove')
+    for (const id of keys) usage = await removeLogInTransaction(tx, id, usage, 'remove', discarded, unreadable)
+    if (usage === null) usage = await reconcileLogUsage(tx, 'remove', discarded, unreadable)
     await logRequest(tx, 'remove', 'put', [{ key: LOG_USAGE_KEY, value: usage }], { store: STATE_STORE })
     return keys.length
   })
