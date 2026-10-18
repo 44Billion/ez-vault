@@ -535,3 +535,24 @@ test('startContentKeyEventRefresh does not arm its clock while locked', () => {
     stop()
   }
 })
+
+test('a refresh interrupted by lock cannot enqueue another account after unlock', async () => {
+  const vaultKey = generateSecretKey()
+  secrets.unlock(vaultKey, null)
+  const first = await addNsecAccount(), second = await addNsecAccount()
+  await addContentKey(first.pubkey); await addContentKey(second.pubkey)
+  const entered = Promise.withResolvers(), gate = Promise.withResolvers()
+  let calls = 0
+  const refresh = refreshStoredContentKeyEvents({
+    _isOnline: async () => true,
+    _fetchRelayListEvent: async () => { calls++; entered.resolve(); await gate.promise; return null },
+    _relayPool: { sendEvent: async () => assert.fail('cancelled refresh cannot publish') }
+  })
+  await entered.promise
+  const blob = secrets.sealCurrentEntries()
+  secrets.lock()
+  secrets.unlock(vaultKey, blob)
+  gate.resolve()
+  assert.equal((await refresh).skipped, 'superseded')
+  assert.equal(calls, 1)
+})

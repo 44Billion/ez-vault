@@ -113,7 +113,7 @@ export async function run ({ pubkey, method, params = [], internals = {}, withSh
   })
   const { account, signer } = scoped
   if (normalized === 'nip44EncryptDoubleDH') {
-    return nip44DoubleDh.nip44EncryptDoubleDH({ account, signer, params, internals })
+    return nip44DoubleDh.nip44EncryptDoubleDH({ account, signer, params, internals: { ...internals, accountPubkey: storedAccount.pubkey } })
   }
   if (normalized === 'nip44DecryptDoubleDH') {
     return (await nip44DoubleDh.nip44DecryptDoubleDH({ account, signer, params })).slice().buffer

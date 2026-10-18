@@ -455,7 +455,7 @@ reach onError; lifecycle suppression must not become a blanket error filter.
 
 ## Launcher relay bridge
 
-- Use the coordinated libp2r2p 0.11.24 release, pinned exactly in the
+- Use the coordinated libp2r2p 0.11.25 release, pinned exactly in the
   dev dependency and lockfile. Its live readers stop definitive per-route refusals
   and recover transient errors through bounded offline-aware backoff/cooldowns.
   Keep the existing facade/protocol and standalone fallback. Validate sync,
@@ -530,3 +530,12 @@ integrity; publish that same archive. The facade preserves params unchanged.
 Import kind 18716 as `CONTENT_KEY_ANNOUNCEMENT` from `libp2r2p/kind`; content-key
 event helpers no longer export a separate kind constant. Do not add a legacy alias
 to the vault's content-key service.
+
+Message DoubleDH encryption waits only for local content-key selection and
+persistence. The pinned key's announcement runs through the shared serial
+content-key publication coordinator; coalesce by account/key and preserve its
+1–30s backoff. Periodic refresh uses that coordinator too. Lock, account removal,
+rotation and pagehide fence stale continuations, including multi-account refresh
+loops. Public signing still requires publication and explicit publish/rotate
+operations retain their contracts. Development timings contain identifiers and
+measurements only; the additional correlation stays outside NIP07 parameters.

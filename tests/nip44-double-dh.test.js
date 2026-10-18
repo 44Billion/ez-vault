@@ -211,6 +211,27 @@ test('nip44-double-dh self-encryption with content keys round-trips', async () =
   assert.equal(bufferToText(decrypted), 'note to self')
 })
 
+test('consecutive encryptions finish while a single background own-key announcement is held', async t => {
+  secrets.unlock(generateSecretKey(), null)
+  const alice = await addNsecAccount()
+  const bob = await addNsecAccount()
+  const active = await addContentKey(alice.pubkey)
+  const release = Promise.withResolvers()
+  const started = Promise.withResolvers()
+  t.after(() => release.resolve())
+  let announcements = 0
+  const internals = {
+    _getIykcProofs: async () => ({}),
+    _upsertContentKeyEvent: async () => { announcements++; started.resolve(); await release.promise; return { result: { success: true } } }
+  }
+  const outputs = []
+  for (let n = 0; n < 3; n++) outputs.push(await run({ pubkey: alice.pubkey, method: 'nip44EncryptDoubleDH', params: [bob.pubkey, DOUBLE_DH_KIND, '', textToBuffer('without waiting')], internals }))
+  await started.promise
+  assert.equal(announcements, 1)
+  assert.ok(outputs.every(value => value[1] === active.pubkey))
+  release.resolve()
+})
+
 test('nip44-double-dh decrypt resolves older stored own content keys by pubkey', async () => {
   secrets.unlock(generateSecretKey(), null)
   const alice = await addNsecAccount()
@@ -630,7 +651,7 @@ test('encryption and public signatures republish the active local key even when 
   assert.equal(personal.tags.find(tag => tag[0] === 'imkc')[1], activePubkey)
 })
 
-test('encryption keeps its selected key when newer keys arrive during discovery and publication', async () => {
+test('encryption pins its key and skips an obsolete background announcement after rotation', async () => {
   secrets.unlock(generateSecretKey(), null)
   const alice = await addNsecAccount()
   const bob = await addNsecAccount()
@@ -652,7 +673,7 @@ test('encryption keeps its selected key when newer keys arrive during discovery 
     }
   })
   assert.notEqual(secrets.getLatestContentKeySigner(alice.pubkey).getPublicKey(), selected.pubkey)
-  assert.equal(published, selected.pubkey)
+  assert.equal(published, null, 'A superseded key must not be published by background work')
   assert.equal(encrypted[1], selected.pubkey)
   assert.equal(bufferToText(await run({
     pubkey: bob.pubkey, method: 'nip44DecryptDoubleDH',

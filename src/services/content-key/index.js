@@ -8,6 +8,7 @@ import * as secrets from '../secrets.js'
 import { filterVisibleAccounts } from '../account-mutations.js'
 import { fetchRelayListEvent, parseRelayListEvent, resolveWriteRelays } from '../relay.js'
 import { getState, setState } from '../storage/index.js'
+import { createContentKeyPublicationJobs } from './publication-jobs.js'
 
 export { getIykcProofs }
 
@@ -16,6 +17,32 @@ export const CONTENT_KEY_EVENT_REFRESH_INTERVAL_MS = 4 * 60 * 60 * 1000
 const CONTENT_KEY_EVENT_REFRESH_KEY = 'ez-vault:content-key-events:last-refresh'
 
 let stopContentKeyEventRefresh = null
+let publicationGeneration = 0
+
+const publicationJobs = createContentKeyPublicationJobs({
+  current: (owner, key, accountPubkey = owner) => secrets.isUnlocked() && store.get(accountPubkey)?.type === 'nsec' && secrets.getLatestContentKeySigner(owner)?.getPublicKey() === key,
+  online: () => globalThis.navigator?.onLine !== false,
+  onOnline,
+  onError: () => console.warn('content key background publication failed'),
+  debug: entry => { if (typeof IS_DEVELOPMENT !== 'undefined' && IS_DEVELOPMENT) console.debug(`[messaging-performance] ${JSON.stringify(entry)}`) }
+})
+function clearPublications () { publicationGeneration++; publicationJobs.clear() }
+secrets.subscribe(() => { if (!secrets.isUnlocked()) clearPublications(); else publicationJobs.reconcile() })
+secrets.subscribeContentKeys(() => publicationJobs.reconcile())
+store.subscribe(() => publicationJobs.reconcile())
+if (typeof window !== 'undefined') window.addEventListener('pagehide', () => { stopContentKeyEventRefresh?.(); clearPublications() })
+
+export function scheduleContentKeyPublication ({ ownerPubkey, accountPubkey = ownerPubkey, contentKeySigner, run, force = false }) {
+  return publicationJobs.request(ownerPubkey, contentKeySigner.getPublicKey(), run, { force, accountPubkey })
+}
+
+export function recordContentKeyTiming (stage, contentKeyId, startedAt, diagnostics) {
+  if (typeof IS_DEVELOPMENT === 'undefined' || !IS_DEVELOPMENT) return
+  const ids = Object.fromEntries(['requestId', 'parentId', 'eventId'].filter(key =>
+    typeof diagnostics?.[key] === 'string' && /^[a-zA-Z0-9:_-]{1,160}$/.test(diagnostics[key])
+  ).map(key => [key, diagnostics[key]]))
+  console.debug(`[messaging-performance] ${JSON.stringify({ stage, contentKeyId, ...ids, elapsedMs: performance.now() - startedAt })}`)
+}
 
 function copyUnsignedEvent (event) {
   // eslint-disable-next-line no-unused-vars
@@ -96,7 +123,8 @@ async function publishRelayListIfNeeded ({
   relayListEvent,
   parsedRelays,
   _relayPool,
-  _nowSeconds
+  _nowSeconds,
+  signal
 }) {
   const fallback = freeRelays.slice(0, 2)
   let readRelays = parsedRelays.read
@@ -126,7 +154,9 @@ async function publishRelayListIfNeeded ({
     writeRelays,
     createdAt: _nowSeconds()
   }))
-  const result = await _relayPool.sendEvent(event, seedRelays)
+  signal?.throwIfAborted()
+  const result = await _relayPool.sendEvent(event, seedRelays, { signal })
+  signal?.throwIfAborted()
   await store.update(account.pubkey, { relayListEvent: event, writeRelays })
   return { writeRelays, relayListEvent: event, published: true, reason, result }
 }
@@ -136,9 +166,11 @@ async function resolveContentKeyWriteRelays ({
   userSigner,
   _fetchRelayListEvent,
   _relayPool,
-  _nowSeconds
+  _nowSeconds,
+  signal
 }) {
   const relayListEvent = await _fetchRelayListEvent(account.pubkey)
+  signal?.throwIfAborted()
   const parsedRelays = parseRelayListEvent(relayListEvent)
   return publishRelayListIfNeeded({
     account,
@@ -146,17 +178,19 @@ async function resolveContentKeyWriteRelays ({
     relayListEvent,
     parsedRelays,
     _relayPool,
-    _nowSeconds
+    _nowSeconds,
+    signal
   })
 }
 
-async function fetchLatestContentKeyEventFromRelay ({ ownerPubkey, relay, _relayPool }) {
+async function fetchLatestContentKeyEventFromRelay ({ ownerPubkey, relay, _relayPool, signal }) {
   try {
     const response = await _relayPool.getEvents({
       kinds: [CONTENT_KEY_ANNOUNCEMENT],
       authors: [ownerPubkey],
       limit: 1
     }, [relay], {
+      signal,
       timeout: 5000,
       timeoutAfterFirstEose: null
     })
@@ -177,7 +211,8 @@ async function refreshAccountContentKeyEvent ({
   account,
   _fetchRelayListEvent,
   _relayPool,
-  _nowSeconds
+  _nowSeconds,
+  signal
 }) {
   const userSigner = secrets.getNsecSigner(account.pubkey)
   if (!userSigner) return { pubkey: account.pubkey, skipped: 'locked' }
@@ -189,14 +224,17 @@ async function refreshAccountContentKeyEvent ({
     userSigner,
     _fetchRelayListEvent,
     _relayPool,
-    _nowSeconds
+    _nowSeconds,
+    signal
   })
+  signal?.throwIfAborted()
   const writeRelays = unique(relayList.writeRelays)
   if (!writeRelays.length) return { pubkey: account.pubkey, skipped: 'no-write-relays', relayList }
 
   const relayResults = await Promise.all(writeRelays.map(relay =>
-    fetchLatestContentKeyEventFromRelay({ ownerPubkey: account.pubkey, relay, _relayPool })
+    fetchLatestContentKeyEventFromRelay({ ownerPubkey: account.pubkey, relay, _relayPool, signal })
   ))
+  signal?.throwIfAborted()
   const checkedResults = relayResults.filter(result => !result.error)
   const found = checkedResults.map(result => result.latest).filter(Boolean)
   if (!checkedResults.length) return { pubkey: account.pubkey, skipped: 'relay-check-failed', relayList, relayResults }
@@ -218,7 +256,9 @@ async function refreshAccountContentKeyEvent ({
     contentKeySigner,
     createdAt: Math.max(_nowSeconds(), ...found.map(result => result.event.created_at + 1))
   })
-  const result = await _relayPool.sendEvent(event, relaysToPublish)
+  signal?.throwIfAborted()
+  const result = await _relayPool.sendEvent(event, relaysToPublish, { signal })
+  signal?.throwIfAborted()
   if (result?.success) rememberContentKeyEvent(event)
   return {
     pubkey: account.pubkey,
@@ -231,12 +271,15 @@ async function refreshAccountContentKeyEvent ({
   }
 }
 
-export async function upsertContentKeyEvent ({ userSigner, contentKeySigner, createdAt, relays, _relayPool = relayPool, _resolveWriteRelays = resolveWriteRelays }) {
+export async function upsertContentKeyEvent ({ userSigner, contentKeySigner, createdAt, relays, signal, _relayPool = relayPool, _resolveWriteRelays = resolveWriteRelays }) {
   if (!userSigner?.getPublicKey) throw new Error('USER_SIGNER_REQUIRED')
   const pubkey = await userSigner.getPublicKey()
   const writeRelays = relays?.length ? relays : await _resolveWriteRelays(pubkey)
+  signal?.throwIfAborted()
   const event = await makeContentKeyEvent({ userSigner, contentKeySigner, createdAt })
-  const result = await _relayPool.sendEvent(event, writeRelays)
+  signal?.throwIfAborted()
+  const result = await _relayPool.sendEvent(event, writeRelays, { signal })
+  signal?.throwIfAborted()
   if (result?.success) rememberContentKeyEvent(event)
   return { event, result }
 }
@@ -336,24 +379,31 @@ export async function refreshStoredContentKeyEvents ({
   _nowSeconds = nowSeconds
 } = {}) {
   if (!secrets.isUnlocked()) return { skipped: 'locked', accounts: [] }
+  const generation = publicationGeneration
   const accounts = contentKeyAccounts()
   if (!accounts.length) return { checked: 0, accounts: [] }
   if (!await _isOnline()) return { skipped: 'offline', accounts: accounts.map(account => account.pubkey) }
 
   const results = []
   for (const account of accounts) {
+    if (generation !== publicationGeneration || !secrets.isUnlocked()) return { skipped: 'superseded', accounts: [] }
+    if (store.get(account.pubkey)?.type !== 'nsec') continue
     try {
-      results.push(await refreshAccountContentKeyEvent({
-        account,
-        _fetchRelayListEvent,
-        _relayPool,
-        _nowSeconds
+      const contentKeySigner = secrets.getLatestContentKeySigner(account.pubkey)
+      results.push(await scheduleContentKeyPublication({
+        ownerPubkey: account.pubkey, contentKeySigner, force: true,
+        run: async signal => {
+          const result = await refreshAccountContentKeyEvent({ account, _fetchRelayListEvent, _relayPool, _nowSeconds, signal })
+          if (result.skipped === 'relay-check-failed' || result.result?.success === false) throw new Error('CONTENT_KEY_PUBLISH_FAILED')
+          return result
+        }
       }))
     } catch (err) {
       console.warn('content key event refresh failed', account.pubkey, err?.message ?? err)
       results.push({ pubkey: account.pubkey, error: err })
     }
   }
+  if (generation !== publicationGeneration || !secrets.isUnlocked()) return { skipped: 'superseded', accounts: [] }
   return {
     checked: accounts.length,
     published: results.reduce((count, result) => count + (result.publishedRelays?.length || 0), 0),
@@ -371,7 +421,7 @@ export async function refreshStoredContentKeyEventsIfDue ({
   const last = readLastContentKeyEventRefresh()
   if (last && now - last < intervalMs) return { skipped: 'fresh', nextInMs: intervalMs - (now - last) }
   const result = await refreshStoredContentKeyEvents(options)
-  if (result.skipped !== 'offline' && result.skipped !== 'locked') await writeLastContentKeyEventRefresh(now)
+  if (!['offline', 'locked', 'superseded'].includes(result.skipped)) await writeLastContentKeyEventRefresh(now)
   return result
 }
 

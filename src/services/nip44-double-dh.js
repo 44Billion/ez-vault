@@ -1,5 +1,5 @@
 import { isOnline } from 'libp2r2p/network'
-import { getIykcProofs, upsertContentKeyEvent } from './content-key/index.js'
+import { getIykcProofs, upsertContentKeyEvent, scheduleContentKeyPublication, recordContentKeyTiming } from './content-key/index.js'
 import * as secrets from './secrets.js'
 import { normalizeKind } from 'libp2r2p/nip44-v3'
 
@@ -66,7 +66,9 @@ export async function publishedOwnContentSigner ({ account, userSigner, contentK
     ? await localOwnContentSigner({ account, warnings })
     : contentKeySigner
   if (!localSigner) return null
+  const lookupStartedAt = performance.now()
   const advertised = await lookupContentPubkey(ownerPubkey, warnings, internals)
+  recordContentKeyTiming('own-content-key-lookup', localSigner.getPublicKey(), lookupStartedAt, internals.diagnostics)
   if (advertised.failed) return null
   if (advertised.pubkey === await localSigner.getPublicKey()) return localSigner
 
@@ -94,7 +96,27 @@ async function encrypt ({ account, signer, params, internals }) {
 
   const warnings = []
   const contentKeySigner = await localOwnContentSigner({ account, warnings })
-  await publishedOwnContentSigner({ account, userSigner: signer, contentKeySigner, warnings, internals })
+  if (contentKeySigner) {
+    scheduleContentKeyPublication({
+      ownerPubkey: account.pubkey, accountPubkey: internals.accountPubkey, contentKeySigner,
+      run: async signal => {
+        const startedAt = performance.now()
+        const published = await publishedOwnContentSigner({
+          account, userSigner: signer, contentKeySigner, warnings: [],
+          internals: {
+            ...internals, _upsertContentKeyEvent: options => {
+              signal.throwIfAborted()
+              return (internals._upsertContentKeyEvent || upsertContentKeyEvent)({ ...options, signal })
+            }
+          }
+        })
+        signal.throwIfAborted()
+        if (!published) throw new Error('CONTENT_KEY_PUBLISH_FAILED')
+        recordContentKeyTiming('own-content-key-announcement', contentKeySigner.getPublicKey(), startedAt, internals.diagnostics)
+        return { pubkey: account.pubkey }
+      }
+    }).catch(() => {})
+  }
 
   const [ciphertext, senderContentPubkey = ''] = await signer.nip44EncryptDoubleDHBytes(
     peerPubkey,

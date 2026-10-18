@@ -439,7 +439,7 @@ export async function handleSignerRequest (e, { code, run, sendReply = message =
   const shouldLog = !UNLOGGED_METHODS.has(method)
 
   try {
-    const payload = await run({ pubkey, method, params, withSharedKey })
+    const payload = await run({ pubkey, method, params, withSharedKey, ...(developmentTiming ? { internals: { diagnostics: e.data.diagnostics } } : {}) })
     if (shouldLog) {
       log.appendInBackground({ ...logBase, status: 'success', params, result: payload })
     }
