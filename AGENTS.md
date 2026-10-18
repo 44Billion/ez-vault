@@ -455,7 +455,7 @@ reach onError; lifecycle suppression must not become a blanket error filter.
 
 ## Launcher relay bridge
 
-- Use the coordinated libp2r2p 0.11.22 release, pinned exactly in the
+- Use the coordinated libp2r2p 0.11.24 release, pinned exactly in the
   dev dependency and lockfile. Its live readers stop definitive per-route refusals
   and recover transient errors through bounded offline-aware backoff/cooldowns.
   Keep the existing facade/protocol and standalone fallback. Validate sync,

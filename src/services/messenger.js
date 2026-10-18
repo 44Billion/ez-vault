@@ -415,6 +415,9 @@ function handleNostrDbAppBackfill (e) {
 }
 
 export async function handleSignerRequest (e, { code, run, sendReply = message => reply(e, message, { to: launcherPort }) }) {
+  const startedAt = performance.now()
+  const developmentTiming = typeof IS_DEVELOPMENT !== 'undefined' && IS_DEVELOPMENT
+  const sendTimedReply = message => sendReply(developmentTiming ? { ...message, diagnostics: { vaultDurationMs: performance.now() - startedAt } } : message)
   const { pubkey, method, params = [], app = {}, with_shared_key: withSharedKey = null, context: requestContext = '' } = e.data.payload ?? {}
   const signerContext = signerRequestContext(method, params)
   const context = typeof requestContext === 'string' && requestContext ? requestContext : ''
@@ -440,7 +443,7 @@ export async function handleSignerRequest (e, { code, run, sendReply = message =
     if (shouldLog) {
       log.appendInBackground({ ...logBase, status: 'success', params, result: payload })
     }
-    sendReply({ payload })
+    sendTimedReply({ payload })
   } catch (err) {
     const serialized = serializeError(err, errorContext)
     if (shouldLog) {
@@ -451,7 +454,7 @@ export async function handleSignerRequest (e, { code, run, sendReply = message =
         error: { message: err.message }
       })
     }
-    sendReply({ error: serialized })
+    sendTimedReply({ error: serialized })
   }
 }
 

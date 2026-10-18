@@ -383,3 +383,22 @@ test('unlogged disclosures still avoid the activity log', async () => {
   assert.deepEqual(replies, [{ payload: 'opaque-id' }])
   assert.deepEqual(await listMessengerLogs(), [])
 })
+
+test('development timings add only a finite internal duration to signer replies', async () => {
+  const previous = globalThis.IS_DEVELOPMENT
+  globalThis.IS_DEVELOPMENT = true
+  try {
+    const replies = []
+    await handleSignerRequest({ data: { payload: { pubkey: 'owner', method: 'obfuscate', params: ['private value', '1006', '.id'] } } }, {
+      code: 'NIP07', run: async () => 'opaque-id', sendReply: message => replies.push(message)
+    })
+    assert.equal(replies[0].payload, 'opaque-id')
+    assert.ok(Number.isFinite(replies[0].diagnostics.vaultDurationMs))
+    assert.ok(replies[0].diagnostics.vaultDurationMs >= 0)
+    assert.deepEqual(Object.keys(replies[0].diagnostics), ['vaultDurationMs'])
+    assert.equal(JSON.stringify(replies).includes('private value'), false)
+  } finally {
+    if (previous === undefined) delete globalThis.IS_DEVELOPMENT
+    else globalThis.IS_DEVELOPMENT = previous
+  }
+})
