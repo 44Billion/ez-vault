@@ -330,8 +330,8 @@ validation criteria.
 
 When the launcher advertises relay-pool support, the vault uses its dedicated
 MessagePort and shares the launcher's physical relay connections. Standalone
-vaults keep native sockets. The bridge preserves outgoing frame order under
-backpressure, returns trailing receive credits, and releases queued payloads on
+vaults keep native sockets. The bridge preserves outgoing order within priority/normal classes under
+backpressure, reserving four frames/32 KiB for private publications and AUTH, returns trailing receive credits, and releases queued payloads on
 close. An outgoing overflow closes the virtual socket and releases its launcher
 attachment. Outgoing limits remain 64 frames/256 KiB of credit and
 256 frames/1 MiB queued. Launcher-owned incoming budgets may be larger without
@@ -395,3 +395,16 @@ requires successful persistence, and the vault keeps its local recovery seed sto
 The coordinated libp2r2p 0.11.26 patch shares confirmed connectivity with automatic
 pause recovery. Vault synchronization keeps its direct messenger and local seed
 storage; foreground-send urgency belongs to sessions that explicitly request it.
+
+### Protected NIP44v3 conversation cache
+
+Common NIP44v3 byte encryption/decryption reuses ECDH output inside module-private
+memory, separately from ordinary NIP44. LRU limits are 32 peers per effective
+signer and 128 vault-wide, with 60-second idle expiration and one cache timer.
+Account revocation conservatively purges the whole new cache, including derived
+identities, and fences unfinished derivations. Each synchronous crypto operation
+uses a private pinned copy, zeroized before returning; cache cleanup cannot
+change a key already selected by an operation. Eviction,
+lock, account removal/replacement and shutdown zero controlled buffers using a
+captured native fill function. No key reference is exposed or persisted. Fresh
+nonces, permissions, wire formats and DoubleDH derivation remain unchanged.

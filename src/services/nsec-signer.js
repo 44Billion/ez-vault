@@ -1,3 +1,4 @@
+import { recordCryptoPerformance } from './crypto-performance.js'
 import { finalizeEvent } from 'libp2r2p/event'
 import { getPublicKey } from 'libp2r2p/key'
 import * as nip04 from 'libp2r2p/nip04'
@@ -8,6 +9,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { concatBytes, utf8ToBytes } from '@noble/hashes/utils.js'
 import { bytesToHex, hexToBytes } from 'libp2r2p/base16'
 import { deriveSharedKey } from '../helpers/crypto.js'
+import { sharedXOnlySecret } from 'libp2r2p/ecdh'
 import { deriveDoubleDhConversationKey } from 'libp2r2p/double-dh'
 import * as nip44v3 from 'libp2r2p/nip44-v3'
 import {
@@ -23,12 +25,80 @@ const nip44Encrypt = nip44.encrypt.bind(nip44)
 const nip44Decrypt = nip44.decrypt.bind(nip44)
 const nip04Encrypt = nip04.encrypt.bind(nip04)
 const nip04Decrypt = nip04.decrypt.bind(nip04)
+const v3Encrypt = nip44v3.encryptWithConversationKeyBytes
+const v3Decrypt = nip44v3.decryptWithConversationKeyBytes
+const deriveV3Key = sharedXOnlySecret
+const zeroBytes = Function.prototype.call.bind(Uint8Array.prototype.fill)
+const copyBytes = Function.prototype.call.bind(Uint8Array.prototype.slice)
 const OBFUSCATE_SALT = utf8ToBytes('nostr-obfuscate-v1')
 
 // Keep raw secret-key bytes off the instance itself so signer.leak = () => this.#secretKey
 // and similar prototype-poking tricks can't reach the key.
 const secretKeys = new WeakMap()
 const createToken = Symbol('createToken')
+
+// These buffers never leave this module. One realm-wide LRU/timer also bounds
+// derived signers; ordinary NIP44 has a different derivation and cache.
+const v3Keys = new Map()
+const revokedSigners = new WeakSet()
+let v3Timer
+let signerGeneration = 0
+let cacheAvailable = true
+function discardV3Key (key) {
+  const record = v3Keys.get(key)
+  if (!record) return
+  zeroBytes(record.bytes, 0)
+  v3Keys.delete(key)
+}
+function scheduleV3Expiry () {
+  clearTimeout(v3Timer)
+  v3Timer = undefined
+  if (!v3Keys.size) return
+  const next = Math.min(...[...v3Keys.values()].map(record => record.usedAt + 60000))
+  v3Timer = setTimeout(() => {
+    const now = performance.now()
+    const wallNow = Date.now()
+    for (const [key, record] of v3Keys) if (now - record.usedAt >= 60000 || wallNow - record.wallAt >= 60000) discardV3Key(key)
+    scheduleV3Expiry()
+  }, Math.max(1, next - performance.now()))
+  v3Timer?.unref?.()
+}
+function conversationKeyV3 (signer, peer, diagnostics) {
+  if (!cacheAvailable || revokedSigners.has(signer)) throw new Error('SIGNER_RELEASED')
+  const now = performance.now()
+  const wallNow = Date.now()
+  for (const [key, record] of v3Keys) if (now - record.usedAt >= 60000 || wallNow - record.wallAt >= 60000) discardV3Key(key)
+  let record = [...v3Keys.values()].find(record => record.signer === signer && record.peer === peer)
+  const hit = Boolean(record)
+  if (record) v3Keys.delete(record)
+  else record = { signer, peer, bytes: deriveV3Key(secretKeys.get(signer), peer) }
+  record.usedAt = now
+  record.wallAt = wallNow
+  v3Keys.set(record, record)
+  const own = [...v3Keys.values()].filter(record => record.signer === signer)
+  while (own.length > 32) discardV3Key(own.shift())
+  while (v3Keys.size > 128) discardV3Key(v3Keys.keys().next().value)
+  scheduleV3Expiry()
+  const key = copyBytes(record.bytes)
+  try {
+    recordCryptoPerformance({ ...diagnostics, stage: 'nip44v3-cache', cacheHit: hit, count: v3Keys.size })
+    if (!cacheAvailable || revokedSigners.has(signer)) throw new Error('SIGNER_RELEASED')
+    return key
+  } catch (error) { zeroBytes(key, 0); throw error }
+}
+function clearV3Keys () {
+  // Conservative realm-wide purge also covers derived identities, without a
+  // second ownership registry retaining references to retired secret signers.
+  for (const key of v3Keys.keys()) discardV3Key(key)
+  scheduleV3Expiry()
+}
+
+globalThis.addEventListener?.('pagehide', () => {
+  cacheAvailable = false
+  signerGeneration++
+  clearV3Keys()
+})
+globalThis.addEventListener?.('pageshow', () => { cacheAvailable = true })
 
 class SharedKeySigner {
   #signer
@@ -44,11 +114,26 @@ class SharedKeySigner {
   }
 
   async #sharedSigner () {
+    if (!cacheAvailable || revokedSigners.has(this.#signer)) throw new Error('SIGNER_RELEASED')
     this.#sharedSignerPromise ??= (async () => {
+      const generation = signerGeneration
+      if (!cacheAvailable || revokedSigners.has(this.#signer)) throw new Error('SIGNER_RELEASED')
       const sharedSecretKey = await deriveSharedKey(secretKeys.get(this.#signer), this.#peerPubkey, this.#info)
-      return NsecSigner.getOrCreate(bytesToHex(sharedSecretKey))
-    })()
+      try {
+        if (!cacheAvailable || generation !== signerGeneration || revokedSigners.has(this.#signer)) throw new Error('SIGNER_RELEASED')
+        const child = NsecSigner.getOrCreate(bytesToHex(sharedSecretKey))
+        return child
+      } finally { zeroBytes(sharedSecretKey, 0) }
+    })().catch(error => { this.#sharedSignerPromise = null; throw error })
     return this.#sharedSignerPromise
+  }
+
+  async #v3 (method, params) {
+    const generation = signerGeneration
+    const signer = await this.#sharedSigner()
+    if (!cacheAvailable || generation !== signerGeneration || revokedSigners.has(this.#signer)) throw new Error('SIGNER_RELEASED')
+    // No await between revocation check and the synchronous cached primitive.
+    return signer[method](...params)
   }
 
   async getPublicKey () { return (await this.#sharedSigner()).getPublicKey() }
@@ -57,10 +142,10 @@ class SharedKeySigner {
   async nip04Decrypt (peerPubkey, ciphertext) { return (await this.#sharedSigner()).nip04Decrypt(peerPubkey, ciphertext) }
   async nip44Encrypt (peerPubkey, plaintext) { return (await this.#sharedSigner()).nip44Encrypt(peerPubkey, plaintext) }
   async nip44Decrypt (peerPubkey, ciphertext) { return (await this.#sharedSigner()).nip44Decrypt(peerPubkey, ciphertext) }
-  async nip44v3Encrypt (peerPubkey, kind, scope, plaintextB64) { return (await this.#sharedSigner()).nip44v3Encrypt(peerPubkey, kind, scope, plaintextB64) }
-  async nip44v3Decrypt (peerPubkey, kind, scope, ciphertext) { return (await this.#sharedSigner()).nip44v3Decrypt(peerPubkey, kind, scope, ciphertext) }
-  async nip44v3EncryptBytes (...params) { return (await this.#sharedSigner()).nip44v3EncryptBytes(...params) }
-  async nip44v3DecryptBytes (...params) { return (await this.#sharedSigner()).nip44v3DecryptBytes(...params) }
+  async nip44v3Encrypt (peerPubkey, kind, scope, plaintextB64) { return this.#v3('nip44v3Encrypt', [peerPubkey, kind, scope, plaintextB64]) }
+  async nip44v3Decrypt (peerPubkey, kind, scope, ciphertext) { return this.#v3('nip44v3Decrypt', [peerPubkey, kind, scope, ciphertext]) }
+  async nip44v3EncryptBytes (...params) { return this.#v3('nip44v3EncryptBytes', params) }
+  async nip44v3DecryptBytes (...params) { return this.#v3('nip44v3DecryptBytes', params) }
   async obfuscate (value, kind, scope) { return this.#signer.obfuscate(value, kind, scope) }
   async nip44EncryptDoubleDH (...params) { return (await this.#sharedSigner()).nip44EncryptDoubleDH(...params) }
   async nip44DecryptDoubleDH (...params) { return (await this.#sharedSigner()).nip44DecryptDoubleDH(...params) }
@@ -86,6 +171,7 @@ export default class NsecSigner {
   static getOrCreate (seckey) {
     if (!seckey) throw new Error('MISSING_SECKEY')
     const pubkey = getPublicKey(hexToBytes(seckey))
+    if (revokedSigners.has(this.#signersByPubkey[pubkey])) delete this.#signersByPubkey[pubkey]
     return (this.#signersByPubkey[pubkey] ??= new this(createToken, seckey, pubkey))
   }
 
@@ -102,6 +188,8 @@ export default class NsecSigner {
   static release (pubkey) {
     const signer = this.#signersByPubkey[pubkey]
     if (!signer) return
+    revokedSigners.add(signer)
+    clearV3Keys()
     signer.#cleanup()
     delete this.#signersByPubkey[pubkey]
   }
@@ -189,12 +277,14 @@ export default class NsecSigner {
 
   // Local app requests use bytes directly. The Base64 methods above serve
   // the existing private-channel/private-messenger signer contract.
-  nip44v3EncryptBytes (peerPubkey, kind, scope, plaintextBytes) {
-    return nip44v3.encryptBytes(this.#secretKey, peerPubkey, kind, nip44v3.toBytes(scope || ''), plaintextBytes)
+  nip44v3EncryptBytes (peerPubkey, kind, scope, plaintextBytes, diagnostics) {
+    const key = conversationKeyV3(this, peerPubkey, diagnostics)
+    try { return v3Encrypt(key, kind, nip44v3.toBytes(scope || ''), plaintextBytes) } finally { zeroBytes(key, 0) }
   }
 
-  nip44v3DecryptBytes (peerPubkey, kind, scope, ciphertext) {
-    return nip44v3.decryptBytes(this.#secretKey, peerPubkey, kind, nip44v3.toBytes(scope || ''), ciphertext)
+  nip44v3DecryptBytes (peerPubkey, kind, scope, ciphertext, diagnostics) {
+    const key = conversationKeyV3(this, peerPubkey, diagnostics)
+    try { return v3Decrypt(key, kind, nip44v3.toBytes(scope || ''), ciphertext) } finally { zeroBytes(key, 0) }
   }
 
   obfuscate (value, kind, scope) {

@@ -362,7 +362,7 @@ function adoptBunkerFromUnlock (pubkey, clientKey, encryptedHandlerPubkey = null
 }
 
 function clearAll () {
-  for (const pubkey of nsecSignersByPubkey.keys()) NsecSigner.release(pubkey)
+  NsecSigner.releaseAll()
   dropAllContentKeys()
   for (const handle of bunkerHandlesByPubkey.values()) handle.close()
   nsecSignersByPubkey.clear()

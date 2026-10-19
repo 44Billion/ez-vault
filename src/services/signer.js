@@ -118,9 +118,13 @@ export async function run ({ pubkey, method, params = [], internals = {}, withSh
   if (normalized === 'nip44DecryptDoubleDH') {
     return (await nip44DoubleDh.nip44DecryptDoubleDH({ account, signer, params })).slice().buffer
   }
-  if (normalized === 'nip44v3Encrypt') return signer.nip44v3EncryptBytes(...params)
-  // The crypto result may be a view into padded plaintext: return only its range.
-  if (normalized === 'nip44v3Decrypt') return (await signer.nip44v3DecryptBytes(...params)).slice().buffer
+  if (normalized === 'nip44v3Encrypt' || normalized === 'nip44v3Decrypt') {
+    const cryptoParams = storedAccount.type === 'nsec' ? params.slice(0, 4) : params
+    if (storedAccount.type === 'nsec' && internals.diagnostics) { cryptoParams.length = 4; cryptoParams.push(internals.diagnostics) }
+    if (normalized === 'nip44v3Encrypt') return signer.nip44v3EncryptBytes(...cryptoParams)
+    // Only the plaintext range, never its padded backing buffer, crosses RPC.
+    return (await signer.nip44v3DecryptBytes(...cryptoParams)).slice().buffer
+  }
   if (normalized === 'doubleSignEvent') {
     const [event] = params || []
     if (account.type === 'bunker') return signer.doubleSignEvent(event)

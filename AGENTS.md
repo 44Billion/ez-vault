@@ -466,8 +466,8 @@ reach onError; lifecycle suppression must not become a blanket error filter.
 - `src/services/launcher-relay-pool.js` is only a WebSocket facade over the
   dedicated launcher port; registry, routing and physical sockets stay in the
   launcher. Standalone/unsupported launchers retain native sockets.
-- Preserve FIFO when an outgoing queue exists, even if a newer small frame fits
-  the remaining credit. Keep the outgoing 64-frame/256-KiB credit window and
+- Preserve FIFO within each outgoing scheduling class, even if a newer small
+  frame fits remaining credit. Match launcher priority/credit policy by parity tests. Keep the outgoing 64-frame/256-KiB credit window and
   256-frame/1-MiB queue limits, including the existing string-length accounting.
 - Return trailing receive credits in a microtask. Close releases local buffers
   and suppresses pending refunds; an overflow also sends `RELAY_CLOSE` so the
@@ -539,3 +539,17 @@ rotation and pagehide fence stale continuations, including multi-account refresh
 loops. Public signing still requires publication and explicit publish/rotate
 operations retain their contracts. Development timings contain identifiers and
 measurements only; the additional correlation stays outside NIP07 parameters.
+
+Common NIP44v3 has a module-private conversation-key LRU (32/signer, 128/vault,
+60s idle, one timer). Never expose keys or reuse the NIP44-v2 cache. Captured
+crypto/fill references and fresh nonces preserve the secret boundary. Revocation
+includes derived signers and pending derivations; lock releases all signers.
+Outgoing bridge classification matches the launcher (3:1; 4 frames/32 KiB
+reserved); payload/credit formats and standalone sockets remain unchanged.
+
+Account revocation conservatively purges the complete new NIP44v3 cache. Do not
+add a parallel signer-ownership registry that retains retired secret objects.
+Each crypto call pins a private key copy through the synchronous primitive and
+zeroizes it in finally; use captured native copy/fill functions. A reentrant
+cache purge must never turn an active encryption key into zero bytes. Check idle
+expiry after OS sleep using wall time as well as the monotonic timer.

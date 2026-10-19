@@ -1,3 +1,4 @@
+import { isPriorityPublication, sendQueueIndex, canUseSendCredit } from './relay-priority.js'
 import { relayPool } from 'libp2r2p/relay'
 
 // Hard-coded kill switch: flip to false to keep the vault on direct sockets.
@@ -135,6 +136,7 @@ export function installLauncherRelayPoolShim ({
     #creditBytes = BRIDGE_CREDIT_BYTES
     #queue = []
     #queuedBytes = 0
+    #priorityStreak = 0
     #grantedFrames = 0
     #grantedBytes = 0
     #creditScheduled = false
@@ -185,16 +187,19 @@ export function installLauncherRelayPoolShim ({
         throw new TypeError("Failed to execute 'send' on 'WebSocket': The provided value is not of type '(ArrayBuffer or ArrayBufferView or Blob or string)'.")
       }
       const size = dataByteLength(data)
-      if (this.#queue.length > 0 || this.#creditFrames < 1 || this.#creditBytes < size) {
-        this.#queue.push(data)
+      const item = { data, size, priority: isPriorityPublication(data) }
+      if (this.#queue.length > 0 || !canUseSendCredit(item, { frames: this.#creditFrames, bytes: this.#creditBytes }, { bridgeCreditFrames: BRIDGE_CREDIT_FRAMES, bridgeCreditBytes: BRIDGE_CREDIT_BYTES })) {
+        this.#queue.push(item)
         this.#queuedBytes += size
         if (this.#queue.length > MAX_QUEUED_FRAMES || this.#queuedBytes > MAX_QUEUED_BYTES) {
           port.postMessage({ code: RELAY_BRIDGE.FAILURE, payload: { url: this.url, code: 1013, phase: 'bridge', wasClean: false } })
           port.postMessage({ code: RELAY_BRIDGE.CLOSE, payload: { virtualId: this.#virtualId, code: 1000, reason: '' } })
           this.#finalizeClose(1013, 'relay bridge queue overflow', false)
         }
+        this.#flushQueue()
         return
       }
+      this.#priorityStreak = item.priority ? this.#priorityStreak + 1 : 0
       this.#consumeCredit(size)
       port.postMessage({ code: RELAY_BRIDGE.SEND, payload: { virtualId: this.#virtualId, data } })
     }
@@ -276,10 +281,10 @@ export function installLauncherRelayPoolShim ({
 
     #flushQueue () {
       while (this.#queue.length > 0 && this.readyState === LauncherRelayPoolWebSocket.OPEN) {
-        const data = this.#queue[0]
-        const size = dataByteLength(data)
-        if (this.#creditFrames < 1 || this.#creditBytes < size) return
-        this.#queue.shift()
+        const index = sendQueueIndex(this.#queue, this.#priorityStreak, { frames: this.#creditFrames, bytes: this.#creditBytes }, { bridgeCreditFrames: BRIDGE_CREDIT_FRAMES, bridgeCreditBytes: BRIDGE_CREDIT_BYTES })
+        if (index < 0) return
+        const [{ data, size, priority }] = this.#queue.splice(index, 1)
+        this.#priorityStreak = priority ? this.#priorityStreak + 1 : 0
         this.#queuedBytes -= size
         this.#consumeCredit(size)
         port.postMessage({ code: RELAY_BRIDGE.SEND, payload: { virtualId: this.#virtualId, data } })
