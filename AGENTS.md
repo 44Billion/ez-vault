@@ -540,8 +540,9 @@ loops. Public signing still requires publication and explicit publish/rotate
 operations retain their contracts. Development timings contain identifiers and
 measurements only; the additional correlation stays outside NIP07 parameters.
 
-Common NIP44v3 has a module-private conversation-key LRU (32/signer, 128/vault,
-60s idle, one timer). Never expose keys or reuse the NIP44-v2 cache. Captured
+Common NIP44v3 and final DoubleDH conversation keys share one module-private LRU
+(32 entries/signer, 128/vault, 60s idle, one timer), with distinct protocol
+namespaces. Never expose keys or reuse the NIP44-v2 cache. Captured
 crypto/fill references and fresh nonces preserve the secret boundary. Revocation
 includes derived signers and pending derivations; lock releases all signers.
 Outgoing bridge classification matches the launcher (3:1; 4 frames/32 KiB
@@ -553,3 +554,10 @@ Each crypto call pins a private key copy through the synchronous primitive and
 zeroizes it in finally; use captured native copy/fill functions. A reentrant
 cache purge must never turn an active encryption key into zero bytes. Check idle
 expiry after OS sleep using wall time as well as the monotonic timer.
+DoubleDH keys bind the actual signer, role, content pubkeys, peer identity, kind
+and scope. Select/check content material before every hit; preserve argument
+validation and fresh nonces. Content-binding changes purge DoubleDH entries;
+unchanged bindings do not. An operation selected before rotation may finish with
+its pinned key but cannot reinsert it after invalidation. Root authorization for
+derived signers crosses asynchronous selection only as private call context,
+never app/launcher parameters. Do not cache raw DoubleDH intermediate secrets.

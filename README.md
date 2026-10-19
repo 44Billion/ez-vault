@@ -398,9 +398,12 @@ storage; foreground-send urgency belongs to sessions that explicitly request it.
 
 ### Protected NIP44v3 conversation cache
 
-Common NIP44v3 byte encryption/decryption reuses ECDH output inside module-private
-memory, separately from ordinary NIP44. LRU limits are 32 peers per effective
-signer and 128 vault-wide, with 60-second idle expiration and one cache timer.
+Common NIP44v3 byte encryption/decryption reuses ECDH output; DoubleDH reuses
+only its final context-bound conversation key. The two protocols occupy separate
+namespaces in one module-private LRU: 32 entries per effective signer and 128
+vault-wide, with 60-second idle expiration and one cache timer. DoubleDH entries
+also distinguish sender/receiver role, both content pubkeys, peer identity, kind
+and scope. Identity-only DoubleDH uses the common NIP44v3 cache.
 Account revocation conservatively purges the whole new cache, including derived
 identities, and fences unfinished derivations. Each synchronous crypto operation
 uses a private pinned copy, zeroized before returning; cache cleanup cannot
@@ -408,3 +411,11 @@ change a key already selected by an operation. Eviction,
 lock, account removal/replacement and shutdown zero controlled buffers using a
 captured native fill function. No key reference is exposed or persisted. Fresh
 nonces, permissions, wire formats and DoubleDH derivation remain unchanged.
+Every DoubleDH call still selects and checks its content signer before looking
+up a cached key. Changing the local content-key inventory or active key purges
+DoubleDH entries; a no-op rebinding retains them. Rotation during selection keeps
+the chosen key for that operation but skips cache admission. Historical keys
+remain usable only while still authorized. The private derived-signer call
+context carries root authorization across selection; it never enters wire params.
+Development diagnostics record only cache hits, entry counts and lookup/derivation
+durations, never keys or derivation context.

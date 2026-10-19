@@ -10,6 +10,7 @@ import { concatBytes, utf8ToBytes } from '@noble/hashes/utils.js'
 import { bytesToHex, hexToBytes } from 'libp2r2p/base16'
 import { deriveSharedKey } from '../helpers/crypto.js'
 import { sharedXOnlySecret } from 'libp2r2p/ecdh'
+import { ValidationError } from 'libp2r2p/error'
 import { deriveDoubleDhConversationKey } from 'libp2r2p/double-dh'
 import * as nip44v3 from 'libp2r2p/nip44-v3'
 import {
@@ -28,6 +29,7 @@ const nip04Decrypt = nip04.decrypt.bind(nip04)
 const v3Encrypt = nip44v3.encryptWithConversationKeyBytes
 const v3Decrypt = nip44v3.decryptWithConversationKeyBytes
 const deriveV3Key = sharedXOnlySecret
+const deriveDoubleDhKey = deriveDoubleDhConversationKey
 const zeroBytes = Function.prototype.call.bind(Uint8Array.prototype.fill)
 const copyBytes = Function.prototype.call.bind(Uint8Array.prototype.slice)
 const OBFUSCATE_SALT = utf8ToBytes('nostr-obfuscate-v1')
@@ -39,64 +41,104 @@ const createToken = Symbol('createToken')
 
 // These buffers never leave this module. One realm-wide LRU/timer also bounds
 // derived signers; ordinary NIP44 has a different derivation and cache.
-const v3Keys = new Map()
+const cachedKeys = new Map()
 const revokedSigners = new WeakSet()
-let v3Timer
+let keyTimer
 let signerGeneration = 0
 let cacheAvailable = true
-function discardV3Key (key) {
-  const record = v3Keys.get(key)
+function discardConversationKey (key) {
+  const record = cachedKeys.get(key)
   if (!record) return
   zeroBytes(record.bytes, 0)
-  v3Keys.delete(key)
+  cachedKeys.delete(key)
 }
-function scheduleV3Expiry () {
-  clearTimeout(v3Timer)
-  v3Timer = undefined
-  if (!v3Keys.size) return
-  const next = Math.min(...[...v3Keys.values()].map(record => record.usedAt + 60000))
-  v3Timer = setTimeout(() => {
+function scheduleKeyExpiry () {
+  clearTimeout(keyTimer)
+  keyTimer = undefined
+  if (!cachedKeys.size) return
+  const next = Math.min(...[...cachedKeys.values()].map(record => record.usedAt + 60000))
+  keyTimer = setTimeout(() => {
     const now = performance.now()
     const wallNow = Date.now()
-    for (const [key, record] of v3Keys) if (now - record.usedAt >= 60000 || wallNow - record.wallAt >= 60000) discardV3Key(key)
-    scheduleV3Expiry()
+    for (const [key, record] of cachedKeys) if (now - record.usedAt >= 60000 || wallNow - record.wallAt >= 60000) discardConversationKey(key)
+    scheduleKeyExpiry()
   }, Math.max(1, next - performance.now()))
-  v3Timer?.unref?.()
+  keyTimer?.unref?.()
 }
-function conversationKeyV3 (signer, peer, diagnostics) {
-  if (!cacheAvailable || revokedSigners.has(signer)) throw new Error('SIGNER_RELEASED')
+function assertAvailable (generation, ...signers) {
+  if (!cacheAvailable || generation !== signerGeneration || signers.some(signer => signer && revokedSigners.has(signer))) throw new Error('SIGNER_RELEASED')
+}
+function conversationKey (signer, protocol, context, derive, { diagnostics, check, cache = true } = {}) {
+  const generation = signerGeneration
+  check ??= () => assertAvailable(generation, signer)
+  check()
   const now = performance.now()
   const wallNow = Date.now()
-  for (const [key, record] of v3Keys) if (now - record.usedAt >= 60000 || wallNow - record.wallAt >= 60000) discardV3Key(key)
-  let record = [...v3Keys.values()].find(record => record.signer === signer && record.peer === peer)
+  for (const [key, record] of cachedKeys) if (now - record.usedAt >= 60000 || wallNow - record.wallAt >= 60000) discardConversationKey(key)
+  let record = cache && [...cachedKeys.values()].find(record => record.signer === signer && record.protocol === protocol && record.context === context)
   const hit = Boolean(record)
-  if (record) v3Keys.delete(record)
-  else record = { signer, peer, bytes: deriveV3Key(secretKeys.get(signer), peer) }
+  if (record) cachedKeys.delete(record)
+  else {
+    const bytes = derive()
+    try { check() } catch (error) { if (bytes) zeroBytes(bytes, 0); throw error }
+    if (!bytes) return null // Identity-only DoubleDH uses the common v3 cache.
+    record = { signer, protocol, context, bytes }
+  }
   record.usedAt = now
   record.wallAt = wallNow
-  v3Keys.set(record, record)
-  const own = [...v3Keys.values()].filter(record => record.signer === signer)
-  while (own.length > 32) discardV3Key(own.shift())
-  while (v3Keys.size > 128) discardV3Key(v3Keys.keys().next().value)
-  scheduleV3Expiry()
+  if (cache) {
+    cachedKeys.set(record, record)
+    const own = [...cachedKeys.values()].filter(record => record.signer === signer)
+    while (own.length > 32) discardConversationKey(own.shift())
+    while (cachedKeys.size > 128) discardConversationKey(cachedKeys.keys().next().value)
+  }
+  scheduleKeyExpiry()
   const key = copyBytes(record.bytes)
+  if (!cache) zeroBytes(record.bytes, 0)
   try {
-    recordCryptoPerformance({ ...diagnostics, stage: 'nip44v3-cache', cacheHit: hit, count: v3Keys.size })
-    if (!cacheAvailable || revokedSigners.has(signer)) throw new Error('SIGNER_RELEASED')
+    recordCryptoPerformance({ ...diagnostics, stage: protocol === 'double-dh' ? 'double-dh-cache' : 'nip44v3-cache', cacheHit: hit, count: cachedKeys.size, durationMs: performance.now() - now })
+    check()
     return key
   } catch (error) { zeroBytes(key, 0); throw error }
 }
-function clearV3Keys () {
+function conversationKeyV3 (signer, peer, diagnostics, check) {
+  return conversationKey(signer, 'nip44v3', peer, () => deriveV3Key(secretKeys.get(signer), peer), { diagnostics, check })
+}
+let contentGeneration = 0
+function clearDoubleDhKeys () {
+  contentGeneration++
+  for (const [key, record] of cachedKeys) if (record.protocol === 'double-dh') discardConversationKey(key)
+  scheduleKeyExpiry()
+}
+function doubleDhConversationKey (signer, { role, identityPubkey, contentPubkey, contentSecretKey, contentSigner, peerIdentityPubkey, peerContentPubkey, kind, scope, ownerSigner, generation, selectedContentGeneration }) {
+  const check = () => assertAvailable(generation, signer, ownerSigner, contentSigner)
+  check()
+  // Hits must preserve the derivation's argument checks and key-availability rules.
+  if (!peerIdentityPubkey) throw new ValidationError('DOUBLE_DH_IDENTITY_REQUIRED')
+  for (const pubkey of [peerIdentityPubkey, contentPubkey, peerContentPubkey]) {
+    if (pubkey && (typeof pubkey !== 'string' || !/^[0-9a-f]{64}$/.test(pubkey))) throw new ValidationError('INVALID_PUBLIC_KEY')
+  }
+  if (typeof scope !== 'string') throw new ValidationError('INVALID_SCOPE')
+  if (contentPubkey && !contentSecretKey) throw new ValidationError(role === 'sender' ? 'SENDER_CONTENT_KEY_REQUIRED' : 'RECEIVER_CONTENT_KEY_REQUIRED')
+  // Validated pubkeys/kind cannot contain ':', and arbitrary scope is last.
+  const context = `${role}:${contentPubkey || ''}:${peerIdentityPubkey}:${peerContentPubkey || ''}:${kind}:${scope}`
+  return conversationKey(signer, 'double-dh', context, () => deriveDoubleDhKey({
+    role, identitySecretKey: secretKeys.get(signer), identityPubkey, contentSecretKey,
+    contentPubkey, peerIdentityPubkey, peerContentPubkey, kind, scope
+  }).conversationKey, { check, cache: selectedContentGeneration === contentGeneration })
+}
+
+function clearConversationKeys () {
   // Conservative realm-wide purge also covers derived identities, without a
   // second ownership registry retaining references to retired secret signers.
-  for (const key of v3Keys.keys()) discardV3Key(key)
-  scheduleV3Expiry()
+  for (const key of cachedKeys.keys()) discardConversationKey(key)
+  scheduleKeyExpiry()
 }
 
 globalThis.addEventListener?.('pagehide', () => {
   cacheAvailable = false
   signerGeneration++
-  clearV3Keys()
+  clearConversationKeys()
 })
 globalThis.addEventListener?.('pageshow', () => { cacheAvailable = true })
 
@@ -132,7 +174,8 @@ class SharedKeySigner {
     const generation = signerGeneration
     const signer = await this.#sharedSigner()
     if (!cacheAvailable || generation !== signerGeneration || revokedSigners.has(this.#signer)) throw new Error('SIGNER_RELEASED')
-    // No await between revocation check and the synchronous cached primitive.
+    // Common v3 runs synchronously; DoubleDH carries root authorization across
+    // its own asynchronous content-key selection.
     return signer[method](...params)
   }
 
@@ -147,10 +190,10 @@ class SharedKeySigner {
   async nip44v3EncryptBytes (...params) { return this.#v3('nip44v3EncryptBytes', params) }
   async nip44v3DecryptBytes (...params) { return this.#v3('nip44v3DecryptBytes', params) }
   async obfuscate (value, kind, scope) { return this.#signer.obfuscate(value, kind, scope) }
-  async nip44EncryptDoubleDH (...params) { return (await this.#sharedSigner()).nip44EncryptDoubleDH(...params) }
-  async nip44DecryptDoubleDH (...params) { return (await this.#sharedSigner()).nip44DecryptDoubleDH(...params) }
-  async nip44EncryptDoubleDHBytes (...params) { return (await this.#sharedSigner()).nip44EncryptDoubleDHBytes(...params) }
-  async nip44DecryptDoubleDHBytes (...params) { return (await this.#sharedSigner()).nip44DecryptDoubleDHBytes(...params) }
+  async nip44EncryptDoubleDH (peer, kind, scope, plaintext, contentPubkey) { return this.nip44EncryptDoubleDHBytes(peer, kind, scope, nip44v3.b64decode(plaintext), contentPubkey) }
+  async nip44DecryptDoubleDH (peer, kind, scope, ciphertext, contentPubkey, ownContentPubkey) { return nip44v3.b64encode(await this.nip44DecryptDoubleDHBytes(peer, kind, scope, ciphertext, contentPubkey, ownContentPubkey)) }
+  async nip44EncryptDoubleDHBytes (peer, kind, scope, plaintext, contentPubkey, contentSigner) { return this.#v3('nip44EncryptDoubleDHBytes', [peer, kind, scope, plaintext, contentPubkey, contentSigner, this.#signer]) }
+  async nip44DecryptDoubleDHBytes (peer, kind, scope, ciphertext, contentPubkey, ownContentPubkey) { return this.#v3('nip44DecryptDoubleDHBytes', [peer, kind, scope, ciphertext, contentPubkey, ownContentPubkey, this.#signer]) }
   withSharedKey (peerPubkey, info = this.#info) { return new SharedKeySigner(this.#signer, peerPubkey, info) }
 }
 
@@ -189,7 +232,7 @@ export default class NsecSigner {
     const signer = this.#signersByPubkey[pubkey]
     if (!signer) return
     revokedSigners.add(signer)
-    clearV3Keys()
+    clearConversationKeys()
     signer.#cleanup()
     delete this.#signersByPubkey[pubkey]
   }
@@ -206,6 +249,9 @@ export default class NsecSigner {
       signers.set(signer.getPublicKey(), signer)
     }
     if (activeSigner && signers.get(activeSigner.getPublicKey()) !== activeSigner) throw new Error('ACTIVE_CONTENT_SIGNER_UNSUPPORTED')
+    const previous = this.#contentSignersByOwnerSigner.get(ownerSigner)
+    if ((previous?.activeSigner || null) !== activeSigner || (previous?.signers.size || 0) !== signers.size ||
+        [...signers].some(([pubkey, signer]) => previous?.signers.get(pubkey) !== signer)) clearDoubleDhKeys()
     if (signers.size) this.#contentSignersByOwnerSigner.set(ownerSigner, { signers, activeSigner })
     else this.#contentSignersByOwnerSigner.delete(ownerSigner)
   }
@@ -299,13 +345,15 @@ export default class NsecSigner {
     if (!contentSigner && requestedContentPubkey) {
       contentSigner = NsecSigner.#contentSignersByOwnerSigner.get(this)?.signers.get(requestedContentPubkey) || null
     }
-    if (!contentSigner) return { contentPubkey: requestedContentPubkey || '', contentSecretKey: null }
+    if (!contentSigner) return { contentPubkey: requestedContentPubkey || '', contentSecretKey: null, contentSigner: null }
     if (!secretKeys.has(contentSigner)) throw new Error('CONTENT_SIGNER_UNSUPPORTED')
+    assertAvailable(signerGeneration, this, contentSigner)
     const contentPubkey = await contentSigner.getPublicKey()
     if (requestedContentPubkey && requestedContentPubkey !== contentPubkey) throw new Error('CONTENT_SIGNER_MISMATCH')
     return {
       contentPubkey,
-      contentSecretKey: secretKeys.get(contentSigner)
+      contentSecretKey: secretKeys.get(contentSigner),
+      contentSigner
     }
   }
 
@@ -318,61 +366,43 @@ export default class NsecSigner {
     return this.nip44EncryptDoubleDHBytes(peerPubkey, kind, scope, nip44v3.b64decode(plaintextB64), peerContentPubkey)
   }
 
-  async nip44EncryptDoubleDHBytes (peerPubkey, kind, scope = '', plaintextBytes, peerContentPubkey = '', contentSigner = undefined) {
+  // ownerSigner is private call context for derived signers, never a wire parameter.
+  async nip44EncryptDoubleDHBytes (peerPubkey, kind, scope = '', plaintextBytes, peerContentPubkey = '', contentSigner = undefined, ownerSigner = this) {
+    const generation = signerGeneration
+    const selectedContentGeneration = contentGeneration
+    assertAvailable(generation, this, ownerSigner)
     const normalizedKind = nip44v3.normalizeKind(kind)
-    // Local dispatch pins the signer selected before asynchronous relay work.
-    // Private-messenger callers omit it and use the centrally bound active key.
-    const { contentPubkey, contentSecretKey } = await (contentSigner === undefined
+    // Pin the selected key, including across a concurrent rotation.
+    const material = await (contentSigner === undefined
       ? this.#latestContentKeyMaterial()
       : this.#contentKeyMaterial(contentSigner))
-    const { conversationKey } = deriveDoubleDhConversationKey({
-      role: 'sender',
-      identitySecretKey: this.#secretKey,
-      identityPubkey: this.#pubkey,
-      contentSecretKey,
-      contentPubkey,
-      peerIdentityPubkey: peerPubkey,
-      peerContentPubkey,
-      kind: normalizedKind,
-      scope
-    })
-    const ciphertext = conversationKey
-      ? nip44v3.encryptWithConversationKeyBytes(
-        conversationKey,
-        normalizedKind,
-        nip44v3.toBytes(scope || ''),
-        plaintextBytes
-      )
-      : this.nip44v3EncryptBytes(peerPubkey, normalizedKind, scope, plaintextBytes)
-    return [ciphertext, contentPubkey]
+    const key = doubleDhConversationKey(this, {
+      ...material, role: 'sender', identityPubkey: this.#pubkey, peerIdentityPubkey: peerPubkey,
+      peerContentPubkey, kind: normalizedKind, scope, ownerSigner, generation, selectedContentGeneration
+    }) ?? conversationKeyV3(this, peerPubkey, undefined, () => assertAvailable(generation, this, ownerSigner))
+    try {
+      const ciphertext = v3Encrypt(key, normalizedKind, nip44v3.toBytes(scope || ''), plaintextBytes)
+      return [ciphertext, material.contentPubkey]
+    } finally { zeroBytes(key, 0) }
   }
 
   async nip44DecryptDoubleDH (peerPubkey, kind, scope = '', ciphertext, peerContentPubkey = '', ownContentPubkey = '') {
     return nip44v3.b64encode(await this.nip44DecryptDoubleDHBytes(peerPubkey, kind, scope, ciphertext, peerContentPubkey, ownContentPubkey))
   }
 
-  async nip44DecryptDoubleDHBytes (peerPubkey, kind, scope = '', ciphertext, peerContentPubkey = '', ownContentPubkey = '') {
+  async nip44DecryptDoubleDHBytes (peerPubkey, kind, scope = '', ciphertext, peerContentPubkey = '', ownContentPubkey = '', ownerSigner = this) {
+    const generation = signerGeneration
+    const selectedContentGeneration = contentGeneration
+    assertAvailable(generation, this, ownerSigner)
     const normalizedKind = nip44v3.normalizeKind(kind)
-    const { contentPubkey, contentSecretKey } = await this.#contentKeyMaterial(null, ownContentPubkey)
-    const { conversationKey } = deriveDoubleDhConversationKey({
-      role: 'receiver',
-      identitySecretKey: this.#secretKey,
-      identityPubkey: this.#pubkey,
-      contentSecretKey,
-      contentPubkey,
-      peerIdentityPubkey: peerPubkey,
-      peerContentPubkey,
-      kind: normalizedKind,
-      scope
-    })
-    return conversationKey
-      ? nip44v3.decryptWithConversationKeyBytes(
-        conversationKey,
-        normalizedKind,
-        nip44v3.toBytes(scope || ''),
-        ciphertext
-      )
-      : this.nip44v3DecryptBytes(peerPubkey, normalizedKind, scope, ciphertext)
+    const material = await this.#contentKeyMaterial(null, ownContentPubkey)
+    const key = doubleDhConversationKey(this, {
+      ...material, role: 'receiver', identityPubkey: this.#pubkey, peerIdentityPubkey: peerPubkey,
+      peerContentPubkey, kind: normalizedKind, scope, ownerSigner, generation, selectedContentGeneration
+    }) ?? conversationKeyV3(this, peerPubkey, undefined, () => assertAvailable(generation, this, ownerSigner))
+    try {
+      return v3Decrypt(key, normalizedKind, nip44v3.toBytes(scope || ''), ciphertext)
+    } finally { zeroBytes(key, 0) }
   }
 
   withSharedKey (peerPubkey, info) {
