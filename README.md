@@ -330,9 +330,16 @@ validation criteria.
 
 When the launcher advertises relay-pool support, the vault uses its dedicated
 MessagePort and shares the launcher's physical relay connections. Standalone
-vaults keep native sockets. The bridge preserves outgoing order within priority/normal classes under
-backpressure, reserving four frames/32 KiB for private publications and AUTH, returns trailing receive credits, and releases queued payloads on
-close. An outgoing overflow closes the virtual socket and releases its launcher
+vaults keep native sockets. Outgoing priority is restricted to outer kind 3560
+publications and validated AUTH; inner message kinds published directly are
+normal. Signer request priorities are unchanged. Incoming private ACK/AUTH has
+high preference; other correlated OK/COUNT/EOSE/CLOSED/NEG controls have
+intermediate preference (9:2:1 high/intermediate/normal under eligible demand).
+Controls retain the order of their own subscription or
+NEG session and can pass unrelated history. The bridge preserves outgoing order
+within priority/normal classes under backpressure, reserves four frames/32 KiB
+for private publications and AUTH, returns trailing receive credits, and releases
+queued payloads on close. An outgoing overflow closes the virtual socket and releases its launcher
 attachment. Outgoing limits remain 64 frames/256 KiB of credit and
 256 frames/1 MiB queued. Launcher-owned incoming budgets may be larger without
 changing the vault's publication limits. Receive refunds echo optional frame

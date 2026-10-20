@@ -461,7 +461,10 @@ reach onError; lifecycle suppression must not become a blanket error filter.
   Keep the existing facade/protocol and standalone fallback. Validate sync,
   NIP-46 and bridge regressions, then validate the production build in untracked `dist/`.
   The private-sync browser fixture must answer connectivity probes at the HTTP
-  boundary while keeping the real monitor and recovery code active.
+  boundary while keeping the real monitor and recovery code active. Force live
+  overflow with a constrained byte budget, not assumptions about a network
+  burst reaching one consumer turn. Preserve held EVENT/EOSE/CLOSED ordering;
+  restore only future stream limits and let automatic recovery recreate input.
 
 - `src/services/launcher-relay-pool.js` is only a WebSocket facade over the
   dedicated launcher port; registry, routing and physical sockets stay in the
@@ -545,8 +548,13 @@ Common NIP44v3 and final DoubleDH conversation keys share one module-private LRU
 namespaces. Never expose keys or reuse the NIP44-v2 cache. Captured
 crypto/fill references and fresh nonces preserve the secret boundary. Revocation
 includes derived signers and pending derivations; lock releases all signers.
-Outgoing bridge classification matches the launcher (3:1; 4 frames/32 KiB
-reserved); payload/credit formats and standalone sockets remain unchanged.
+Outgoing bridge classification matches the launcher: outer 3560 and validated
+AUTH only (3:1; 4 frames/32 KiB reserved). Inner kinds/chunks published directly
+are normal; encrypted chunks inside 3560 cannot be distinguished by the pool.
+Signer priorities are unchanged. Launcher-owned return scheduling correlates
+high private OK/AUTH and intermediate OK/COUNT/EOSE/CLOSED/NEG, preserving
+own-stream dependencies. Payload/credit formats and standalone sockets remain
+unchanged.
 
 Account revocation conservatively purges the complete new NIP44v3 cache. Do not
 add a parallel signer-ownership registry that retains retired secret objects.

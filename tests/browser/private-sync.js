@@ -26,7 +26,8 @@ const fixture = await esbuild.build({ absWorkingDir: root, entryPoints: ['tests/
 const script = fixture.outputFiles[0].text
 const matches = (event, filter) => (!filter.authors || filter.authors.includes(event.pubkey)) && (!filter.kinds || filter.kinds.includes(event.kind)) && event.created_at >= (filter.since ?? 0) && event.created_at <= (filter.until ?? Infinity) && Object.entries(filter).every(([key, values]) => !key.startsWith('#') || event.tags.some(tag => tag[0] === key.slice(1) && values.includes(tag[1])))
 function deliver (transport, frame) {
-  if (holdLiveBurst && frame[0] === 'EVENT') { heldLiveBurst.push({ transport, frame }); return }
+  const behindHeldEvent = ['EOSE', 'CLOSED'].includes(frame[0]) && heldLiveBurst.some(item => item.transport === transport && item.frame[1] === frame[1])
+  if (holdLiveBurst && (frame[0] === 'EVENT' || behindHeldEvent)) { heldLiveBurst.push({ transport, frame }); return }
   const key = `${transport.device}:${transport.contextId}`
   if (!pending.has(key)) pending.set(key, { transport, frames: [] })
   pending.get(key).frames.push([transport.socket, frame])
@@ -176,16 +177,18 @@ try {
   await b.evaluate('syncProbe.lock()', vaultOrigin)
   assert.equal(await b.evaluate('syncProbe.unlocked()', vaultOrigin), false)
   await b.evaluate('syncProbe.unlock()', vaultOrigin)
-  await b.evaluate('syncProbe.limit(2)', vaultOrigin)
-  // Batch actual upstream EVENT frames so overflow does not depend on CPU/
-  // MessagePort timing; publication OKs and ordinary control frames stay live.
+  // A real live event exceeds this test-only byte budget even if port delivery
+  // yields between frames. Event-count overflow alone depends on consumer speed.
+  await b.evaluate('syncProbe.limit(2, 1024)', vaultOrigin)
+  // Batch actual upstream EVENT frames, retaining their own EOSE/CLOSED order;
+  // publication OKs and unrelated control frames stay live.
   holdLiveBurst = true
   await evaluateApp(0, 'syncApp.burst()')
   const burstDeadline = Date.now() + 30000
   const largestBurst = () => {
     const sizes = new Map()
     for (const { transport, frame } of heldLiveBurst) {
-      if (transport.device !== 1) continue
+      if (transport.device !== 1 || frame[0] !== 'EVENT') continue
       const key = `${transport.contextId}:${transport.socket}:${frame[1]}`
       sizes.set(key, (sizes.get(key) || 0) + 1)
     }
@@ -197,6 +200,10 @@ try {
   assert.ok(largestBurst() >= 4, 'upstream burst reached one paired-device subscription')
   holdLiveBurst = false
   for (const { transport, frame } of heldLiveBurst.splice(0)) deliver(transport, frame)
+  await b.until(async () => (await b.evaluate('JSON.stringify(syncProbe.errors)', vaultOrigin)).includes('RELAY_LIVE_BUFFER_FULL'), 'real live overflow at the constrained byte budget', 45000)
+  // Only future streams use the restored budget. Do not restart sync here:
+  // the real error recovery/backoff must recreate its stream and recover data.
+  await b.evaluate('syncProbe.restoreLimits()', vaultOrigin)
   await b.until(async () => (await evaluateApp(1, 'syncApp.contents(9)')).filter(event => event.content.startsWith('Burst ')).length === 12, 'burst messages synchronized', 90000)
   assert.ok((await b.evaluate('JSON.stringify(syncProbe.errors)', vaultOrigin)).includes('RELAY_LIVE_BUFFER_FULL'), 'controlled burst exercised live overflow')
   console.log('All 12 burst messages recovered after a real live overflow.')

@@ -174,6 +174,24 @@ it('preserves send order when a small frame fits the credit left behind a queued
   shim.dispose()
 })
 
+it('only private outer envelopes bypass normal outgoing work', () => {
+  const { port, shim } = createFixture()
+  const socket = new shim.WebSocket('wss://relay.example')
+  const { virtualId } = attachFrame(port)
+  port.emit({ code: 'RELAY_ATTACHED', payload: { virtualId } })
+  const event = (id, kind) => JSON.stringify(['EVENT', { id, kind, sig: 'sig', tags: [] }])
+  const first = 'a'.repeat(200 * 1024)
+  const queued = 'b'.repeat(100 * 1024)
+  socket.send(first); socket.send(queued)
+  for (const kind of [9, 1063, 26300, 26400, 34601]) socket.send(event(String(kind), kind))
+  socket.send(event('outer', 3560))
+  const sent = () => port.sent.filter(message => message.code === 'RELAY_SEND').map(message => message.payload.data)
+  assert.deepEqual(sent(), [first, event('outer', 3560)])
+  port.emit({ code: 'RELAY_CREDIT', payload: { virtualId, frames: 1, bytes: first.length } })
+  assert.deepEqual(sent(), [first, event('outer', 3560), queued, ...[9, 1063, 26300, 26400, 34601].map(kind => event(String(kind), kind))])
+  shim.dispose()
+})
+
 for (const limit of ['frames', 'bytes']) {
   it(`notifies the launcher and releases the local queue on ${limit} overflow`, async () => {
     const { port, shim } = createFixture()

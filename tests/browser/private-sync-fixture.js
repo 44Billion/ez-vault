@@ -13,7 +13,8 @@ const errors = []
 const warn = console.warn
 console.warn = (...args) => { errors.push(args.map(value => value?.message ?? value)); if (errors.length > 64) errors.shift(); warn(...args) }
 let liveLimit
-relayPool.getLiveEventsGenerator = (filter, relays, options) => live(filter, relays, { ...options, ...(liveLimit ? { maxBufferedLiveEvents: liveLimit } : {}) })
+let liveBytes
+relayPool.getLiveEventsGenerator = (filter, relays, options) => live(filter, relays, { ...options, ...(liveLimit ? { maxBufferedLiveEvents: liveLimit } : {}), ...(liveBytes ? { maxBufferedLiveBytes: liveBytes } : {}) })
 await import('../../src/index.js')
 globalThis.syncProbe = {
   errors,
@@ -27,7 +28,8 @@ globalThis.syncProbe = {
   async trust (pubkey) { await trust.add({ pubkey, platform: 'controlled peer', actorPubkey: await secrets.getDeviceSignerPubkey() }); await sync.refresh() },
   async lock () { secrets.lock(); setAccountsState(); await sync.refresh() },
   async unlock () { if (passkey.hasLocalVault()) await passkey.continueWithoutPasskey(); else await passkey.unlock(); setAccountsState(); await sync.refresh() },
-  async limit (limit) { liveLimit = limit; await sync.stop(); await sync.refresh() },
+  async limit (limit, bytes) { liveLimit = limit; liveBytes = bytes; await sync.stop(); await sync.refresh() },
+  restoreLimits () { liveLimit = liveBytes = undefined },
   unlocked: () => secrets.isUnlocked(),
   debug: () => sync.getDebugSnapshot()
 }
