@@ -72,6 +72,26 @@ function relayFrame (device, { params, sessionId }) {
     }
   }
 }
+function duplicateRetainedEvent (kind) {
+  const event = [...retained.values()].find(candidate => candidate.kind === kind)
+  if (!event) return { eventId: '', deliveries: 0 }
+  const matching = []
+  const active = []
+  for (const transport of transports.values()) {
+    for (const [sub, filters] of transport.subscriptions) {
+      const target = { transport, sub }
+      active.push(target)
+      if (filters.some(filter => matches(event, filter))) matching.push(target)
+    }
+  }
+  const targets = [...matching]
+  for (const target of active) {
+    if (targets.length >= 2) break
+    if (!targets.some(item => item.transport === target.transport && item.sub === target.sub)) targets.push(target)
+  }
+  for (const { transport, sub } of targets) deliver(transport, ['EVENT', sub, event])
+  return { eventId: event.id, deliveries: targets.length }
+}
 const socketScript = `if(location.port==='10000' && location.hostname==='localhost') {
   const sockets=new Map(); let serial=0;
   globalThis.relayFixture={receive(frames){for(const [id,frame] of frames){const socket=sockets.get(id);if(socket?.readyState===1){const event=new MessageEvent('message',{data:JSON.stringify(frame)});socket.onmessage?.(event);socket.dispatchEvent(event)}}}};
@@ -212,10 +232,16 @@ try {
   await b.until(() => b.evaluate('!!globalThis.syncProbe', vaultOrigin), 'vault after reload')
   await b.until(async () => (await evaluateApp(1, 'syncApp.contents(30000)')).some(event => event.tags.some(tag => tag[0] === 'p' && tag[1] === peer)), 'contact after reload', 45000)
   await b.until(async () => (await evaluateApp(1, 'syncApp.contents(9)')).length === 15, 'messages after reload', 45000)
+  const duplicate = duplicateRetainedEvent(3560)
+  assert.ok(duplicate.eventId, 'retained private-channel event available for duplicate delivery')
+  assert.ok(duplicate.deliveries >= 2, 'duplicate private-channel event reached concurrent subscriptions')
+  await new Promise(resolve => setTimeout(resolve, 1000))
   for (const browser of browsers) {
     const logs = JSON.stringify(browser.logs)
     assert.ok(!logs.includes('Cached account metadata storage failed: invalid'))
     assert.ok(!logs.includes('Event shape or signature is invalid.'))
+    const errors = JSON.parse(await browser.evaluate('JSON.stringify(syncProbe.errors)', vaultOrigin))
+    assert.ok(!errors.some(error => String(error).includes("index 'bySeedKey'")), 'duplicate seed delivery does not fail the unique index')
   }
   assert.deepEqual(failures, [])
   assert.ok(connectivityProbes > 0, 'native connectivity checks received controlled HTTP responses')
