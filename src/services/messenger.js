@@ -325,7 +325,23 @@ function onPortMessage (e) {
   if (code === 'UPDATE_ACCOUNT_EVENTS') return handleUpdateAccountEvents(e)
   if (code === 'NOSTRDB_APP_BACKFILL') return handleNostrDbAppBackfill(e)
   if (code === 'NIP07') return handleNip07(e)
+  if (code === 'NIP07_BATCH') return handleNip07Batch(e)
   if (code === 'LOCAL_DEV_WIPE') return handleLocalDevWipe(e)
+}
+
+async function handleNip07Batch (e) {
+  const startedAt = performance.now()
+  const { pubkey, method, operations } = e.data.payload ?? {}
+  try {
+    if (method !== 'obfuscateMany') throw Object.assign(new Error('UNSUPPORTED_METHOD'), { code: 'UNSUPPORTED_METHOD' })
+    const payload = await signer.runObfuscateMany({ pubkey, operations })
+    const diagnostics = typeof IS_DEVELOPMENT !== 'undefined' && IS_DEVELOPMENT
+      ? { vaultDurationMs: performance.now() - startedAt, operationCount: operations.length }
+      : undefined
+    reply(e, diagnostics ? { payload, diagnostics } : { payload }, { to: launcherPort })
+  } catch (error) {
+    reply(e, { error: serializeError(error, { method: 'obfuscateMany' }) }, { to: launcherPort })
+  }
 }
 
 // Development-only: the launcher's full reset deletes every origin's storage,

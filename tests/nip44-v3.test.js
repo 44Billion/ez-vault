@@ -9,7 +9,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { concatBytes, utf8ToBytes } from '@noble/hashes/utils.js'
 import * as nip44v3 from 'libp2r2p/nip44-v3'
 import NsecSigner from '../src/services/nsec-signer.js'
-import { run } from '../src/services/signer.js'
+import { run, runObfuscateMany } from '../src/services/signer.js'
 import * as store from '../src/services/accounts-store.js'
 import * as secrets from '../src/services/secrets.js'
 import { bytesToHex, hexToBytes } from 'libp2r2p/base16'
@@ -211,6 +211,26 @@ test('signer.run exposes obfuscate', async () => {
     method: 'obfuscate',
     params: ['dm:alice', 1006, '']
   }), result)
+})
+
+test('launcher-only obfuscateMany preserves order, deduplicates and validates bounds', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const alice = await addNsecAccount()
+  const operations = [
+    ['topic', 1006, '#t'],
+    ['author', '1006', '#p'],
+    ['topic', 1006, '#t']
+  ]
+  assert.deepEqual(await runObfuscateMany({ pubkey: alice.pubkey, operations }), [
+    expectedObfuscate(alice.secret, 'topic', 1006, '#t'),
+    expectedObfuscate(alice.secret, 'author', 1006, '#p'),
+    expectedObfuscate(alice.secret, 'topic', 1006, '#t')
+  ])
+  await assert.rejects(runObfuscateMany({ pubkey: alice.pubkey, operations: [] }), /INVALID_PERSONAL_COPY_OBFUSCATION_BATCH/)
+  await assert.rejects(runObfuscateMany({
+    pubkey: alice.pubkey,
+    operations: Array.from({ length: 65 }, (_, index) => [`value-${index}`, 1006, ''])
+  }), /INVALID_PERSONAL_COPY_OBFUSCATION_BATCH/)
 })
 
 test('local binary dispatch preserves exact bytes, snapshots before shared-key selection and rejects invalid buffers', async () => {

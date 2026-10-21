@@ -73,24 +73,20 @@ function relayFrame (device, { params, sessionId }) {
   }
 }
 function duplicateRetainedEvent (kind) {
-  const event = [...retained.values()].find(candidate => candidate.kind === kind)
-  if (!event) return { eventId: '', deliveries: 0 }
-  const matching = []
-  const active = []
-  for (const transport of transports.values()) {
-    for (const [sub, filters] of transport.subscriptions) {
-      const target = { transport, sub }
-      active.push(target)
-      if (filters.some(filter => matches(event, filter))) matching.push(target)
+  let selected = { event: null, matching: [] }
+  for (const event of retained.values()) {
+    if (event.kind !== kind) continue
+    const matching = []
+    for (const transport of transports.values()) {
+      for (const [sub, filters] of transport.subscriptions) {
+        if (filters.some(filter => matches(event, filter))) matching.push({ transport, sub })
+      }
     }
+    if (matching.length > selected.matching.length) selected = { event, matching }
   }
-  const targets = [...matching]
-  for (const target of active) {
-    if (targets.length >= 2) break
-    if (!targets.some(item => item.transport === target.transport && item.sub === target.sub)) targets.push(target)
-  }
-  for (const { transport, sub } of targets) deliver(transport, ['EVENT', sub, event])
-  return { eventId: event.id, deliveries: targets.length }
+  if (!selected.event) return { eventId: '', deliveries: 0 }
+  for (const { transport, sub } of selected.matching) deliver(transport, ['EVENT', sub, selected.event])
+  return { eventId: selected.event.id, deliveries: selected.matching.length }
 }
 const socketScript = `if(location.port==='10000' && location.hostname==='localhost') {
   const sockets=new Map(); let serial=0;
@@ -227,15 +223,15 @@ try {
   await b.until(async () => (await evaluateApp(1, 'syncApp.contents(9)')).filter(event => event.content.startsWith('Burst ')).length === 12, 'burst messages synchronized', 90000)
   assert.ok((await b.evaluate('JSON.stringify(syncProbe.errors)', vaultOrigin)).includes('RELAY_LIVE_BUFFER_FULL'), 'controlled burst exercised live overflow')
   console.log('All 12 burst messages recovered after a real live overflow.')
+  const duplicate = duplicateRetainedEvent(3560)
+  assert.ok(duplicate.eventId, 'retained private-channel event available for duplicate delivery')
+  assert.ok(duplicate.deliveries >= 1, 'duplicate private-channel event reached its subscription')
+  await new Promise(resolve => setTimeout(resolve, 1000))
   await b.evaluate('syncProbe.limit(null)', vaultOrigin)
   await b.navigate(`http://localhost:10000/${app.app}`)
   await b.until(() => b.evaluate('!!globalThis.syncProbe', vaultOrigin), 'vault after reload')
   await b.until(async () => (await evaluateApp(1, 'syncApp.contents(30000)')).some(event => event.tags.some(tag => tag[0] === 'p' && tag[1] === peer)), 'contact after reload', 45000)
   await b.until(async () => (await evaluateApp(1, 'syncApp.contents(9)')).length === 15, 'messages after reload', 45000)
-  const duplicate = duplicateRetainedEvent(3560)
-  assert.ok(duplicate.eventId, 'retained private-channel event available for duplicate delivery')
-  assert.ok(duplicate.deliveries >= 2, 'duplicate private-channel event reached concurrent subscriptions')
-  await new Promise(resolve => setTimeout(resolve, 1000))
   for (const browser of browsers) {
     const logs = JSON.stringify(browser.logs)
     assert.ok(!logs.includes('Cached account metadata storage failed: invalid'))

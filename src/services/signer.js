@@ -29,6 +29,9 @@ const METHOD_ALIASES = {
   nip44v3_decrypt_double_dh: 'nip44DecryptDoubleDH',
   double_sign_event: 'doubleSignEvent'
 }
+const MAX_OBFUSCATE_BATCH_OPERATIONS = 64
+const MAX_OBFUSCATE_BATCH_BYTES = 256 * 1024
+const obfuscateBatchEncoder = new TextEncoder()
 
 // NIP-07 wire methods are snake_case (get_public_key, nip44_encrypt, ...)
 // while our JS impls are camelCase. Normalize here so callers can forward
@@ -135,4 +138,37 @@ export async function run ({ pubkey, method, params = [], internals = {}, withSh
     })
   }
   return signer[normalized](...params)
+}
+
+// Launcher-only batch primitive for preparing private personal copies. This is
+// intentionally outside SUPPORTED_METHODS so apps cannot request it as NIP-07.
+export async function runObfuscateMany ({ pubkey, operations }) {
+  const storedAccount = store.get(pubkey)
+  if (!storedAccount) throw new Error('UNKNOWN_ACCOUNT')
+  if (!Array.isArray(operations) || !operations.length || operations.length > MAX_OBFUSCATE_BATCH_OPERATIONS) {
+    throw new Error('INVALID_PERSONAL_COPY_OBFUSCATION_BATCH')
+  }
+  const signer = claimSigner(storedAccount)
+  const unique = new Map()
+  const keys = []
+  let bytes = 0
+  for (const operation of operations) {
+    if (!Array.isArray(operation) || operation.length !== 3 || typeof operation[0] !== 'string' || typeof operation[2] !== 'string') {
+      throw new Error('INVALID_PERSONAL_COPY_OBFUSCATION_BATCH')
+    }
+    const kind = typeof operation[1] === 'number' || (typeof operation[1] === 'string' && /^\d+$/.test(operation[1]))
+      ? Number(operation[1])
+      : NaN
+    if (!Number.isSafeInteger(kind) || kind < 0 || kind > 0xffffffff) throw new Error('INVALID_PERSONAL_COPY_OBFUSCATION_BATCH')
+    bytes += obfuscateBatchEncoder.encode(operation[0]).byteLength + obfuscateBatchEncoder.encode(operation[2]).byteLength
+    if (bytes > MAX_OBFUSCATE_BATCH_BYTES) throw new Error('PERSONAL_COPY_OBFUSCATION_BATCH_TOO_LARGE')
+    const value = operation[0]
+    const scope = operation[2]
+    const key = JSON.stringify([kind, scope, value])
+    keys.push(key)
+    if (!unique.has(key)) unique.set(key, [value, kind, scope])
+  }
+  const results = new Map()
+  for (const [key, params] of unique) results.set(key, await signer.obfuscate(...params))
+  return keys.map(key => results.get(key))
 }

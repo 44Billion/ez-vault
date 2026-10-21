@@ -35,6 +35,11 @@ Because the signer custodies private keys, the overriding design principle is **
   `node ../44billion/bin/run-browser-tests.js -- node tests/browser/signer-log.js`
   verifies real binary signer success/error replies while audit writes are held,
   followed by complete encrypted records after the transition barrier releases.
+- The launcher-only `NIP07_BATCH / obfuscateMany` protocol is outside the
+  app-facing NIP-07 whitelist. Accept at most 64 exact `value/kind/scope`
+  operations and 256 KiB, deduplicate them, preserve result order and never put
+  batch params/results in the activity log. Unknown batch methods fail with
+  `UNSUPPORTED_METHOD` so the launcher can use its individual-call fallback.
 - Activity-log writes serialize preparation/commit, while metadata backfills use
   one coalescing worker per app. A metadata read failure must not prevent new log
   entries from committing or notifying the UI. Storage failures use independent
