@@ -399,7 +399,7 @@ subscriptions and historical recovery continue in the background. ACK still
 requires successful persistence, and the vault keeps its local recovery seed store.
 
 
-The coordinated libp2r2p 0.11.35 release shares confirmed connectivity with automatic
+The coordinated libp2r2p 0.11.36 release shares confirmed connectivity with automatic
 pause recovery. Vault synchronization keeps its direct messenger and local seed
 storage; foreground-send urgency belongs to sessions that explicitly request it.
 
