@@ -8,6 +8,12 @@ or secrets enter these measurements. Activity-log persistence remains background
 work and is never awaited before replying. Scheduling belongs to the launcher;
 the vault does not infer app priorities or add another signer-request queue.
 
+Crypto-cache and content-key timing records remain in bounded development memory
+without console output by default. Set
+`globalThis.__EZ_VAULT_PERFORMANCE_TRACE__ = true` in the vault context to print
+their sanitized `console.debug` records. This is independent from the launcher's
+performance and scheduler flags because cross-origin globals are isolated.
+
 DoubleDH encryption waits for its locally persisted content key, not relay
 discovery or announcement. A single background publication worker coalesces
 account/content-key tasks and shares work with periodic refresh. Failed jobs use

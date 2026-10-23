@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { getEventHash, isValidEvent } from 'libp2r2p/event'
 import { generateSecretKey, getPublicKey } from 'libp2r2p/key'
 import NsecSigner from '../src/services/nsec-signer.js'
-import { doubleSignEvent, refreshStoredContentKeyEvents, refreshStoredContentKeyEventsIfDue, rotateContentKeyIfStillCanonical, startContentKeyEventRefresh, upsertContentKeyEvent } from '../src/services/content-key/index.js'
+import { doubleSignEvent, recordContentKeyTiming, refreshStoredContentKeyEvents, refreshStoredContentKeyEventsIfDue, rotateContentKeyIfStillCanonical, startContentKeyEventRefresh, upsertContentKeyEvent } from '../src/services/content-key/index.js'
 import { makeContentKeyEvent, makeContentKeyEventForPubkey, parseContentKeyEvent, isValidContentKeyProof, isValidIykcProof } from 'libp2r2p/content-key/event'
 import { CONTENT_KEY_ANNOUNCEMENT } from 'libp2r2p/kind'
 import { getIykcProofs } from 'libp2r2p/content-key'
@@ -35,6 +35,34 @@ afterEach(() => {
 function signer () {
   return NsecSigner.getOrCreate(bytesToHex(generateSecretKey()))
 }
+
+test('content-key performance console output follows the vault trace flag', () => {
+  const previousDevelopment = globalThis.IS_DEVELOPMENT
+  const previousTrace = globalThis.__EZ_VAULT_PERFORMANCE_TRACE__
+  const previousDebug = console.debug
+  const records = []
+  globalThis.IS_DEVELOPMENT = true
+  delete globalThis.__EZ_VAULT_PERFORMANCE_TRACE__
+  console.debug = value => records.push(JSON.parse(value.slice('[messaging-performance] '.length)))
+  try {
+    recordContentKeyTiming('content-key-publish', 'content', performance.now() - 1, { requestId: 'request', scope: 'private' })
+    assert.deepEqual(records, [])
+
+    globalThis.__EZ_VAULT_PERFORMANCE_TRACE__ = true
+    recordContentKeyTiming('content-key-publish', 'content', performance.now() - 1, { requestId: 'request', scope: 'private' })
+    assert.equal(records.length, 1)
+    assert.equal(records[0].stage, 'content-key-publish')
+    assert.equal(records[0].contentKeyId, 'content')
+    assert.equal(records[0].requestId, 'request')
+    assert.equal('scope' in records[0], false)
+  } finally {
+    console.debug = previousDebug
+    if (previousDevelopment === undefined) delete globalThis.IS_DEVELOPMENT
+    else globalThis.IS_DEVELOPMENT = previousDevelopment
+    if (previousTrace === undefined) delete globalThis.__EZ_VAULT_PERFORMANCE_TRACE__
+    else globalThis.__EZ_VAULT_PERFORMANCE_TRACE__ = previousTrace
+  }
+})
 
 test('only a confirmed content-key publication refreshes discovery without another relay read', async () => {
   const user = signer()

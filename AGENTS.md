@@ -35,6 +35,10 @@ Because the signer custodies private keys, the overriding design principle is **
   `node ../44billion/bin/run-browser-tests.js -- node tests/browser/signer-log.js`
   verifies real binary signer success/error replies while audit writes are held,
   followed by complete encrypted records after the transition barrier releases.
+- Keep development crypto and content-key performance records bounded in memory
+  and silent by default. `globalThis.__EZ_VAULT_PERFORMANCE_TRACE__ = true`
+  enables their sanitized `console.debug` lines in the vault context; it never
+  includes payloads, ciphertext, scopes or keys.
 - The launcher-only `NIP07_BATCH / obfuscateMany` protocol is outside the
   app-facing NIP-07 whitelist. Accept at most 64 exact `value/kind/scope`
   operations and 256 KiB, deduplicate them, preserve result order and never put

@@ -19,12 +19,17 @@ const CONTENT_KEY_EVENT_REFRESH_KEY = 'ez-vault:content-key-events:last-refresh'
 let stopContentKeyEventRefresh = null
 let publicationGeneration = 0
 
+function tracePerformance (entry) {
+  if (typeof IS_DEVELOPMENT === 'undefined' || !IS_DEVELOPMENT || globalThis.__EZ_VAULT_PERFORMANCE_TRACE__ !== true) return
+  try { console.debug(`[messaging-performance] ${JSON.stringify(entry)}`) } catch {}
+}
+
 const publicationJobs = createContentKeyPublicationJobs({
   current: (owner, key, accountPubkey = owner) => secrets.isUnlocked() && store.get(accountPubkey)?.type === 'nsec' && secrets.getLatestContentKeySigner(owner)?.getPublicKey() === key,
   online: () => globalThis.navigator?.onLine !== false,
   onOnline,
   onError: () => console.warn('content key background publication failed'),
-  debug: entry => { if (typeof IS_DEVELOPMENT !== 'undefined' && IS_DEVELOPMENT) console.debug(`[messaging-performance] ${JSON.stringify(entry)}`) }
+  debug: tracePerformance
 })
 function clearPublications () { publicationGeneration++; publicationJobs.clear() }
 secrets.subscribe(() => { if (!secrets.isUnlocked()) clearPublications(); else publicationJobs.reconcile() })
@@ -41,7 +46,7 @@ export function recordContentKeyTiming (stage, contentKeyId, startedAt, diagnost
   const ids = Object.fromEntries(['requestId', 'parentId', 'eventId'].filter(key =>
     typeof diagnostics?.[key] === 'string' && /^[a-zA-Z0-9:_-]{1,160}$/.test(diagnostics[key])
   ).map(key => [key, diagnostics[key]]))
-  console.debug(`[messaging-performance] ${JSON.stringify({ stage, contentKeyId, ...ids, elapsedMs: performance.now() - startedAt })}`)
+  tracePerformance({ stage, contentKeyId, ...ids, elapsedMs: performance.now() - startedAt })
 }
 
 function copyUnsignedEvent (event) {
