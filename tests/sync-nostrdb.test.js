@@ -400,6 +400,51 @@ test('nostrdb app backfill retains pending state when publication fails', async 
   assert.equal(errors.at(-1).message, 'SYNC_PUBLICATION_FAILED')
 })
 
+test('nostrdb app backfill does not retry before a publication circuit deadline', async () => {
+  let now = 1000
+  let attempts = 0
+  const retryAt = now + 10 * 60 * 1000
+  const errors = []
+  const msg = messenger()
+  msg.ask = async options => {
+    attempts++
+    msg.sent.push({ method: 'ask', options })
+    if (attempts === 1) {
+      throw Object.assign(new Error('RELAY_CIRCUIT_OPEN'), {
+        code: 'RELAY_CIRCUIT_OPEN',
+        category: 'timeout',
+        retryAt,
+        retryWhenAvailable: true
+      })
+    }
+    return { delivery: { reports: [{ success: true }] } }
+  }
+  const controller = createNostrDbSyncController({
+    _nowMs: () => now,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    onError: err => errors.push(err),
+    getDb: () => ({ subscribe: emptySubscription })
+  })
+
+  controller.requestAppBackfill({ ownerPubkey: OWNER, appId: 'app-1' }, context(msg))
+  await controller.processAppBackfills(context(msg))
+
+  const appState = Object.values(controller._getState().appBackfills[OWNER])[0]
+  assert.equal(attempts, 1)
+  assert.equal(appState.peers[PEER].pending.nextRetryAt, retryAt)
+  assert.equal(appState.peers[PEER].pending.onlineRetryAt, retryAt)
+  assert.equal(errors.at(-1).code, 'RELAY_CIRCUIT_OPEN')
+
+  now = retryAt - 1
+  await controller.processAppBackfills(context(msg))
+  assert.equal(attempts, 1)
+
+  now = retryAt
+  await controller.processAppBackfills(context(msg))
+  assert.equal(attempts, 2)
+})
+
 test('nostrdb app backfill ask exports one app page', async () => {
   const msg = messenger()
   const events = [event(1), event(2)]

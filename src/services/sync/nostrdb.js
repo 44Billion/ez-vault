@@ -374,6 +374,29 @@ function publicationSucceeded (result) {
   return Array.isArray(reports) && reports.length > 0 && reports.every(report => report?.success === true)
 }
 
+// A private-messenger circuit deadline may be nested in a wrapped failure.
+// Preserve the latest deadline so connectivity retries cannot bypass it.
+function publicationRetryAt (error) {
+  const pending = [error]
+  const seen = new Set()
+  let retryAt = 0
+  while (pending.length) {
+    const value = pending.pop()
+    if (!value || typeof value !== 'object' || seen.has(value)) continue
+    seen.add(value)
+    if (Number.isSafeInteger(value.retryAt) && value.retryAt > retryAt) retryAt = value.retryAt
+    for (const key of ['cause', 'reason', 'error']) pending.push(value[key])
+    for (const key of ['errors', 'relays', 'reports']) {
+      if (Array.isArray(value[key])) pending.push(...value[key])
+    }
+  }
+  return retryAt
+}
+
+function retryAtAfterPublicationError (error, delay, now) {
+  return Math.max(now + delay, publicationRetryAt(error))
+}
+
 function trustedPubkeys (context) {
   if (Array.isArray(context.receiverPubkeys)) return context.receiverPubkeys.filter(Boolean)
   return [...(context.trustedByPubkey?.keys?.() || [])]
@@ -661,9 +684,11 @@ export function createNostrDbSyncController ({
       const nextState = getState()
       const { app: nextApp, entry: nextEntry } = existingAppBackfillPeerState(nextState, ownerPubkey, appId, peerPubkey)
       if (nextEntry?.pending?.requestId === id) {
-        nextEntry.pending.nextRetryAt = _nowMs() + onlineDelay
-        nextEntry.pending.onlineRetryAt = nextEntry.pending.nextRetryAt
-        nextEntry.updatedAt = _nowMs()
+        const now = _nowMs()
+        const retryAt = retryAtAfterPublicationError(err, onlineDelay, now)
+        nextEntry.pending.nextRetryAt = retryAt
+        nextEntry.pending.onlineRetryAt = retryAt
+        nextEntry.updatedAt = now
         nextApp.updatedAt = nextEntry.updatedAt
         setState(nextState)
       }
