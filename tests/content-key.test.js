@@ -299,6 +299,39 @@ test('refreshStoredContentKeyEvents publishes local key only when no valid event
   assert.equal(parseContentKeyEvent(published[0].event).iykcPubkey, localContentKey.pubkey)
 })
 
+test('refreshStoredContentKeyEvents preserves a relay retry deadline from a failed publication', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const account = await addNsecAccount()
+  await addContentKey(account.pubkey, 50)
+  const userSigner = secrets.getNsecSigner(account.pubkey)
+  const retryAt = Date.now() + 10 * 60 * 1000
+  const relayList = await userSigner.signEvent({
+    kind: 10002,
+    created_at: 6,
+    tags: [['r', 'wss://limited.example', 'write']],
+    content: ''
+  })
+
+  const result = await refreshStoredContentKeyEvents({
+    _isOnline: async () => true,
+    _nowSeconds: () => 200,
+    _fetchRelayListEvent: async () => relayList,
+    _relayPool: relayPoolStub({
+      send: async () => ({
+        success: false,
+        promise: Promise.resolve({
+          errors: [{
+            relay: 'wss://limited.example',
+            reason: Object.assign(new Error('rate-limited: wait'), { retryAt })
+          }]
+        })
+      })
+    })
+  })
+
+  assert.equal(result.accounts[0].error.retryAt, retryAt)
+})
+
 test('refresh keeps the local selection despite a delayed historical import and skips matching or failed routes', async () => {
   secrets.unlock(generateSecretKey(), null)
   const account = await addNsecAccount()

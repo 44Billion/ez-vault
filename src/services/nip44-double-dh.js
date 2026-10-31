@@ -1,5 +1,5 @@
 import { isOnline } from 'libp2r2p/network'
-import { getIykcProofs, upsertContentKeyEvent, scheduleContentKeyPublication, recordContentKeyTiming } from './content-key/index.js'
+import { getIykcProofs, upsertContentKeyEvent, scheduleContentKeyPublication, contentKeyPublicationError, recordContentKeyTiming } from './content-key/index.js'
 import * as secrets from './secrets.js'
 import { normalizeKind } from 'libp2r2p/nip44-v3'
 
@@ -24,13 +24,15 @@ async function lookupContentPubkey (pubkey, warnings, { _getIykcProofs = getIykc
   }
 }
 
-async function publishLocalContentKey ({ userSigner, contentKeySigner, createdAt, warnings, _upsertContentKeyEvent = upsertContentKeyEvent }) {
+async function publishLocalContentKey ({ userSigner, contentKeySigner, createdAt, warnings, _upsertContentKeyEvent = upsertContentKeyEvent, onPublicationError }) {
   try {
     const { result } = await _upsertContentKeyEvent({ userSigner, contentKeySigner, createdAt })
     if (publishSucceeded(result)) return true
     warning(warnings, 'CONTENT_KEY_PUBLISH_FAILED')
+    onPublicationError?.(await contentKeyPublicationError(result))
   } catch (err) {
     warning(warnings, 'CONTENT_KEY_PUBLISH_FAILED', err?.message || '')
+    onPublicationError?.(err)
   }
   return false
 }
@@ -101,17 +103,19 @@ async function encrypt ({ account, signer, params, internals }) {
       ownerPubkey: account.pubkey, accountPubkey: internals.accountPubkey, contentKeySigner,
       run: async signal => {
         const startedAt = performance.now()
+        let publicationError = null
         const published = await publishedOwnContentSigner({
           account, userSigner: signer, contentKeySigner, warnings: [],
           internals: {
             ...internals, _upsertContentKeyEvent: options => {
               signal.throwIfAborted()
               return (internals._upsertContentKeyEvent || upsertContentKeyEvent)({ ...options, signal })
-            }
+            },
+            onPublicationError: error => { publicationError = error }
           }
         })
         signal.throwIfAborted()
-        if (!published) throw new Error('CONTENT_KEY_PUBLISH_FAILED')
+        if (!published) throw publicationError || new Error('CONTENT_KEY_PUBLISH_FAILED')
         recordContentKeyTiming('own-content-key-announcement', contentKeySigner.getPublicKey(), startedAt, internals.diagnostics)
         return { pubkey: account.pubkey }
       }

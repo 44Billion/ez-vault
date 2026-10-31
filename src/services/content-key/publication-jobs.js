@@ -1,3 +1,5 @@
+import { retryAtAfterPublicationError } from '../../helpers/publication-retry.js'
+
 // One serial network worker; a new send never resets an existing retry deadline.
 export function createContentKeyPublicationJobs ({ current, online, onOnline, onError, debug = () => {}, setTimer = setTimeout, clearTimer = clearTimeout, now = Date.now, random = Math.random }) {
   const jobs = new Map()
@@ -34,7 +36,9 @@ export function createContentKeyPublicationJobs ({ current, online, onOnline, on
           if (!active()) continue
           job.first.reject(error)
           onError(error)
-          job.nextAt = now() + Math.max(1000, Math.min(30000, job.delay * (0.8 + random() * 0.4)))
+          const failedAt = now()
+          const backoff = Math.max(1000, Math.min(30000, job.delay * (0.8 + random() * 0.4)))
+          job.nextAt = retryAtAfterPublicationError(error, backoff, failedAt)
           job.delay = Math.min(30000, job.delay * 2)
         }
       }

@@ -93,3 +93,48 @@ test('retry jitter never schedules before the one-second lower bound', async () 
   assert.equal([...f.timers.values()][0].at, 1000)
   f.jobs.clear()
 })
+
+test('publication retry waits for the relay advice carried by a wrapped error', async () => {
+  const f = fixture()
+  const retryAt = 10 * 60 * 1000
+  let attempts = 0
+  const run = async () => {
+    attempts++
+    if (attempts === 1) {
+      throw Object.assign(new Error('rate-limited: slow down'), {
+        cause: Object.assign(new Error('relay cooldown'), { retryAt })
+      })
+    }
+    return 'published'
+  }
+
+  await assert.rejects(f.jobs.request('owner', 'key', run), /rate-limited/)
+  await f.jobs.idle()
+  assert.equal([...f.timers.values()][0].at, retryAt)
+
+  await f.advance(retryAt - 1)
+  assert.equal(attempts, 1)
+  await f.advance(1)
+  assert.equal(attempts, 2)
+  assert.equal(await f.jobs.request('owner', 'key', run), 'published')
+  f.jobs.clear()
+})
+
+test('publication retry converts relative relay advice into an absolute deadline', async () => {
+  const f = fixture()
+  const retryAfterMs = 2 * 60 * 1000
+  let attempts = 0
+  const run = async () => {
+    attempts++
+    if (attempts === 1) throw Object.assign(new Error('rate-limited: slow down'), { retryAfterMs })
+    return 'published'
+  }
+
+  await assert.rejects(f.jobs.request('owner', 'key', run), /rate-limited/)
+  await f.jobs.idle()
+  assert.equal([...f.timers.values()][0].at, retryAfterMs)
+
+  await f.advance(retryAfterMs)
+  assert.equal(attempts, 2)
+  f.jobs.clear()
+})

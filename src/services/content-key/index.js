@@ -9,6 +9,7 @@ import { filterVisibleAccounts } from '../account-mutations.js'
 import { fetchRelayListEvent, parseRelayListEvent, resolveWriteRelays } from '../relay.js'
 import { getState, setState } from '../storage/index.js'
 import { createContentKeyPublicationJobs } from './publication-jobs.js'
+import { publicationError } from '../../helpers/publication-retry.js'
 
 export { getIykcProofs }
 
@@ -95,6 +96,18 @@ function readLastContentKeyEventRefresh () {
 
 function writeLastContentKeyEventRefresh (value = Date.now()) {
   return setState(CONTENT_KEY_EVENT_REFRESH_KEY, Math.max(0, Math.floor(Number(value) || 0)))
+}
+
+export async function contentKeyPublicationError (failure, message = 'CONTENT_KEY_PUBLISH_FAILED') {
+  let report = null
+  if (failure?.promise) {
+    try {
+      report = await failure.promise
+    } catch (cause) {
+      report = { errors: [{ reason: cause }] }
+    }
+  }
+  return publicationError(message, [failure, report])
 }
 
 function contentKeyAccounts () {
@@ -399,7 +412,10 @@ export async function refreshStoredContentKeyEvents ({
         ownerPubkey: account.pubkey, contentKeySigner, force: true,
         run: async signal => {
           const result = await refreshAccountContentKeyEvent({ account, _fetchRelayListEvent, _relayPool, _nowSeconds, signal })
-          if (result.skipped === 'relay-check-failed' || result.result?.success === false) throw new Error('CONTENT_KEY_PUBLISH_FAILED')
+          if (result.skipped === 'relay-check-failed') {
+            throw publicationError('CONTENT_KEY_RELAY_CHECK_FAILED', result.relayResults?.map(entry => entry.error))
+          }
+          if (result.result?.success === false) throw await contentKeyPublicationError(result.result)
           return result
         }
       }))
