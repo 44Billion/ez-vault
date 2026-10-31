@@ -598,9 +598,11 @@ export function createNostrDbSyncController ({
       })
       if (!publicationSucceeded(result)) throw new Error('SYNC_PUBLICATION_FAILED')
     } catch (err) {
-      entry.pending.nextRetryAt = _nowMs() + onlineDelay
-      entry.pending.onlineRetryAt = entry.pending.nextRetryAt
-      entry.updatedAt = _nowMs()
+      const now = _nowMs()
+      const retryAt = retryAtAfterPublicationError(err, onlineDelay, now)
+      entry.pending.nextRetryAt = retryAt
+      entry.pending.onlineRetryAt = retryAt
+      entry.updatedAt = now
       setState(state)
       scheduleRetrySweep(context)
       report(err)
@@ -1148,11 +1150,14 @@ export function createNostrDbSyncController ({
           for (const event of events.slice(start)) {
             if (!queue.events.has(event.id)) queue.events.set(event.id, event)
           }
+          queue.retryAt = retryAtAfterPublicationError(err, PUSH_THROTTLE_MS, _nowMs())
           report(err)
+          startPushCooldown(ownerPubkey, queue)
           return
         }
       }
       if (!current()) return
+      queue.retryAt = 0
       emitDebug(runtime.debug, 'push', {
         ownerPubkey,
         channelPubkey: target.channelPubkey,
@@ -1166,15 +1171,20 @@ export function createNostrDbSyncController ({
 
   function startPushCooldown (ownerPubkey, queue) {
     if (pushQueues.get(ownerPubkey) !== queue) return
+    if (queue.timer) _clearTimeout?.(queue.timer)
+    queue.timer = null
     queue.cooling = true
     queue.timer = _setTimeout(async () => {
       queue.timer = null
       queue.cooling = false
+      if (pushQueues.get(ownerPubkey) !== queue) return
       if (queue.events.size > 0) {
         await flushPushQueue(ownerPubkey)
-        startPushCooldown(ownerPubkey, queue)
+        if (!queue.timer) startPushCooldown(ownerPubkey, queue)
+      } else {
+        queue.retryAt = 0
       }
-    }, PUSH_THROTTLE_MS)
+    }, Math.max(PUSH_THROTTLE_MS, (queue.retryAt || 0) - _nowMs()))
     queue.timer?.unref?.()
   }
 
@@ -1184,7 +1194,7 @@ export function createNostrDbSyncController ({
     if (!normalizePubkey(event?.id) || isRecentSyncEvent(event)) return
     let queue = pushQueues.get(ownerPubkey)
     if (!queue) {
-      queue = { events: new Map(), timer: null, cooling: false }
+      queue = { events: new Map(), timer: null, cooling: false, retryAt: 0 }
       pushQueues.set(ownerPubkey, queue)
     }
     queue.events.set(event.id, event)

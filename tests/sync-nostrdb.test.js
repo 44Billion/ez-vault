@@ -445,6 +445,51 @@ test('nostrdb app backfill does not retry before a publication circuit deadline'
   assert.equal(attempts, 2)
 })
 
+test('nostrdb range sync does not retry before a publication circuit deadline', async () => {
+  let now = 1000
+  const retryAt = now + 10 * 60 * 1000
+  let attempts = 0
+  const msg = messenger()
+  msg.ask = async options => {
+    attempts++
+    msg.sent.push({ method: 'ask', options })
+    throw Object.assign(new Error('RELAY_CIRCUIT_OPEN'), {
+      code: 'RELAY_CIRCUIT_OPEN',
+      category: 'timeout',
+      retryAt,
+      retryWhenAvailable: true
+    })
+  }
+  const controller = createNostrDbSyncController({
+    _nowMs: () => now,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    onError: () => {},
+    getDb: () => ({
+      async query () {
+        return { results: [], meta: { firstScore: now, lastScore: now } }
+      }
+    })
+  })
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: now, minScore: now, maxScore: now + 1 }
+  }), context(msg))
+
+  const owner = controller._getState().owners[OWNER][PEER]
+  assert.equal(attempts, 1)
+  assert.equal(owner.pending.nextRetryAt, retryAt)
+  assert.equal(owner.pending.onlineRetryAt, retryAt)
+
+  now = retryAt - 1
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: now, minScore: now, maxScore: now + 1 }
+  }), context(msg))
+  assert.equal(attempts, 1)
+})
+
 test('nostrdb app backfill ask exports one app page', async () => {
   const msg = messenger()
   const events = [event(1), event(2)]
@@ -876,5 +921,52 @@ test('push batches bound UTF-8 bytes, retry failures and never overlap in-flight
   const ids = replies.flatMap(reply => reply.jsonl.trim().split('\n').map(row => JSON.parse(row).id))
   assert.deepEqual(new Set(ids), new Set([...pending.map(item => item.id), event(100).id]))
   assert.equal(ids.length, 11)
+  controller.stop()
+})
+
+test('nostrdb push waits for a publication circuit deadline', async () => {
+  let now = 1000
+  const retryAt = now + 10 * 60 * 1000
+  let attempts = 0
+  const timers = new Set()
+  const msg = messenger()
+  msg.yell = async options => {
+    attempts++
+    msg.sent.push({ method: 'yell', options })
+    if (attempts === 1) {
+      throw Object.assign(new Error('RELAY_CIRCUIT_OPEN'), {
+        code: 'RELAY_CIRCUIT_OPEN',
+        category: 'timeout',
+        retryAt,
+        retryWhenAvailable: true
+      })
+    }
+    return { delivery: { reports: [{ success: true }] } }
+  }
+  const controller = createNostrDbSyncController({
+    _nowMs: () => now,
+    onError: () => {},
+    getDb: () => ({ subscribe: emptySubscription }),
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.add(timer)
+      return timer
+    },
+    _clearTimeout: timer => timers.delete(timer)
+  })
+  controller.ensureSubscriptions(context(msg))
+  controller.queuePush(OWNER, event(1))
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.equal(attempts, 1)
+  assert.equal(timers.size, 1)
+  assert.equal([...timers][0].ms, retryAt - now)
+
+  now = retryAt
+  const timer = [...timers][0]
+  timers.delete(timer)
+  await timer.fn()
+
+  assert.equal(attempts, 2)
   controller.stop()
 })
