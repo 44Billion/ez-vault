@@ -68,6 +68,7 @@ let factory = null
 let dbPromise = null
 let readyPromise = null
 let database = null
+let storageClosed = false
 let mutationTail = Promise.resolve()
 let accountCache = []
 const stateCache = new Map()
@@ -149,9 +150,18 @@ async function transaction (storeNames, mode, work) {
   }
 }
 
+function storageClosedError () {
+  return new Error('STORAGE_CLOSED')
+}
+
 function ensureDatabase () {
+  if (storageClosed) return Promise.reject(storageClosedError())
   if (!dbPromise) {
     dbPromise = openDatabase(factory).then(db => {
+      if (storageClosed) {
+        db.close()
+        throw storageClosedError()
+      }
       database = db
       return db
     })
@@ -173,6 +183,7 @@ function cleanAccountRecord (record) {
 }
 
 export function initializeStorage ({ indexedDB = globalThis.indexedDB } = {}) {
+  if (storageClosed) return Promise.reject(storageClosedError())
   if (readyPromise) {
     if (factory !== indexedDB) throw new Error('IDB_FACTORY_ALREADY_SELECTED')
     return readyPromise
@@ -581,11 +592,23 @@ export async function requestPersistentStorage () {
   }
 }
 
+// Enter a permanent shutdown state before a full development wipe. New storage
+// callers must fail instead of reopening the database after it has been
+// deleted; a document reload creates a fresh module and removes this state.
+export function beginStorageShutdown () {
+  storageClosed = true
+}
+
 // Drop the open connection and every in-memory snapshot. Callers that delete
 // databases in this origin (development reset, tests) must await this first:
 // an open connection blocks `deleteDatabase` and leaves the wipe half applied.
-export async function closeStorage () {
+// `terminal` is used by the full development reset so late operations cannot
+// recreate the database between deletion and the page reload.
+export async function closeStorage ({ terminal = false } = {}) {
+  if (terminal) beginStorageShutdown()
+  const connecting = dbPromise
   await mutationTail
+  try { await connecting } catch {}
   try { database?.close() } catch {}
   database = null
   dbPromise = null
@@ -599,6 +622,7 @@ export async function closeStorage () {
 
 export async function resetStorageForTests ({ indexedDB = globalThis.indexedDB } = {}) {
   await closeStorage()
+  storageClosed = false
   factory = indexedDB
   if (!indexedDB?.deleteDatabase) return
   await new Promise((resolve, reject) => {

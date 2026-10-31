@@ -15,6 +15,7 @@ import { launcherLocale, setLocale } from '../i18n/index.js'
 import { resetVaultView } from './view-state.js'
 import { wipeLocalDevData } from './local-dev-wipe.js'
 import { installLauncherRelayPoolShim, shouldUseLauncherRelayPool } from './launcher-relay-pool.js'
+import { beginStorageShutdown } from './storage/index.js'
 
 // Read-only disclosures — the result is publicly derivable, so logging them
 // would just be noise in the audit trail. Match both wire and JS spellings.
@@ -32,6 +33,8 @@ const NIP44_V3_CONTEXT_METHODS = new Set([
 ])
 
 const LAUNCHER_APP_NAME = 'App launcher'
+
+let localDevWipeStarted = false
 
 function normalizedEventKind (kind) {
   const n = typeof kind === 'string' && kind.trim() !== '' ? Number(kind) : kind
@@ -322,6 +325,7 @@ function onPortMessage (e) {
   if (!handshakeComplete) return
   if (code === 'VAULT_PING') return reply(e, { payload: true }, { to: launcherPort })
   if (handleLegacyViewMessage(e)) return
+  if (localDevWipeStarted) return
   if (code === 'UPDATE_ACCOUNT_EVENTS') return handleUpdateAccountEvents(e)
   if (code === 'NOSTRDB_APP_BACKFILL') return handleNostrDbAppBackfill(e)
   if (code === 'NIP07') return handleNip07(e)
@@ -352,9 +356,12 @@ export function handleLocalDevWipe (e, {
   _wipe = wipeLocalDevData,
   _reply = message => reply(e, message, { to: launcherPort }),
   _setTimeout = setTimeout,
-  _reload = () => globalThis.location?.reload?.()
+  _reload = () => globalThis.location?.reload?.(),
+  _beginStorageShutdown = beginStorageShutdown
 } = {}) {
   if (typeof IS_DEVELOPMENT === 'undefined' || !IS_DEVELOPMENT) return
+  localDevWipeStarted = true
+  _beginStorageShutdown()
   return _wipe()
     .then(result => {
       _reply({ payload: result })

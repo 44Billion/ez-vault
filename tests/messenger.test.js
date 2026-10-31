@@ -65,21 +65,25 @@ test('the launcher full reset wipes the vault only in development builds', async
   const reloads = []
   const scheduled = []
   const wipes = []
+  const storageShutdowns = []
   const handlerOptions = {
     _wipe: async () => { wipes.push('wipe'); return { databases: ['ez-vault'], failures: [] } },
     _reply: message => replies.push(message),
     _setTimeout: fn => scheduled.push(fn),
-    _reload: () => reloads.push('reload')
+    _reload: () => reloads.push('reload'),
+    _beginStorageShutdown: () => storageShutdowns.push('shutdown')
   }
   try {
     globalThis.IS_DEVELOPMENT = false
     assert.equal(handleLocalDevWipe({}, handlerOptions), undefined)
     assert.deepEqual(wipes, [])
     assert.deepEqual(replies, [])
+    assert.deepEqual(storageShutdowns, [])
 
     globalThis.IS_DEVELOPMENT = true
     await handleLocalDevWipe({}, handlerOptions)
     assert.deepEqual(wipes, ['wipe'])
+    assert.deepEqual(storageShutdowns, ['shutdown'])
     assert.deepEqual(replies, [{ payload: { databases: ['ez-vault'], failures: [] } }])
     assert.equal(scheduled.length, 1)
     scheduled.shift()()

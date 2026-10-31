@@ -84,7 +84,7 @@ export async function wipeLocalDevData ({
   }
 
   // Close our own connection first so deleting it below is not blocked.
-  await run('storage', () => _closeStorage())
+  await run('storage', () => _closeStorage({ terminal: true }))
 
   await run('indexedDB', async () => {
     if (typeof _indexedDB?.databases !== 'function' || typeof _indexedDB?.deleteDatabase !== 'function') {
