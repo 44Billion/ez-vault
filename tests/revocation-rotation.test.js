@@ -6,6 +6,7 @@ import * as store from '../src/services/accounts-store.js'
 import * as secrets from '../src/services/secrets.js'
 import {
   FALLBACK_ROTATION_DELAY_MS,
+  nextRevocationRotationDelay,
   runDueRevocationRotations,
   scheduleRevocationRotationsForRemovedSigner
 } from '../src/services/sync/revocation-rotation.js'
@@ -143,4 +144,40 @@ test('revocation rotation retries failures and clears completed work', async () 
   assert.equal(second.cleared, 1)
   assert.equal(second.remaining, 0)
   assert.equal(calls, 2)
+})
+
+test('revocation rotation honors a publication circuit deadline', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const account = await addNsecAccount()
+  await addContentKey(account.pubkey)
+  const nowMs = 1000
+  const retryAt = nowMs + 20 * 60 * 1000
+
+  await scheduleRevocationRotationsForRemovedSigner({
+    removedSignerPubkey: pk(2),
+    removalUpdatedAt: 20,
+    actorPubkey: pk(1),
+    localActorPubkey: pk(1),
+    nowMs
+  })
+  const result = await runDueRevocationRotations({
+    nowMs,
+    _rotateContentKeyIfStillCanonical: async () => ({
+      status: 'retry',
+      reason: 'publish-failed',
+      result: {
+        success: false,
+        promise: Promise.resolve({
+          errors: [{
+            relay: 'wss://limited.example',
+            reason: Object.assign(new Error('rate-limited: wait'), { retryAt })
+          }]
+        })
+      }
+    })
+  })
+
+  assert.equal(result.remaining, 1)
+  assert.equal(await nextRevocationRotationDelay(undefined, nowMs + 5 * 60 * 1000), retryAt - (nowMs + 5 * 60 * 1000))
+  assert.equal(await nextRevocationRotationDelay(undefined, retryAt), 0)
 })

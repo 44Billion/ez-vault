@@ -1,8 +1,9 @@
 import * as store from '../accounts-store.js'
 import * as secrets from '../secrets.js'
 import { filterVisibleAccounts } from '../account-mutations.js'
-import { rotateContentKeyIfStillCanonical } from '../content-key/index.js'
+import { contentKeyPublicationError, rotateContentKeyIfStillCanonical } from '../content-key/index.js'
 import { readRecords, replaceRecords, REVOCATION_ROTATIONS } from '../storage/index.js'
+import { publicationRetryAt } from '../../helpers/publication-retry.js'
 
 const KEY = 'ez-vault:trusted-signer-sync:content-key-rotation:v1'
 const HEX32 = /^[0-9a-f]{64}$/i
@@ -88,6 +89,15 @@ function retryDelay (attempts) {
   return Math.min(MAX_ROTATION_RETRY_MS, MIN_ROTATION_RETRY_MS * (2 ** Math.max(0, attempts)))
 }
 
+async function publicationRetryAtForRotation (result, error, nowMs) {
+  let retryAt = publicationRetryAt([result, error], nowMs)
+  retryAt = Math.max(retryAt, publicationRetryAt(result?.relayResults?.map(entry => entry.error), nowMs))
+  if (result?.result?.success === false) {
+    retryAt = Math.max(retryAt, publicationRetryAt(await contentKeyPublicationError(result.result), nowMs))
+  }
+  return retryAt
+}
+
 export async function scheduleRevocationRotationsForRemovedSigner ({
   removedSignerPubkey,
   removalUpdatedAt,
@@ -161,18 +171,20 @@ export async function runDueRevocationRotations ({
         continue
       }
       const attempts = (intent.attempts || 0) + 1
+      const retryAt = await publicationRetryAtForRotation(result, null, nowMs)
       remaining.push({
         ...intent,
         attempts,
-        nextAttemptAt: nowMs + retryDelay(attempts)
+        nextAttemptAt: Math.max(nowMs + retryDelay(attempts), retryAt)
       })
     } catch (err) {
       onError(err)
       const attempts = (intent.attempts || 0) + 1
+      const retryAt = await publicationRetryAtForRotation(null, err, nowMs)
       remaining.push({
         ...intent,
         attempts,
-        nextAttemptAt: nowMs + retryDelay(attempts)
+        nextAttemptAt: Math.max(nowMs + retryDelay(attempts), retryAt)
       })
     }
   }

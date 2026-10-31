@@ -246,3 +246,29 @@ test('trusted signer announce omits the receiver own pubkey', async () => {
   assert.deepEqual(sent.find(call => call.receiverPubkey === pk(1)).payload.entries.map(entry => entry.pubkey), [pk(2)])
   assert.deepEqual(sent.find(call => call.receiverPubkey === pk(2)).payload.entries.map(entry => entry.pubkey), [pk(1)])
 })
+
+test('trusted signer announce preserves a relay retry deadline', async () => {
+  const retryAt = Date.now() + 10 * 60 * 1000
+  await assert.rejects(announceTrustedSignerState({
+    messenger: {
+      tell: async () => ({
+        delivery: {
+          reports: [{
+            success: false,
+            promise: Promise.resolve({
+              errors: [{
+                relay: 'wss://limited.example',
+                reason: Object.assign(new Error('rate-limited: wait'), { retryAt })
+              }]
+            })
+          }]
+        }
+      })
+    },
+    peerChannels: new Map([[pk(1), 'channel-one']]),
+    activePeerPubkeys: [pk(1)],
+    records: [
+      { pubkey: pk(2), platform: 'Two', status: 'trusted', updatedAt: 10, actorPubkey: pk(9) }
+    ]
+  }), error => error.code === 'SYNC_PUBLICATION_FAILED' && error.retryAt === retryAt)
+})

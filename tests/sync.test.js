@@ -977,6 +977,114 @@ test('sync announces content-key changes immediately and restarts the four-hour 
   controller.close()
 })
 
+test('sync announcement retries are independent per owner and honor circuit deadlines', async () => {
+  let now = 1_000_000
+  const retryAt = now + 10 * 60 * 1000
+  const firstOwner = 'a'.repeat(64)
+  const secondOwner = 'b'.repeat(64)
+  const timers = new Set()
+  const attempts = new Map()
+  const announced = []
+
+  class FakeMessenger {
+    async init () { return this }
+    async update () { return this }
+    async tell () {}
+    nextMessage () { return null }
+    close () {}
+  }
+
+  const controller = createSyncController({
+    MessengerClass: FakeMessenger,
+    _store: createSubscribable({
+      list: () => [
+        { type: 'nsec', pubkey: firstOwner },
+        { type: 'nsec', pubkey: secondOwner }
+      ]
+    }),
+    _secrets: createSubscribable({
+      isUnlocked: () => true,
+      getDeviceSigner: async () => signer('device'),
+      subscribeContentKeys: () => () => {}
+    }),
+    _trustedSigners: createSubscribable({
+      list: () => [{ pubkey: 'trusted1', platform: 'Laptop' }]
+    }),
+    _claimSigner: account => signer(account.pubkey),
+    _contentKeys: {
+      resetDebugSources: () => {},
+      handleMessage: async () => false,
+      announceContentKeys: async options => {
+        const count = (attempts.get(options.ownerPubkey) || 0) + 1
+        attempts.set(options.ownerPubkey, count)
+        if (options.ownerPubkey === firstOwner && count === 1) {
+          return {
+            delivery: {
+              reports: [{
+                success: false,
+                promise: Promise.resolve({
+                  errors: [{
+                    relay: 'wss://limited.example',
+                    reason: Object.assign(new Error('rate-limited: wait'), { retryAt })
+                  }]
+                })
+              }]
+            }
+          }
+        }
+        announced.push(options.ownerPubkey)
+      }
+    },
+    _trustedSignerSync: {
+      announceTrustedSignerState: async () => {},
+      handleMessage: async () => false
+    },
+    _createNostrDbSyncController: () => ({
+      announceRange: async () => {},
+      handleMessage: async () => false,
+      ensureSubscriptions: () => {},
+      requestAppBackfill: () => true,
+      stop: () => {}
+    }),
+    _now: () => now,
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms, at: now + ms }
+      timers.add(timer)
+      return timer
+    },
+    _clearTimeout: timer => timers.delete(timer),
+    _setInterval: () => ({}),
+    _clearInterval: () => {},
+    onError: () => {}
+  })
+
+  await controller.init()
+  const initial = [...timers].find(timer => timer.ms === 1000)
+  timers.delete(initial)
+  await initial.fn()
+
+  assert.equal(attempts.get(firstOwner), 1)
+  assert.equal(attempts.get(secondOwner), 1)
+  assert.ok([...timers].some(timer => timer.at === retryAt))
+
+  now = retryAt - 1
+  controller.scheduleAnnounce(secondOwner, { immediate: true })
+  const immediate = [...timers].find(timer => timer.ms === 0)
+  timers.delete(immediate)
+  await immediate.fn()
+
+  assert.equal(attempts.get(firstOwner), 1)
+  assert.equal(attempts.get(secondOwner), 2)
+
+  now = retryAt
+  const retry = [...timers].find(timer => timer.at === retryAt)
+  timers.delete(retry)
+  await retry.fn()
+  assert.equal(attempts.get(firstOwner), 2)
+
+  controller.close()
+})
+
 test('sync close cancels init work that resolves later', async () => {
   let resolveInit
   const timers = []

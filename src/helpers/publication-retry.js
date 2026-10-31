@@ -35,3 +35,30 @@ export function publicationError (message, value, now = Date.now()) {
   if (retryAt > 0) error.retryAt = retryAt
   return error
 }
+
+export async function publicationErrorFromResult (result, message = 'PUBLICATION_FAILED') {
+  const reports = result?.delivery?.reports
+  const failed = (result?.delivery && (!Array.isArray(reports) || !reports.length ||
+      reports.some(report => report?.success !== true))) ||
+    result?.success === false
+  if (!failed) return null
+
+  const details = [result]
+  if (result?.promise) {
+    try {
+      details.push(await result.promise)
+    } catch (cause) {
+      details.push({ errors: [{ reason: cause }] })
+    }
+  }
+  for (const report of reports || []) {
+    details.push(report)
+    if (!report?.promise) continue
+    try {
+      details.push(await report.promise)
+    } catch (cause) {
+      details.push({ errors: [{ reason: cause }] })
+    }
+  }
+  return publicationError(message, details)
+}

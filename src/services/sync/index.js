@@ -1,4 +1,5 @@
 import { syncErrorDetails } from '../../helpers/sync-error.js'
+import { publicationErrorFromResult, publicationRetryAt } from '../../helpers/publication-retry.js'
 import { PrivateMessenger } from 'libp2r2p/private-messenger'
 import { claimSigner } from '../signer.js'
 import { subscribeRelayListUpdates } from 'libp2r2p/relay'
@@ -132,6 +133,7 @@ export function createSyncController ({
   _clearTimeout = globalThis.clearTimeout.bind(globalThis),
   _setInterval = globalThis.setInterval.bind(globalThis),
   _clearInterval = globalThis.clearInterval.bind(globalThis),
+  _now = Date.now,
   _debug,
   onError = defaultOnError
 } = {}) {
@@ -144,6 +146,7 @@ export function createSyncController ({
   let draining = false
   let channelConfiguration = null
   let announceTimer = null
+  let announceTimerAt = 0
   let announceInterval = null
   let pendingResetInterval = false
   let lastStoreIdentityKey = ''
@@ -152,7 +155,9 @@ export function createSyncController ({
   let relayListRevision = 0
   let refreshQueued = false
   let lifecycleId = 0
+  let trustedAnnounceRetryAt = 0
   const pendingAnnounceOwners = new Set()
+  const announceRetryAtByOwner = new Map()
   const unsubscribers = []
   const channelPubkeyByOwnerPubkey = new Map()
   const ownerPubkeyByChannelPubkey = new Map()
@@ -177,11 +182,11 @@ export function createSyncController ({
     }
   }
 
-  function assertPublished (result) {
+  async function assertPublished (result) {
     if (!result?.delivery) return result
     const reports = result.delivery.reports
     if (!Array.isArray(reports) || !reports.length || reports.some(report => report?.success !== true)) {
-      throw new Error('SYNC_PUBLICATION_FAILED')
+      throw await publicationErrorFromResult(result, 'SYNC_PUBLICATION_FAILED')
     }
     return result
   }
@@ -498,9 +503,34 @@ export function createSyncController ({
     if (announceTimer) _clearTimeout(announceTimer)
     if (announceInterval) _clearInterval(announceInterval)
     announceTimer = null
+    announceTimerAt = 0
     announceInterval = null
     pendingResetInterval = false
+    trustedAnnounceRetryAt = 0
+    announceRetryAtByOwner.clear()
     if (clearPending) pendingAnnounceOwners.clear()
+  }
+
+  function armAnnouncementTimer (id, at) {
+    const target = Math.max(_now(), at)
+    if (announceTimer && announceTimerAt <= target) return
+    if (announceTimer) _clearTimeout(announceTimer)
+    announceTimerAt = target
+    announceTimer = _setTimeout(() => {
+      announceTimer = null
+      announceTimerAt = 0
+      return flushAnnouncements(id)
+    }, target - _now())
+    announceTimer?.unref?.()
+  }
+
+  function scheduleNextAnnouncementRetry (id) {
+    const now = _now()
+    const deadlines = [...pendingAnnounceOwners]
+      .map(ownerPubkey => announceRetryAtByOwner.get(ownerPubkey) || 0)
+      .concat(trustedAnnounceRetryAt)
+      .filter(retryAt => retryAt > now)
+    if (deadlines.length) armAnnouncementTimer(id, Math.min(...deadlines))
   }
 
   function ensureAnnouncementInterval () {
@@ -521,6 +551,7 @@ export function createSyncController ({
   async function flushAnnouncements (id = lifecycleId) {
     if (!isCurrentLifecycle(id)) return
     announceTimer = null
+    announceTimerAt = 0
     const resetInterval = pendingResetInterval
     pendingResetInterval = false
     const currentRefresh = refreshPromise
@@ -544,10 +575,16 @@ export function createSyncController ({
       ? nsecOwnerPubkeys(_store)
       : [...pendingAnnounceOwners]
     pendingAnnounceOwners.clear()
+    const now = _now()
 
     if (receivers.length) {
       for (const ownerPubkey of owners) {
         if (!isCurrentLifecycle(id)) return
+        const retryAt = announceRetryAtByOwner.get(ownerPubkey) || 0
+        if (retryAt > now) {
+          pendingAnnounceOwners.add(ownerPubkey)
+          continue
+        }
         const channelPubkey = ownerChannels.get(ownerPubkey)
         if (!readyOwners.has(ownerPubkey) || !channelPubkey) {
           pendingAnnounceOwners.add(ownerPubkey)
@@ -558,7 +595,7 @@ export function createSyncController ({
           continue
         }
         try {
-          assertPublished(await _contentKeys.announceContentKeys({
+          await assertPublished(await _contentKeys.announceContentKeys({
             messenger: currentMessenger,
             channelPubkey,
             ownerPubkey,
@@ -566,7 +603,7 @@ export function createSyncController ({
             debug
           }))
           if (HEX32.test(ownerPubkey)) {
-            assertPublished(await nostrDbSync.announceRange({
+            await assertPublished(await nostrDbSync.announceRange({
               messenger: currentMessenger,
               channelPubkey,
               ownerPubkey,
@@ -574,26 +611,35 @@ export function createSyncController ({
               debug
             }))
           }
+          announceRetryAtByOwner.delete(ownerPubkey)
         } catch (err) {
           pendingAnnounceOwners.add(ownerPubkey)
+          const retryAt = publicationRetryAt(err, now)
+          if (retryAt > now) announceRetryAtByOwner.set(ownerPubkey, retryAt)
+          else announceRetryAtByOwner.delete(ownerPubkey)
           onError(err)
         }
       }
     }
-    try {
-      await _trustedSignerSync.announceTrustedSignerState({
-        messenger: currentMessenger,
-        peerChannels,
-        records: trustedRecords(),
-        activePeerPubkeys: receivers,
-        reminderRecords: removedReminderRecords(),
-        debug
-      })
-    } catch (err) {
-      pendingAnnounceOwners.add(ANNOUNCE_ALL)
-      onError(err)
+    if (!trustedAnnounceRetryAt || trustedAnnounceRetryAt <= now) {
+      try {
+        await _trustedSignerSync.announceTrustedSignerState({
+          messenger: currentMessenger,
+          peerChannels,
+          records: trustedRecords(),
+          activePeerPubkeys: receivers,
+          reminderRecords: removedReminderRecords(),
+          debug
+        })
+        trustedAnnounceRetryAt = 0
+      } catch (err) {
+        const retryAt = publicationRetryAt(err, now)
+        trustedAnnounceRetryAt = retryAt > now ? retryAt : 0
+        onError(err)
+      }
     }
     if (resetInterval && isCurrentLifecycle(id)) resetAnnouncementInterval()
+    scheduleNextAnnouncementRetry(id)
   }
 
   function scheduleAnnounce (ownerPubkey, { immediate = false, resetInterval = false } = {}) {
@@ -602,10 +648,14 @@ export function createSyncController ({
     if (ownerPubkey) pendingAnnounceOwners.add(ownerPubkey)
     else pendingAnnounceOwners.add(ANNOUNCE_ALL)
     pendingResetInterval = pendingResetInterval || resetInterval
-    if (announceTimer && !immediate) return
-    if (announceTimer) _clearTimeout(announceTimer)
-    announceTimer = _setTimeout(() => flushAnnouncements(id), immediate ? 0 : ANNOUNCE_DEBOUNCE_MS)
-    announceTimer?.unref?.()
+    const now = _now()
+    let at = now + (immediate ? 0 : ANNOUNCE_DEBOUNCE_MS)
+    for (const pendingOwner of pendingAnnounceOwners) {
+      const retryAt = announceRetryAtByOwner.get(pendingOwner) || 0
+      if (retryAt > now) at = Math.min(at, retryAt)
+    }
+    if (trustedAnnounceRetryAt > now) at = Math.min(at, trustedAnnounceRetryAt)
+    armAnnouncementTimer(id, at)
   }
 
   function scheduleAnnounceAll (options) {
