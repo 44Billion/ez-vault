@@ -154,6 +154,14 @@ async function flushMicrotasks (turns = 14) {
   for (let i = 0; i < turns; i++) await Promise.resolve()
 }
 
+async function waitUntil (predicate, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() >= deadline) assert.fail('condition was not met before timeout')
+    await new Promise(resolve => setTimeout(resolve, 1))
+  }
+}
+
 test('sync initialization clears private messenger temporary storage before unlock', async () => {
   globalThis.sessionStorage.setItem('tmp.session', 'encrypted')
   globalThis.sessionStorage.setItem(TEMPORARY_STORAGE_KEYS_KEY, JSON.stringify(['tmp.session']))
@@ -1224,6 +1232,7 @@ test('setContentKeySecret causes one immediate announce through the sync subscri
   await flushMicrotasks()
   assert.equal(instances[0].updates.length, 0)
 
+  await waitUntil(() => timers.some(timer => timer.ms === 0))
   const immediateTimers = timers.filter(timer => timer.ms === 0)
   assert.equal(immediateTimers.length, 1)
   await immediateTimers[0].fn()

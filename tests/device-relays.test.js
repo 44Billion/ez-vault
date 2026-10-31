@@ -8,7 +8,9 @@ import {
   canConnectRelay,
   refreshDeviceRelayList,
   refreshDeviceRelayListIfDue,
-  resolveDeviceRelays
+  resolveDeviceRelays,
+  startDeviceRelayListRefresh,
+  DEVICE_RELAY_LIST_REFRESH_INTERVAL_MS
 } from '../src/services/device-relays.js'
 
 const data = new Map()
@@ -58,6 +60,14 @@ function relayList (relays) {
     created_at: 10,
     tags: relays.map(relay => ['r', relay]),
     content: ''
+  }
+}
+
+async function waitUntil (predicate, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() >= deadline) assert.fail('condition was not met before timeout')
+    await new Promise(resolve => setTimeout(resolve, 1))
   }
 }
 
@@ -116,6 +126,28 @@ test('device relay refresh replaces only one offline relay per run', async () =>
   assert.equal(checked.includes('wss://old-two.example'), false)
 })
 
+test('device relay refresh rejects an unsuccessful publication and preserves its retry deadline', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const retryAt = Date.now() + 10 * 60 * 1000
+
+  await assert.rejects(refreshDeviceRelayList({
+    _isOnline: async () => true,
+    _nowSeconds: () => 30,
+    _fetchRelayListEvent: async () => null,
+    _relayPool: {
+      sendEvent: async () => ({
+        success: false,
+        promise: Promise.resolve({
+          errors: [{
+            relay: seedRelays[0],
+            reason: Object.assign(new Error('rate-limited: wait'), { retryAt })
+          }]
+        })
+      })
+    }
+  }), error => error.code === 'DEVICE_RELAY_PUBLICATION_FAILED' && error.retryAt === retryAt)
+})
+
 test('device relay lookup falls back to free relays', async () => {
   assert.deepEqual(await resolveDeviceRelays('f'.repeat(64), {
     _fetchRelayListEvent: async () => null
@@ -134,4 +166,67 @@ test('device relay due refresh persists cadence', async () => {
 
   assert.equal(first.published, true)
   assert.equal(second.skipped, 'fresh')
+})
+
+test('device relay refresh waits for a relay deadline even across online events', async t => {
+  secrets.unlock(generateSecretKey(), null)
+  const previousWindow = globalThis.window
+  globalThis.window = {}
+  t.after(() => {
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
+  })
+  let now = Date.now() + DEVICE_RELAY_LIST_REFRESH_INTERVAL_MS
+  let attempts = 0
+  let onlineListener
+  const timers = new Set()
+  const retryAt = now + 10 * 60 * 1000
+
+  const stop = startDeviceRelayListRefresh({
+    _isOnline: async () => true,
+    _nowMs: () => now,
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms, at: now + ms }
+      timers.add(timer)
+      return timer
+    },
+    _clearTimeout: timer => timers.delete(timer),
+    _onOnline: callback => {
+      onlineListener = callback
+      return () => { onlineListener = null }
+    },
+    _fetchRelayListEvent: async () => null,
+    _relayPool: {
+      sendEvent: async () => {
+        attempts++
+        if (attempts === 1) {
+          return {
+            success: false,
+            promise: Promise.resolve({
+              errors: [{
+                relay: seedRelays[0],
+                reason: Object.assign(new Error('rate-limited: wait'), { retryAt })
+              }]
+            })
+          }
+        }
+        return { success: true }
+      }
+    }
+  })
+  t.after(stop)
+
+  await waitUntil(() => attempts === 1)
+  assert.equal(attempts, 1)
+  assert.ok([...timers].some(timer => timer.at === retryAt))
+
+  onlineListener()
+  await new Promise(resolve => setTimeout(resolve, 1))
+  assert.equal(attempts, 1)
+
+  now = retryAt
+  const retry = [...timers].find(timer => timer.at === retryAt)
+  timers.delete(retry)
+  await retry.fn()
+  assert.equal(attempts, 2)
 })

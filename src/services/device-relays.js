@@ -3,6 +3,7 @@ import { fetchRelayListEvent, parseRelayListEvent } from './relay.js'
 import * as secrets from './secrets.js'
 import { isOnline, onOnline } from 'libp2r2p/network'
 import { getState, setState } from './storage/index.js'
+import { publicationErrorFromResult, publicationRetryAt, retryAtAfterPublicationError } from '../helpers/publication-retry.js'
 
 export const DEVICE_RELAY_LIST_REFRESH_INTERVAL_MS = 4 * 60 * 60 * 1000
 
@@ -123,6 +124,8 @@ export async function refreshDeviceRelayList ({
     createdAt: _nowSeconds()
   }))
   const result = await _relayPool.sendEvent(event, seedRelays)
+  const error = await publicationErrorFromResult(result, 'DEVICE_RELAY_PUBLICATION_FAILED')
+  if (error) throw error
   return {
     pubkey: devicePubkey,
     relays: nextRelays,
@@ -152,23 +155,25 @@ export function startDeviceRelayListRefresh ({
   _setTimeout = setTimeout,
   _clearTimeout = clearTimeout,
   _onOnline = onOnline,
+  _nowMs = () => Date.now(),
   ...options
 } = {}) {
   stopDeviceRelayListRefresh?.()
   let stopped = false
   let timer = null
   let running = null
-  let retryAfterMs = 0
+  let retryAt = 0
+  let relayRetryAt = 0
 
   const clearTimer = () => {
     if (timer) _clearTimeout(timer)
     timer = null
   }
   const delayUntilDue = () => {
-    if (retryAfterMs) return Math.max(0, retryAfterMs - Date.now())
+    if (retryAt) return Math.max(0, retryAt - _nowMs())
     const last = readLastRefresh()
     if (!last) return 0
-    return Math.max(0, intervalMs - (Date.now() - last))
+    return Math.max(0, intervalMs - (_nowMs() - last))
   }
   const schedule = () => {
     if (stopped) return
@@ -178,16 +183,23 @@ export function startDeviceRelayListRefresh ({
   }
   const tick = () => {
     if (stopped || !secrets.isUnlocked()) return Promise.resolve()
+    if (relayRetryAt > _nowMs()) {
+      schedule()
+      return Promise.resolve()
+    }
     if (!running) {
-      running = refreshDeviceRelayListIfDue({ intervalMs, ...options })
+      running = refreshDeviceRelayListIfDue({ intervalMs, _nowMs, ...options })
         .catch(err => {
           console.warn('device relay refresh failed', err?.message ?? err)
-          return { skipped: 'error' }
+          return { skipped: 'error', error: err }
         })
         .then(result => {
-          retryAfterMs = result?.skipped === 'offline' || result?.skipped === 'error'
-            ? Date.now() + Math.min(intervalMs, 60_000)
+          const now = _nowMs()
+          const failed = result?.skipped === 'offline' || result?.skipped === 'error'
+          retryAt = failed
+            ? retryAtAfterPublicationError(result.error, Math.min(intervalMs, 60_000), now)
             : 0
+          relayRetryAt = failed ? publicationRetryAt(result.error, now) : 0
           return result
         })
         .finally(() => {
