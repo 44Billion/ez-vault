@@ -156,17 +156,19 @@ export function getDebugSnapshot () {
   const accounts = filterVisibleAccounts(store.list())
     .filter(account => account.type === 'nsec')
     .map(account => {
-      const keys = secrets.isUnlocked() ? contentKeysForOwner(account.pubkey) : []
+      const keys = secrets.isUnlocked()
+        ? contentKeysForOwner(account.pubkey).map(key => ({
+          ...key,
+          source: debugSourceByKey.get(sourceKey(account.pubkey, key.pubkey)) || 'persisted local'
+        }))
+        : []
       const activePubkey = secrets.getLatestContentKeySigner(account.pubkey)?.getPublicKey()
       const latest = keys.find(key => key.pubkey === activePubkey) || null
-      const source = latest
-        ? debugSourceByKey.get(sourceKey(account.pubkey, latest.pubkey)) || 'persisted local'
-        : ''
       return {
         account,
         keys,
         latest,
-        source,
+        source: latest?.source || '',
         publishStatus: publishStatusByOwner.get(account.pubkey) || null
       }
     })

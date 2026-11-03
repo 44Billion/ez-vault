@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { getEventHash, isValidEvent } from 'libp2r2p/event'
 import { generateSecretKey, getPublicKey } from 'libp2r2p/key'
 import NsecSigner from '../src/services/nsec-signer.js'
-import { doubleSignEvent, recordContentKeyTiming, refreshStoredContentKeyEvents, refreshStoredContentKeyEventsIfDue, rotateContentKeyIfStillCanonical, startContentKeyEventRefresh, upsertContentKeyEvent } from '../src/services/content-key/index.js'
+import { doubleSignEvent, readContentKeyAnnouncement, recordContentKeyTiming, refreshStoredContentKeyEvents, refreshStoredContentKeyEventsIfDue, rotateContentKeyIfStillCanonical, startContentKeyEventRefresh, upsertContentKeyEvent } from '../src/services/content-key/index.js'
 import { makeContentKeyEvent, makeContentKeyEventForPubkey, parseContentKeyEvent, isValidContentKeyProof, isValidIykcProof } from 'libp2r2p/content-key/event'
 import { CONTENT_KEY_ANNOUNCEMENT } from 'libp2r2p/kind'
 import { getIykcProofs } from 'libp2r2p/content-key'
@@ -101,6 +101,76 @@ async function addContentKey (ownerPubkey, createdAt = 10) {
   await secrets.setContentKeySecret(ownerPubkey, secret, createdAt)
   return { pubkey, secret, createdAt }
 }
+
+test('diagnostic announcement reads distinguish advertised, absent and unknown', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const account = await addNsecAccount()
+  const content = await addContentKey(account.pubkey, 50)
+  const userSigner = secrets.getNsecSigner(account.pubkey)
+  const relays = ['wss://one.example', 'wss://two.example']
+  const relayList = await userSigner.signEvent({
+    kind: 10002,
+    created_at: 10,
+    tags: relays.map(relay => ['r', relay, 'write']),
+    content: ''
+  })
+  const announcement = await makeContentKeyEventForPubkey({
+    userSigner,
+    contentPubkey: content.pubkey,
+    createdAt: 60
+  })
+  const options = {
+    ownerPubkey: account.pubkey,
+    _fetchRelayListEvent: async () => relayList,
+    _isOnline: async () => true
+  }
+
+  const advertised = await readContentKeyAnnouncement({
+    ...options,
+    _relayPool: relayPoolStub({ events: async () => [announcement] })
+  })
+  assert.deepEqual(
+    Object.fromEntries(['status', 'contentPubkey', 'createdAt', 'relayCount', 'checkedRelayCount', 'failedRelayCount'].map(key => [key, advertised[key]])),
+    { status: 'advertised', contentPubkey: content.pubkey, createdAt: 60, relayCount: 2, checkedRelayCount: 2, failedRelayCount: 0 }
+  )
+
+  const absent = await readContentKeyAnnouncement({
+    ...options,
+    _relayPool: relayPoolStub({ events: async () => [] })
+  })
+  assert.equal(absent.status, 'not-advertised')
+  assert.equal(absent.checkedRelayCount, 2)
+
+  const partial = await readContentKeyAnnouncement({
+    ...options,
+    _relayPool: {
+      async getEvents (filter, [relay]) {
+        if (relay === relays[0]) return { result: [], errors: [], success: true }
+        return { result: [], errors: [new Error('relay offline')], success: false }
+      }
+    }
+  })
+  assert.equal(partial.status, 'unknown')
+  assert.equal(partial.reason, 'partial-relay-failure')
+  assert.equal(partial.checkedRelayCount, 1)
+  assert.equal(partial.failedRelayCount, 1)
+
+  const fallback = await readContentKeyAnnouncement({
+    ...options,
+    _fetchRelayListEvent: async () => null,
+    _relayPool: relayPoolStub({ events: async () => [] })
+  })
+  assert.equal(fallback.status, 'unknown')
+  assert.equal(fallback.reason, 'fallback-relay-check-incomplete')
+
+  const offline = await readContentKeyAnnouncement({
+    ...options,
+    _isOnline: async () => false,
+    _relayPool: relayPoolStub({ events: async () => [] })
+  })
+  assert.equal(offline.status, 'unknown')
+  assert.equal(offline.reason, 'offline')
+})
 
 function relayPoolStub ({
   events = async () => [],

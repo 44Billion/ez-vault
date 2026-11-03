@@ -56,6 +56,18 @@ test('destructive removals use local confirmation or fresh passkey verification'
   assert.doesNotMatch(contentKeys, /ensureRegistered/)
 })
 
+test('diagnostic content-key upsert confirms local mode or verifies a passkey freshly', () => {
+  const devPanel = source('src/components/dev-panel.js')
+  const upsertMethod = devPanel.slice(
+    devPanel.indexOf('async #onClick'),
+    devPanel.indexOf('customElements.define')
+  )
+
+  assert.match(upsertMethod, /!protectedByPasskey && !window\.confirm/)
+  assert.match(upsertMethod, /if \(protectedByPasskey\)[\s\S]*await passkey\.openSecrets\(\)/)
+  assert.doesNotMatch(upsertMethod, /passkey\.ensureRegistered\(\)/)
+})
+
 test('flows that settle protection before remote effects do not retry it during commit', () => {
   const intake = source('src/services/account-intake.js')
   const accountAdd = source('src/components/account-add.js')

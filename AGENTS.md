@@ -416,6 +416,26 @@ device advertises an unavailable secret. Personal copies remain offline-capable.
 Do not persist announcements in NostrDB or introduce a separate active pointer.
 Preserve best-effort encryption and publication-required public signing on errors.
 
+The top-level Development panel remains available for direct vault access.
+The launcher may enable the same diagnostics in its iframe only with the exact
+`?debug=1` query; do not persist this opt-in or add a hidden gesture to a
+functional control. Render one local inventory sorted by active-key selection,
+including creation dates and known sources, with `Active` and `Advertised` as
+independent badges. A valid kind-18716 announcement not present locally must show
+`Secret unavailable`; failed or partial relay lookups must remain `Unknown`, not
+`Not advertised`. Run one bounded announcement read only while this diagnostic
+component is mounted and unlocked, repeat it only from explicit `Refresh` or after
+`Upsert`, and never write NIP-65 or kind-18716 during the read. Never display or
+return content-key secrets. Keep `Upsert` in the inventory header and require the
+existing local-confirmation/fresh-passkey policy before generating and publishing
+a new active key.
+
+Present `Relay announcement` as the first diagnostic group, with its own fixed
+status slot above an optional `Remote` key card styled like a local key. Follow it
+with `Local content keys`; keep its title and `Last Upsert` status in one
+left-aligned cell centered against the `Upsert` button. Separate the groups with
+spacing only, not a rule or border.
+
 
 The Python development server resolves its output directory explicitly instead
 of changing its working directory. Rebuilding generated output can replace the

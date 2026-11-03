@@ -210,6 +210,21 @@ profile picture and an existing local picture.
 - `npm run end` — stop the local dev server
 - `npm test` — run the test suite
 
+## Production diagnostics
+
+Opening the vault as a top-level document always exposes its Development
+diagnostics. When embedded by the launcher, the exact iframe query
+`?debug=1` enables the same panel for support without persisting a
+preference. The panel shows only public content-key coordinates, creation dates
+and known sources; content-key secrets are never displayed. It marks the active
+local key and the currently advertised kind-18716 key, including when that
+announcement has no local secret. The relay-announcement group appears first and
+uses a `Remote` card matching the local-key card layout. The announcement is read
+once while the panel is active and again only by `Refresh` or after `Upsert`;
+relay failures remain `Unknown` rather than being reported as absence. `Upsert`
+changes the active key for new events and requires either a native confirmation
+in unprotected local mode or a fresh passkey assertion in protected mode.
+
 ## License
 
 MIT

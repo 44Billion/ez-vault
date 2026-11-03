@@ -13,6 +13,7 @@ import { swUpdateLocales } from './i18n/sw-update.js'
 import { initializeStorage } from './services/storage/index.js'
 import { applySwUpdate, initSwManager, isUpdateAvailable, subscribeSwUpdate } from './services/sw-manager.js'
 import { setVaultViewShell } from './services/view-state.js'
+import { debugEnabledForWindow } from './helpers/diagnostics-mode.js'
 
 // Storage is a hard prerequisite: no component may observe an empty cache
 // while IndexedDB is still opening. Initialization fails closed when IDB is
@@ -145,7 +146,7 @@ startRevocationRotation().catch(err => {
   console.warn('revocation rotation startup failed', err?.message ?? err)
 })
 
-if (window === window.top) {
+if (debugEnabledForWindow()) {
   document.body.classList.add('dev')
   import('./components/dev-panel.js').then(() => {
     document.querySelector('.diagnostics-section')?.append(document.createElement('dev-panel'))

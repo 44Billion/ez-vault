@@ -225,6 +225,72 @@ async function fetchLatestContentKeyEventFromRelay ({ ownerPubkey, relay, _relay
   }
 }
 
+export async function readContentKeyAnnouncement ({
+  ownerPubkey,
+  _fetchRelayListEvent = fetchRelayListEvent,
+  _relayPool = relayPool,
+  _isOnline = isOnline
+} = {}) {
+  const account = store.get(ownerPubkey)
+  if (account?.type !== 'nsec') {
+    return { ownerPubkey, status: 'unknown', reason: 'missing-account', relayCount: 0, checkedRelayCount: 0, failedRelayCount: 0 }
+  }
+  if (!await _isOnline()) {
+    return { ownerPubkey, status: 'unknown', reason: 'offline', relayCount: 0, checkedRelayCount: 0, failedRelayCount: 0 }
+  }
+
+  let relayList = null
+  let canonicalRelayList = false
+  try {
+    relayList = parseRelayListEvent(await _fetchRelayListEvent(ownerPubkey))
+    canonicalRelayList = relayList.write.length > 0
+  } catch {
+    // The free relays remain useful for observation, but cannot prove absence.
+  }
+
+  const relays = unique(canonicalRelayList ? relayList.write : freeRelays.slice(0, 2))
+  if (!relays.length) {
+    return { ownerPubkey, status: 'unknown', reason: 'no-relays', relayCount: 0, checkedRelayCount: 0, failedRelayCount: 0 }
+  }
+
+  const relayResults = await Promise.all(relays.map(relay =>
+    fetchLatestContentKeyEventFromRelay({ ownerPubkey, relay, _relayPool })
+  ))
+  const checked = relayResults.filter(result => !result.error)
+  const failedRelayCount = relayResults.length - checked.length
+  let latest = null
+  for (const result of checked) {
+    if (!result.latest) continue
+    if (!latest || newerAnnouncement(result.latest.event, latest.event)) latest = result.latest
+  }
+
+  const base = {
+    ownerPubkey,
+    relayCount: relayResults.length,
+    checkedRelayCount: checked.length,
+    failedRelayCount,
+    canonicalRelayList
+  }
+  if (latest) {
+    return {
+      ...base,
+      status: 'advertised',
+      contentPubkey: latest.parsed.iykcPubkey,
+      createdAt: latest.event.created_at
+    }
+  }
+  if (canonicalRelayList && checked.length === relayResults.length) {
+    return { ...base, status: 'not-advertised' }
+  }
+  return {
+    ...base,
+    status: 'unknown',
+    reason: !canonicalRelayList
+      ? 'fallback-relay-check-incomplete'
+      : checked.length ? 'partial-relay-failure' : 'all-relay-checks-failed'
+  }
+}
+
 async function refreshAccountContentKeyEvent ({
   account,
   _fetchRelayListEvent,
