@@ -156,6 +156,7 @@ export function createSyncController ({
   let refreshQueued = false
   let lifecycleId = 0
   let trustedAnnounceRetryAt = 0
+  let messengerStateMonitor = null
   const pendingAnnounceOwners = new Set()
   const announceRetryAtByOwner = new Map()
   const unsubscribers = []
@@ -425,6 +426,31 @@ export function createSyncController ({
     if (channelConfiguration || draining || drainScheduled) return
     drainScheduled = true
     Promise.resolve().then(() => drainMessages(id))
+  }
+
+  function flushMessengerResume (monitor = messengerStateMonitor) {
+    if (!monitor?.resumePending || !initialized || !_secrets.isUnlocked() ||
+      !messenger || messenger !== monitor.messenger) return
+    if (channelConfiguration || refreshPromise) return
+    monitor.resumePending = false
+    scheduleAnnounceAll({ immediate: true, resetInterval: true })
+    nostrDbSync.resumeAfterPause(nostrDbRuntimeContext()).catch(onError)
+    scheduleDrain()
+  }
+
+  function observeMessengerState (monitor, status) {
+    if (monitor !== messengerStateMonitor) return
+    if (monitor.messenger && messenger !== monitor.messenger) return
+    const paused = status?.paused === true
+    const resumed = monitor.paused && !paused
+    monitor.paused = paused
+    if (paused) {
+      monitor.resumePending = false
+      return
+    }
+    if (!resumed) return
+    monitor.resumePending = true
+    queueMicrotask(() => flushMessengerResume(monitor))
   }
 
   async function drainMessages (id = lifecycleId) {
@@ -733,6 +759,10 @@ export function createSyncController ({
   function stop () {
     const currentMessenger = messenger
     messenger = null
+    if (messengerStateMonitor) {
+      messengerStateMonitor.messenger = null
+      messengerStateMonitor.resumePending = false
+    }
     channelConfiguration = null
     drainQueued = false
     drainScheduled = false
@@ -769,6 +799,10 @@ export function createSyncController ({
     if (!snapshot.channels.length) {
       const currentMessenger = messenger
       messenger = null
+      if (messengerStateMonitor) {
+        messengerStateMonitor.messenger = null
+        messengerStateMonitor.resumePending = false
+      }
       clearAnnouncementTimers({ clearPending: false })
       nostrDbSync.stop()
       await Promise.resolve(currentMessenger?.close?.()).catch(onError)
@@ -793,12 +827,25 @@ export function createSyncController ({
     channelConfiguration = configuration
     try {
       if (!messenger) {
-        const nextMessenger = new MessengerClass({ onMessageQueued: scheduleDrain, onError, useContentKeys: false, onDebug: debug })
+        const monitor = { messenger: null, paused: false, resumePending: false }
+        messengerStateMonitor = monitor
+        const nextMessenger = new MessengerClass({
+          onMessageQueued: scheduleDrain,
+          onError,
+          onStateChanged: status => observeMessengerState(monitor, status),
+          useContentKeys: false,
+          onDebug: debug
+        })
+        monitor.messenger = nextMessenger
         messenger = nextMessenger
         try {
           await nextMessenger.init(options)
         } catch (err) {
-          if (messenger === nextMessenger) messenger = null
+          if (messenger === nextMessenger) {
+            messenger = null
+            monitor.messenger = null
+            monitor.resumePending = false
+          }
           await Promise.resolve(nextMessenger.close?.()).catch(onError)
           throw err
         }
@@ -819,6 +866,7 @@ export function createSyncController ({
     } finally {
       if (channelConfiguration === configuration) channelConfiguration = null
     }
+    flushMessengerResume()
     ensureRelayListWatcher()
     nostrDbSync.ensureSubscriptions(nostrDbRuntimeContext())
     ensureAnnouncementInterval()
@@ -848,6 +896,8 @@ export function createSyncController ({
       })
       .finally(() => {
         if (refreshPromise === promise) refreshPromise = null
+        const monitor = messengerStateMonitor
+        if (monitor?.resumePending) queueMicrotask(() => flushMessengerResume(monitor))
       })
     refreshPromise = promise
     return refreshPromise

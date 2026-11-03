@@ -337,6 +337,138 @@ test('sync orchestration watches nsec channels with identity-only sync options',
   assert.equal(accountMutationsStub.subscriberCount, 0)
 })
 
+test('sync wakes announcements, NostrDB work and the inbox once after unpause', async () => {
+  const owner = 'a'.repeat(64)
+  const trusted = 'b'.repeat(64)
+  const deviceSigner = signer('device')
+  const accountSigner = signer(owner)
+  const storeStub = createSubscribable({ list: () => [{ type: 'nsec', pubkey: owner }] })
+  let unlocked = true
+  const secretsStub = createSubscribable({
+    isUnlocked: () => unlocked,
+    getDeviceSigner: async () => deviceSigner
+  })
+  const trustedStub = createSubscribable({
+    list: () => [{ pubkey: trusted, platform: 'Phone' }],
+    listRecords: () => [{ pubkey: trusted, platform: 'Phone', status: 'trusted', updatedAt: 1, actorPubkey: owner }],
+    listRemovedForReminder: () => []
+  })
+  const timers = []
+  let announcedContentKeys = 0
+  let announcedRanges = 0
+  let resumed = 0
+  let nextMessages = 0
+  class FakeMessenger {
+    constructor (options) { this.options = options }
+    async init () { return this }
+    async update () { return this }
+    async nextMessage () { nextMessages++; return null }
+    close () {}
+  }
+  const controller = createSyncController({
+    MessengerClass: FakeMessenger,
+    _store: storeStub,
+    _secrets: secretsStub,
+    _trustedSigners: trustedStub,
+    _claimSigner: () => accountSigner,
+    _subscribePendingMutations: () => () => {},
+    _contentKeys: {
+      handleMessage: async () => false,
+      announceContentKeys: async () => { announcedContentKeys++ },
+      resetDebugSources: () => {}
+    },
+    _trustedSignerSync: {
+      TRUSTED_SIGNER_SYNC_INFO: SIGNER_LIST_SYNC_INFO,
+      handleMessage: async () => false,
+      announceTrustedSignerState: async () => {}
+    },
+    _createNostrDbSyncController: () => ({
+      announceRange: async () => { announcedRanges++ },
+      ensureSubscriptions: () => {},
+      handleMessage: async () => false,
+      resumeAfterPause: async () => { resumed++ },
+      stop: () => {}
+    }),
+    _subscribeRelayListUpdates: () => () => {},
+    _isOnline: async () => true,
+    _onOnline: () => () => {},
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: timer => {
+      const index = timers.indexOf(timer)
+      if (index >= 0) timers.splice(index, 1)
+    },
+    _setInterval: () => ({}),
+    _clearInterval: () => {}
+  })
+  await controller.init()
+  await flushMicrotasks()
+  const initialNextMessages = nextMessages
+  const stateChanged = controller.messenger.options.onStateChanged
+  assert.equal(typeof stateChanged, 'function')
+
+  stateChanged({ paused: false, pauseReasons: [] })
+  stateChanged({ paused: true, pauseReasons: ['capacity', 'network'] })
+  stateChanged({ paused: true, pauseReasons: ['capacity', 'network'] })
+  stateChanged({ paused: false, pauseReasons: [] })
+  await flushMicrotasks()
+  assert.equal(resumed, 1)
+  const resumeTimer = timers.find(timer => timer.ms === 0)
+  assert.ok(resumeTimer)
+  await resumeTimer.fn()
+  assert.equal(announcedContentKeys, 1)
+  assert.equal(announcedRanges, 1)
+  assert.equal(nextMessages, initialNextMessages + 1)
+
+  stateChanged({ paused: false, pauseReasons: [] })
+  await flushMicrotasks()
+  assert.equal(resumed, 1)
+
+  stateChanged({ paused: true, pauseReasons: ['capacity'] })
+  stateChanged({ paused: false, pauseReasons: [] })
+  await flushMicrotasks()
+  assert.equal(resumed, 2)
+
+  const staleStateChanged = stateChanged
+  unlocked = false
+  await secretsStub.emit()
+  unlocked = true
+  await secretsStub.emit()
+  const currentStateChanged = controller.messenger.options.onStateChanged
+  const resumedBeforeStaleCallback = resumed
+  staleStateChanged({ paused: true, pauseReasons: ['capacity'] })
+  staleStateChanged({ paused: false, pauseReasons: [] })
+  await flushMicrotasks()
+  assert.equal(resumed, resumedBeforeStaleCallback)
+  currentStateChanged({ paused: true, pauseReasons: ['capacity'] })
+  currentStateChanged({ paused: false, pauseReasons: [] })
+  await flushMicrotasks()
+  assert.equal(resumed, resumedBeforeStaleCallback + 1)
+
+  const refreshGate = Promise.withResolvers()
+  let holdRefresh = true
+  const getDeviceSigner = secretsStub.getDeviceSigner
+  secretsStub.getDeviceSigner = async () => {
+    if (holdRefresh) await refreshGate.promise
+    return deviceSigner
+  }
+  const refreshing = secretsStub.emit()
+  currentStateChanged({ paused: true, pauseReasons: ['network'] })
+  currentStateChanged({ paused: false, pauseReasons: [] })
+  await flushMicrotasks()
+  assert.equal(resumed, resumedBeforeStaleCallback + 1)
+  holdRefresh = false
+  refreshGate.resolve()
+  await refreshing
+  await flushMicrotasks()
+  assert.equal(resumed, resumedBeforeStaleCallback + 2)
+  secretsStub.getDeviceSigner = getDeviceSigner
+  controller.close()
+})
+
 test('sync refreshes messenger channels when watched account read relays change', async () => {
   const deviceSigner = signer('device')
   const accountSigners = {

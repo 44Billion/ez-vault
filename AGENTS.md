@@ -480,11 +480,18 @@ NostrDB push batches are scoped to their queue and messenger lifetime. On stop o
 replacement, stale in-flight results must not report shutdown errors, send the
 next chunk or rearm the trailing cooldown. Active messenger/storage errors still
 reach onError; lifecycle suppression must not become a blanket error filter.
+Observe PrivateMessenger state changes and, after the final pause reason clears,
+run one fenced resume pass for existing announcements, parked range asks and
+app-backfills, push queues and inbox delivery. Requests receiving
+PRIVATE_MESSENGER_PAUSED persist `waitingForResume`, create no retry timer and
+preserve any relay retryAt; a reload with an active messenger resumes them.
+Capacity diagnostics may include queue kind, required/used/max bytes and pause
+reasons, never payloads, filters or identities.
 
 
 ## Launcher relay bridge
 
-- Use the coordinated libp2r2p 0.12.1 release, pinned exactly in the
+- Use the coordinated libp2r2p 0.12.3 release, pinned exactly in the
   dev dependency and lockfile. Its live readers stop definitive per-route refusals
   and recover transient errors through bounded offline-aware backoff/cooldowns.
   Keep the existing facade/protocol and standalone fallback. Validate sync,

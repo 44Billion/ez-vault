@@ -328,7 +328,10 @@ seed storage even when consumer apps opt into personal-copy recovery records.
 NostrDB synchronization stops stale push batches when their queue or messenger is
 replaced. An in-flight shutdown cannot send subsequent chunks or restart its
 cooldown, and shutdown errors are not reported as active synchronization failures.
-Errors from the current messenger remain visible.
+Errors from the current messenger remain visible. When every pause reason clears,
+the sync controller immediately retries existing announcements, parked asks and
+app-backfills, queued pushes and inbox delivery once, without bypassing relay
+retry deadlines.
 
 ### Deferred bunker synchronization
 
@@ -414,7 +417,7 @@ subscriptions and historical recovery continue in the background. ACK still
 requires successful persistence, and the vault keeps its local recovery seed store.
 
 
-The coordinated libp2r2p 0.12.1 release shares confirmed connectivity with automatic
+The coordinated libp2r2p 0.12.3 release shares confirmed connectivity with automatic
 pause recovery. Vault synchronization keeps its direct messenger and local seed
 storage; foreground-send urgency belongs to sessions that explicitly request it.
 

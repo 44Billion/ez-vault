@@ -77,6 +77,10 @@ function event (number) {
   return { id: eventId(number), pubkey: PEER, kind: 1, created_at: number, tags: [], content: '', sig: 'd'.repeat(128) }
 }
 
+async function flushMicrotasks (turns = 30) {
+  for (let index = 0; index < turns; index++) await Promise.resolve()
+}
+
 test('nostrdb sync advertises one account range without ownerPubkey in payload', async () => {
   const msg = messenger()
   const controller = createNostrDbSyncController({
@@ -488,6 +492,204 @@ test('nostrdb range sync does not retry before a publication circuit deadline', 
     payload: { generatedAt: now, minScore: now, maxScore: now + 1 }
   }), context(msg))
   assert.equal(attempts, 1)
+})
+
+test('paused range asks wait for explicit resume without spending backoff', async () => {
+  let attempts = 0
+  const timers = []
+  const msg = messenger()
+  msg.ask = async options => {
+    attempts++
+    msg.sent.push({ method: 'ask', options })
+    if (attempts === 1) {
+      throw Object.assign(new Error('PRIVATE_MESSENGER_PAUSED'), {
+        code: 'PRIVATE_MESSENGER_PAUSED',
+        pauseReasons: ['capacity']
+      })
+    }
+    return { delivery: { reports: [{ success: true }] } }
+  }
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: timer => {
+      const index = timers.indexOf(timer)
+      if (index >= 0) timers.splice(index, 1)
+    },
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { firstScore: 1000, lastScore: 1000 } }
+      }
+    })
+  })
+  controller.ensureSubscriptions(context(msg))
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: 900, minScore: 1000, maxScore: 2000 }
+  }), context(msg))
+
+  const pending = controller._getState().owners[OWNER][PEER].pending
+  assert.equal(pending.waitingForResume, true)
+  assert.equal(pending.attempt, 0)
+  assert.equal(timers.some(timer => timer.ms === 5 * 60 * 1000), false)
+
+  await controller.resumeAfterPause(context(msg))
+  assert.equal(attempts, 2)
+  assert.equal(controller._getState().owners[OWNER][PEER].pending.waitingForResume, undefined)
+})
+
+test('waiting-for-resume state recovers after reload once the messenger is active', async () => {
+  const first = messenger()
+  first.ask = async () => {
+    throw Object.assign(new Error('PRIVATE_MESSENGER_PAUSED'), {
+      code: 'PRIVATE_MESSENGER_PAUSED',
+      pauseReasons: ['capacity']
+    })
+  }
+  const options = {
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { firstScore: 1000, lastScore: 1000 } }
+      }
+    })
+  }
+  const firstController = createNostrDbSyncController(options)
+  firstController.ensureSubscriptions(context(first))
+  await firstController.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: 900, minScore: 1000, maxScore: 2000 }
+  }), context(first))
+  assert.equal(firstController._getState().owners[OWNER][PEER].pending.waitingForResume, true)
+
+  const second = messenger()
+  second.readStatus = () => ({ paused: false })
+  const secondController = createNostrDbSyncController(options)
+  secondController.ensureSubscriptions(context(second))
+  await flushMicrotasks(30)
+
+  assert.equal(second.sent.filter(item => item.options.code === NOSTRDB_SYNC_ASK_CODE).length, 1)
+  assert.equal(secondController._getState().owners[OWNER][PEER].pending.waitingForResume, undefined)
+})
+
+test('resume does not bypass a relay retry deadline attached to a paused error', async () => {
+  let attempts = 0
+  const retryAt = 1000 + 10 * 60 * 1000
+  const msg = messenger()
+  msg.ask = async () => {
+    attempts++
+    throw Object.assign(new Error('PRIVATE_MESSENGER_PAUSED'), {
+      code: 'PRIVATE_MESSENGER_PAUSED',
+      retryAt,
+      pauseReasons: ['capacity']
+    })
+  }
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { firstScore: 1000, lastScore: 1000 } }
+      }
+    })
+  })
+  controller.ensureSubscriptions(context(msg))
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: 900, minScore: 1000, maxScore: 2000 }
+  }), context(msg))
+
+  const pending = controller._getState().owners[OWNER][PEER].pending
+  assert.equal(pending.waitingForResume, undefined)
+  assert.equal(pending.nextRetryAt, retryAt)
+  await controller.resumeAfterPause(context(msg))
+  assert.equal(attempts, 1)
+})
+
+test('paused app backfills resume immediately without increasing backoff', async () => {
+  let attempts = 0
+  const errors = []
+  const msg = messenger()
+  msg.ask = async options => {
+    attempts++
+    msg.sent.push({ method: 'ask', options })
+    if (attempts === 1) {
+      throw Object.assign(new Error('PRIVATE_MESSENGER_PAUSED'), {
+        code: 'PRIVATE_MESSENGER_PAUSED',
+        pauseReasons: ['storage']
+      })
+    }
+    return { delivery: { reports: [{ success: true }] } }
+  }
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    onError: error => errors.push(error),
+    getDb: () => ({ subscribe: emptySubscription })
+  })
+  controller.requestAppBackfill({ ownerPubkey: OWNER, appId: 'app-1' }, context(msg))
+  await controller.processAppBackfills(context(msg))
+
+  let app = Object.values(controller._getState().appBackfills[OWNER])[0]
+  assert.equal(app.peers[PEER].pending.waitingForResume, true)
+  assert.equal(app.peers[PEER].pending.attempt, 0)
+
+  await controller.resumeAfterPause(context(msg))
+  assert.equal(attempts, 2)
+  app = Object.values(controller._getState().appBackfills[OWNER])[0]
+  assert.equal(app.peers[PEER].pending.waitingForResume, undefined)
+  assert.ok(errors.some(error => error.message === 'PRIVATE_MESSENGER_PAUSED'))
+})
+
+test('resuming a pause flushes queued NostrDB pushes without waiting for cooldown', async () => {
+  let attempts = 0
+  const timers = []
+  const msg = messenger()
+  msg.yell = async options => {
+    attempts++
+    msg.sent.push({ method: 'yell', options })
+    if (attempts === 1) {
+      throw Object.assign(new Error('PRIVATE_MESSENGER_PAUSED'), {
+        code: 'PRIVATE_MESSENGER_PAUSED',
+        pauseReasons: ['capacity']
+      })
+    }
+    return { delivery: { reports: [{ success: true }] } }
+  }
+  const controller = createNostrDbSyncController({
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: timer => {
+      const index = timers.indexOf(timer)
+      if (index >= 0) timers.splice(index, 1)
+    },
+    getDb: () => ({ subscribe: emptySubscription })
+  })
+  controller.ensureSubscriptions(context(msg))
+  controller.queuePush(OWNER, event(1))
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(attempts, 1)
+  assert.ok(timers.some(timer => timer.ms === 1500))
+
+  await controller.resumeAfterPause(context(msg))
+  assert.equal(attempts, 2)
+  assert.equal(timers.some(timer => timer.ms === 1500), false)
 })
 
 test('nostrdb app backfill ask exports one app page', async () => {

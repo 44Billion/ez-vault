@@ -11,3 +11,46 @@ test('overflow diagnostics retain only the bounded operational fields', () => {
   assert.equal(details.relay, error.relay)
   assert.ok(!JSON.stringify(details).includes('secret'))
 })
+
+test('capacity diagnostics expose only queue metrics and pause reasons', () => {
+  const error = Object.assign(new Error('SYNC_PUBLICATION_FAILED'), {
+    cause: Object.assign(new Error('PRIVATE_MESSENGER_PAUSED'), {
+      code: 'PRIVATE_MESSENGER_PAUSED',
+      pauseReasons: ['capacity', 'network'],
+      payload: 'secret'
+    }),
+    reports: [{
+      reason: Object.assign(new Error('QUEUE_CAPACITY_EXCEEDED'), {
+        code: 'QUEUE_CAPACITY_EXCEEDED',
+        queue: 'inbox',
+        requiredBytes: 240,
+        usedBytes: 16 * 1024 * 1024 - 100,
+        maxBytes: 16 * 1024 * 1024,
+        ciphertext: 'secret'
+      })
+    }]
+  })
+  assert.deepEqual(syncErrorDetails(error), {
+    code: 'QUEUE_CAPACITY_EXCEEDED',
+    queue: 'inbox',
+    requiredBytes: 240,
+    usedBytes: 16 * 1024 * 1024 - 100,
+    maxBytes: 16 * 1024 * 1024,
+    pauseReasons: ['capacity', 'network']
+  })
+  assert.equal(JSON.stringify(syncErrorDetails(error)).includes('secret'), false)
+})
+
+test('paused diagnostics never expose arbitrary error properties', () => {
+  const error = Object.assign(new Error('PUBLISH_FAILED'), {
+    cause: Object.assign(new Error('PRIVATE_MESSENGER_PAUSED'), {
+      code: 'PRIVATE_MESSENGER_PAUSED',
+      pauseReasons: ['storage', '', 'capacity'],
+      payload: 'secret'
+    })
+  })
+  assert.deepEqual(syncErrorDetails(error), {
+    code: 'PRIVATE_MESSENGER_PAUSED',
+    pauseReasons: ['storage', 'capacity']
+  })
+})
