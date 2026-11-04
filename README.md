@@ -225,6 +225,12 @@ relay failures remain `Unknown` rather than being reported as absence. `Upsert`
 changes the active key for new events and requires either a native confirmation
 in unprotected local mode or a fresh passkey assertion in protected mode.
 
+The same `?debug=1` opt-in enables sanitized NostrDB synchronization diagnostics
+in the vault console. Records include message codes, queue age, batch bytes and
+counts, elapsed time, relay interruption/recovery and recovery-range outcomes.
+They never include payloads, ciphertext, filters, pubkeys or event IDs. Without
+the query, these detailed records remain disabled.
+
 ## License
 
 MIT
@@ -374,6 +380,9 @@ matching account author and expected kind (0/10002). Legacy unsigned timestamp-0
 placeholders remain readable for presentation/export only; no bulk migration or
 storage reset is required. A valid signed timestamp-0 event is acceptable.
 Sync overflow warnings include only bounded operational queue diagnostics.
+NostrDB push chunks are paced at least one second apart. Failed push cycles retry
+with exponential backoff from 1.5 to 30 seconds and never start earlier than a
+relay-provided `retryAfter`/absolute `retryAt` deadline, capped at five minutes.
 
 
 The private synchronization browser regression uses two isolated Chrome profiles,

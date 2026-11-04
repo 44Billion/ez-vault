@@ -1825,6 +1825,8 @@ test('sync persists invalid data payloads before ACK and drops invalid requests 
   const rejections = []
   const quarantined = []
   const diagnostics = []
+  const debugEvents = []
+  let performanceTime = 0
 
   class FakeMessenger {
     constructor (options) {
@@ -1891,7 +1893,8 @@ test('sync persists invalid data payloads before ACK and drops invalid requests 
     _setInterval: () => ({}),
     _clearInterval: () => {},
     onError: error => diagnostics.push(error),
-    _debug: () => {}
+    _performanceNow: () => performanceTime++,
+    _debug: event => debugEvents.push(event)
   })
 
   await controller.init()
@@ -1903,6 +1906,11 @@ test('sync persists invalid data payloads before ACK and drops invalid requests 
   assert.deepEqual(rejections, ['storage'])
   assert.equal(diagnostics.filter(error => error.code === 'SYNC_MESSAGE_QUARANTINED').length, 1)
   assert.ok(diagnostics.some(error => error.message === 'QUARANTINE_WRITE_FAILED'))
+  const processed = debugEvents.filter(event => event.action === 'message-processed')
+  assert.deepEqual(processed.map(event => event.operationCode), ['data_code', 'request_code', 'unknown_code', 'data_code'])
+  assert.deepEqual(processed.map(event => event.outcome), ['failed', 'failed', 'ok', 'failed'])
+  assert.ok(processed.every(event => event.elapsedMs >= 0))
+  assert.equal(JSON.stringify(processed).includes('trusted1'), false)
   controller.close()
 })
 

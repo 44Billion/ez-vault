@@ -486,7 +486,11 @@ app-backfills, push queues and inbox delivery. Requests receiving
 PRIVATE_MESSENGER_PAUSED persist `waitingForResume`, create no retry timer and
 preserve any relay retryAt; a reload with an active messenger resumes them.
 Capacity diagnostics may include queue kind, required/used/max bytes and pause
-reasons, never payloads, filters or identities.
+reasons plus bounded counts by inner message code, never payloads, filters or
+identities. Detailed NostrDB sync diagnostics require the exact `?debug=1`
+iframe query and report sanitized queue age, payload bytes, batch sizes, elapsed
+time, subscription interruption/recovery and recovery-range outcomes. Keep the
+default sink silent without that query.
 
 
 ## Launcher relay bridge
@@ -529,7 +533,10 @@ reasons, never payloads, filters or identities.
   once and preserves any relay `retryAt`. Sync JSONL batches target 128 KiB UTF-8
   plus the 100-record cap; an indivisible oversized event travels alone. Keep
   non-pause native errors visible and never raise browser storage quotas or
-  acknowledge an unsent final response.
+  acknowledge an unsent final response. Pace consecutive chunks by at least one
+  second and grow retry delays exponentially from 1.5 seconds to 30 seconds,
+  while honoring a later relay `retryAt`/`retryAfterMs` hint up to a five-minute
+  cap so malformed or adversarial advice cannot stall synchronization.
 
 - Trusted-device sync data payloads are validated independently of their Nostr
   event/private-channel envelope. Structurally invalid data-bearing messages use

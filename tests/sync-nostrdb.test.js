@@ -1098,10 +1098,13 @@ test('nostrdb sync ingests with mergeSource sync and suppresses echo pushes', as
 test('nostrdb sync pushes local events on the leading edge then trailing throttle', async () => {
   const msg = messenger()
   const timers = []
+  const diagnostics = []
+  let performanceTime = 0
   const event1 = { id: '1'.repeat(64), kind: 1, tags: [], content: '' }
   const event2 = { id: '2'.repeat(64), kind: 1, tags: [], content: '' }
   const controller = createNostrDbSyncController({
     getDb: () => ({ subscribe: emptySubscription }),
+    _performanceNow: () => performanceTime++,
     _setTimeout: (fn, ms) => {
       const timer = { fn, ms }
       timers.push(timer)
@@ -1109,7 +1112,7 @@ test('nostrdb sync pushes local events on the leading edge then trailing throttl
     },
     _clearTimeout: () => {}
   })
-  controller.ensureSubscriptions(context(msg))
+  controller.ensureSubscriptions(context(msg, { debug: event => diagnostics.push(event) }))
 
   controller.queuePush(OWNER, event1)
   await Promise.resolve()
@@ -1120,10 +1123,20 @@ test('nostrdb sync pushes local events on the leading edge then trailing throttl
   assert.equal(msg.sent[0].options.code, NOSTRDB_SYNC_PUSH_CODE)
   assert.equal(JSON.parse(msg.sent[0].options.payload.jsonl.trim()).id, event1.id)
   assert.equal(timers[0].ms, 1500)
+  const firstChunk = diagnostics.find(entry => entry.action === 'push-chunk')
+  assert.equal(firstChunk.code, NOSTRDB_SYNC_PUSH_CODE)
+  assert.equal(firstChunk.eventCount, 1)
+  assert.equal(firstChunk.flushEventCount, 1)
+  assert.equal(firstChunk.outcome, 'published')
+  assert.ok(firstChunk.bytes > 0)
+  assert.ok(firstChunk.elapsedMs >= 0)
 
   await timers[0].fn()
   assert.equal(msg.sent.length, 2)
   assert.equal(JSON.parse(msg.sent[1].options.payload.jsonl.trim()).id, event2.id)
+  assert.equal(diagnostics.filter(entry => entry.action === 'push-chunk').length, 2)
+  assert.ok(diagnostics.filter(entry => entry.action === 'push').every(entry => !Object.hasOwn(entry, 'channelPubkey')))
+  assert.ok(diagnostics.every(entry => !Object.hasOwn(entry, 'ownerPubkey')))
 })
 
 test('nostrdb live envelopes push only events, excluding control markers and IDs', async () => {
@@ -1219,6 +1232,7 @@ test('push batches bound UTF-8 bytes, retry failures and never overlap in-flight
   const controller = createNostrDbSyncController({
     getDb: () => ({ subscribe: emptySubscription }),
     onError: error => errors.push(error),
+    _pushChunkIntervalMs: 0,
     _setTimeout: fn => { const timer = { fn }; timers.push(timer); return timer },
     _clearTimeout: () => {}
   })
@@ -1250,7 +1264,107 @@ test('push batches bound UTF-8 bytes, retry failures and never overlap in-flight
   controller.stop()
 })
 
-test('nostrdb push waits for a publication circuit deadline', async () => {
+test('nostrdb push chunks are paced without overlapping and failures back off exponentially', async () => {
+  const timers = []
+  const diagnostics = []
+  const msg = messenger()
+  let now = 1000
+  let attempts = 0
+  msg.yell = async options => {
+    attempts++
+    if (attempts === 1) {
+      throw Object.assign(new Error('rate-limited: slow down'), {
+        code: 'PUBLICATION_RATE_LIMITED',
+        retryAfterMs: 5000
+      })
+    }
+    msg.sent.push({ method: 'yell', options })
+  }
+  const controller = createNostrDbSyncController({
+    getDb: () => ({ subscribe: emptySubscription }),
+    _nowMs: () => now,
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: timer => {
+      const index = timers.indexOf(timer)
+      if (index >= 0) timers.splice(index, 1)
+    }
+  })
+  controller.ensureSubscriptions(context(msg, { debug: event => diagnostics.push(event) }))
+  controller.queuePush(OWNER, event(1))
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.equal(attempts, 1)
+  assert.equal(timers[0].ms, 5000, 'relay retryAfter takes precedence over the shorter local delay')
+  const failedChunk = diagnostics.find(event => event.action === 'push-chunk' && event.outcome === 'failed')
+  assert.equal(failedChunk.retryAfterMs, 5000)
+  assert.equal(failedChunk.backoffMs, 1500)
+  now += 5000
+  const retry = timers.shift()
+  await retry.fn()
+  assert.equal(attempts, 2)
+
+  const pending = Array.from({ length: 101 }, (_, index) => event(index + 10))
+  for (const item of pending) controller.queuePush(OWNER, item)
+  const flushTimer = timers.find(timer => timer.ms === 1500)
+  assert.ok(flushTimer)
+  timers.splice(timers.indexOf(flushTimer), 1)
+  const flushing = flushTimer.fn()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(msg.sent.length, 2, 'only the first paced chunk has been published')
+
+  const pacingTimer = timers.find(timer => timer.ms === 1000)
+  assert.ok(pacingTimer)
+  timers.splice(timers.indexOf(pacingTimer), 1)
+  now += 1000
+  await pacingTimer.fn()
+  await flushing
+  assert.equal(msg.sent.length, 3)
+  controller.stop()
+})
+
+test('nostrdb push retries grow exponentially after repeated local failures', async () => {
+  const timers = []
+  const msg = messenger()
+  let now = 1000
+  let attempts = 0
+  msg.yell = async () => {
+    attempts++
+    throw new Error('relay unavailable')
+  }
+  const controller = createNostrDbSyncController({
+    getDb: () => ({ subscribe: emptySubscription }),
+    onError: () => {},
+    _nowMs: () => now,
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: timer => {
+      const index = timers.indexOf(timer)
+      if (index >= 0) timers.splice(index, 1)
+    }
+  })
+  controller.ensureSubscriptions(context(msg))
+  controller.queuePush(OWNER, event(1))
+  await new Promise(resolve => setImmediate(resolve))
+
+  const first = timers.shift()
+  assert.equal(first.ms, 1500)
+  now += first.ms
+  await first.fn()
+  await new Promise(resolve => setImmediate(resolve))
+  const second = timers.shift()
+  assert.equal(second.ms, 3000)
+  assert.equal(attempts, 2)
+  controller.stop()
+})
+
+test('nostrdb push caps a publication circuit deadline at five minutes', async () => {
   let now = 1000
   const retryAt = now + 10 * 60 * 1000
   let attempts = 0
@@ -1286,9 +1400,9 @@ test('nostrdb push waits for a publication circuit deadline', async () => {
 
   assert.equal(attempts, 1)
   assert.equal(timers.size, 1)
-  assert.equal([...timers][0].ms, retryAt - now)
+  assert.equal([...timers][0].ms, 5 * 60 * 1000)
 
-  now = retryAt
+  now += 5 * 60 * 1000
   const timer = [...timers][0]
   timers.delete(timer)
   await timer.fn()

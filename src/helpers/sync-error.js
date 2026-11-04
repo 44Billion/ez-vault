@@ -70,6 +70,22 @@ export function syncErrorDetails (error) {
           return [{ type, ageBucket, count, bytes }]
         })
       }
+      if (Array.isArray(summary.codes)) {
+        details.summary.codes = summary.codes.slice(0, 32).flatMap(value => {
+          if (!value || typeof value !== 'object') return []
+          const type = ['message', 'ask', 'reply', 'tell', 'yell', 'nym', 'other'].includes(value.type)
+            ? value.type
+            : null
+          const code = typeof value.code === 'string' && /^[A-Za-z0-9][A-Za-z0-9:._-]{0,159}$/.test(value.code)
+            ? value.code
+            : null
+          const count = safeInteger(value.count)
+          const bytes = safeInteger(value.bytes)
+          return type && code && count !== undefined && bytes !== undefined
+            ? [{ type, code, count, bytes }]
+            : []
+        })
+      }
     }
     return details
   }

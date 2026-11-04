@@ -55,6 +55,9 @@ const ONLINE_RETRY_MIN_MS = 5 * 60 * 1000
 const ONLINE_RETRY_MAX_MS = 6 * 60 * 60 * 1000
 const STATE_PRUNE_MS = 30 * 24 * 60 * 60 * 1000
 const PUSH_THROTTLE_MS = 1500
+const PUSH_CHUNK_INTERVAL_MS = 1000
+const PUSH_BACKOFF_MAX_MS = 30_000
+const PUSH_RETRY_AFTER_MAX_MS = 5 * 60 * 1000
 const PUSH_EVENTS_PER_CHUNK = 100
 const SYNC_BYTES_PER_CHUNK = 128 * 1024
 const encoder = new TextEncoder()
@@ -441,13 +444,21 @@ function emitDebug (debug, action, detail = {}) {
   }
 }
 
+function debugToken (value) {
+  return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9:._-]{0,159}$/.test(value)
+    ? value
+    : undefined
+}
+
 export function createNostrDbSyncController ({
   getDb = nostrdb.forAccount,
   storage,
   _setTimeout = globalThis.setTimeout?.bind(globalThis),
   _clearTimeout = globalThis.clearTimeout?.bind(globalThis),
   _nowMs = nowMs,
+  _performanceNow = () => performance.now(),
   _random = Math.random,
+  _pushChunkIntervalMs = PUSH_CHUNK_INTERVAL_MS,
   onError = err => console.warn('nostrdb sync failed', err?.message ?? err)
 } = {}) {
   const subscriptions = new Map()
@@ -1191,9 +1202,24 @@ export function createNostrDbSyncController ({
     queue.flushing = true
     let cursor = 0
     let index = 0
+    let publishedBytes = 0
+    let lastChunkStartedAt = null
+    const flushStartedAt = runtime.debug ? _performanceNow() : 0
     try {
       while (cursor < events.length) {
         if (!current()) return
+        if (lastChunkStartedAt !== null) {
+          const waitMs = Math.max(0, _pushChunkIntervalMs - (_nowMs() - lastChunkStartedAt))
+          if (waitMs > 0) await new Promise(resolve => _setTimeout(resolve, waitMs))
+          if (!current()) return
+          if (target.messenger.readStatus?.().paused === true) {
+            for (const event of events.slice(cursor)) {
+              if (!queue.events.has(event.id)) queue.events.set(event.id, event)
+            }
+            parkPushQueue(ownerPubkey, queue)
+            return
+          }
+        }
         const start = cursor
         let jsonl = ''
         let bytes = 0
@@ -1205,15 +1231,52 @@ export function createNostrDbSyncController ({
           bytes += length
           cursor++
         }
+        const chunkIndex = index++
+        const chunkStartedAt = runtime.debug ? _performanceNow() : 0
+        lastChunkStartedAt = _nowMs()
         try {
           await target.messenger.yell({
             channelPubkey: target.channelPubkey,
             receiverPubkeys: target.receiverPubkeys,
             code: NOSTRDB_SYNC_PUSH_CODE,
-            payload: { index: index++, isLast: cursor === events.length, jsonl }
+            payload: { index: chunkIndex, isLast: cursor === events.length, jsonl }
+          })
+          if (!current()) return
+          publishedBytes += bytes
+          emitDebug(runtime.debug, 'push-chunk', {
+            code: NOSTRDB_SYNC_PUSH_CODE,
+            chunkIndex,
+            eventCount: cursor - start,
+            bytes,
+            flushEventCount: events.length,
+            remainingEvents: events.length - cursor,
+            isLast: cursor === events.length,
+            elapsedMs: Math.max(0, Math.round(_performanceNow() - chunkStartedAt)),
+            outcome: 'published'
           })
         } catch (err) {
           if (!current()) return
+          const failedAt = _nowMs()
+          const backoffMs = queue.backoffMs || PUSH_THROTTLE_MS
+          const retryAt = Math.min(
+            retryAtAfterPublicationError(err, backoffMs, failedAt),
+            failedAt + PUSH_RETRY_AFTER_MAX_MS
+          )
+          emitDebug(runtime.debug, 'push-chunk', {
+            code: NOSTRDB_SYNC_PUSH_CODE,
+            chunkIndex,
+            eventCount: cursor - start,
+            bytes,
+            flushEventCount: events.length,
+            remainingEvents: events.length - cursor,
+            isLast: cursor === events.length,
+            elapsedMs: Math.max(0, Math.round(_performanceNow() - chunkStartedAt)),
+            outcome: 'failed',
+            errorCode: debugToken(err?.code) || debugToken(err?.name) || 'UNKNOWN',
+            retryAt,
+            retryAfterMs: Math.max(0, retryAt - failedAt),
+            backoffMs
+          })
           // Keep the failed batch and its unsent tail for the next cooldown.
           for (const event of events.slice(start)) {
             if (!queue.events.has(event.id)) queue.events.set(event.id, event)
@@ -1222,7 +1285,8 @@ export function createNostrDbSyncController ({
             parkPushQueue(ownerPubkey, queue, err)
             return
           }
-          queue.retryAt = retryAtAfterPublicationError(err, PUSH_THROTTLE_MS, _nowMs())
+          queue.retryAt = retryAt
+          queue.backoffMs = Math.min(PUSH_BACKOFF_MAX_MS, backoffMs * 2)
           report(err)
           startPushCooldown(ownerPubkey, queue)
           return
@@ -1230,11 +1294,13 @@ export function createNostrDbSyncController ({
       }
       if (!current()) return
       queue.retryAt = 0
+      queue.backoffMs = PUSH_THROTTLE_MS
       emitDebug(runtime.debug, 'push', {
-        ownerPubkey,
-        channelPubkey: target.channelPubkey,
         receiverCount: target.receiverPubkeys.length,
-        count: events.length
+        count: events.length,
+        chunkCount: index,
+        bytes: publishedBytes,
+        elapsedMs: Math.max(0, Math.round(_performanceNow() - flushStartedAt))
       })
     } finally {
       queue.flushing = false
@@ -1301,6 +1367,7 @@ export function createNostrDbSyncController ({
         timer: null,
         cooling: false,
         retryAt: 0,
+        backoffMs: PUSH_THROTTLE_MS,
         waitingForResume: false,
         resumePending: false
       }

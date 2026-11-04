@@ -85,6 +85,11 @@ test('soft capacity pressure exposes only bounded queue aggregates', () => {
         { type: 'invalid', ageBucket: '<1h', count: 1, bytes: 1 },
         { type: 'ask', ageBucket: 'not-a-bucket', count: 1, bytes: 1 }
       ],
+      codes: [
+        { type: 'yell', code: 'nostrDbSync_push_kpkr', count: 2, bytes: 900, payload: 'secret' },
+        { type: 'invalid', code: 'secret', count: 1, bytes: 1 },
+        { type: 'yell', code: 'contains spaces', count: 1, bytes: 1 }
+      ],
       channelPubkey: 'secret',
       ciphertext: 'secret'
     },
@@ -105,6 +110,9 @@ test('soft capacity pressure exposes only bounded queue aggregates', () => {
       buckets: [
         { type: 'message', ageBucket: '<1h', count: 2, bytes: 800 },
         { type: 'other', ageBucket: 'unknown', count: 1, bytes: 300 }
+      ],
+      codes: [
+        { type: 'yell', code: 'nostrDbSync_push_kpkr', count: 2, bytes: 900 }
       ]
     }
   })

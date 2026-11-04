@@ -1,5 +1,6 @@
 import { syncErrorDetails } from '../../helpers/sync-error.js'
 import { publicationErrorFromResult, publicationRetryAt } from '../../helpers/publication-retry.js'
+import { debugEnabledForWindow } from '../../helpers/diagnostics-mode.js'
 import { PrivateMessenger } from 'libp2r2p/private-messenger'
 import { claimSigner } from '../signer.js'
 import { subscribeRelayListUpdates } from 'libp2r2p/relay'
@@ -25,6 +26,7 @@ const ANNOUNCE_ALL = '*'
 const TRUSTED_SIGNER_SYNC_INFO = 'trusted-signer-sync-v1'
 const HEX32 = /^[0-9a-f]{64}$/i
 const APP_ID_MAX_LENGTH = 512
+const encoder = new TextEncoder()
 
 // Account data sync derives one private channel per unlocked nsec account and
 // talks only to configured trusted signer pubkeys. Content-key sync exchanges
@@ -42,19 +44,16 @@ function isPlainObject (value) {
   return value && typeof value === 'object' && !Array.isArray(value)
 }
 
-function isTopLevelWindow () {
-  try {
-    return typeof window !== 'undefined' && window === window.top
-  } catch {
-    return false
-  }
-}
-
 function redactDebugEvent (event) {
   try {
     return JSON.parse(JSON.stringify(event, (key, value) => {
       const name = String(key).toLowerCase()
-      if (name.includes('seckey') || name.includes('secret') || name === 'payload' || name === 'content') {
+      if (
+        name.includes('seckey') || name.includes('secret') || name.includes('pubkey') ||
+        name.includes('eventid') || name === 'outerid' ||
+        name === 'publicationid' || name === 'seedrecordid' || name === 'payload' ||
+        name === 'content' || name.includes('filter')
+      ) {
         return '[redacted]'
       }
       return value
@@ -65,7 +64,7 @@ function redactDebugEvent (event) {
 }
 
 function defaultDebugSink () {
-  if (!isTopLevelWindow()) return null
+  if (!debugEnabledForWindow()) return null
   return event => {
     const safe = redactDebugEvent(event)
     console.log('[ez-vault sync]', safe.action || 'event', safe)
@@ -105,15 +104,18 @@ function messageCode (message) {
   return isPlainObject(message?.payload) ? message.payload.code || '' : ''
 }
 
+function messagePayloadBytes (message) {
+  const value = message?.payload?.payload
+  if (typeof value?.jsonl === 'string') return encoder.encode(value.jsonl).byteLength
+  if (typeof value === 'string') return encoder.encode(value).byteLength
+  return 0
+}
+
 function messageDebugInfo (message) {
   return {
     type: message?.type || '',
     code: messageCode(message),
-    channelPubkey: message?.channelPubkey || '',
-    senderPubkey: message?.event?.pubkey || '',
-    eventId: message?.event?.id || '',
-    outerId: message?.outer?.id || '',
-    outerCreatedAt: message?.outer?.created_at || message?.event?.created_at || 0
+    payloadBytes: messagePayloadBytes(message)
   }
 }
 
@@ -138,6 +140,7 @@ export function createSyncController ({
   _setInterval = globalThis.setInterval.bind(globalThis),
   _clearInterval = globalThis.clearInterval.bind(globalThis),
   _now = Date.now,
+  _performanceNow = () => performance.now(),
   _debug,
   onError = defaultOnError
 } = {}) {
@@ -177,6 +180,7 @@ export function createSyncController ({
   const nostrDbSync = _createNostrDbSyncController({
     _setTimeout,
     _clearTimeout,
+    _performanceNow,
     onError
   })
 
@@ -537,9 +541,34 @@ export function createSyncController ({
           const { message, ack, nack } = delivery
           if (!isCurrentLifecycle(id) || channelConfiguration || !_secrets.isUnlocked()) { await nack(); break }
           handled += 1
-          emitDebug('handle', messageDebugInfo(message))
+          if (debug) emitDebug('handle', messageDebugInfo(message))
+          const processStartedAt = debug ? _performanceNow() : 0
+          const processDiagnostic = debug
+            ? {
+                syncType: message?.type || '',
+                syncCode: message?.code || '',
+                operationCode: messageCode(message),
+                payloadBytes: messagePayloadBytes(message),
+                queuedAgeMs: Number.isSafeInteger(message?.receivedAt)
+                  ? Math.max(0, _now() - message.receivedAt * 1000)
+                  : undefined,
+                outcome: 'ok'
+              }
+            : null
           try {
-            await handleSyncMessage(message)
+            try {
+              await handleSyncMessage(message)
+            } catch (error) {
+              if (processDiagnostic) processDiagnostic.outcome = 'failed'
+              throw error
+            } finally {
+              if (processDiagnostic) {
+                emitDebug('message-processed', {
+                  ...processDiagnostic,
+                  elapsedMs: Math.max(0, Math.round(_performanceNow() - processStartedAt))
+                })
+              }
+            }
             await ack()
           } catch (err) {
             let failure = err
