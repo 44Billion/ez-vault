@@ -41,6 +41,51 @@ test('capacity diagnostics expose only queue metrics and pause reasons', () => {
   assert.equal(JSON.stringify(syncErrorDetails(error)).includes('secret'), false)
 })
 
+test('soft capacity pressure exposes only bounded queue aggregates', () => {
+  const error = Object.assign(new Error('PRIVATE_MESSENGER_CAPACITY_PRESSURE'), {
+    code: 'PRIVATE_MESSENGER_CAPACITY_PRESSURE',
+    queue: 'inbox',
+    usedBytes: 1200,
+    highWaterBytes: 1200,
+    resumeAtBytes: 800,
+    maxBytes: 1600,
+    pauseReasons: ['capacity', 'network'],
+    summary: {
+      count: 3,
+      bytes: 1100,
+      channelCount: 2,
+      buckets: [
+        { type: 'message', ageBucket: '<1h', count: 2, bytes: 800, channelPubkey: 'secret' },
+        { type: 'other', ageBucket: 'unknown', count: 1, bytes: 300 },
+        { type: 'invalid', ageBucket: '<1h', count: 1, bytes: 1 },
+        { type: 'ask', ageBucket: 'not-a-bucket', count: 1, bytes: 1 }
+      ],
+      channelPubkey: 'secret',
+      ciphertext: 'secret'
+    },
+    payload: 'secret'
+  })
+  assert.deepEqual(syncErrorDetails(error), {
+    code: 'PRIVATE_MESSENGER_CAPACITY_PRESSURE',
+    queue: 'inbox',
+    usedBytes: 1200,
+    highWaterBytes: 1200,
+    resumeAtBytes: 800,
+    maxBytes: 1600,
+    pauseReasons: ['capacity', 'network'],
+    summary: {
+      count: 3,
+      bytes: 1100,
+      channelCount: 2,
+      buckets: [
+        { type: 'message', ageBucket: '<1h', count: 2, bytes: 800 },
+        { type: 'other', ageBucket: 'unknown', count: 1, bytes: 300 }
+      ]
+    }
+  })
+  assert.equal(JSON.stringify(syncErrorDetails(error)).includes('secret'), false)
+})
+
 test('paused diagnostics never expose arbitrary error properties', () => {
   const error = Object.assign(new Error('PUBLISH_FAILED'), {
     cause: Object.assign(new Error('PRIVATE_MESSENGER_PAUSED'), {

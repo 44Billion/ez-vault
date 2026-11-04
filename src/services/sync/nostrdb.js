@@ -1141,9 +1141,13 @@ export function createNostrDbSyncController ({
 
   async function flushPushQueue (ownerPubkey) {
     const queue = pushQueues.get(ownerPubkey)
-    if (!queue || queue.flushing || queue.events.size === 0) return
+    if (!queue || queue.waitingForResume || queue.flushing || queue.events.size === 0) return
     const target = pushRuntime(ownerPubkey)
     if (!target) return
+    if (target.messenger.readStatus?.().paused === true) {
+      parkPushQueue(ownerPubkey, queue)
+      return
+    }
 
     const current = () => pushQueues.get(ownerPubkey) === queue && runtime.messenger === target.messenger
     const events = [...queue.events.values()]
@@ -1178,6 +1182,10 @@ export function createNostrDbSyncController ({
           for (const event of events.slice(start)) {
             if (!queue.events.has(event.id)) queue.events.set(event.id, event)
           }
+          if (messengerPausedError(err)) {
+            parkPushQueue(ownerPubkey, queue, err)
+            return
+          }
           queue.retryAt = retryAtAfterPublicationError(err, PUSH_THROTTLE_MS, _nowMs())
           report(err)
           startPushCooldown(ownerPubkey, queue)
@@ -1194,11 +1202,40 @@ export function createNostrDbSyncController ({
       })
     } finally {
       queue.flushing = false
+      if (current() && queue.resumePending) {
+        queue.resumePending = false
+        if (queue.events.size > 0 && !queue.waitingForResume) {
+          Promise.resolve().then(() => flushPushQueue(ownerPubkey)).catch(report)
+        }
+      }
+    }
+  }
+
+  function clearPushTimer (queue) {
+    if (queue.timer) _clearTimeout?.(queue.timer)
+    queue.timer = null
+    queue.cooling = false
+  }
+
+  function parkPushQueue (ownerPubkey, queue, error = null) {
+    if (pushQueues.get(ownerPubkey) !== queue) return
+    const retryAt = error ? publicationRetryAt(error, _nowMs()) : 0
+    if (retryAt > _nowMs()) queue.retryAt = Math.max(queue.retryAt || 0, retryAt)
+    clearPushTimer(queue)
+    if (queue.retryAt > _nowMs() && runtime.messenger?.readStatus?.().paused !== true) {
+      queue.waitingForResume = false
+      startPushCooldown(ownerPubkey, queue)
+    } else {
+      queue.waitingForResume = true
     }
   }
 
   function startPushCooldown (ownerPubkey, queue) {
     if (pushQueues.get(ownerPubkey) !== queue) return
+    if (queue.waitingForResume || runtime.messenger?.readStatus?.().paused === true) {
+      parkPushQueue(ownerPubkey, queue)
+      return
+    }
     if (queue.timer) _clearTimeout?.(queue.timer)
     queue.timer = null
     queue.cooling = true
@@ -1208,9 +1245,10 @@ export function createNostrDbSyncController ({
       if (pushQueues.get(ownerPubkey) !== queue) return
       if (queue.events.size > 0) {
         await flushPushQueue(ownerPubkey)
-        if (!queue.timer) startPushCooldown(ownerPubkey, queue)
+        if (!queue.timer && !queue.waitingForResume) startPushCooldown(ownerPubkey, queue)
       } else {
         queue.retryAt = 0
+        queue.waitingForResume = false
       }
     }, Math.max(PUSH_THROTTLE_MS, (queue.retryAt || 0) - _nowMs()))
     queue.timer?.unref?.()
@@ -1222,10 +1260,21 @@ export function createNostrDbSyncController ({
     if (!normalizePubkey(event?.id) || isRecentSyncEvent(event)) return
     let queue = pushQueues.get(ownerPubkey)
     if (!queue) {
-      queue = { events: new Map(), timer: null, cooling: false, retryAt: 0 }
+      queue = {
+        events: new Map(),
+        timer: null,
+        cooling: false,
+        retryAt: 0,
+        waitingForResume: false,
+        resumePending: false
+      }
       pushQueues.set(ownerPubkey, queue)
     }
     queue.events.set(event.id, event)
+    if (runtime.messenger?.readStatus?.().paused === true) {
+      parkPushQueue(ownerPubkey, queue)
+      return
+    }
     if (queue.cooling) return
     flushPushQueue(ownerPubkey).catch(report)
     startPushCooldown(ownerPubkey, queue)
@@ -1398,11 +1447,22 @@ export function createNostrDbSyncController ({
     runtime = { ...runtime, ...context }
     const pushes = []
     for (const [ownerPubkey, queue] of pushQueues) {
-      if (queue.timer) _clearTimeout?.(queue.timer)
-      queue.timer = null
-      queue.cooling = false
+      clearPushTimer(queue)
+      queue.waitingForResume = false
+      queue.resumePending = false
+      if (runtime.messenger?.readStatus?.().paused === true) {
+        parkPushQueue(ownerPubkey, queue)
+        continue
+      }
+      if ((queue.retryAt || 0) > _nowMs()) {
+        startPushCooldown(ownerPubkey, queue)
+        continue
+      }
       queue.retryAt = 0
-      if (queue.events.size > 0 && !queue.flushing) pushes.push(flushPushQueue(ownerPubkey).catch(report))
+      if (queue.events.size > 0) {
+        if (queue.flushing) queue.resumePending = true
+        else pushes.push(flushPushQueue(ownerPubkey).catch(report))
+      }
     }
     await Promise.all(pushes)
     await retryDueRequests(runtime, { resume: true, apps: false })

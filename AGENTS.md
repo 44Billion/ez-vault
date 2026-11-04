@@ -491,7 +491,7 @@ reasons, never payloads, filters or identities.
 
 ## Launcher relay bridge
 
-- Use the coordinated libp2r2p 0.12.3 release, pinned exactly in the
+- Use the coordinated libp2r2p 0.12.4 release, pinned exactly in the
   dev dependency and lockfile. Its live readers stop definitive per-route refusals
   and recover transient errors through bounded offline-aware backoff/cooldowns.
   Keep the existing facade/protocol and standalone fallback. Validate sync,
@@ -525,9 +525,11 @@ reasons, never payloads, filters or identities.
 - NostrDB reply handlers must propagate database/publication failures so the
   parent delivery drain nacks them. Pushes are serialized per owner and retain
   failed/unsent batches for the next cooldown while their runtime stays active.
-  Sync JSONL batches target 128 KiB UTF-8 plus the 100-record cap; an indivisible
-  oversized event travels alone. Keep native errors visible and never raise
-  browser storage quotas or acknowledge an unsent final response.
+  A paused messenger parks pushes without a timer or `onError`; resume flushes
+  once and preserves any relay `retryAt`. Sync JSONL batches target 128 KiB UTF-8
+  plus the 100-record cap; an indivisible oversized event travels alone. Keep
+  non-pause native errors visible and never raise browser storage quotas or
+  acknowledge an unsent final response.
 
 
 Account presentation (`name`, `picture`, `about`) may come from pairing before

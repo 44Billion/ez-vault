@@ -657,6 +657,7 @@ test('paused app backfills resume immediately without increasing backoff', async
 test('resuming a pause flushes queued NostrDB pushes without waiting for cooldown', async () => {
   let attempts = 0
   const timers = []
+  const errors = []
   const msg = messenger()
   msg.yell = async options => {
     attempts++
@@ -670,6 +671,7 @@ test('resuming a pause flushes queued NostrDB pushes without waiting for cooldow
     return { delivery: { reports: [{ success: true }] } }
   }
   const controller = createNostrDbSyncController({
+    onError: error => errors.push(error),
     _setTimeout: (fn, ms) => {
       const timer = { fn, ms }
       timers.push(timer)
@@ -685,11 +687,102 @@ test('resuming a pause flushes queued NostrDB pushes without waiting for cooldow
   controller.queuePush(OWNER, event(1))
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(attempts, 1)
-  assert.ok(timers.some(timer => timer.ms === 1500))
+  assert.equal(timers.length, 0)
+  assert.deepEqual(errors, [])
 
   await controller.resumeAfterPause(context(msg))
   assert.equal(attempts, 2)
-  assert.equal(timers.some(timer => timer.ms === 1500), false)
+  assert.equal(timers.length, 0)
+})
+
+test('paused push queues retain events without polling and flush once after resume', async () => {
+  let paused = true
+  let attempts = 0
+  const timers = []
+  const errors = []
+  const msg = messenger()
+  msg.readStatus = () => ({ closed: false, paused, pauseReasons: paused ? ['capacity'] : [] })
+  msg.yell = async () => {
+    attempts++
+    return { delivery: { reports: [{ success: true }] } }
+  }
+  const controller = createNostrDbSyncController({
+    onError: error => errors.push(error),
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: timer => {
+      const index = timers.indexOf(timer)
+      if (index >= 0) timers.splice(index, 1)
+    },
+    getDb: () => ({ subscribe: emptySubscription })
+  })
+  controller.ensureSubscriptions(context(msg))
+  controller.queuePush(OWNER, event(1))
+  controller.queuePush(OWNER, event(2))
+  await flushMicrotasks()
+
+  assert.equal(attempts, 0)
+  assert.equal(timers.length, 0)
+  assert.deepEqual(errors, [])
+
+  paused = false
+  await controller.resumeAfterPause(context(msg))
+  await flushMicrotasks()
+  assert.equal(attempts, 1)
+  assert.equal(timers.length, 0)
+  assert.deepEqual(errors, [])
+})
+
+test('paused push preserves a relay retry deadline across resume', async () => {
+  let now = 1000
+  const retryAt = now + 60000
+  let attempts = 0
+  const timers = []
+  const errors = []
+  const msg = messenger()
+  msg.yell = async () => {
+    attempts++
+    throw Object.assign(new Error('PRIVATE_MESSENGER_PAUSED'), {
+      code: 'PRIVATE_MESSENGER_PAUSED',
+      pauseReasons: ['capacity'],
+      retryAt
+    })
+  }
+  const controller = createNostrDbSyncController({
+    _nowMs: () => now,
+    onError: error => errors.push(error),
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: timer => {
+      const index = timers.indexOf(timer)
+      if (index >= 0) timers.splice(index, 1)
+    },
+    getDb: () => ({ subscribe: emptySubscription })
+  })
+  controller.ensureSubscriptions(context(msg))
+  controller.queuePush(OWNER, event(1))
+  await flushMicrotasks()
+
+  assert.equal(attempts, 1)
+  assert.deepEqual(errors, [])
+  assert.equal(timers.length, 1)
+  assert.equal(timers[0].ms, retryAt - now)
+
+  await controller.resumeAfterPause(context(msg))
+  assert.equal(attempts, 1)
+  assert.equal(timers.length, 1)
+  assert.equal(timers[0].ms, retryAt - now)
+
+  now = retryAt
+  const timer = timers.shift()
+  await timer.fn()
+  assert.equal(attempts, 2)
 })
 
 test('nostrdb app backfill ask exports one app page', async () => {

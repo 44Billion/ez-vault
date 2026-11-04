@@ -417,9 +417,11 @@ subscriptions and historical recovery continue in the background. ACK still
 requires successful persistence, and the vault keeps its local recovery seed store.
 
 
-The coordinated libp2r2p 0.12.3 release shares confirmed connectivity with automatic
+The coordinated libp2r2p 0.12.4 release shares confirmed connectivity with automatic
 pause recovery. Vault synchronization keeps its direct messenger and local seed
 storage; foreground-send urgency belongs to sessions that explicitly request it.
+The durable inbox begins backpressure at 70% and resumes at 50%; NostrDB pushes
+park without polling while the messenger is paused and honor relay retry deadlines.
 
 ### Protected NIP44v3 conversation cache
 
