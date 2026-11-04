@@ -2,6 +2,7 @@ import * as nostrdb from '../nostrdb.js'
 import { createEventReplyPacker } from 'libp2r2p/private-messenger/recovery'
 import { NOSTRDB_SYNC, readRecords, replaceRecords } from '../storage/index.js'
 import { publicationRetryAt, retryAtAfterPublicationError } from '../../helpers/publication-retry.js'
+import { assertSupportedPayloadVersion, syncPayloadInvalid } from './payload-error.js'
 
 // Flow notes:
 // - Adverts ride the trusted-device announce cadence: debounced after startup
@@ -39,6 +40,9 @@ export const NOSTRDB_SYNC_APP_REPLY_CODE = 'nostrDbSync_appReply_7c93'
 const STATE_KEY = 'ez-vault:trusted-signer-sync:nostrdb:v1'
 const HEX32 = /^[0-9a-f]{64}$/i
 const APP_ID_MAX_LENGTH = 512
+const REQUEST_ID_MAX_LENGTH = 256
+const MAX_SYNC_JSONL_CHARS = 4 * 1024 * 1024
+const MAX_SYNC_JSONL_BYTES = 4 * 1024 * 1024
 const DEFAULT_WINDOW_MS = 15 * 60 * 1000
 const MIN_WINDOW_MS = 60 * 1000
 const MAX_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
@@ -108,6 +112,13 @@ function messageBody (message) {
   return isPlainObject(message?.payload?.payload) ? message.payload.payload : {}
 }
 
+function requireDataBody (message) {
+  const body = message?.payload?.payload
+  if (!isPlainObject(body)) throw syncPayloadInvalid('payload-object-required')
+  assertSupportedPayloadVersion(body)
+  return body
+}
+
 function messageTimeMs (message) {
   const seconds = message?.outer?.created_at || message?.event?.created_at || 0
   return Number.isSafeInteger(seconds) && seconds > 0 ? seconds * 1000 : 0
@@ -170,7 +181,10 @@ function normalizeAdvert (payload) {
 
 function normalizeAsk (payload) {
   if (!isPlainObject(payload)) return null
-  const requestId = typeof payload.requestId === 'string' && payload.requestId ? payload.requestId : ''
+  const requestId = typeof payload.requestId === 'string' && payload.requestId &&
+    payload.requestId.length <= REQUEST_ID_MAX_LENGTH
+    ? payload.requestId
+    : ''
   const sinceScore = normalizeScore(payload.sinceScore)
   const untilScore = normalizeScore(payload.untilScore)
   if (!requestId || sinceScore == null || untilScore == null || untilScore < sinceScore) return null
@@ -185,7 +199,10 @@ function normalizeAsk (payload) {
 
 function normalizeAppAsk (payload) {
   if (!isPlainObject(payload)) return null
-  const requestId = typeof payload.requestId === 'string' && payload.requestId ? payload.requestId : ''
+  const requestId = typeof payload.requestId === 'string' && payload.requestId &&
+    payload.requestId.length <= REQUEST_ID_MAX_LENGTH
+    ? payload.requestId
+    : ''
   const appId = normalizeAppId(payload.appId)
   const after = normalizeOptionalEventId(payload.after)
   if (!requestId || !appId || (payload.after && !after)) return null
@@ -201,13 +218,17 @@ function normalizeEventBatchPayload (payload) {
   if (!isPlainObject(payload)) return null
   const index = Math.floor(Number(payload.index))
   if (!Number.isSafeInteger(index) || index < 0) return null
-  if (typeof payload.jsonl !== 'string') return null
+  if (typeof payload.isLast !== 'boolean') return null
+  if (typeof payload.jsonl !== 'string' || payload.jsonl.length > MAX_SYNC_JSONL_CHARS ||
+    encoder.encode(payload.jsonl).byteLength > MAX_SYNC_JSONL_BYTES) return null
+  if (payload.requestId != null &&
+    (typeof payload.requestId !== 'string' || payload.requestId.length > REQUEST_ID_MAX_LENGTH)) return null
   return {
     requestId: typeof payload.requestId === 'string' ? payload.requestId : '',
     sinceScore: normalizeScore(payload.sinceScore),
     untilScore: normalizeScore(payload.untilScore),
     index,
-    isLast: payload.isLast === true,
+    isLast: payload.isLast,
     hasMore: typeof payload.hasMore === 'boolean' ? payload.hasMore : null,
     jsonl: payload.jsonl
   }
@@ -228,17 +249,20 @@ function normalizeAppEventBatchPayload (payload) {
   }
 }
 
-function parseJsonlEvents (jsonl) {
+function parseJsonlEventsDetailed (jsonl) {
   const events = []
+  let rejected = 0
   for (const line of String(jsonl || '').split('\n')) {
     if (!line) continue
     try {
       const event = JSON.parse(line)
-      if (Number.isInteger(event?.kind)) events.push(event)
+      if (isPlainObject(event) && Number.isInteger(event.kind)) events.push(event)
+      else rejected++
     } catch {
+      rejected++
     }
   }
-  return events
+  return { events, rejected }
 }
 
 function eventsToJsonl (events) {
@@ -837,9 +861,10 @@ export function createNostrDbSyncController ({
   }
 
   async function handleAdvertise (ownerPubkey, message, context) {
-    const advert = normalizeAdvert(messageBody(message))
+    const advert = normalizeAdvert(requireDataBody(message))
     const peerPubkey = normalizePubkey(message?.event?.pubkey)
-    if (!advert || !peerPubkey) return true
+    if (!advert) throw syncPayloadInvalid('advertise-payload-invalid')
+    if (!peerPubkey) return true
 
     const nextAdvert = {
       ...advert,
@@ -1015,11 +1040,12 @@ export function createNostrDbSyncController ({
   }
 
   async function handleReply (ownerPubkey, message, context) {
-    const payload = normalizeEventBatchPayload(messageBody(message))
+    const payload = normalizeEventBatchPayload(requireDataBody(message))
     const peerPubkey = normalizePubkey(message?.event?.pubkey)
-    if (!payload || !peerPubkey) return true
+    if (!payload) throw syncPayloadInvalid('reply-payload-invalid')
+    if (!peerPubkey) return true
 
-    const events = parseJsonlEvents(payload.jsonl)
+    const { events, rejected } = parseJsonlEventsDetailed(payload.jsonl)
     await ingestEvents(ownerPubkey, events)
 
     const state = getState()
@@ -1048,25 +1074,32 @@ export function createNostrDbSyncController ({
           untilScore: pending.untilScore
         })
         await maybeAsk(ownerPubkey, peerPubkey, context, { force: true })
+        if (rejected) throw syncPayloadInvalid('jsonl-entries-invalid', { partial: true })
         return true
       }
       entry.updatedAt = _nowMs()
       setState(state)
     }
+    if (rejected) throw syncPayloadInvalid('jsonl-entries-invalid', { partial: true })
     return true
   }
 
   async function handleAppReply (ownerPubkey, message, context) {
-    const payload = normalizeAppEventBatchPayload(messageBody(message))
+    const payload = normalizeAppEventBatchPayload(requireDataBody(message))
     const peerPubkey = normalizePubkey(message?.event?.pubkey)
-    if (!payload || !peerPubkey) return true
+    if (!payload) throw syncPayloadInvalid('app-reply-payload-invalid')
+    if (!peerPubkey) return true
 
     const state = getState()
     const { app, entry } = existingAppBackfillPeerState(state, ownerPubkey, payload.appId, peerPubkey)
     const pending = entry?.pending
-    if (!pending || !payload.requestId || pending.requestId !== payload.requestId) return true
+    if (!pending || !payload.requestId || pending.requestId !== payload.requestId) {
+      const { rejected } = parseJsonlEventsDetailed(payload.jsonl)
+      if (rejected) throw syncPayloadInvalid('jsonl-entries-invalid', { partial: true })
+      return true
+    }
 
-    const events = parseJsonlEvents(payload.jsonl)
+    const { events, rejected } = parseJsonlEventsDetailed(payload.jsonl)
     await ingestAppEvents(ownerPubkey, payload.appId, events)
     pending.replyCount = (pending.replyCount || 0) + events.length
     if (events.length) pending.lastEventId = events.at(-1).id
@@ -1091,19 +1124,21 @@ export function createNostrDbSyncController ({
         nextAfter
       })
       if (hasMore) await processAppBackfills(context, { ownerPubkey, peerPubkey })
+      if (rejected) throw syncPayloadInvalid('jsonl-entries-invalid', { partial: true })
       return true
     }
 
     entry.updatedAt = _nowMs()
     app.updatedAt = entry.updatedAt
     setState(state)
+    if (rejected) throw syncPayloadInvalid('jsonl-entries-invalid', { partial: true })
     return true
   }
 
   async function handlePush (ownerPubkey, message, context) {
-    const payload = normalizeEventBatchPayload(messageBody(message))
-    if (!payload) return true
-    const events = parseJsonlEvents(payload.jsonl)
+    const payload = normalizeEventBatchPayload(requireDataBody(message))
+    if (!payload) throw syncPayloadInvalid('push-payload-invalid')
+    const { events, rejected } = parseJsonlEventsDetailed(payload.jsonl)
     const imported = await ingestEvents(ownerPubkey, events)
     emitDebug(context.debug, 'push-received', {
       ownerPubkey,
@@ -1111,6 +1146,7 @@ export function createNostrDbSyncController ({
       count: imported
     })
     await processAppBackfills(context, { ownerPubkey, peerPubkey: message.event?.pubkey || '', onlineHint: true })
+    if (rejected) throw syncPayloadInvalid('jsonl-entries-invalid', { partial: true })
     return true
   }
 

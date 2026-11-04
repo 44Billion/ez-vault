@@ -71,6 +71,7 @@ const LOCAL_KEY = 'ez-vault:passkey:local-key'
 const UPGRADE_PENDING_KEY = 'ez-vault:passkey:upgrade-pending'
 const CONTENT_KEYS_KEY = 'ez-vault:content-keys'
 const TRUSTED_SIGNERS_KEY = 'ez-vault:trusted-signers'
+const SYNC_QUARANTINE_KEY = 'ez-vault:sync-quarantine:v1'
 const MODE_IDB = 'idb'
 const MODE_LARGE_BLOB = 'largeblob'
 const MODE_IDB_COMPAT = 'idb-compat'
@@ -599,6 +600,13 @@ async function recipherLocalVault (material, { stage = true } = {}) {
         if (snapshot.state[TRUSTED_SIGNERS_KEY]) {
           set[TRUSTED_SIGNERS_KEY] = rekeyer.localState(snapshot.state[TRUSTED_SIGNERS_KEY], parsed => {
             if (!Array.isArray(parsed)) throw new Error('INVALID_TRUSTED_SIGNERS')
+          })
+        }
+        if (snapshot.state[SYNC_QUARANTINE_KEY]) {
+          set[SYNC_QUARANTINE_KEY] = rekeyer.localState(snapshot.state[SYNC_QUARANTINE_KEY], parsed => {
+            if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.records)) {
+              throw new Error('INVALID_SYNC_QUARANTINE')
+            }
           })
         }
 

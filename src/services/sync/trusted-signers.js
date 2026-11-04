@@ -1,9 +1,11 @@
 import { publicationErrorFromResult } from '../../helpers/publication-retry.js'
+import { assertSupportedPayloadVersion, syncPayloadInvalid } from './payload-error.js'
 
 export const TRUSTED_SIGNERS_STATE_CODE = 'trustedSigners_state_v1'
 export const TRUSTED_SIGNER_SYNC_INFO = 'trusted-signer-list-sync-v1'
 
 const HEX32 = /^[0-9a-f]{64}$/i
+const MAX_SYNC_ENTRIES = 512
 
 function isPlainObject (value) {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -17,10 +19,6 @@ function normalizePubkey (value) {
 function normalizeTimestamp (value) {
   const timestamp = Math.floor(Number(value) || 0)
   return Number.isSafeInteger(timestamp) && timestamp > 0 ? timestamp : 0
-}
-
-function messageBody (message) {
-  return isPlainObject(message?.payload?.payload) ? message.payload.payload : {}
 }
 
 function messageCode (message) {
@@ -118,24 +116,39 @@ export async function handleMessage (message, context = {}) {
   const senderPubkey = normalizePubkey(message?.event?.pubkey)
   if (!senderPubkey || !context.trustedByPubkey?.has?.(senderPubkey)) return true
 
-  const entries = stateEntries(messageBody(message).entries)
-  if (!entries.length) return true
+  const body = message?.payload?.payload
+  if (!isPlainObject(body)) throw syncPayloadInvalid('payload-object-required')
+  assertSupportedPayloadVersion(body)
+  if (!Array.isArray(body.entries) || body.entries.length > MAX_SYNC_ENTRIES) {
+    throw syncPayloadInvalid('entries-array-invalid')
+  }
+  const entries = stateEntries(body.entries)
+  const rejected = body.entries.length - entries.length
+  if (!entries.length) {
+    if (rejected) throw syncPayloadInvalid('entries-invalid', { partial: true })
+    return true
+  }
 
   const devicePubkey = normalizePubkey(context.devicePubkey)
   const selfRemoval = entries.find(entry => entry.status === 'removed' && entry.pubkey === devicePubkey)
   if (selfRemoval) {
     // Old direct-removal reminders may arrive after this peer was re-trusted.
     // Only a removal at least as fresh as the sender trust can clear us.
-    if (selfRemoval.updatedAt < senderTrustUpdatedAt(context, senderPubkey)) return true
+    if (selfRemoval.updatedAt < senderTrustUpdatedAt(context, senderPubkey)) {
+      if (rejected) throw syncPayloadInvalid('entries-invalid', { partial: true })
+      return true
+    }
     await context.trustedSigners?.clearActive?.({
       actorPubkey: devicePubkey,
       updatedAt: selfRemoval.updatedAt,
       tombstone: false
     })
+    if (rejected) throw syncPayloadInvalid('entries-invalid', { partial: true })
     return true
   }
 
   const mergeEntries = entriesExceptPubkey(entries, devicePubkey)
   if (mergeEntries.length) await context.trustedSigners?.mergeRecords?.(mergeEntries, { action: 'sync' })
+  if (rejected) throw syncPayloadInvalid('entries-invalid', { partial: true })
   return true
 }

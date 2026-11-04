@@ -272,3 +272,31 @@ test('trusted signer announce preserves a relay retry deadline', async () => {
     ]
   }), error => error.code === 'SYNC_PUBLICATION_FAILED' && error.retryAt === retryAt)
 })
+
+test('trusted signer sync classifies malformed entries as quarantineable payload errors', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  await trustedSigners.add({ pubkey: pk(1), platform: 'One', actorPubkey: pk(9), updatedAt: 10 })
+
+  await assert.rejects(handleMessage({
+    event: { pubkey: pk(1) },
+    payload: {
+      code: TRUSTED_SIGNERS_STATE_CODE,
+      payload: {
+        entries: [
+          { pubkey: pk(2), status: 'trusted', updatedAt: 20, actorPubkey: pk(1) },
+          { pubkey: 'invalid', status: 'trusted', updatedAt: 20 }
+        ]
+      }
+    }
+  }, {
+    trustedByPubkey: new Map([[pk(1), { pubkey: pk(1), updatedAt: 10 }]]),
+    trustedSigners,
+    devicePubkey: pk(9)
+  }), error => {
+    assert.equal(error.code, 'SYNC_PAYLOAD_INVALID')
+    assert.equal(error.quarantineable, true)
+    assert.equal(error.partial, true)
+    return true
+  })
+  assert.equal(trustedSigners.list().some(entry => entry.pubkey === pk(2)), true)
+})

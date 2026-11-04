@@ -175,6 +175,37 @@ test('nostrdb sync infers owner from channel and builds bounded ask', async () =
   assert.equal(Object.hasOwn(msg.sent[0].options.payload, 'ownerPubkey'), false)
 })
 
+test('nostrdb data payload validation quarantines shape errors and ignores invalid requests', async () => {
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    getDb: () => ({ subscribe: emptySubscription }),
+    _setTimeout: () => ({}),
+    _clearTimeout: () => {}
+  })
+  controller.ensureSubscriptions(context(msg))
+
+  for (const [code, payload] of [
+    [NOSTRDB_SYNC_ADVERTISE_CODE, {}],
+    [NOSTRDB_SYNC_REPLY_CODE, { index: 0, isLast: true, jsonl: '{}\n' }],
+    [NOSTRDB_SYNC_PUSH_CODE, { index: 0, isLast: false, jsonl: '{}\n' }],
+    [NOSTRDB_SYNC_APP_REPLY_CODE, { appId: 'app', index: 0, isLast: true, jsonl: '{}\n' }]
+  ]) {
+    await assert.rejects(controller.handleMessage(syncMessage({ code, payload }), context(msg)), error => {
+      assert.equal(error.code, 'SYNC_PAYLOAD_INVALID')
+      assert.equal(error.quarantineable, true)
+      return true
+    })
+  }
+  assert.equal(await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ASK_CODE,
+    payload: { requestId: '', sinceScore: 2, untilScore: 1 }
+  }), context(msg)), true)
+  assert.equal(await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_APP_ASK_CODE,
+    payload: { requestId: '', appId: '', batchSize: 0 }
+  }), context(msg)), true)
+})
+
 test('nostrdb sync replies with an empty final chunk when no events are missing', async () => {
   const msg = messenger()
   const controller = createNostrDbSyncController({

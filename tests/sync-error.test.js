@@ -12,6 +12,31 @@ test('overflow diagnostics retain only the bounded operational fields', () => {
   assert.ok(!JSON.stringify(details).includes('secret'))
 })
 
+test('quarantine diagnostics expose classifications but never message coordinates or payloads', () => {
+  const error = Object.assign(new Error('SYNC_MESSAGE_QUARANTINED'), {
+    code: 'SYNC_MESSAGE_QUARANTINED',
+    syncCode: 'SYNC_PAYLOAD_INVALID',
+    syncType: 'reply',
+    operationCode: 'contentKeys_reply_t7y8',
+    status: 'stored',
+    partial: true,
+    evicted: 2,
+    senderPubkey: 'secret',
+    eventId: 'secret',
+    payload: { seckey: 'secret' }
+  })
+  assert.deepEqual(syncErrorDetails(error), {
+    code: 'SYNC_MESSAGE_QUARANTINED',
+    syncCode: 'SYNC_PAYLOAD_INVALID',
+    syncType: 'reply',
+    operationCode: 'contentKeys_reply_t7y8',
+    status: 'stored',
+    partial: true,
+    evicted: 2
+  })
+  assert.equal(JSON.stringify(syncErrorDetails(error)).includes('secret'), false)
+})
+
 test('capacity diagnostics expose only queue metrics and pause reasons', () => {
   const error = Object.assign(new Error('SYNC_PUBLICATION_FAILED'), {
     cause: Object.assign(new Error('PRIVATE_MESSENGER_PAUSED'), {

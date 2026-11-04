@@ -40,6 +40,11 @@ state, keyPath "key"
   retain history; retention removes only historical keys older than 45 days and
   always protects the active key. Announcements are not persisted in NostrDB.
 
+  ez-vault:sync-quarantine:v1 is one encrypted bounded quarantine/retry state.
+  It retains structurally incompatible data-bearing sync messages for replay
+  after the decoder version changes. No plaintext payload or identity metadata
+  is stored outside the sealed state value.
+
 revocationRotations, keyPath "key"
   key    stable rotation-intent coordinate
   value  content-key rotation intent and retry state

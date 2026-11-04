@@ -571,6 +571,27 @@ test('local mode promotion reciphers every durable sensitive payload', async () 
   await secrets.setContentKeySecret(pubkey, contentSeckey, 123)
   await trustedSigners.add({ pubkey: trustedPubkey, platform: 'Test device' })
   await messengerLog.append({ method: 'sign_event', status: 'success', params: ['sensitive'] })
+  const quarantinedMessage = {
+    version: 1,
+    records: [{
+      id: 'a'.repeat(64),
+      ownerPubkey: pubkey,
+      channelPubkey: pubkey,
+      senderPubkey: trustedPubkey,
+      code: 'contentKeys_reply_t7y8',
+      reason: 'bad-shape',
+      partial: false,
+      handlerVersion: 1,
+      firstAt: 1,
+      lastAt: 1,
+      attempts: 1,
+      byteSize: 100,
+      message: { event: { id: 'a'.repeat(64), pubkey: trustedPubkey }, payload: { code: 'contentKeys_reply_t7y8' } }
+    }]
+  }
+  await updateState({
+    set: { 'ez-vault:sync-quarantine:v1': secrets.vaultEncrypt(JSON.stringify(quarantinedMessage)) }
+  })
   await appendMessengerLog({
     ts: 1,
     appKey: 'launcher',
@@ -595,6 +616,7 @@ test('local mode promotion reciphers every durable sensitive payload', async () 
   assert.deepEqual(secrets.listSecretRefs(), [{ type: 'nsec', pubkey }])
   assert.equal(secrets.listContentKeys(pubkey).length, 1)
   assert.equal(trustedSigners.list()[0].pubkey, trustedPubkey)
+  assert.deepEqual(JSON.parse(secrets.vaultDecrypt(getState('ez-vault:sync-quarantine:v1'))), quarantinedMessage)
   const logs = await messengerLog.list()
   assert.equal(logs.some(entry => entry.method === 'corrupt'), false)
   assert.deepEqual(logs.find(entry => entry.method === 'sign_event')?.params, ['sensitive'])

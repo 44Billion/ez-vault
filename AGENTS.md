@@ -531,6 +531,20 @@ reasons, never payloads, filters or identities.
   non-pause native errors visible and never raise browser storage quotas or
   acknowledge an unsent final response.
 
+- Trusted-device sync data payloads are validated independently of their Nostr
+  event/private-channel envelope. Structurally invalid data-bearing messages use
+  `SYNC_PAYLOAD_INVALID`/`SYNC_SCHEMA_UNSUPPORTED` and are sealed in
+  `ez-vault:sync-quarantine:v1` before ACK; invalid requests are ACK/drop and are
+  never replayed. Operational storage/network/pause failures still NACK.
+  Quarantine has 100-record/4 MiB global and 25-record/1 MiB per-peer caps, a
+  30-day TTL, and 1 MiB maximum per record. Replay runs once per lifecycle only
+  for records from an older decoder version, ahead of inbox delivery, and keeps
+  transient failures encrypted without advancing their version. Diagnostics
+  contain classifications/counts only, never payloads or identities. Passkey
+  promotion must rekey this state with the existing local-state scope. Increment
+  `SYNC_QUARANTINE_DECODER_VERSION` whenever an accepted sync payload shape or
+  decoder compatibility rule changes.
+
 
 Account presentation (`name`, `picture`, `about`) may come from pairing before
 signed metadata is available. Intake never fabricates Nostr profile events.

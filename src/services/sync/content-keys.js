@@ -4,6 +4,7 @@ import * as secrets from '../secrets.js'
 import { filterVisibleAccounts } from '../account-mutations.js'
 import { upsertContentKeyEvent } from '../content-key/index.js'
 import { hexToBytes } from 'libp2r2p/base16'
+import { assertSupportedPayloadVersion, syncPayloadInvalid } from './payload-error.js'
 
 // Flow notes:
 // - This trusted-device layer only syncs content-key material for local nsec
@@ -26,6 +27,7 @@ export const CONTENT_KEYS_ASK_CODE = 'contentKeys_ask_t7y8'
 export const CONTENT_KEYS_REPLY_CODE = 'contentKeys_reply_t7y8'
 
 const HEX32 = /^[0-9a-f]{64}$/i
+const MAX_SYNC_ENTRIES = 512
 
 const listeners = new Set()
 const debugSourceByKey = new Map()
@@ -117,6 +119,13 @@ function messageCode (message) {
 
 function messageBody (message) {
   return isPlainObject(message?.payload?.payload) ? message.payload.payload : {}
+}
+
+function requireDataBody (message) {
+  const body = message?.payload?.payload
+  if (!isPlainObject(body)) throw syncPayloadInvalid('payload-object-required')
+  assertSupportedPayloadVersion(body)
+  return body
 }
 
 function isTrustedSender (message, trustedByPubkey) {
@@ -243,11 +252,17 @@ async function handleAnnounce (message, context) {
   const ownerPubkey = localOwnerForChannel(message.channelPubkey, context)
   if (!ownerPubkey) return false
   const channelPubkey = message.channelPubkey || ownerPubkey
-  const keys = (Array.isArray(messageBody(message).keys) ? messageBody(message).keys : [])
-    .map(normalizeMetaKey)
-    .filter(Boolean)
+  const body = requireDataBody(message)
+  if (!Array.isArray(body.keys) || body.keys.length > MAX_SYNC_ENTRIES) {
+    throw syncPayloadInvalid('keys-array-invalid')
+  }
+  const keys = body.keys.map(normalizeMetaKey).filter(Boolean)
+  const rejected = body.keys.length - keys.length
   const { knownPubkeys, announcedPubkeys, missingPubkeys: pubkeys } = contentKeyDiff(ownerPubkey, keys)
-  if (!pubkeys.length) return true
+  if (!pubkeys.length) {
+    if (rejected) throw syncPayloadInvalid('keys-entries-invalid', { partial: true })
+    return true
+  }
 
   emitDebug(context.debug, 'request', {
     type: 'ask',
@@ -266,6 +281,7 @@ async function handleAnnounce (message, context) {
     code: CONTENT_KEYS_ASK_CODE,
     payload: { pubkeys }
   })
+  if (rejected) throw syncPayloadInvalid('keys-entries-invalid', { partial: true })
   return true
 }
 
@@ -273,7 +289,10 @@ async function handleRequest (message, context) {
   const ownerPubkey = localOwnerForChannel(message.channelPubkey, context)
   if (!ownerPubkey || !message.event?.id) return false
   const channelPubkey = message.channelPubkey || ownerPubkey
-  const pubkeys = normalizePubkeyList(messageBody(message).pubkeys)
+  const body = messageBody(message)
+  if (!isPlainObject(message?.payload?.payload) || !Array.isArray(body.pubkeys) ||
+    body.pubkeys.length > MAX_SYNC_ENTRIES || (body.v != null && body.v !== 1)) return true
+  const pubkeys = normalizePubkeyList(body.pubkeys)
   if (!pubkeys.length) return true
 
   await secrets.replyWithContentKeySecrets({
@@ -306,14 +325,22 @@ async function handleReply (message, context) {
   const ownerPubkey = localOwnerForChannel(message.channelPubkey, context)
   if (!ownerPubkey) return false
   const channelPubkey = message.channelPubkey || ownerPubkey
+  const body = requireDataBody(message)
+  if (!Array.isArray(body.keys) || body.keys.length > MAX_SYNC_ENTRIES) {
+    throw syncPayloadInvalid('keys-array-invalid')
+  }
   const label = trustedLabel(message.event.pubkey, context.trustedByPubkey)
   const existingByPubkey = new Map(contentKeysForOwner(ownerPubkey).map(key => [key.pubkey, key]))
   let changed = false
   const importedPubkeys = []
+  let rejected = 0
 
-  for (const key of (Array.isArray(messageBody(message).keys) ? messageBody(message).keys : [])) {
+  for (const key of body.keys) {
     const normalized = normalizeSecretKey(key)
-    if (!normalized) continue
+    if (!normalized) {
+      rejected++
+      continue
+    }
 
     const existing = existingByPubkey.get(normalized.pubkey)
     if (existing && (existing.createdAt || 0) >= normalized.createdAt) continue
@@ -338,6 +365,7 @@ async function handleReply (message, context) {
       count: importedPubkeys.length
     })
   }
+  if (rejected) throw syncPayloadInvalid('keys-entries-invalid', { partial: true })
   return true
 }
 

@@ -422,6 +422,10 @@ pause recovery. Vault synchronization keeps its direct messenger and local seed
 storage; foreground-send urgency belongs to sessions that explicitly request it.
 The durable inbox begins backpressure at 70% and resumes at 50%; NostrDB pushes
 park without polling while the messenger is paused and honor relay retry deadlines.
+Trusted-device sync payloads that are structurally incompatible are sealed in a
+bounded, 30-day quarantine/retry state before being acknowledged. They are
+revalidated after a decoder-version update, so an older vault can process a peer's
+newer data after being upgraded without blocking unrelated inbox messages.
 
 ### Protected NIP44v3 conversation cache
 

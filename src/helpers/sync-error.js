@@ -22,6 +22,19 @@ function safeInteger (value) {
 // Keep operational buffer diagnostics useful without logging messages or keys.
 export function syncErrorDetails (error) {
   const errors = nestedErrors(error)
+  const quarantined = errors.find(value => value.code === 'SYNC_MESSAGE_QUARANTINED')
+  if (quarantined) {
+    const details = { code: 'SYNC_MESSAGE_QUARANTINED' }
+    for (const key of ['syncCode', 'syncType', 'operationCode']) {
+      if (typeof quarantined[key] === 'string' && quarantined[key]) details[key] = quarantined[key].slice(0, 128)
+    }
+    if (['stored', 'updated', 'oversized', 'ignored'].includes(quarantined.status)) details.status = quarantined.status
+    if (typeof quarantined.partial === 'boolean') details.partial = quarantined.partial
+    const evicted = safeInteger(quarantined.evicted)
+    if (evicted !== undefined) details.evicted = evicted
+    return details
+  }
+
   const pressureError = errors.find(value => value.code === 'PRIVATE_MESSENGER_CAPACITY_PRESSURE')
   if (pressureError) {
     const details = { code: 'PRIVATE_MESSENGER_CAPACITY_PRESSURE' }

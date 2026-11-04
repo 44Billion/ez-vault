@@ -11,6 +11,8 @@ import * as contentKeys from './content-keys.js'
 import * as trustedSignerSync from './trusted-signers.js'
 import * as revocationRotation from './revocation-rotation.js'
 import { createNostrDbSyncController } from './nostrdb.js'
+import { isSyncPayloadError, syncPayloadInvalid } from './payload-error.js'
+import { SYNC_QUARANTINE_DECODER_VERSION, syncQuarantine } from './quarantine.js'
 import {
   filterVisibleAccounts,
   hasPendingMutation,
@@ -125,6 +127,8 @@ export function createSyncController ({
   _trustedSignerSync = trustedSignerSync,
   _revocationRotation = revocationRotation,
   _createNostrDbSyncController = createNostrDbSyncController,
+  _syncQuarantine = syncQuarantine,
+  _quarantineDecoderVersion = SYNC_QUARANTINE_DECODER_VERSION,
   _claimSigner = claimSigner,
   _subscribeRelayListUpdates = subscribeRelayListUpdates,
   _hasPendingMutation = hasPendingMutation,
@@ -155,6 +159,7 @@ export function createSyncController ({
   let relayListRevision = 0
   let refreshQueued = false
   let lifecycleId = 0
+  let quarantineReplayLifecycle = 0
   let trustedAnnounceRetryAt = 0
   let messengerStateMonitor = null
   const pendingAnnounceOwners = new Set()
@@ -174,6 +179,62 @@ export function createSyncController ({
     _clearTimeout,
     onError
   })
+
+  function syncHandlerContext () {
+    return {
+      messenger,
+      trustedByPubkey,
+      devicePubkey,
+      ownerPubkeyForChannel,
+      channelPubkeyForOwner,
+      ownerPubkeys: new Set(nostrDbOwnerPubkeys(_store)),
+      trustedSigners: _trustedSigners,
+      debug
+    }
+  }
+
+  async function handleSyncMessage (message) {
+    const context = syncHandlerContext()
+    const handled = await _contentKeys.handleMessage(message, context)
+    if (handled) return true
+    const handledTrustedSigners = await _trustedSignerSync.handleMessage(message, context)
+    if (handledTrustedSigners) return true
+    return nostrDbSync.handleMessage(message, context)
+  }
+
+  function emitQuarantineDiagnostic (message, error, result) {
+    const diagnostic = Object.assign(new Error('SYNC_MESSAGE_QUARANTINED'), {
+      code: 'SYNC_MESSAGE_QUARANTINED',
+      syncCode: error.code,
+      syncType: message?.type || '',
+      operationCode: messageCode(message),
+      status: result?.status || 'stored',
+      partial: error.partial === true,
+      evicted: Number.isSafeInteger(result?.evicted) ? result.evicted : 0
+    })
+    try { onError(diagnostic) } catch {}
+  }
+
+  async function replayQuarantinedMessages (id) {
+    if (quarantineReplayLifecycle === id || !initialized || !messenger ||
+      !_secrets.isUnlocked() || channelConfiguration) return
+    quarantineReplayLifecycle = id
+    try {
+      const result = await _syncQuarantine.replay({
+        context: syncHandlerContext(),
+        decoderVersion: _quarantineDecoderVersion,
+        handle: async message => {
+          if (await handleSyncMessage(message)) return true
+          throw syncPayloadInvalid('handler-no-longer-recognized')
+        }
+      })
+      if (result.pruned || result.replayed || result.retained) {
+        emitDebug('quarantine-replay', result)
+      }
+    } catch (error) {
+      if (error?.name !== 'InvalidStateError' && error?.message !== 'STORAGE_CLOSED') onError(error)
+    }
+  }
 
   function emitDebug (action, detail = {}) {
     try {
@@ -460,6 +521,7 @@ export function createSyncController ({
     if (draining) return
     draining = true
     try {
+      await replayQuarantinedMessages(id)
       while (drainQueued && isCurrentLifecycle(id)) {
         drainQueued = false
         let handled = 0
@@ -477,35 +539,41 @@ export function createSyncController ({
           handled += 1
           emitDebug('handle', messageDebugInfo(message))
           try {
-            const handled = await _contentKeys.handleMessage(message, {
-              messenger,
-              trustedByPubkey,
-              ownerPubkeyForChannel,
-              debug
-            })
-            if (!handled) {
-              const handledTrustedSigners = await _trustedSignerSync.handleMessage(message, {
-                messenger,
-                trustedByPubkey,
-                devicePubkey,
-                trustedSigners: _trustedSigners,
-                debug
-              })
-              if (!handledTrustedSigners) {
-                await nostrDbSync.handleMessage(message, {
-                  messenger,
-                  trustedByPubkey,
-                  ownerPubkeyForChannel,
-                  channelPubkeyForOwner,
-                  ownerPubkeys: new Set(nostrDbOwnerPubkeys(_store)),
-                  debug
-                })
-              }
-            }
+            await handleSyncMessage(message)
             await ack()
           } catch (err) {
+            let failure = err
+            if (isSyncPayloadError(err)) {
+              try {
+                if (!err.quarantineable || !message?.event?.id) {
+                  emitDebug('dropped-invalid-sync-message', {
+                    syncCode: err.code,
+                    syncType: message?.type || '',
+                    operationCode: messageCode(message)
+                  })
+                } else {
+                  const result = await _syncQuarantine.add(message, err, {
+                    context: syncHandlerContext(),
+                    decoderVersion: _quarantineDecoderVersion
+                  })
+                  if (['stored', 'oversized'].includes(result.status)) {
+                    emitQuarantineDiagnostic(message, err, result)
+                  } else {
+                    emitDebug('quarantine-deduplicated', {
+                      syncCode: err.code,
+                      status: result.status,
+                      evicted: result.evicted || 0
+                    })
+                  }
+                }
+                if (await ack() === false) throw new Error('INBOX_ACK_FAILED')
+                continue
+              } catch (quarantineError) {
+                failure = quarantineError
+              }
+            }
             await nack()
-            onError(err)
+            onError(failure)
             // Do not spin on a persistent storage/permission failure. A later
             // unlock, refresh or queued delivery schedules another attempt.
             drainQueued = false

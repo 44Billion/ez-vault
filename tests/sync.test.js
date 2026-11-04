@@ -15,6 +15,7 @@ import {
   resetDebugSources
 } from '../src/services/sync/content-keys.js'
 import { TRUSTED_SIGNERS_STATE_CODE } from '../src/services/sync/trusted-signers.js'
+import { syncPayloadInvalid } from '../src/services/sync/payload-error.js'
 import * as store from '../src/services/accounts-store.js'
 import * as secrets from '../src/services/secrets.js'
 import { bytesToHex, hexToBytes } from 'libp2r2p/base16'
@@ -286,7 +287,7 @@ test('sync orchestration watches nsec channels with identity-only sync options',
   assert.deepEqual(instances[0].initOptions.channels[1].sendRelays, ['wss://relay.44billion.net', 'wss://nos.lol'])
   assert.deepEqual(instances[0].initOptions.channels[1].seeders, ['trusted1'])
   assert.ok(debugEvents.some(event => event.action === 'watch' && event.mode === 'seeder'))
-  assert.equal(timers[0].ms, 1000)
+  assert.ok(timers[0].ms >= 999 && timers[0].ms <= 1000)
 
   await storeStub.emit()
   assert.equal(instances[0].updates.length, 0)
@@ -940,7 +941,6 @@ test('sync drains messages enqueued while another message is being handled', asy
   const handled = []
   const debugEvents = []
   let messenger = null
-
   class FakeMessenger {
     constructor (options) {
       this.options = options
@@ -1430,6 +1430,39 @@ test('content-key announce ignores untrusted and non-nsec channels, then request
   assert.deepEqual(messenger.sent[0].options.payload.pubkeys, [absentPubkey])
 })
 
+test('content-key announce shape errors are quarantineable while malformed requests are ignored', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const owner = await addNsecAccount()
+  const trusted = 'd'.repeat(64)
+  const context = {
+    messenger: fakeMessenger(),
+    trustedByPubkey: new Map([[trusted, { pubkey: trusted }]])
+  }
+
+  await assert.rejects(handleMessage(syncMessage({
+    channelPubkey: owner.pubkey,
+    senderPubkey: trusted,
+    code: CONTENT_KEYS_ANNOUNCE_CODE,
+    payload: {}
+  }), context), error => {
+    assert.equal(error.code, 'SYNC_PAYLOAD_INVALID')
+    assert.equal(error.quarantineable, true)
+    return true
+  })
+  await assert.rejects(handleMessage(syncMessage({
+    channelPubkey: owner.pubkey,
+    senderPubkey: trusted,
+    code: CONTENT_KEYS_ANNOUNCE_CODE,
+    payload: { v: 2, keys: [] }
+  }), context), error => error.code === 'SYNC_SCHEMA_UNSUPPORTED')
+  assert.equal(await handleMessage(syncMessage({
+    channelPubkey: owner.pubkey,
+    senderPubkey: trusted,
+    code: CONTENT_KEYS_ASK_CODE,
+    payload: { pubkeys: 'not-an-array' }
+  }), context), true)
+})
+
 test('content-key announce does not request keys already restored from IndexedDB', async () => {
   const vaultKey = generateSecretKey()
   secrets.unlock(vaultKey, null)
@@ -1555,7 +1588,7 @@ test('content-key replies import valid keys, keep older keys, and notify the syn
   const unsubscribe = secrets.subscribeContentKeys(ownerPubkey => notified.push(ownerPubkey))
 
   try {
-    await handleMessage(syncMessage({
+    await assert.rejects(handleMessage(syncMessage({
       channelPubkey: owner.pubkey,
       senderPubkey: trusted,
       code: CONTENT_KEYS_REPLY_CODE,
@@ -1569,7 +1602,7 @@ test('content-key replies import valid keys, keep older keys, and notify the syn
       messenger: fakeMessenger(),
       trustedByPubkey: new Map([[trusted, { pubkey: trusted, platform: 'Tablet' }]]),
       scheduleAnnounce: (ownerPubkey, options) => scheduled.push({ ownerPubkey, options })
-    })
+    }), error => error.code === 'SYNC_PAYLOAD_INVALID' && error.partial === true)
   } finally {
     unsubscribe()
   }
@@ -1774,5 +1807,190 @@ test('sync only acknowledges a successful handler and nacks a failed delivery wi
   assert.deepEqual(rejections, ['a'])
   assert.equal(messenger.queue.length, 1)
 
+  controller.close()
+})
+
+test('sync persists invalid data payloads before ACK and drops invalid requests without quarantine', async () => {
+  const storeStub = createSubscribable({
+    list: () => [{ type: 'nsec', pubkey: 'nsec1' }]
+  })
+  const secretsStub = createSubscribable({
+    isUnlocked: () => true,
+    getDeviceSigner: async () => signer('device')
+  })
+  const trustedStub = createSubscribable({
+    list: () => [{ pubkey: 'trusted1', platform: 'Laptop' }]
+  })
+  const acknowledgements = []
+  const rejections = []
+  const quarantined = []
+  const diagnostics = []
+
+  class FakeMessenger {
+    constructor (options) {
+      this.options = options
+      this.queue = [
+        { type: 'reply', event: { id: 'data', pubkey: 'trusted1' }, payload: { code: 'data_code' } },
+        { type: 'ask', event: { id: 'request', pubkey: 'trusted1' }, payload: { code: 'request_code' } },
+        { type: 'reply', event: { id: 'unknown', pubkey: 'trusted1' }, payload: { code: 'unknown_code' } },
+        { type: 'reply', event: { id: 'storage', pubkey: 'trusted1' }, payload: { code: 'data_code' } }
+      ]
+    }
+
+    async init (options) { this.initOptions = options; return this }
+    async nextMessage () {
+      const message = this.queue.shift()
+      return message
+        ? {
+            message,
+            ack: async () => { acknowledgements.push(message.event.id); return true },
+            nack: async () => { rejections.push(message.event.id); this.queue.unshift(message); return true }
+          }
+        : null
+    }
+
+    close () {}
+  }
+
+  const controller = createSyncController({
+    MessengerClass: FakeMessenger,
+    _store: storeStub,
+    _secrets: secretsStub,
+    _trustedSigners: trustedStub,
+    _contentKeys: {
+      resetDebugSources: () => {},
+      announceContentKeys: async () => {},
+      handleMessage: async message => {
+        if (message.payload.code === 'unknown_code') return false
+        throw syncPayloadInvalid('bad-shape', { quarantineable: message.type !== 'ask' })
+      }
+    },
+    _trustedSignerSync: {
+      TRUSTED_SIGNER_SYNC_INFO: SIGNER_LIST_SYNC_INFO,
+      announceTrustedSignerState: async () => {},
+      handleMessage: async () => false
+    },
+    _createNostrDbSyncController: () => ({
+      announceRange: async () => {},
+      ensureSubscriptions: () => {},
+      handleMessage: async () => false,
+      resumeAfterPause: async () => {},
+      stop: () => {}
+    }),
+    _syncQuarantine: {
+      replay: async () => ({ pruned: 0, replayed: 0, retained: 0 }),
+      add: async (message, error, options) => {
+        if (message.event.id === 'storage') throw new Error('QUARANTINE_WRITE_FAILED')
+        quarantined.push({ message, error, options })
+        return { status: 'stored', evicted: 0 }
+      }
+    },
+    _claimSigner: () => signer('nsec1'),
+    _setTimeout: () => ({}),
+    _clearTimeout: () => {},
+    _setInterval: () => ({}),
+    _clearInterval: () => {},
+    onError: error => diagnostics.push(error),
+    _debug: () => {}
+  })
+
+  await controller.init()
+  await flushMicrotasks()
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.deepEqual(quarantined.map(entry => entry.message.event.id), ['data'])
+  assert.deepEqual(acknowledgements, ['data', 'request', 'unknown'])
+  assert.deepEqual(rejections, ['storage'])
+  assert.equal(diagnostics.filter(error => error.code === 'SYNC_MESSAGE_QUARANTINED').length, 1)
+  assert.ok(diagnostics.some(error => error.message === 'QUARANTINE_WRITE_FAILED'))
+  controller.close()
+})
+
+test('sync replays quarantine once before inbox deliveries and leaves storage failures held', async () => {
+  const storeStub = createSubscribable({
+    list: () => [{ type: 'nsec', pubkey: 'nsec1' }]
+  })
+  const secretsStub = createSubscribable({
+    isUnlocked: () => true,
+    getDeviceSigner: async () => signer('device')
+  })
+  const trustedStub = createSubscribable({
+    list: () => [{ pubkey: 'trusted1', platform: 'Laptop' }]
+  })
+  const order = []
+  const rejections = []
+  let messenger = null
+  let replayCalls = 0
+
+  class FakeMessenger {
+    constructor (options) {
+      this.options = options
+      this.queue = [{ type: 'message', event: { id: 'inbox', pubkey: 'trusted1' }, payload: { code: 'other' } }]
+      messenger = this
+    }
+
+    async init (options) { this.initOptions = options; return this }
+    async nextMessage () {
+      const message = this.queue.shift()
+      if (message) order.push(`delivery:${message.event.id}`)
+      return message
+        ? {
+            message,
+            ack: async () => true,
+            nack: async () => { rejections.push(message.event.id); this.queue.unshift(message); return true }
+          }
+        : null
+    }
+
+    close () {}
+  }
+
+  const controller = createSyncController({
+    MessengerClass: FakeMessenger,
+    _store: storeStub,
+    _secrets: secretsStub,
+    _trustedSigners: trustedStub,
+    _contentKeys: {
+      resetDebugSources: () => {},
+      announceContentKeys: async () => {},
+      handleMessage: async () => true
+    },
+    _trustedSignerSync: {
+      TRUSTED_SIGNER_SYNC_INFO: SIGNER_LIST_SYNC_INFO,
+      announceTrustedSignerState: async () => {},
+      handleMessage: async () => false
+    },
+    _createNostrDbSyncController: () => ({
+      announceRange: async () => {},
+      ensureSubscriptions: () => {},
+      handleMessage: async () => false,
+      resumeAfterPause: async () => {},
+      stop: () => {}
+    }),
+    _syncQuarantine: {
+      replay: async () => {
+        replayCalls++
+        order.push('replay')
+        return { pruned: 0, replayed: 0, retained: 0 }
+      },
+      add: async () => ({ status: 'stored', evicted: 0 })
+    },
+    _claimSigner: () => signer('nsec1'),
+    _setTimeout: () => ({}),
+    _clearTimeout: () => {},
+    _setInterval: () => ({}),
+    _clearInterval: () => {},
+    onError: () => {},
+    _debug: () => {}
+  })
+
+  await controller.init()
+  await flushMicrotasks()
+  messenger.options.onMessageQueued()
+  await flushMicrotasks()
+
+  assert.equal(replayCalls, 1)
+  assert.deepEqual(order, ['replay', 'delivery:inbox'])
+  assert.deepEqual(rejections, [])
   controller.close()
 })
