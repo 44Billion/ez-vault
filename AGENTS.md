@@ -491,7 +491,7 @@ reasons, never payloads, filters or identities.
 
 ## Launcher relay bridge
 
-- Use the coordinated libp2r2p 0.12.4 release, pinned exactly in the
+- Use the coordinated libp2r2p 0.12.6 release, pinned exactly in the
   dev dependency and lockfile. Its live readers stop definitive per-route refusals
   and recover transient errors through bounded offline-aware backoff/cooldowns.
   Keep the existing facade/protocol and standalone fallback. Validate sync,
@@ -554,8 +554,9 @@ placeholders remain readable for presentation/export only; no bulk migration or
 storage reset is required. A valid signed timestamp-0 event is acceptable.
 Sync overflow warnings include only bounded operational queue diagnostics.
 
-- Forward Nostr frames, including optional absolute `@<Unix milliseconds>` params, unchanged.
-  Never recompute cooldown at delivery or add properties to WebSocket events.
+- Forward Nostr frames and standard relative `retryAfter` params unchanged after
+  the launcher normalizes them for consumer delivery. Never accept proprietary
+  `@` params or add properties to WebSocket events.
   Outgoing overflow may report operational facts over the internal bridge; the
   launcher treats consumer reports as unverified. Remote origin/policy fields
   do not supply trusted local-failure attribution.

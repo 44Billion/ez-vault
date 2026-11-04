@@ -383,7 +383,7 @@ recovery and reload without reseeding. Run it with
 `node ../44billion/bin/run-browser-tests.js -- node tests/browser/private-sync.js`.
 The runner caps the complete browser/runtime group at 3 GiB with no swap.
 
-Private synchronization uses the `libp2r2p@0.11.21` package pinned in
+Private synchronization uses the `libp2r2p@0.12.6` package pinned in
 `package-lock.json`, including live-overflow recovery with durable history gaps.
 Live readers stop definitive per-route refusals and recover transient failures
 with bounded offline-aware backoff and relay cooldowns. The launcher facade and
@@ -395,9 +395,10 @@ Content-key announcements use `CONTENT_KEY_ANNOUNCEMENT` (18716), imported from
 `libp2r2p/kind`. Event builders and parsers remain in `libp2r2p/content-key/event`;
 that subpath no longer exports a separate kind constant.
 
-Delegated sockets preserve optional Nostr `params` strings, including absolute
-`@<Unix milliseconds>` deadlines, through the launcher bridge. The library scopes
-cooldowns by EVENT/AUTH/REQ/COUNT, so publication refusals do not block reads. WebSocket events carry no custom provenance; bridge overflow reports are
+Delegated sockets preserve standard relative Nostr `params` strings through the
+launcher bridge; the launcher refreshes `retryAfter` immediately before delivery.
+The library scopes cooldowns by EVENT/AUTH/REQ/COUNT, so publication refusals do
+not block reads. WebSocket events carry no custom provenance; bridge overflow reports are
 internal, unverified consumer diagnostics and do not accuse a relay of failure.
 
 The 0.11.20 messenger status snapshots distinguish pause causes; internally
@@ -417,7 +418,7 @@ subscriptions and historical recovery continue in the background. ACK still
 requires successful persistence, and the vault keeps its local recovery seed store.
 
 
-The coordinated libp2r2p 0.12.4 release shares confirmed connectivity with automatic
+The coordinated libp2r2p 0.12.6 release shares confirmed connectivity with automatic
 pause recovery. Vault synchronization keeps its direct messenger and local seed
 storage; foreground-send urgency belongs to sessions that explicitly request it.
 The durable inbox begins backpressure at 70% and resumes at 50%; NostrDB pushes
