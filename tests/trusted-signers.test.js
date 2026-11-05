@@ -243,12 +243,13 @@ test('trusted signer announce omits the receiver own pubkey', async () => {
   })
 
   assert.equal(sent.length, 2)
+  assert.ok(sent.every(call => call.useBulkPacing === true))
   assert.deepEqual(sent.find(call => call.receiverPubkey === pk(1)).payload.entries.map(entry => entry.pubkey), [pk(2)])
   assert.deepEqual(sent.find(call => call.receiverPubkey === pk(2)).payload.entries.map(entry => entry.pubkey), [pk(1)])
 })
 
 test('trusted signer announce preserves a relay retry deadline', async () => {
-  const retryAt = Date.now() + 10 * 60 * 1000
+  const retryAt = Date.now() + 5 * 60 * 1000
   await assert.rejects(announceTrustedSignerState({
     messenger: {
       tell: async () => ({

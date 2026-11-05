@@ -202,7 +202,8 @@ export async function announceContentKeys ({ messenger, ownerPubkey, channelPubk
     channelPubkey,
     receiverPubkeys: receivers,
     code: CONTENT_KEYS_ANNOUNCE_CODE,
-    payload: { keys }
+    payload: { keys },
+    useBulkPacing: true
   })
 }
 
@@ -279,7 +280,8 @@ async function handleAnnounce (message, context) {
     channelPubkey,
     receiverPubkey: message.event.pubkey,
     code: CONTENT_KEYS_ASK_CODE,
-    payload: { pubkeys }
+    payload: { pubkeys },
+    useBulkPacing: true
   })
   if (rejected) throw syncPayloadInvalid('keys-entries-invalid', { partial: true })
   return true
@@ -314,7 +316,8 @@ async function handleRequest (message, context) {
         question: message.event,
         receiverPubkey: message.event.pubkey,
         code: CONTENT_KEYS_REPLY_CODE,
-        payload
+        payload,
+        useBulkPacing: true
       })
     }
   })

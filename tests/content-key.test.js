@@ -240,14 +240,15 @@ test('upsertContentKeyEvent signs and publishes to user write relays', async () 
       return ['wss://write.example']
     },
     _relayPool: relayPoolStub({
-      send: async (event, relays) => {
-        published = { event, relays }
+      send: async (event, relays, options) => {
+        published = { event, relays, options }
         return { success: true }
       }
     })
   })
 
   assert.deepEqual(published.relays, ['wss://write.example'])
+  assert.equal(published.options.useBulkPacing, true)
   assert.equal(parseContentKeyEvent(published.event).iykcPubkey, await contentKey.getPublicKey())
   assert.equal(result.event.id, published.event.id)
   assert.deepEqual(result.result, { success: true })
@@ -323,8 +324,8 @@ test('refreshStoredContentKeyEvents advertises the active local key where absent
         if (relay === 'wss://older.example') return [olderOther]
         return []
       },
-      send: async (event, relays) => {
-        published.push({ event, relays })
+      send: async (event, relays, options) => {
+        published.push({ event, relays, options })
         return { success: true }
       }
     })
@@ -334,6 +335,7 @@ test('refreshStoredContentKeyEvents advertises the active local key where absent
   assert.equal(result.published, 3)
   assert.equal(published.length, 1)
   assert.deepEqual(published[0].relays, ['wss://newest.example', 'wss://absent.example', 'wss://older.example'])
+  assert.equal(published[0].options.useBulkPacing, true)
   assert.equal(published[0].event.created_at, 101)
   assert.equal(parseContentKeyEvent(published[0].event).iykcPubkey, localContentKey.pubkey)
   assert.equal(secrets.listContentKeys(account.pubkey)[0].createdAt, 50)
@@ -374,7 +376,7 @@ test('refreshStoredContentKeyEvents preserves a relay retry deadline from a fail
   const account = await addNsecAccount()
   await addContentKey(account.pubkey, 50)
   const userSigner = secrets.getNsecSigner(account.pubkey)
-  const retryAt = Date.now() + 10 * 60 * 1000
+  const retryAt = Date.now() + 5 * 60 * 1000
   const relayList = await userSigner.signEvent({
     kind: 10002,
     created_at: 6,

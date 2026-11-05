@@ -737,9 +737,7 @@ export function createSyncController ({
           announceRetryAtByOwner.delete(ownerPubkey)
         } catch (err) {
           pendingAnnounceOwners.add(ownerPubkey)
-          const retryAt = publicationRetryAt(err, now)
-          if (retryAt > now) announceRetryAtByOwner.set(ownerPubkey, retryAt)
-          else announceRetryAtByOwner.delete(ownerPubkey)
+          announceRetryAtByOwner.set(ownerPubkey, publicationRetryAt(err, now) || now + 1)
           onError(err)
         }
       }
@@ -756,8 +754,7 @@ export function createSyncController ({
         })
         trustedAnnounceRetryAt = 0
       } catch (err) {
-        const retryAt = publicationRetryAt(err, now)
-        trustedAnnounceRetryAt = retryAt > now ? retryAt : 0
+        trustedAnnounceRetryAt = publicationRetryAt(err, now) || now + 1
         onError(err)
       }
     }

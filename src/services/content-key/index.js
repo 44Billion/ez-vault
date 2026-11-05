@@ -341,7 +341,7 @@ async function refreshAccountContentKeyEvent ({
     createdAt: Math.max(_nowSeconds(), ...found.map(result => result.event.created_at + 1))
   })
   signal?.throwIfAborted()
-  const result = await _relayPool.sendEvent(event, relaysToPublish, { signal })
+  const result = await _relayPool.sendEvent(event, relaysToPublish, { signal, useBulkPacing: true })
   signal?.throwIfAborted()
   if (result?.success) rememberContentKeyEvent(event)
   return {
@@ -362,7 +362,7 @@ export async function upsertContentKeyEvent ({ userSigner, contentKeySigner, cre
   signal?.throwIfAborted()
   const event = await makeContentKeyEvent({ userSigner, contentKeySigner, createdAt })
   signal?.throwIfAborted()
-  const result = await _relayPool.sendEvent(event, writeRelays, { signal })
+  const result = await _relayPool.sendEvent(event, writeRelays, { signal, useBulkPacing: true })
   signal?.throwIfAborted()
   if (result?.success) rememberContentKeyEvent(event)
   return { event, result }
@@ -429,7 +429,7 @@ export async function rotateContentKeyIfStillCanonical ({
     contentKeySigner,
     createdAt: Math.max(_nowSeconds(), canonical.event.created_at + 1)
   })
-  const result = await _relayPool.sendEvent(event, writeRelays)
+  const result = await _relayPool.sendEvent(event, writeRelays, { useBulkPacing: true })
   if (result?.success) rememberContentKeyEvent(event)
   return {
     status: result?.success ? 'rotated' : 'retry',

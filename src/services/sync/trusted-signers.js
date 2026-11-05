@@ -88,7 +88,8 @@ export async function announceTrustedSignerState ({
         channelPubkey,
         receiverPubkey: peerPubkey,
         code: TRUSTED_SIGNERS_STATE_CODE,
-        payload: { entries: payloadEntries }
+        payload: { entries: payloadEntries },
+        useBulkPacing: true
       }))
       sent += 1
     }
@@ -103,7 +104,8 @@ export async function announceTrustedSignerState ({
       channelPubkey,
       receiverPubkey: record.pubkey,
       code: TRUSTED_SIGNERS_STATE_CODE,
-      payload: { entries: [record] }
+      payload: { entries: [record] },
+      useBulkPacing: true
     }))
     sent += 1
   }

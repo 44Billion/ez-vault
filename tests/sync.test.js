@@ -1119,7 +1119,7 @@ test('sync announces content-key changes immediately and restarts the four-hour 
 
 test('sync announcement retries are independent per owner and honor circuit deadlines', async () => {
   let now = 1_000_000
-  const retryAt = now + 10 * 60 * 1000
+  const retryAt = now + 5 * 60 * 1000
   const firstOwner = 'a'.repeat(64)
   const secondOwner = 'b'.repeat(64)
   const timers = new Set()
@@ -1427,6 +1427,7 @@ test('content-key announce ignores untrusted and non-nsec channels, then request
   assert.equal(messenger.sent.length, 1)
   assert.equal(messenger.sent[0].method, 'ask')
   assert.equal(messenger.sent[0].options.code, CONTENT_KEYS_ASK_CODE)
+  assert.equal(messenger.sent[0].options.useBulkPacing, true)
   assert.deepEqual(messenger.sent[0].options.payload.pubkeys, [absentPubkey])
 })
 
@@ -1538,6 +1539,7 @@ test('content-key announce contains only public key metadata', async () => {
 
   assert.equal(messenger.sent[0].method, 'yell')
   assert.equal(messenger.sent[0].options.code, CONTENT_KEYS_ANNOUNCE_CODE)
+  assert.equal(messenger.sent[0].options.useBulkPacing, true)
   assert.deepEqual(messenger.sent[0].options.payload, {
     keys: [{ pubkey: content.pubkey, createdAt: 30 }]
   })
@@ -1566,6 +1568,7 @@ test('content-key requests reply with only locally held requested secrets', asyn
   assert.equal(messenger.sent.length, 1)
   assert.equal(messenger.sent[0].method, 'reply')
   assert.equal(messenger.sent[0].options.code, CONTENT_KEYS_REPLY_CODE)
+  assert.equal(messenger.sent[0].options.useBulkPacing, true)
   assert.equal(messenger.sent[0].options.payload.keys.length, 1)
   assert.deepEqual(messenger.sent[0].options.payload.keys[0], {
     pubkey: content.pubkey,

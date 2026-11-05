@@ -1,7 +1,7 @@
-import { retryAtAfterPublicationError } from '../../helpers/publication-retry.js'
+import { publicationRetryAt } from '../../helpers/publication-retry.js'
 
 // One serial network worker; a new send never resets an existing retry deadline.
-export function createContentKeyPublicationJobs ({ current, online, onOnline, onError, debug = () => {}, setTimer = setTimeout, clearTimer = clearTimeout, now = Date.now, random = Math.random }) {
+export function createContentKeyPublicationJobs ({ current, online, onOnline, onError, debug = () => {}, setTimer = setTimeout, clearTimer = clearTimeout, now = Date.now }) {
   const jobs = new Map()
   let running; let timer; let stopOnline
   function schedule () {
@@ -37,9 +37,7 @@ export function createContentKeyPublicationJobs ({ current, online, onOnline, on
           job.first.reject(error)
           onError(error)
           const failedAt = now()
-          const backoff = Math.max(1000, Math.min(30000, job.delay * (0.8 + random() * 0.4)))
-          job.nextAt = retryAtAfterPublicationError(error, backoff, failedAt)
-          job.delay = Math.min(30000, job.delay * 2)
+          job.nextAt = publicationRetryAt(error, failedAt) || failedAt + 1
         }
       }
     }).finally(() => { if (running === work) running = null; if (!stopOnline) schedule() })
@@ -52,7 +50,7 @@ export function createContentKeyPublicationJobs ({ current, online, onOnline, on
       let job = jobs.get(owner)
       if (job && job.key === key && (!job.done || (!force && job.expiresAt > now()))) return job.done ? Promise.resolve(job.result) : job.first.promise
       if (job) { job.controller.abort(); job.first.resolve({ skipped: 'superseded' }) }
-      job = { owner, key, accountPubkey, run, first: Promise.withResolvers(), controller: new AbortController(), nextAt: now(), delay: 1000, done: false }
+      job = { owner, key, accountPubkey, run, first: Promise.withResolvers(), controller: new AbortController(), nextAt: now(), done: false }
       job.first.promise.catch(() => {})
       jobs.set(owner, job)
       pump()

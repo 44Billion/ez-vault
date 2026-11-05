@@ -19,7 +19,7 @@ function fixture ({ random = () => 0.5 } = {}) {
   }
 }
 
-test('publication jobs coalesce sends and keep their backoff deadline across new requests', async () => {
+test('publication jobs coalesce sends and keep their next scheduler turn across new requests', async () => {
   const f = fixture(); let attempts = 0
   const run = async () => { attempts++; if (attempts < 3) throw new Error('unavailable'); return 'published' }
   const first = f.jobs.request('owner', 'key', run)
@@ -28,9 +28,7 @@ test('publication jobs coalesce sends and keep their backoff deadline across new
   const deadline = [...f.timers.values()][0].at
   assert.equal(f.jobs.request('owner', 'key', run), first)
   assert.equal([...f.timers.values()][0].at, deadline)
-  await f.advance(1000)
-  assert.equal(attempts, 2)
-  await f.advance(1999)
+  await f.advance(1)
   assert.equal(attempts, 2)
   await f.advance(1)
   assert.equal(attempts, 3)
@@ -86,17 +84,17 @@ test('reconciliation checks the base account of a derived identity', async () =>
   jobs.clear()
 })
 
-test('retry jitter never schedules before the one-second lower bound', async () => {
+test('failed publication yields to the relay scheduler on the next turn', async () => {
   const f = fixture({ random: () => 0 })
   await assert.rejects(f.jobs.request('owner', 'key', async () => { throw new Error('offline') }))
   await f.jobs.idle()
-  assert.equal([...f.timers.values()][0].at, 1000)
+  assert.equal([...f.timers.values()][0].at, 1)
   f.jobs.clear()
 })
 
-test('publication retry waits for the relay advice carried by a wrapped error', async () => {
+test('publication retry preserves the already capped relay advice carried by a wrapped error', async () => {
   const f = fixture()
-  const retryAt = 10 * 60 * 1000
+  const retryAt = 5 * 60 * 1000
   let attempts = 0
   const run = async () => {
     attempts++

@@ -495,7 +495,7 @@ default sink silent without that query.
 
 ## Launcher relay bridge
 
-- Use the coordinated libp2r2p 0.12.6 release, pinned exactly in the
+- Use the coordinated libp2r2p 0.12.8 release, pinned exactly in the
   dev dependency and lockfile. Its live readers stop definitive per-route refusals
   and recover transient errors through bounded offline-aware backoff/cooldowns.
   Keep the existing facade/protocol and standalone fallback. Validate sync,
@@ -533,10 +533,11 @@ default sink silent without that query.
   once and preserves any relay `retryAt`. Sync JSONL batches target 128 KiB UTF-8
   plus the 100-record cap; an indivisible oversized event travels alone. Keep
   non-pause native errors visible and never raise browser storage quotas or
-  acknowledge an unsent final response. Pace consecutive chunks by at least one
-  second and grow retry delays exponentially from 1.5 seconds to 30 seconds,
-  while honoring a later relay `retryAt`/`retryAfterMs` hint up to a five-minute
-  cap so malformed or adversarial advice cannot stall synchronization.
+  acknowledge an unsent final response. Mark synchronization publications with
+  `useBulkPacing: true`; RelayConnection owns the one-second serial pacing and
+  the 1..30 second exponential retry. A relay `retryAt` overrides that local
+  backoff. RelayPool owns the configurable rate-limit cap, defaulting to five
+  minutes; consumers must not duplicate either mechanism.
 
 - Trusted-device sync data payloads are validated independently of their Nostr
   event/private-channel envelope. Structurally invalid data-bearing messages use
@@ -596,8 +597,9 @@ to the vault's content-key service.
 
 Message DoubleDH encryption waits only for local content-key selection and
 persistence. The pinned key's announcement runs through the shared serial
-content-key publication coordinator; coalesce by account/key and preserve its
-1–30s backoff. Periodic refresh uses that coordinator too. Lock, account removal,
+content-key publication coordinator; coalesce by account/key and retry on its
+next scheduler turn. RelayConnection owns the bulk pacing and exponential
+rate-limit backoff. Periodic refresh uses that coordinator too. Lock, account removal,
 rotation and pagehide fence stale continuations, including multi-account refresh
 loops. Public signing still requires publication and explicit publish/rotate
 operations retain their contracts. Development timings contain identifiers and
