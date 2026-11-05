@@ -249,6 +249,7 @@ test('upsertContentKeyEvent signs and publishes to user write relays', async () 
 
   assert.deepEqual(published.relays, ['wss://write.example'])
   assert.equal(published.options.useBulkPacing, true)
+  assert.equal(published.options.rateLimitRetries, undefined)
   assert.equal(parseContentKeyEvent(published.event).iykcPubkey, await contentKey.getPublicKey())
   assert.equal(result.event.id, published.event.id)
   assert.deepEqual(result.result, { success: true })
@@ -359,8 +360,8 @@ test('refreshStoredContentKeyEvents publishes local key only when no valid event
     _nowSeconds: () => 200,
     _fetchRelayListEvent: async () => relayList,
     _relayPool: relayPoolStub({
-      send: async (event, relays) => {
-        published.push({ event, relays })
+      send: async (event, relays, options) => {
+        published.push({ event, relays, options })
         return { success: true }
       }
     })
@@ -428,14 +429,15 @@ test('refresh keeps the local selection despite a delayed historical import and 
         if (relay === 'wss://different.example') await secrets.setContentKeySecret(account.pubkey, older.secret, older.createdAt)
         return [relay === 'wss://matching.example' ? matching : different]
       },
-      send: async (event, relays) => {
-        publications.push({ event, relays })
+      send: async (event, relays, options) => {
+        publications.push({ event, relays, options })
         return { success: true }
       }
     })
   })
   assert.equal(result.published, 1)
   assert.deepEqual(publications[0].relays, ['wss://different.example'])
+  assert.equal(publications[0].options.rateLimitRetries, 0)
   assert.equal(parseContentKeyEvent(publications[0].event).iykcPubkey, active.getPublicKey())
   const noRead = { _getEvents: async () => assert.fail('Confirmed refresh should update cache'), _getRelaysByPubkey: async () => assert.fail('No discovery needed') }
   assert.equal((await getIykcProofs([account.pubkey], noRead))[account.pubkey].iykcPubkey, active.getPublicKey())
@@ -473,8 +475,8 @@ test('refreshStoredContentKeyEvents publishes a fallback relay list when none ex
     _nowSeconds: () => 200,
     _fetchRelayListEvent: async () => null,
     _relayPool: relayPoolStub({
-      send: async (event, relays) => {
-        published.push({ event, relays })
+      send: async (event, relays, options) => {
+        published.push({ event, relays, options })
         return { success: true }
       }
     })
@@ -509,8 +511,8 @@ test('refreshStoredContentKeyEvents adds fallback write relays without duplicate
     _nowSeconds: () => 200,
     _fetchRelayListEvent: async () => relayList,
     _relayPool: relayPoolStub({
-      send: async (event, relays) => {
-        published.push({ event, relays })
+      send: async (event, relays, options) => {
+        published.push({ event, relays, options })
         return { success: true }
       }
     })
@@ -550,8 +552,8 @@ test('rotateContentKeyIfStillCanonical rotates when relays still advertise remov
     _fetchRelayListEvent: async () => relayList,
     _relayPool: relayPoolStub({
       events: async () => [oldEvent],
-      send: async (event, relays) => {
-        published.push({ event, relays })
+      send: async (event, relays, options) => {
+        published.push({ event, relays, options })
         return { success: true }
       }
     })
@@ -561,6 +563,7 @@ test('rotateContentKeyIfStillCanonical rotates when relays still advertise remov
   assert.equal(result.rotated, true)
   assert.equal(published.length, 1)
   assert.deepEqual(published[0].relays, ['wss://one.example'])
+  assert.equal(published[0].options.rateLimitRetries, 0)
   assert.notEqual(parseContentKeyEvent(published[0].event).iykcPubkey, oldContent.pubkey)
   assert.equal(secrets.listContentKeys(account.pubkey).length, 2)
   assert.ok(secrets.getContentKeySigner(account.pubkey, oldContent.pubkey))

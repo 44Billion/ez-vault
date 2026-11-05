@@ -58,7 +58,8 @@ export async function canConnectRelay (relay, { _relayPool = relayPool } = {}) {
   try {
     const result = await _relayPool.getEvents({ limit: 0 }, [relay], {
       timeout: RELAY_CONNECT_TIMEOUT_MS,
-      timeoutAfterFirstEose: null
+      timeoutAfterFirstEose: null,
+      rateLimitRetries: 0
     })
     return result.success
   } catch {
@@ -123,7 +124,7 @@ export async function refreshDeviceRelayList ({
     relays: nextRelays,
     createdAt: _nowSeconds()
   }))
-  const result = await _relayPool.sendEvent(event, seedRelays)
+  const result = await _relayPool.sendEvent(event, seedRelays, { rateLimitRetries: 0 })
   const error = await publicationErrorFromResult(result, 'DEVICE_RELAY_PUBLICATION_FAILED')
   if (error) throw error
   return {

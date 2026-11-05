@@ -35,7 +35,7 @@ test('device relay health uses a bounded one-relay EOSE probe', async () => {
   assert.deepEqual(calls, [{
     filter: { limit: 0 },
     relays: ['wss://relay.example'],
-    options: { timeout: 5000, timeoutAfterFirstEose: null }
+    options: { timeout: 5000, timeoutAfterFirstEose: null, rateLimitRetries: 0 }
   }])
 
   assert.equal(await canConnectRelay('wss://offline.example', {
@@ -80,8 +80,8 @@ test('device relay refresh publishes a two-relay NIP-65 list when missing', asyn
     _nowSeconds: () => 30,
     _fetchRelayListEvent: async () => null,
     _relayPool: {
-      sendEvent: async (event, relays) => {
-        published.push({ event, relays })
+      sendEvent: async (event, relays, options) => {
+        published.push({ event, relays, options })
         return { success: true }
       }
     }
@@ -92,6 +92,7 @@ test('device relay refresh publishes a two-relay NIP-65 list when missing', asyn
   assert.deepEqual(published[0].relays, seedRelays)
   assert.equal(published[0].event.kind, 10002)
   assert.equal(published[0].event.created_at, 30)
+  assert.equal(published[0].options.rateLimitRetries, 0)
   assert.deepEqual(published[0].event.tags, freeRelays.slice(0, 2).map(relay => ['r', relay]))
 })
 
@@ -109,8 +110,8 @@ test('device relay refresh replaces only one offline relay per run', async () =>
       return relay !== 'wss://old-one.example'
     },
     _relayPool: {
-      sendEvent: async (event, relays) => {
-        published.push({ event, relays })
+      sendEvent: async (event, relays, options) => {
+        published.push({ event, relays, options })
         return { success: true }
       }
     }
@@ -118,6 +119,7 @@ test('device relay refresh replaces only one offline relay per run', async () =>
 
   assert.equal(result.reason, 'replace-offline')
   assert.equal(published.length, 1)
+  assert.equal(published[0].options.rateLimitRetries, 0)
   assert.deepEqual(published[0].event.tags, [
     ['r', freeRelays[0]],
     ['r', 'wss://old-two.example']

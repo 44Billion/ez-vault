@@ -539,6 +539,11 @@ default sink silent without that query.
   backoff. RelayPool owns the configurable rate-limit cap, defaulting to five
   minutes; consumers must not duplicate either mechanism.
 
+- Durable publication owners pass `rateLimitRetries: 0`: content-key jobs and
+  revocation rotation, device-relay cadence, sync announcements and NostrDB push
+  retries retain their own persisted deadlines. Ephemeral bootstrap/profile
+  publications may use the library's guarded one-retry default.
+
 - Trusted-device sync data payloads are validated independently of their Nostr
   event/private-channel envelope. Structurally invalid data-bearing messages use
   `SYNC_PAYLOAD_INVALID`/`SYNC_SCHEMA_UNSUPPORTED` and are sealed in

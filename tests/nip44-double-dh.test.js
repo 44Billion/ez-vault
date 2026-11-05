@@ -641,6 +641,8 @@ test('encryption and public signatures republish the active local key even when 
     assert.equal(publication.contentKeySigner, active)
     assert.equal(publication.createdAt, remoteTimestamp + 1)
   }
+  assert.equal(publications.filter(publication => publication.rateLimitRetries === 0).length, 1)
+  assert.equal(publications.filter(publication => publication.rateLimitRetries === undefined).length, 1)
 
   const noNetwork = async () => assert.fail('Personal copies must not require an announcement')
   const personal = await run({

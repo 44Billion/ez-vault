@@ -142,7 +142,8 @@ async function publishRelayListIfNeeded ({
   parsedRelays,
   _relayPool,
   _nowSeconds,
-  signal
+  signal,
+  rateLimitRetries
 }) {
   const fallback = freeRelays.slice(0, 2)
   let readRelays = parsedRelays.read
@@ -173,7 +174,7 @@ async function publishRelayListIfNeeded ({
     createdAt: _nowSeconds()
   }))
   signal?.throwIfAborted()
-  const result = await _relayPool.sendEvent(event, seedRelays, { signal })
+  const result = await _relayPool.sendEvent(event, seedRelays, { signal, rateLimitRetries })
   signal?.throwIfAborted()
   await store.update(account.pubkey, { relayListEvent: event, writeRelays })
   return { writeRelays, relayListEvent: event, published: true, reason, result }
@@ -185,7 +186,8 @@ async function resolveContentKeyWriteRelays ({
   _fetchRelayListEvent,
   _relayPool,
   _nowSeconds,
-  signal
+  signal,
+  rateLimitRetries
 }) {
   const relayListEvent = await _fetchRelayListEvent(account.pubkey)
   signal?.throwIfAborted()
@@ -197,7 +199,8 @@ async function resolveContentKeyWriteRelays ({
     parsedRelays,
     _relayPool,
     _nowSeconds,
-    signal
+    signal,
+    rateLimitRetries
   })
 }
 
@@ -296,7 +299,8 @@ async function refreshAccountContentKeyEvent ({
   _fetchRelayListEvent,
   _relayPool,
   _nowSeconds,
-  signal
+  signal,
+  rateLimitRetries
 }) {
   const userSigner = secrets.getNsecSigner(account.pubkey)
   if (!userSigner) return { pubkey: account.pubkey, skipped: 'locked' }
@@ -309,7 +313,8 @@ async function refreshAccountContentKeyEvent ({
     _fetchRelayListEvent,
     _relayPool,
     _nowSeconds,
-    signal
+    signal,
+    rateLimitRetries
   })
   signal?.throwIfAborted()
   const writeRelays = unique(relayList.writeRelays)
@@ -341,7 +346,11 @@ async function refreshAccountContentKeyEvent ({
     createdAt: Math.max(_nowSeconds(), ...found.map(result => result.event.created_at + 1))
   })
   signal?.throwIfAborted()
-  const result = await _relayPool.sendEvent(event, relaysToPublish, { signal, useBulkPacing: true })
+  const result = await _relayPool.sendEvent(event, relaysToPublish, {
+    signal,
+    useBulkPacing: true,
+    rateLimitRetries
+  })
   signal?.throwIfAborted()
   if (result?.success) rememberContentKeyEvent(event)
   return {
@@ -355,14 +364,27 @@ async function refreshAccountContentKeyEvent ({
   }
 }
 
-export async function upsertContentKeyEvent ({ userSigner, contentKeySigner, createdAt, relays, signal, _relayPool = relayPool, _resolveWriteRelays = resolveWriteRelays }) {
+export async function upsertContentKeyEvent ({
+  userSigner,
+  contentKeySigner,
+  createdAt,
+  relays,
+  signal,
+  _relayPool = relayPool,
+  _resolveWriteRelays = resolveWriteRelays,
+  rateLimitRetries
+}) {
   if (!userSigner?.getPublicKey) throw new Error('USER_SIGNER_REQUIRED')
   const pubkey = await userSigner.getPublicKey()
   const writeRelays = relays?.length ? relays : await _resolveWriteRelays(pubkey)
   signal?.throwIfAborted()
   const event = await makeContentKeyEvent({ userSigner, contentKeySigner, createdAt })
   signal?.throwIfAborted()
-  const result = await _relayPool.sendEvent(event, writeRelays, { signal, useBulkPacing: true })
+  const result = await _relayPool.sendEvent(event, writeRelays, {
+    signal,
+    useBulkPacing: true,
+    rateLimitRetries
+  })
   signal?.throwIfAborted()
   if (result?.success) rememberContentKeyEvent(event)
   return { event, result }
@@ -387,7 +409,8 @@ export async function rotateContentKeyIfStillCanonical ({
     userSigner,
     _fetchRelayListEvent,
     _relayPool,
-    _nowSeconds
+    _nowSeconds,
+    rateLimitRetries: 0
   })
   const writeRelays = unique(relayList.writeRelays)
   if (!writeRelays.length) return { status: 'retry', reason: 'no-write-relays', relayList }
@@ -429,7 +452,10 @@ export async function rotateContentKeyIfStillCanonical ({
     contentKeySigner,
     createdAt: Math.max(_nowSeconds(), canonical.event.created_at + 1)
   })
-  const result = await _relayPool.sendEvent(event, writeRelays, { useBulkPacing: true })
+  const result = await _relayPool.sendEvent(event, writeRelays, {
+    useBulkPacing: true,
+    rateLimitRetries: 0
+  })
   if (result?.success) rememberContentKeyEvent(event)
   return {
     status: result?.success ? 'rotated' : 'retry',
@@ -477,7 +503,14 @@ export async function refreshStoredContentKeyEvents ({
       results.push(await scheduleContentKeyPublication({
         ownerPubkey: account.pubkey, contentKeySigner, force: true,
         run: async signal => {
-          const result = await refreshAccountContentKeyEvent({ account, _fetchRelayListEvent, _relayPool, _nowSeconds, signal })
+          const result = await refreshAccountContentKeyEvent({
+            account,
+            _fetchRelayListEvent,
+            _relayPool,
+            _nowSeconds,
+            signal,
+            rateLimitRetries: 0
+          })
           if (result.skipped === 'relay-check-failed') {
             throw publicationError('CONTENT_KEY_RELAY_CHECK_FAILED', result.relayResults?.map(entry => entry.error))
           }

@@ -109,7 +109,11 @@ async function encrypt ({ account, signer, params, internals }) {
           internals: {
             ...internals, _upsertContentKeyEvent: options => {
               signal.throwIfAborted()
-              return (internals._upsertContentKeyEvent || upsertContentKeyEvent)({ ...options, signal })
+              return (internals._upsertContentKeyEvent || upsertContentKeyEvent)({
+                ...options,
+                signal,
+                rateLimitRetries: 0
+              })
             },
             onPublicationError: error => { publicationError = error }
           }
