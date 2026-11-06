@@ -11,7 +11,7 @@ import * as deviceRelays from '../device-relays.js'
 import * as contentKeys from './content-keys.js'
 import * as trustedSignerSync from './trusted-signers.js'
 import * as revocationRotation from './revocation-rotation.js'
-import { createNostrDbSyncController, askCoalescingDigest as nostrDbAskCoalescingDigest } from './nostrdb.js'
+import { createNostrDbSyncController, coalescingHint as nostrDbCoalescingHint } from './nostrdb.js'
 import { isSyncPayloadError, syncPayloadInvalid } from './payload-error.js'
 import { SYNC_QUARANTINE_DECODER_VERSION, syncQuarantine } from './quarantine.js'
 import {
@@ -27,6 +27,11 @@ const TRUSTED_SIGNER_SYNC_INFO = 'trusted-signer-sync-v1'
 const HEX32 = /^[0-9a-f]{64}$/i
 const APP_ID_MAX_LENGTH = 512
 const encoder = new TextEncoder()
+const DEFAULT_COALESCING_HINTS = [
+  contentKeys.coalescingHint,
+  nostrDbCoalescingHint,
+  trustedSignerSync.coalescingHint
+]
 
 // Account data sync derives one private channel per unlocked nsec account and
 // talks only to configured trusted signer pubkeys. Content-key sync exchanges
@@ -111,13 +116,12 @@ function messagePayloadBytes (message) {
   return 0
 }
 
-export function resolveInboundCoalescing (
-  message,
-  contentKeyDigest = contentKeys.askCoalescingDigest,
-  nostrDbDigest = nostrDbAskCoalescingDigest
-) {
-  const key = contentKeyDigest?.(message) ?? nostrDbDigest?.(message) ?? null
-  return key ? { key, keep: 'latest' } : null
+export function resolveInboundCoalescing (message, hints = DEFAULT_COALESCING_HINTS) {
+  for (const hint of hints) {
+    const resolved = hint?.(message)
+    if (resolved) return resolved
+  }
+  return null
 }
 
 function messageDebugInfo (message) {
@@ -140,7 +144,7 @@ export function createSyncController ({
   _createNostrDbSyncController = createNostrDbSyncController,
   _syncQuarantine = syncQuarantine,
   _quarantineDecoderVersion = SYNC_QUARANTINE_DECODER_VERSION,
-  _nostrDbAskCoalescingDigest = nostrDbAskCoalescingDigest,
+  _coalescingHints = DEFAULT_COALESCING_HINTS,
   _claimSigner = claimSigner,
   _subscribeRelayListUpdates = subscribeRelayListUpdates,
   _hasPendingMutation = hasPendingMutation,
@@ -165,6 +169,7 @@ export function createSyncController ({
   let announceTimer = null
   let announceTimerAt = 0
   let announceInterval = null
+  let announcementSequence = 0
   let pendingResetInterval = false
   let lastStoreIdentityKey = ''
   let stopRelayListWatcher = null
@@ -709,6 +714,10 @@ export function createSyncController ({
       : [...pendingAnnounceOwners]
     pendingAnnounceOwners.clear()
     const now = _now()
+    const nextAnnouncementSequence = () => {
+      announcementSequence = Math.max(_now(), announcementSequence + 1)
+      return announcementSequence
+    }
 
     if (receivers.length) {
       for (const ownerPubkey of owners) {
@@ -733,7 +742,8 @@ export function createSyncController ({
             channelPubkey,
             ownerPubkey,
             receiverPubkeys: receivers,
-            debug
+            debug,
+            _now: nextAnnouncementSequence
           }))
           if (HEX32.test(ownerPubkey)) {
             await assertPublished(await nostrDbSync.announceRange({
@@ -741,7 +751,8 @@ export function createSyncController ({
               channelPubkey,
               ownerPubkey,
               receiverPubkeys: receivers,
-              debug
+              debug,
+              _nowMs: nextAnnouncementSequence
             }))
           }
           announceRetryAtByOwner.delete(ownerPubkey)
@@ -760,7 +771,8 @@ export function createSyncController ({
           records: trustedRecords(),
           activePeerPubkeys: receivers,
           reminderRecords: removedReminderRecords(),
-          debug
+          debug,
+          _now: nextAnnouncementSequence
         })
         trustedAnnounceRetryAt = 0
       } catch (err) {
@@ -937,11 +949,7 @@ export function createSyncController ({
           onMessageQueued: scheduleDrain,
           onError,
           onStateChanged: status => observeMessengerState(monitor, status),
-          resolveInboundCoalescing: message => resolveInboundCoalescing(
-            message,
-            _contentKeys.askCoalescingDigest,
-            _nostrDbAskCoalescingDigest
-          ),
+          resolveInboundCoalescing: message => resolveInboundCoalescing(message, _coalescingHints),
           useContentKeys: false,
           onDebug: debug
         })

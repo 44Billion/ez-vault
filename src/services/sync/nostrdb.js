@@ -117,6 +117,13 @@ function coalescingDigest (parts) {
   return bytesToHex(sha256(encoder.encode(JSON.stringify(parts))))
 }
 
+function pushChunkIdempotencyKey (events) {
+  return coalescingDigest([
+    'nostrdb-push',
+    ...events.map(event => event.id).sort()
+  ])
+}
+
 function requireDataBody (message) {
   const body = message?.payload?.payload
   if (!isPlainObject(body)) throw syncPayloadInvalid('payload-object-required')
@@ -243,6 +250,21 @@ export function askCoalescingDigest (message) {
     ])
   }
   return null
+}
+
+export function coalescingHint (message) {
+  const code = messageCode(message)
+  if (code === NOSTRDB_SYNC_ADVERTISE_CODE) {
+    const advert = normalizeAdvert(messageBody(message))
+    if (!advert) return null
+    return {
+      key: coalescingDigest(['nostrdb-advertise-stream']),
+      keep: 'latest',
+      sequence: advert.generatedAt
+    }
+  }
+  const key = askCoalescingDigest(message)
+  return key ? { key, keep: 'latest' } : null
 }
 
 function normalizeEventBatchPayload (payload) {
@@ -1251,6 +1273,7 @@ export function createNostrDbSyncController ({
           cursor++
         }
         const chunkIndex = index++
+        const chunkEvents = events.slice(start, cursor)
         const chunkStartedAt = runtime.debug ? _performanceNow() : 0
         try {
           await target.messenger.yell({
@@ -1258,6 +1281,7 @@ export function createNostrDbSyncController ({
             receiverPubkeys: target.receiverPubkeys,
             code: NOSTRDB_SYNC_PUSH_CODE,
             payload: { index: chunkIndex, isLast: cursor === events.length, jsonl },
+            idempotencyKey: pushChunkIdempotencyKey(chunkEvents),
             useBulkPacing: true
           })
           if (!current()) return

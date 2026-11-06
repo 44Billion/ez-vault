@@ -1,16 +1,23 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  CONTENT_KEYS_ANNOUNCE_CODE,
   CONTENT_KEYS_ASK_CODE,
-  askCoalescingDigest as contentKeysDigest
+  askCoalescingDigest as contentKeysDigest,
+  coalescingHint as contentKeysHint
 } from '../src/services/sync/content-keys.js'
 import {
+  NOSTRDB_SYNC_ADVERTISE_CODE,
   NOSTRDB_SYNC_APP_ASK_CODE,
   NOSTRDB_SYNC_ASK_CODE,
-  askCoalescingDigest as nostrDbDigest
+  askCoalescingDigest as nostrDbDigest,
+  coalescingHint as nostrDbHint
 } from '../src/services/sync/nostrdb.js'
 import { resolveInboundCoalescing } from '../src/services/sync/index.js'
-import { TRUSTED_SIGNERS_STATE_CODE } from '../src/services/sync/trusted-signers.js'
+import {
+  TRUSTED_SIGNERS_STATE_CODE,
+  coalescingHint as trustedSignersHint
+} from '../src/services/sync/trusted-signers.js'
 
 const PUBKEY_A = 'a'.repeat(64)
 const PUBKEY_B = 'b'.repeat(64)
@@ -110,6 +117,88 @@ test('content-key coalescing canonicalizes the requested pubkey set', () => {
   })))
 })
 
+test('content-key announcements use an ordered stream and preserve legacy snapshots', () => {
+  const keys = [
+    { pubkey: PUBKEY_B, createdAt: 20 },
+    { pubkey: PUBKEY_A, createdAt: 10 }
+  ]
+  const first = contentKeysHint(message(CONTENT_KEYS_ANNOUNCE_CODE, { generatedAt: 100, keys }))
+  const changed = contentKeysHint(message(CONTENT_KEYS_ANNOUNCE_CODE, {
+    generatedAt: 200,
+    keys: [keys[1]]
+  }))
+  assert.equal(first.key, changed.key)
+  assert.equal(first.sequence, 100)
+  assert.equal(changed.sequence, 200)
+
+  const legacy = contentKeysHint(message(CONTENT_KEYS_ANNOUNCE_CODE, { keys }))
+  const reordered = contentKeysHint(message(CONTENT_KEYS_ANNOUNCE_CODE, { keys: [...keys].reverse() }))
+  assert.equal(legacy.key, reordered.key)
+  assert.equal(legacy.sequence, undefined)
+  assert.notEqual(
+    legacy.key,
+    contentKeysHint(message(CONTENT_KEYS_ANNOUNCE_CODE, { keys: [keys[1]] })).key
+  )
+  assert.equal(contentKeysHint(message(CONTENT_KEYS_ANNOUNCE_CODE, {
+    generatedAt: 'invalid',
+    keys
+  })), null)
+  assert.equal(contentKeysHint(message(CONTENT_KEYS_ANNOUNCE_CODE, {
+    generatedAt: 300,
+    keys: [keys[0], { pubkey: 'invalid', createdAt: 10 }]
+  })), null)
+})
+
+test('NostrDB advertisements use generatedAt as stream sequence', () => {
+  const first = nostrDbHint(message(NOSTRDB_SYNC_ADVERTISE_CODE, {
+    generatedAt: 100,
+    minScore: 10,
+    maxScore: 20
+  }))
+  const changed = nostrDbHint(message(NOSTRDB_SYNC_ADVERTISE_CODE, {
+    generatedAt: 200,
+    minScore: 30,
+    maxScore: 40
+  }))
+  assert.equal(first.key, changed.key)
+  assert.equal(first.sequence, 100)
+  assert.equal(changed.sequence, 200)
+  assert.equal(nostrDbHint(message(NOSTRDB_SYNC_ADVERTISE_CODE, {
+    generatedAt: 0,
+    minScore: 10,
+    maxScore: 20
+  })), null)
+})
+
+test('trusted signer snapshots and reminders share one ordered stream', () => {
+  const trusted = { pubkey: PUBKEY_A, status: 'trusted', updatedAt: 10, actorPubkey: PUBKEY_B, platform: 'Phone' }
+  const removed = { pubkey: PUBKEY_B, status: 'removed', updatedAt: 20, actorPubkey: PUBKEY_A, platform: 'Laptop' }
+  const snapshot = trustedSignersHint(message(TRUSTED_SIGNERS_STATE_CODE, {
+    generatedAt: 100,
+    entries: [removed, trusted]
+  }))
+  const reminder = trustedSignersHint(message(TRUSTED_SIGNERS_STATE_CODE, {
+    generatedAt: 200,
+    entries: [removed]
+  }))
+  assert.equal(snapshot.key, reminder.key)
+  assert.equal(snapshot.sequence, 100)
+  assert.equal(reminder.sequence, 200)
+
+  const legacy = trustedSignersHint(message(TRUSTED_SIGNERS_STATE_CODE, { entries: [trusted, removed] }))
+  const reordered = trustedSignersHint(message(TRUSTED_SIGNERS_STATE_CODE, { entries: [removed, trusted] }))
+  assert.equal(legacy.key, reordered.key)
+  assert.equal(legacy.sequence, undefined)
+  assert.notEqual(
+    legacy.key,
+    trustedSignersHint(message(TRUSTED_SIGNERS_STATE_CODE, { entries: [removed] })).key
+  )
+  assert.equal(trustedSignersHint(message(TRUSTED_SIGNERS_STATE_CODE, {
+    generatedAt: 300,
+    entries: [trusted, { pubkey: 'invalid', status: 'trusted', updatedAt: 10 }]
+  })), null)
+})
+
 test('coalescing returns null for invalid or out-of-scope messages', () => {
   assert.equal(nostrDbDigest(message(NOSTRDB_SYNC_ASK_CODE, {
     requestId: '',
@@ -125,12 +214,12 @@ test('coalescing returns null for invalid or out-of-scope messages', () => {
   assert.equal(contentKeysDigest(message(CONTENT_KEYS_ASK_CODE, {
     pubkeys: ['invalid']
   })), null)
-  assert.equal(contentKeysDigest(message(TRUSTED_SIGNERS_STATE_CODE, {
+  assert.equal(trustedSignersHint(message(TRUSTED_SIGNERS_STATE_CODE, {
     entries: []
   })), null)
 })
 
-test('sync dispatcher prefers content-key digests and falls back to NostrDB', () => {
+test('sync dispatcher applies hints in deterministic order', () => {
   const content = message(CONTENT_KEYS_ASK_CODE, { pubkeys: [PUBKEY_A] })
   const range = message(NOSTRDB_SYNC_ASK_CODE, {
     requestId: 'request',
@@ -139,20 +228,10 @@ test('sync dispatcher prefers content-key digests and falls back to NostrDB', ()
     excludeIds: [],
     limit: 200
   })
-  assert.equal(
-    resolveInboundCoalescing(content, () => 'a'.repeat(64), () => 'b'.repeat(64)).key,
-    'a'.repeat(64)
-  )
-  assert.equal(
-    resolveInboundCoalescing(range, () => null, () => 'b'.repeat(64)).key,
-    'b'.repeat(64)
-  )
-  assert.equal(
-    resolveInboundCoalescing(message('unknown', {}), () => null, () => null),
-    null
-  )
-  assert.deepEqual(
-    resolveInboundCoalescing(content, () => 'a'.repeat(64), () => null),
-    { key: 'a'.repeat(64), keep: 'latest' }
-  )
+  const first = { key: 'a'.repeat(64), keep: 'latest' }
+  const second = { key: 'b'.repeat(64), keep: 'latest' }
+  assert.equal(resolveInboundCoalescing(content, [() => first, () => second]), first)
+  assert.equal(resolveInboundCoalescing(range, [() => null, () => second]), second)
+  assert.equal(resolveInboundCoalescing(message('unknown', {}), [() => null, () => null]), null)
+  assert.equal(resolveInboundCoalescing(content).key, contentKeysHint(content).key)
 })

@@ -3,7 +3,7 @@ import { getState, removeState, setState } from '../storage/index.js'
 import { isSyncPayloadError } from './payload-error.js'
 
 export const SYNC_QUARANTINE_KEY = 'ez-vault:sync-quarantine:v1'
-export const SYNC_QUARANTINE_DECODER_VERSION = 1
+export const SYNC_QUARANTINE_DECODER_VERSION = 2
 export const SYNC_QUARANTINE_MAX_RECORDS = 100
 export const SYNC_QUARANTINE_MAX_BYTES = 4 * 1024 * 1024
 export const SYNC_QUARANTINE_MAX_PEER_RECORDS = 25

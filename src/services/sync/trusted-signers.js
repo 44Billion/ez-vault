@@ -1,3 +1,5 @@
+import { bytesToHex } from 'libp2r2p/base16'
+import { sha256 } from '@noble/hashes/sha2.js'
 import { publicationErrorFromResult } from '../../helpers/publication-retry.js'
 import { assertSupportedPayloadVersion, syncPayloadInvalid } from './payload-error.js'
 
@@ -6,6 +8,7 @@ export const TRUSTED_SIGNER_SYNC_INFO = 'trusted-signer-list-sync-v1'
 
 const HEX32 = /^[0-9a-f]{64}$/i
 const MAX_SYNC_ENTRIES = 512
+const encoder = new TextEncoder()
 
 function isPlainObject (value) {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -47,6 +50,38 @@ export function stateEntries (records) {
     .filter(Boolean)
 }
 
+function coalescingDigest (parts) {
+  return bytesToHex(sha256(encoder.encode(JSON.stringify(parts))))
+}
+
+export function coalescingHint (message) {
+  if (messageCode(message) !== TRUSTED_SIGNERS_STATE_CODE) return null
+  const body = message?.payload?.payload
+  if (!isPlainObject(body) || !Array.isArray(body.entries) ||
+      body.entries.length > MAX_SYNC_ENTRIES || (body.v != null && body.v !== 1)) return null
+  const entries = stateEntries(body.entries)
+  if (!entries.length || entries.length !== body.entries.length) return null
+  entries.sort((left, right) => {
+    const leftValue = JSON.stringify(left)
+    const rightValue = JSON.stringify(right)
+    return leftValue < rightValue ? -1 : leftValue > rightValue ? 1 : 0
+  })
+
+  if (body.generatedAt != null) {
+    if (!Number.isSafeInteger(body.generatedAt) || body.generatedAt < 0) return null
+    return {
+      key: coalescingDigest(['trusted-signers-state-stream']),
+      keep: 'latest',
+      sequence: body.generatedAt
+    }
+  }
+
+  return {
+    key: coalescingDigest(['trusted-signers-state-snapshot', entries]),
+    keep: 'latest'
+  }
+}
+
 function entriesExceptPubkey (entries, pubkey) {
   const normalizedPubkey = normalizePubkey(pubkey)
   return normalizedPubkey ? entries.filter(entry => entry.pubkey !== normalizedPubkey) : entries
@@ -70,12 +105,14 @@ export async function announceTrustedSignerState ({
   peerChannels,
   records,
   activePeerPubkeys,
-  reminderRecords
+  reminderRecords,
+  _now = Date.now
 } = {}) {
   if (!messenger) return { sent: 0 }
   const channels = peerChannels || new Map()
   const active = [...new Set(activePeerPubkeys || [])].map(normalizePubkey).filter(Boolean)
   const entries = stateEntries(records)
+  const generatedAt = _now()
   let sent = 0
 
   if (entries.length) {
@@ -88,7 +125,7 @@ export async function announceTrustedSignerState ({
         channelPubkey,
         receiverPubkey: peerPubkey,
         code: TRUSTED_SIGNERS_STATE_CODE,
-        payload: { entries: payloadEntries },
+        payload: { generatedAt, entries: payloadEntries },
         useBulkPacing: true
       }))
       sent += 1
@@ -104,7 +141,7 @@ export async function announceTrustedSignerState ({
       channelPubkey,
       receiverPubkey: record.pubkey,
       code: TRUSTED_SIGNERS_STATE_CODE,
-      payload: { entries: [record] },
+      payload: { generatedAt, entries: [record] },
       useBulkPacing: true
     }))
     sent += 1

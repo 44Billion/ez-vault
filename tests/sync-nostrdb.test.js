@@ -727,6 +727,8 @@ test('resuming a pause flushes queued NostrDB pushes without waiting for cooldow
   await controller.resumeAfterPause(context(msg))
   assert.equal(attempts, 2)
   assert.equal(timers.length, 0)
+  assert.match(msg.sent[0].options.idempotencyKey, /^[0-9a-f]{64}$/)
+  assert.equal(msg.sent[1].options.idempotencyKey, msg.sent[0].options.idempotencyKey)
 })
 
 test('paused push queues retain events without polling and flush once after resume', async () => {
@@ -1126,6 +1128,7 @@ test('nostrdb sync pushes local events on the leading edge then a trailing queue
   assert.equal(msg.sent.length, 1)
   assert.equal(msg.sent[0].options.code, NOSTRDB_SYNC_PUSH_CODE)
   assert.equal(msg.sent[0].options.useBulkPacing, true)
+  assert.match(msg.sent[0].options.idempotencyKey, /^[0-9a-f]{64}$/)
   assert.equal(JSON.parse(msg.sent[0].options.payload.jsonl.trim()).id, event1.id)
   assert.equal(timers[0].ms, 0)
   const firstChunk = diagnostics.find(entry => entry.action === 'push-chunk')
@@ -1139,6 +1142,8 @@ test('nostrdb sync pushes local events on the leading edge then a trailing queue
   await timers[0].fn()
   assert.equal(msg.sent.length, 2)
   assert.equal(JSON.parse(msg.sent[1].options.payload.jsonl.trim()).id, event2.id)
+  assert.match(msg.sent[1].options.idempotencyKey, /^[0-9a-f]{64}$/)
+  assert.notEqual(msg.sent[1].options.idempotencyKey, msg.sent[0].options.idempotencyKey)
   assert.equal(diagnostics.filter(entry => entry.action === 'push-chunk').length, 2)
   assert.ok(diagnostics.filter(entry => entry.action === 'push').every(entry => !Object.hasOwn(entry, 'channelPubkey')))
   assert.ok(diagnostics.every(entry => !Object.hasOwn(entry, 'ownerPubkey')))

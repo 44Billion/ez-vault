@@ -137,6 +137,40 @@ export function askCoalescingDigest (message) {
   return coalescingDigest(['content-keys-ask', pubkeys])
 }
 
+export function coalescingHint (message) {
+  const code = messageCode(message)
+  if (code === CONTENT_KEYS_ASK_CODE) {
+    const key = askCoalescingDigest(message)
+    return key ? { key, keep: 'latest' } : null
+  }
+  if (code !== CONTENT_KEYS_ANNOUNCE_CODE) return null
+
+  const body = message?.payload?.payload
+  if (!isPlainObject(body) || !Array.isArray(body.keys) ||
+      body.keys.length > MAX_SYNC_ENTRIES || (body.v != null && body.v !== 1)) return null
+  const keys = body.keys.map(normalizeMetaKey)
+  if (!keys.length || keys.some(key => !key)) return null
+  keys.sort((left, right) => {
+    const leftValue = JSON.stringify(left)
+    const rightValue = JSON.stringify(right)
+    return leftValue < rightValue ? -1 : leftValue > rightValue ? 1 : 0
+  })
+
+  if (body.generatedAt != null) {
+    if (!Number.isSafeInteger(body.generatedAt) || body.generatedAt < 0) return null
+    return {
+      key: coalescingDigest(['content-keys-announce-stream']),
+      keep: 'latest',
+      sequence: body.generatedAt
+    }
+  }
+
+  return {
+    key: coalescingDigest(['content-keys-announce-snapshot', keys]),
+    keep: 'latest'
+  }
+}
+
 function requireDataBody (message) {
   const body = message?.payload?.payload
   if (!isPlainObject(body)) throw syncPayloadInvalid('payload-object-required')
@@ -200,10 +234,18 @@ export function getDebugSnapshot () {
   return { unlocked: secrets.isUnlocked(), accounts }
 }
 
-export async function announceContentKeys ({ messenger, ownerPubkey, channelPubkey = ownerPubkey, receiverPubkeys, debug }) {
+export async function announceContentKeys ({
+  messenger,
+  ownerPubkey,
+  channelPubkey = ownerPubkey,
+  receiverPubkeys,
+  debug,
+  _now = Date.now
+}) {
   const keys = contentKeysForOwner(ownerPubkey)
   const receivers = normalizePubkeyList(receiverPubkeys)
   if (!keys.length || !receivers.length) return null
+  const generatedAt = _now()
   emitDebug(debug, 'announce', {
     type: 'yell',
     code: CONTENT_KEYS_ANNOUNCE_CODE,
@@ -218,7 +260,7 @@ export async function announceContentKeys ({ messenger, ownerPubkey, channelPubk
     channelPubkey,
     receiverPubkeys: receivers,
     code: CONTENT_KEYS_ANNOUNCE_CODE,
-    payload: { keys },
+    payload: { generatedAt, keys },
     useBulkPacing: true
   })
 }
