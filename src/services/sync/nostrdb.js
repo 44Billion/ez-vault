@@ -1,5 +1,7 @@
 import * as nostrdb from '../nostrdb.js'
 import { createEventReplyPacker } from 'libp2r2p/private-messenger/recovery'
+import { bytesToHex } from 'libp2r2p/base16'
+import { sha256 } from '@noble/hashes/sha2.js'
 import { NOSTRDB_SYNC, readRecords, replaceRecords } from '../storage/index.js'
 import { publicationRetryAt } from '../../helpers/publication-retry.js'
 import { assertSupportedPayloadVersion, syncPayloadInvalid } from './payload-error.js'
@@ -111,6 +113,10 @@ function messageBody (message) {
   return isPlainObject(message?.payload?.payload) ? message.payload.payload : {}
 }
 
+function coalescingDigest (parts) {
+  return bytesToHex(sha256(encoder.encode(JSON.stringify(parts))))
+}
+
 function requireDataBody (message) {
   const body = message?.payload?.payload
   if (!isPlainObject(body)) throw syncPayloadInvalid('payload-object-required')
@@ -211,6 +217,32 @@ function normalizeAppAsk (payload) {
     after,
     batchSize: normalizePositiveInteger(payload.batchSize, REQUEST_LIMIT, REQUEST_LIMIT)
   }
+}
+
+export function askCoalescingDigest (message) {
+  const code = messageCode(message)
+  if (code === NOSTRDB_SYNC_ASK_CODE) {
+    const ask = normalizeAsk(messageBody(message))
+    if (!ask) return null
+    return coalescingDigest([
+      'nostrdb-range-ask',
+      ask.sinceScore,
+      ask.untilScore,
+      [...ask.excludeIds].sort(),
+      ask.limit
+    ])
+  }
+  if (code === NOSTRDB_SYNC_APP_ASK_CODE) {
+    const ask = normalizeAppAsk(messageBody(message))
+    if (!ask) return null
+    return coalescingDigest([
+      'nostrdb-app-ask',
+      ask.appId,
+      ask.after,
+      ask.batchSize
+    ])
+  }
+  return null
 }
 
 function normalizeEventBatchPayload (payload) {

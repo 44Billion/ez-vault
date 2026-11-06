@@ -11,7 +11,7 @@ import * as deviceRelays from '../device-relays.js'
 import * as contentKeys from './content-keys.js'
 import * as trustedSignerSync from './trusted-signers.js'
 import * as revocationRotation from './revocation-rotation.js'
-import { createNostrDbSyncController } from './nostrdb.js'
+import { createNostrDbSyncController, askCoalescingDigest as nostrDbAskCoalescingDigest } from './nostrdb.js'
 import { isSyncPayloadError, syncPayloadInvalid } from './payload-error.js'
 import { SYNC_QUARANTINE_DECODER_VERSION, syncQuarantine } from './quarantine.js'
 import {
@@ -111,6 +111,14 @@ function messagePayloadBytes (message) {
   return 0
 }
 
+export function resolveAskCoalescingKey (
+  message,
+  contentKeyDigest = contentKeys.askCoalescingDigest,
+  nostrDbDigest = nostrDbAskCoalescingDigest
+) {
+  return contentKeyDigest?.(message) ?? nostrDbDigest?.(message) ?? null
+}
+
 function messageDebugInfo (message) {
   return {
     type: message?.type || '',
@@ -131,6 +139,7 @@ export function createSyncController ({
   _createNostrDbSyncController = createNostrDbSyncController,
   _syncQuarantine = syncQuarantine,
   _quarantineDecoderVersion = SYNC_QUARANTINE_DECODER_VERSION,
+  _nostrDbAskCoalescingDigest = nostrDbAskCoalescingDigest,
   _claimSigner = claimSigner,
   _subscribeRelayListUpdates = subscribeRelayListUpdates,
   _hasPendingMutation = hasPendingMutation,
@@ -927,6 +936,11 @@ export function createSyncController ({
           onMessageQueued: scheduleDrain,
           onError,
           onStateChanged: status => observeMessengerState(monitor, status),
+          resolveAskCoalescingKey: message => resolveAskCoalescingKey(
+            message,
+            _contentKeys.askCoalescingDigest,
+            _nostrDbAskCoalescingDigest
+          ),
           useContentKeys: false,
           onDebug: debug
         })

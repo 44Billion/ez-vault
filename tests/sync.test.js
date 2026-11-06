@@ -267,6 +267,7 @@ test('sync orchestration watches nsec channels with identity-only sync options',
 
   assert.equal(instances.length, 1)
   assert.equal(instances[0].options.useContentKeys, false)
+  assert.equal(typeof instances[0].options.resolveAskCoalescingKey, 'function')
   assert.equal(instances[0].initOptions.userSigner, deviceSigner)
   assert.equal(instances[0].initOptions.contentKeySigner, null)
   assert.equal(instances[0].initOptions.mode, 'seeder')

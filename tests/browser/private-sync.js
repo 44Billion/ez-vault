@@ -171,6 +171,13 @@ try {
     origins.push(origin)
     await browser.until(() => evaluateApp(device, '!!globalThis.syncApp'), 'app APIs')
   }
+  const coalesced = await browsers[1].evaluate('syncProbe.coalescingProbe()', vaultOrigin)
+  assert.deepEqual(coalesced, {
+    eventId: '55'.repeat(32),
+    questionId: '55'.repeat(32),
+    requestId: '55'.repeat(32),
+    exposedInternalKey: false
+  })
   const [a, b] = browsers
   const peer = getPublicKey(generateSecretKey())
   assert.deepEqual(await evaluateApp(0, `syncApp.seed(${JSON.stringify(peer)})`), [true, true])

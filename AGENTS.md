@@ -495,7 +495,7 @@ default sink silent without that query.
 
 ## Launcher relay bridge
 
-- Use the coordinated libp2r2p 0.12.8 release, pinned exactly in the
+- Use the coordinated libp2r2p 0.12.11 release, pinned exactly in the
   dev dependency and lockfile. Its live readers stop definitive per-route refusals
   and recover transient errors through bounded offline-aware backoff/cooldowns.
   Keep the existing facade/protocol and standalone fallback. Validate sync,
@@ -557,6 +557,16 @@ default sink silent without that query.
   promotion must rekey this state with the existing local-state scope. Increment
   `SYNC_QUARANTINE_DECODER_VERSION` whenever an accepted sync payload shape or
   decoder compatibility rule changes.
+- Coalesce direct `contentKeys_ask_t7y8`, `nostrDbSync_ask_kpkr` and
+  `nostrDbSync_appAsk_7c93` asks through the private messenger's optional
+  `resolveAskCoalescingKey` hook. Digest only the normalized semantic payload
+  with a stable semantic prefix; `requestId`, event IDs, timestamps, relays and queue
+  position do not belong in the key. Range keys include sorted `excludeIds` and
+  limit; app keys include app, cursor and batch size; content-key keys include
+  the sorted pubkey set. The inbox keeps one pending item and at most one latest
+  successor. Coalescing never replaces exact-event deduplication, trusted-sender
+  checks, quarantine, ACK/NACK, pause, high-water or physical capacity policy.
+  Diagnostics may report only sanitized status/count/byte fields.
 
 
 Account presentation (`name`, `picture`, `about`) may come from pairing before

@@ -1,9 +1,10 @@
 import { getPublicKey } from 'libp2r2p/key'
+import { bytesToHex, hexToBytes } from 'libp2r2p/base16'
+import { sha256 } from '@noble/hashes/sha2.js'
 import * as store from '../accounts-store.js'
 import * as secrets from '../secrets.js'
 import { filterVisibleAccounts } from '../account-mutations.js'
 import { upsertContentKeyEvent } from '../content-key/index.js'
-import { hexToBytes } from 'libp2r2p/base16'
 import { assertSupportedPayloadVersion, syncPayloadInvalid } from './payload-error.js'
 
 // Flow notes:
@@ -28,6 +29,7 @@ export const CONTENT_KEYS_REPLY_CODE = 'contentKeys_reply_t7y8'
 
 const HEX32 = /^[0-9a-f]{64}$/i
 const MAX_SYNC_ENTRIES = 512
+const encoder = new TextEncoder()
 
 const listeners = new Set()
 const debugSourceByKey = new Map()
@@ -79,6 +81,10 @@ function normalizePubkeyList (values) {
   return [...new Set((Array.isArray(values) ? values : []).map(normalizePubkey).filter(Boolean))]
 }
 
+function coalescingDigest (parts) {
+  return bytesToHex(sha256(encoder.encode(JSON.stringify(parts))))
+}
+
 function contentKeysForOwner (ownerPubkey) {
   return secrets.listContentKeys(ownerPubkey)
     .map(normalizeMetaKey)
@@ -119,6 +125,16 @@ function messageCode (message) {
 
 function messageBody (message) {
   return isPlainObject(message?.payload?.payload) ? message.payload.payload : {}
+}
+
+export function askCoalescingDigest (message) {
+  if (messageCode(message) !== CONTENT_KEYS_ASK_CODE) return null
+  const body = message?.payload?.payload
+  if (!isPlainObject(body) || !Array.isArray(body.pubkeys) ||
+      body.pubkeys.length > MAX_SYNC_ENTRIES || (body.v != null && body.v !== 1)) return null
+  const pubkeys = normalizePubkeyList(body.pubkeys).sort()
+  if (!pubkeys.length) return null
+  return coalescingDigest(['content-keys-ask', pubkeys])
 }
 
 function requireDataBody (message) {

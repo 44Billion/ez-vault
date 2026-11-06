@@ -390,11 +390,12 @@ five minutes; vault services do not duplicate pacing or rate-limit backoff.
 The private synchronization browser regression uses two isolated Chrome profiles,
 real launcher/vault bridges and a controlled relay. It covers paired profile
 presentation, private contacts and self-chat events, secret lock/unlock, overflow
-recovery and reload without reseeding. Run it with
+recovery, duplicate-ask coalescing over real IndexedDB, and reload without
+reseeding. Run it with
 `node ../44billion/bin/run-browser-tests.js -- node tests/browser/private-sync.js`.
 The runner caps the complete browser/runtime group at 3 GiB with no swap.
 
-Private synchronization uses the `libp2r2p@0.12.8` package pinned in
+Private synchronization uses the `libp2r2p@0.12.11` package pinned in
 `package-lock.json`, including live-overflow recovery with durable history gaps.
 Live readers stop definitive per-route refusals and recover transient failures
 with bounded offline-aware backoff and relay cooldowns. The launcher facade and
@@ -429,9 +430,12 @@ subscriptions and historical recovery continue in the background. ACK still
 requires successful persistence, and the vault keeps its local recovery seed store.
 
 
-The coordinated libp2r2p 0.12.8 release shares confirmed connectivity with automatic
+The coordinated libp2r2p 0.12.11 release shares confirmed connectivity with automatic
 pause recovery. Vault synchronization keeps its direct messenger and local seed
 storage; foreground-send urgency belongs to sessions that explicitly request it.
+Equivalent content-key and NostrDB asks are coalesced by a stable semantic
+digest before inbox admission. The queue retains one pending ask and at most one
+latest successor without sharing trust, ACK/NACK or capacity policy.
 The durable inbox begins backpressure at 70% and resumes at 50%; NostrDB pushes
 park without polling while the messenger is paused and honor relay retry deadlines.
 Trusted-device sync payloads that are structurally incompatible are sealed in a
