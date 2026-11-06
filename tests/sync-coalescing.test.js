@@ -9,7 +9,7 @@ import {
   NOSTRDB_SYNC_ASK_CODE,
   askCoalescingDigest as nostrDbDigest
 } from '../src/services/sync/nostrdb.js'
-import { resolveAskCoalescingKey } from '../src/services/sync/index.js'
+import { resolveInboundCoalescing } from '../src/services/sync/index.js'
 import { TRUSTED_SIGNERS_STATE_CODE } from '../src/services/sync/trusted-signers.js'
 
 const PUBKEY_A = 'a'.repeat(64)
@@ -140,15 +140,19 @@ test('sync dispatcher prefers content-key digests and falls back to NostrDB', ()
     limit: 200
   })
   assert.equal(
-    resolveAskCoalescingKey(content, () => 'content-digest', () => 'nostr-digest'),
-    'content-digest'
+    resolveInboundCoalescing(content, () => 'a'.repeat(64), () => 'b'.repeat(64)).key,
+    'a'.repeat(64)
   )
   assert.equal(
-    resolveAskCoalescingKey(range, () => null, () => 'nostr-digest'),
-    'nostr-digest'
+    resolveInboundCoalescing(range, () => null, () => 'b'.repeat(64)).key,
+    'b'.repeat(64)
   )
   assert.equal(
-    resolveAskCoalescingKey(message('unknown', {}), () => null, () => null),
+    resolveInboundCoalescing(message('unknown', {}), () => null, () => null),
     null
+  )
+  assert.deepEqual(
+    resolveInboundCoalescing(content, () => 'a'.repeat(64), () => null),
+    { key: 'a'.repeat(64), keep: 'latest' }
   )
 })

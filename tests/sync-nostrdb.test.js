@@ -233,6 +233,7 @@ test('nostrdb sync replies with an empty final chunk when no events are missing'
   assert.equal(msg.sent.length, 1)
   assert.equal(msg.sent[0].method, 'reply')
   assert.equal(msg.sent[0].options.code, NOSTRDB_SYNC_REPLY_CODE)
+  assert.match(msg.sent[0].options.idempotencyKey, /^[0-9a-f]{64}:0$/)
   assert.deepEqual(msg.sent[0].options.payload, {
     requestId: 'req-1',
     sinceScore: 1,
@@ -848,6 +849,7 @@ test('nostrdb app backfill ask exports one app page', async () => {
   assert.equal(msg.sent.length, 1)
   assert.equal(msg.sent[0].method, 'reply')
   assert.equal(msg.sent[0].options.code, NOSTRDB_SYNC_APP_REPLY_CODE)
+  assert.match(msg.sent[0].options.idempotencyKey, /^[0-9a-f]{64}:0$/)
   assert.equal(msg.sent[0].options.payload.requestId, 'app-req-1')
   assert.equal(msg.sent[0].options.payload.appId, 'app-1')
   assert.equal(msg.sent[0].options.payload.after, EVENT_ID)

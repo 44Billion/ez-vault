@@ -111,12 +111,13 @@ function messagePayloadBytes (message) {
   return 0
 }
 
-export function resolveAskCoalescingKey (
+export function resolveInboundCoalescing (
   message,
   contentKeyDigest = contentKeys.askCoalescingDigest,
   nostrDbDigest = nostrDbAskCoalescingDigest
 ) {
-  return contentKeyDigest?.(message) ?? nostrDbDigest?.(message) ?? null
+  const key = contentKeyDigest?.(message) ?? nostrDbDigest?.(message) ?? null
+  return key ? { key, keep: 'latest' } : null
 }
 
 function messageDebugInfo (message) {
@@ -936,7 +937,7 @@ export function createSyncController ({
           onMessageQueued: scheduleDrain,
           onError,
           onStateChanged: status => observeMessengerState(monitor, status),
-          resolveAskCoalescingKey: message => resolveAskCoalescingKey(
+          resolveInboundCoalescing: message => resolveInboundCoalescing(
             message,
             _contentKeys.askCoalescingDigest,
             _nostrDbAskCoalescingDigest

@@ -434,8 +434,9 @@ The coordinated libp2r2p 0.12.11 release shares confirmed connectivity with auto
 pause recovery. Vault synchronization keeps its direct messenger and local seed
 storage; foreground-send urgency belongs to sessions that explicitly request it.
 Equivalent content-key and NostrDB asks are coalesced by a stable semantic
-digest before inbox admission. The queue retains one pending ask and at most one
-latest successor without sharing trust, ACK/NACK or capacity policy.
+digest before inbox admission. Reply packers derive per-chunk idempotency keys,
+so retries do not collapse distinct chunks. The queue applies latest-wins with at
+most one active successor without sharing trust, ACK/NACK or capacity policy.
 The durable inbox begins backpressure at 70% and resumes at 50%; NostrDB pushes
 park without polling while the messenger is paused and honor relay retry deadlines.
 Trusted-device sync payloads that are structurally incompatible are sealed in a

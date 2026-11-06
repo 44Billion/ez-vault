@@ -173,10 +173,11 @@ try {
   }
   const coalesced = await browsers[1].evaluate('syncProbe.coalescingProbe()', vaultOrigin)
   assert.deepEqual(coalesced, {
-    eventId: '55'.repeat(32),
-    questionId: '55'.repeat(32),
-    requestId: '55'.repeat(32),
-    exposedInternalKey: false
+    tellEventId: '55'.repeat(32),
+    tellPayloadId: '55'.repeat(32),
+    messageEventId: '77'.repeat(32),
+    messageIdempotencyKey: null,
+    exposedInternalMetadata: false
   })
   const [a, b] = browsers
   const peer = getPublicKey(generateSecretKey())

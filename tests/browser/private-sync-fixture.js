@@ -23,6 +23,7 @@ const signer = pubkey => ({
 })
 async function coalescingProbe () {
   let watch
+  let messageIdempotencyKey
   const privateMessage = {
     watch: async options => {
       watch = options
@@ -39,7 +40,11 @@ async function coalescingProbe () {
     _isOnline: async () => true,
     _onOnline: () => () => {},
     offlineRecoverySeconds: 0,
-    resolveAskCoalescingKey: () => 'a'.repeat(64)
+    resolveInboundCoalescing: (message, context) => {
+      if (message.type !== 'message') return null
+      messageIdempotencyKey = context.idempotencyKey
+      return { key: 'a'.repeat(64), keep: 'latest' }
+    }
   }).init({
     userSigner: signer(userPubkey),
     channels: [{
@@ -49,38 +54,48 @@ async function coalescingProbe () {
     }]
   })
   await messenger.update({}, { waitForBackground: true })
-  const ask = (id, createdAt) => ({
+  const envelope = (type, id, createdAt) => ({
     event: {
       id,
-      kind: 7329,
+      kind: type === 'tell' ? 7331 : 9,
       pubkey: '33'.repeat(32),
       created_at: createdAt,
-      tags: [['r', userPubkey], ['q', id]],
+      tags: [['D', 'browser-operation'], ...(type === 'tell' ? [['r', userPubkey]] : [])],
       content: id
     },
     outer: { id: `outer-${id}`, created_at: createdAt },
     meta: { channelPubkey },
     senderPubkey: '33'.repeat(32),
-    payload: { code: 'nostrDbSync_ask_kpkr', payload: { requestId: id } },
-    question: { id, kind: 7329, pubkey: '33'.repeat(32), created_at: createdAt, tags: [] }
+    payload: { code: `${type}:code`, payload: { id } },
+    ...(type === 'tell' ? { tell: { id } } : {})
   })
-  const first = '44'.repeat(32)
-  const second = '55'.repeat(32)
+  const tellFirst = '44'.repeat(32)
+  const tellSecond = '55'.repeat(32)
+  const messageFirst = '66'.repeat(32)
+  const messageSecond = '77'.repeat(32)
   try {
-    await watch.onAsk(ask(first, 10))
-    await watch.onAsk(ask(second, 20))
-    const delivery = await messenger.nextMessage()
-    const result = {
-      eventId: delivery?.message?.event?.id || '',
-      questionId: delivery?.message?.question?.id || '',
-      requestId: delivery?.message?.payload?.payload?.requestId || '',
-      exposedInternalKey: Boolean(
-        delivery?.message?.askCoalescingKey ||
-        delivery?.message?.askCoalescingOrder
+    await watch.onTell(envelope('tell', tellFirst, 10))
+    await watch.onTell(envelope('tell', tellSecond, 20))
+    await watch.onMessage(envelope('message', messageFirst, 30))
+    await watch.onMessage(envelope('message', messageSecond, 40))
+    const tell = await messenger.nextMessage()
+    const message = await messenger.nextMessage()
+    await tell?.ack()
+    await message?.ack()
+    return {
+      tellEventId: tell?.message?.event?.id || '',
+      tellPayloadId: tell?.message?.payload?.payload?.id || '',
+      messageEventId: message?.message?.event?.id || '',
+      messageIdempotencyKey,
+      exposedInternalMetadata: Boolean(
+        tell?.message?.coalescingKey ||
+        tell?.message?.coalescingKeep ||
+        tell?.message?.coalescingOrder ||
+        message?.message?.coalescingKey ||
+        message?.message?.coalescingKeep ||
+        message?.message?.coalescingOrder
       )
     }
-    await delivery?.ack()
-    return result
   } finally {
     await messenger.close()
   }

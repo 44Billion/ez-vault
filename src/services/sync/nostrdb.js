@@ -948,6 +948,7 @@ export function createNostrDbSyncController ({
       question: message.event,
       receiverPubkey: message.event?.pubkey,
       code: NOSTRDB_SYNC_REPLY_CODE,
+      idempotencyKey: coalescingDigest(['nostrdb-reply', NOSTRDB_SYNC_REPLY_CODE, ask.requestId]),
       payload: {
         requestId: ask.requestId,
         sinceScore: ask.sinceScore,
@@ -997,6 +998,7 @@ export function createNostrDbSyncController ({
       question: message.event,
       receiverPubkey: message.event?.pubkey,
       code: NOSTRDB_SYNC_APP_REPLY_CODE,
+      idempotencyKey: coalescingDigest(['nostrdb-app-reply', NOSTRDB_SYNC_APP_REPLY_CODE, ask.requestId]),
       payload: {
         requestId: ask.requestId,
         appId: ask.appId,

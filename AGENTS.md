@@ -557,16 +557,14 @@ default sink silent without that query.
   promotion must rekey this state with the existing local-state scope. Increment
   `SYNC_QUARANTINE_DECODER_VERSION` whenever an accepted sync payload shape or
   decoder compatibility rule changes.
-- Coalesce direct `contentKeys_ask_t7y8`, `nostrDbSync_ask_kpkr` and
-  `nostrDbSync_appAsk_7c93` asks through the private messenger's optional
-  `resolveAskCoalescingKey` hook. Digest only the normalized semantic payload
-  with a stable semantic prefix; `requestId`, event IDs, timestamps, relays and queue
-  position do not belong in the key. Range keys include sorted `excludeIds` and
-  limit; app keys include app, cursor and batch size; content-key keys include
-  the sorted pubkey set. The inbox keeps one pending item and at most one latest
-  successor. Coalescing never replaces exact-event deduplication, trusted-sender
-  checks, quarantine, ACK/NACK, pause, high-water or physical capacity policy.
-  Diagnostics may report only sanitized status/count/byte fields.
+- Coalesce `contentKeys_ask_t7y8`, `nostrDbSync_ask_kpkr` and
+  `nostrDbSync_appAsk_7c93` through `resolveInboundCoalescing`, returning
+  `{ key, keep: 'latest' }`. Digest only normalized semantic payload fields;
+  request IDs, event IDs, timestamps, relays and queue positions stay out.
+  Content-key replies carry a question-scoped D; NostrDB reply packers receive a
+  digest base and append the chunk index. Coalescing never replaces exact event
+  deduplication, trusted-sender checks, quarantine, ACK/NACK, pause, high-water
+  or physical capacity policy. It is not a per-peer rate limit.
 
 
 Account presentation (`name`, `picture`, `about`) may come from pairing before

@@ -332,6 +332,7 @@ async function handleRequest (message, context) {
         question: message.event,
         receiverPubkey: message.event.pubkey,
         code: CONTENT_KEYS_REPLY_CODE,
+        idempotencyKey: `${CONTENT_KEYS_REPLY_CODE}:${message.event.id}`,
         payload,
         useBulkPacing: true
       })
