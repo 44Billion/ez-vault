@@ -395,7 +395,7 @@ reseeding. Run it with
 `node ../44billion/bin/run-browser-tests.js -- node tests/browser/private-sync.js`.
 The runner caps the complete browser/runtime group at 3 GiB with no swap.
 
-Private synchronization uses the `libp2r2p@0.12.13` package pinned in
+Private synchronization uses the `libp2r2p@0.12.14` package pinned in
 `package-lock.json`, including live-overflow recovery with durable history gaps.
 Live readers stop definitive per-route refusals and recover transient failures
 with bounded offline-aware backoff and relay cooldowns. The launcher facade and
@@ -430,7 +430,7 @@ subscriptions and historical recovery continue in the background. ACK still
 requires successful persistence, and the vault keeps its local recovery seed store.
 
 
-The coordinated libp2r2p 0.12.13 release shares confirmed connectivity with automatic
+The coordinated libp2r2p 0.12.14 release shares confirmed connectivity with automatic
 pause recovery. Vault synchronization keeps its direct messenger and local seed
 storage; foreground-send urgency belongs to sessions that explicitly request it.
 Equivalent asks are coalesced by a stable semantic digest before inbox admission.
@@ -446,6 +446,11 @@ missing-key set is suppressed until its announcement-driven retry deadline,
 while changed sets request immediately. Imported keys and removed peers clear
 the coordination state. NostrDB range retries grow from five minutes toward six
 hours as consecutive pending attempts are replaced.
+Inbound sync is additionally guarded per channel and peer with bounded message,
+byte and work-unit buckets. Announcement streams have a one-hour frequency cap.
+Repeated quota or invalid-payload violations open temporary 5/15/30-minute
+cooldowns; excess deliveries are dropped without retry. Relay, storage, pause
+and local errors never count as peer abuse.
 The durable inbox begins backpressure at 70% and resumes at 50%; NostrDB pushes
 park without polling while the messenger is paused and honor relay retry deadlines.
 Trusted-device sync payloads that are structurally incompatible are sealed in a

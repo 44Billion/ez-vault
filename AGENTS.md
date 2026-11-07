@@ -495,7 +495,7 @@ default sink silent without that query.
 
 ## Launcher relay bridge
 
-- Use the coordinated libp2r2p 0.12.13 release, pinned exactly in the
+- Use the coordinated libp2r2p 0.12.14 release, pinned exactly in the
   dev dependency and lockfile. Its live readers stop definitive per-route refusals
   and recover transient errors through bounded offline-aware backoff/cooldowns.
   Keep the existing facade/protocol and standalone fallback. Validate sync,
@@ -580,6 +580,17 @@ default sink silent without that query.
 - Aggregate ask diagnostics may count emitted/suppressed requests by operation
   code and reason when `?debug=1` is active. Public diagnostics contain counts,
   attempts and timings only; never payloads, filters, event IDs or identities.
+- Enable `PrivateMessenger.admitInboundPeer` with an in-memory sync peer guard.
+  Use token buckets per channel/sender for 300 messages/minute, 32 MiB/minute
+  and 240 work units/minute; announcement codes additionally allow 12/hour.
+  Charge content asks 1..5 units, range/app asks 1..10 and push/replies/seeds
+  1..33 by 128 KiB blocks. Quota violations are ACK/drop, never NACK/retry.
+- Open peer cooldown after three quota or invalid-payload violations in ten
+  minutes: 5, 15, then 30 minutes. Drops during cooldown do not extend it.
+  Reset escalation after 30 quiet minutes. Never count relay, storage, pause,
+  cancellation or local internal errors as peer violations. State is
+  controller-memory only; do not mutate trusted signers or create a manual
+  blocklist.
 - NostrDB pushes carry a per-chunk idempotency key derived only from the sorted
   set of event IDs. Chunk index, `isLast`, queue position and timestamps stay
   out, so an identical retry keeps the key while a repacked chunk gets a new one.

@@ -273,8 +273,10 @@ test('sync orchestration watches nsec channels with identity-only sync options',
     contentKeys: { emitted: {}, suppressed: {} },
     nostrDb: { emitted: {}, suppressed: {} }
   })
+  assert.equal(controller.getDebugSnapshot().peerGuard.admitted, 0)
   assert.equal(instances[0].options.useContentKeys, false)
   assert.equal(typeof instances[0].options.resolveInboundCoalescing, 'function')
+  assert.equal(typeof instances[0].options.admitInboundPeer, 'function')
   assert.equal(instances[0].initOptions.userSigner, deviceSigner)
   assert.equal(instances[0].initOptions.contentKeySigner, null)
   assert.equal(instances[0].initOptions.mode, 'seeder')
@@ -2018,10 +2020,10 @@ test('sync persists invalid data payloads before ACK and drops invalid requests 
     constructor (options) {
       this.options = options
       this.queue = [
-        { type: 'reply', event: { id: 'data', pubkey: 'trusted1' }, payload: { code: 'data_code' } },
-        { type: 'ask', event: { id: 'request', pubkey: 'trusted1' }, payload: { code: 'request_code' } },
-        { type: 'reply', event: { id: 'unknown', pubkey: 'trusted1' }, payload: { code: 'unknown_code' } },
-        { type: 'reply', event: { id: 'storage', pubkey: 'trusted1' }, payload: { code: 'data_code' } }
+        { type: 'reply', channelPubkey: 'channel', event: { id: 'data', pubkey: 'trusted1' }, payload: { code: 'data_code' } },
+        { type: 'ask', channelPubkey: 'channel', event: { id: 'request', pubkey: 'trusted1' }, payload: { code: 'request_code' } },
+        { type: 'reply', channelPubkey: 'channel', event: { id: 'unknown', pubkey: 'trusted1' }, payload: { code: 'unknown_code' } },
+        { type: 'reply', channelPubkey: 'channel', event: { id: 'storage', pubkey: 'trusted1' }, payload: { code: 'data_code' } }
       ]
     }
 
@@ -2097,6 +2099,9 @@ test('sync persists invalid data payloads before ACK and drops invalid requests 
   assert.deepEqual(processed.map(event => event.outcome), ['failed', 'failed', 'ok', 'failed'])
   assert.ok(processed.every(event => event.elapsedMs >= 0))
   assert.equal(JSON.stringify(processed).includes('trusted1'), false)
+  assert.equal(controller.getDebugSnapshot().peerGuard.violations, 3)
+  assert.equal(controller.getDebugSnapshot().peerGuard.violationsByReason['invalid-payload'], 3)
+  assert.equal(controller.getDebugSnapshot().peerGuard.cooldownsOpened, 1)
   controller.close()
 })
 

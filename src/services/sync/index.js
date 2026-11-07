@@ -12,6 +12,7 @@ import * as contentKeys from './content-keys.js'
 import * as trustedSignerSync from './trusted-signers.js'
 import * as revocationRotation from './revocation-rotation.js'
 import { createNostrDbSyncController, coalescingHint as nostrDbCoalescingHint } from './nostrdb.js'
+import { createSyncPeerGuard } from './peer-guard.js'
 import { isSyncPayloadError, syncPayloadInvalid } from './payload-error.js'
 import { SYNC_QUARANTINE_DECODER_VERSION, syncQuarantine } from './quarantine.js'
 import {
@@ -145,6 +146,7 @@ export function createSyncController ({
   _syncQuarantine = syncQuarantine,
   _quarantineDecoderVersion = SYNC_QUARANTINE_DECODER_VERSION,
   _coalescingHints = DEFAULT_COALESCING_HINTS,
+  _createPeerGuard = createSyncPeerGuard,
   _claimSigner = claimSigner,
   _subscribeRelayListUpdates = subscribeRelayListUpdates,
   _hasPendingMutation = hasPendingMutation,
@@ -191,6 +193,7 @@ export function createSyncController ({
   const channelBuildFailuresByOwner = new Map()
   let devicePubkey = ''
   const debug = _debug === undefined ? defaultDebugSink() : _debug
+  const peerGuard = _createPeerGuard({ onDebug: debug, now: _now })
   const nostrDbSync = _createNostrDbSyncController({
     _setTimeout,
     _clearTimeout,
@@ -587,6 +590,14 @@ export function createSyncController ({
           } catch (err) {
             let failure = err
             if (isSyncPayloadError(err)) {
+              peerGuard.recordInvalidPayload({
+                type: message?.type || 'message',
+                channelPubkey: message?.channelPubkey || '',
+                senderPubkey: message?.event?.pubkey || '',
+                code: messageCode(message) || '',
+                bytes: messagePayloadBytes(message),
+                now: _now()
+              })
               try {
                 if (!err.quarantineable || !message?.event?.id) {
                   emitDebug('dropped-invalid-sync-message', {
@@ -947,6 +958,7 @@ export function createSyncController ({
           onError,
           onStateChanged: status => observeMessengerState(monitor, status),
           resolveInboundCoalescing: message => resolveInboundCoalescing(message, _coalescingHints),
+          admitInboundPeer: (message, context) => peerGuard.admit(message, context),
           useContentKeys: false,
           onDebug: debug
         })
@@ -1084,12 +1096,14 @@ export function createSyncController ({
     getDebugSnapshot: () => {
       const contentKeys = _contentKeys.getDebugSnapshot?.() || {}
       const nostrDb = nostrDbSync.getDebugSnapshot?.() || {}
+      const peerGuardSnapshot = _peerGuardDebugSnapshot()
       return {
         ...contentKeys,
         askStats: {
           contentKeys: contentKeys.askStats || { emitted: {}, suppressed: {} },
           nostrDb: nostrDb.askStats || { emitted: {}, suppressed: {} }
-        }
+        },
+        peerGuard: peerGuardSnapshot
       }
     },
     subscribeDebug: _contentKeys.subscribeDebug,
@@ -1098,6 +1112,19 @@ export function createSyncController ({
       ...options
     }),
     requestNostrDbAppBackfill
+  }
+
+  function _peerGuardDebugSnapshot () {
+    return peerGuard.getDebugSnapshot?.().peerGuard || {
+      admitted: 0,
+      droppedByQuota: 0,
+      droppedByCooldown: 0,
+      violations: 0,
+      cooldownsOpened: 0,
+      cooldownsExpired: 0,
+      droppedByCode: {},
+      violationsByReason: {}
+    }
   }
 }
 
