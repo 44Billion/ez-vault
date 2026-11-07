@@ -177,6 +177,94 @@ test('nostrdb sync infers owner from channel and builds bounded ask', async () =
   assert.equal(Object.hasOwn(msg.sent[0].options.payload, 'ownerPubkey'), false)
 })
 
+test('range ask retries grow and newer advertisements cannot reset the cooldown', async () => {
+  let now = 1000
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => now,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      async query () {
+        return { results: [], meta: { firstScore: now, lastScore: now } }
+      }
+    })
+  })
+  const advertise = generatedAt => controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt, minScore: now, maxScore: now + 1 }
+  }), context(msg))
+
+  await advertise(now)
+  assert.equal(msg.sent.length, 1)
+  let pending = controller._getState().owners[OWNER][PEER].pending
+  assert.equal(pending.attempt, 0)
+  assert.equal(pending.onlineRetryAt, now + 5 * 60 * 1000)
+
+  now = pending.onlineRetryAt
+  await advertise(now)
+  assert.equal(msg.sent.length, 2)
+  pending = controller._getState().owners[OWNER][PEER].pending
+  assert.equal(pending.attempt, 1)
+  assert.equal(pending.onlineRetryAt, now + 10 * 60 * 1000)
+
+  now += 1
+  await advertise(now)
+  assert.equal(msg.sent.length, 2)
+
+  now = pending.onlineRetryAt
+  await advertise(now)
+  assert.equal(msg.sent.length, 3)
+  pending = controller._getState().owners[OWNER][PEER].pending
+  assert.equal(pending.attempt, 2)
+  assert.equal(pending.onlineRetryAt, now + 20 * 60 * 1000)
+
+  const stats = controller.getDebugSnapshot().askStats
+  assert.equal(stats.emitted[`${NOSTRDB_SYNC_ASK_CODE}:advertise`], 3)
+  assert.equal(stats.suppressed[`${NOSTRDB_SYNC_ASK_CODE}:advertise`], 1)
+})
+
+test('no-reply range retries also advance the attempt and online backoff', async () => {
+  let now = 1000
+  const msg = messenger()
+  const timers = []
+  const controller = createNostrDbSyncController({
+    _nowMs: () => now,
+    _random: () => 0.5,
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: () => {},
+    getDb: () => ({
+      async query () {
+        return { results: [], meta: { firstScore: now, lastScore: now } }
+      }
+    })
+  })
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: now, minScore: now, maxScore: now + 1 }
+  }), context(msg))
+  const first = controller._getState().owners[OWNER][PEER].pending
+  const timer = timers.find(candidate => candidate.ms === first.nextRetryAt - now)
+  assert.ok(timer)
+
+  now = first.nextRetryAt
+  await timer.fn()
+  await flushMicrotasks()
+  assert.equal(msg.sent.length, 2)
+  const second = controller._getState().owners[OWNER][PEER].pending
+  assert.equal(second.attempt, 1)
+  assert.equal(second.onlineRetryAt, now + 10 * 60 * 1000)
+  assert.equal(
+    controller.getDebugSnapshot().askStats.emitted[`${NOSTRDB_SYNC_ASK_CODE}:no-reply`],
+    1
+  )
+})
+
 test('nostrdb data payload validation quarantines shape errors and ignores invalid requests', async () => {
   const msg = messenger()
   const controller = createNostrDbSyncController({
@@ -290,8 +378,7 @@ test('nostrdb app backfill stores install intent and asks trusted peers', async 
   controller.ensureSubscriptions(context(msg))
 
   assert.equal(controller.requestAppBackfill({ ownerPubkey: OWNER, appId: 'app-1' }, context(msg)), true)
-  await Promise.resolve()
-  await Promise.resolve()
+  await flushMicrotasks()
 
   assert.equal(msg.sent.length, 1)
   assert.equal(msg.sent[0].method, 'ask')
@@ -306,6 +393,10 @@ test('nostrdb app backfill stores install intent and asks trusted peers', async 
   const appState = Object.values(apps)[0]
   assert.equal(appState.appId, 'app-1')
   assert.equal(appState.peers[PEER].pending.requestId, msg.sent[0].options.payload.requestId)
+  assert.equal(
+    controller.getDebugSnapshot().askStats.emitted[`${NOSTRDB_SYNC_APP_ASK_CODE}:initial`],
+    1
+  )
 })
 
 test('nostrdb app backfill persists unlocked requests when no trusted peers exist', () => {
@@ -577,6 +668,7 @@ test('paused range asks wait for explicit resume without spending backoff', asyn
   await controller.resumeAfterPause(context(msg))
   assert.equal(attempts, 2)
   assert.equal(controller._getState().owners[OWNER][PEER].pending.waitingForResume, undefined)
+  assert.equal(controller._getState().owners[OWNER][PEER].pending.attempt, 1)
 })
 
 test('waiting-for-resume state recovers after reload once the messenger is active', async () => {
@@ -980,6 +1072,7 @@ test('nostrdb sync re-asks same start when final reply hasMore is true', async (
   assert.equal(secondAsk.sinceScore, firstAsk.sinceScore)
   assert.equal(secondAsk.untilScore, firstAsk.sinceScore + 450000 - 1)
   assert.deepEqual(secondAsk.excludeIds, [imported.id])
+  assert.equal(controller._getState().owners[OWNER][PEER].pending.attempt, 0)
 })
 
 test('nostrdb sync advances only when final reply is complete', async () => {

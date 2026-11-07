@@ -904,6 +904,11 @@ export function createSyncController ({
     trustedByPubkey = trustedMap(_trustedSigners.list())
     const snapshot = await buildChannels(userSigner)
     if (!isCurrentLifecycle(id)) return null
+    await _contentKeys.pruneContentKeyAskState?.({
+      ownerPubkeys: new Set(nostrDbOwnerPubkeys(_store)),
+      peerPubkeys: new Set(trustedByPubkey.keys())
+    })
+    if (!isCurrentLifecycle(id)) return null
     if (!snapshot.channels.length) {
       const currentMessenger = messenger
       messenger = null
@@ -1076,7 +1081,17 @@ export function createSyncController ({
     scheduleAnnounceAll,
     get messenger () { return messenger },
     get trustedByPubkey () { return trustedByPubkey },
-    getDebugSnapshot: _contentKeys.getDebugSnapshot,
+    getDebugSnapshot: () => {
+      const contentKeys = _contentKeys.getDebugSnapshot?.() || {}
+      const nostrDb = nostrDbSync.getDebugSnapshot?.() || {}
+      return {
+        ...contentKeys,
+        askStats: {
+          contentKeys: contentKeys.askStats || { emitted: {}, suppressed: {} },
+          nostrDb: nostrDb.askStats || { emitted: {}, suppressed: {} }
+        }
+      }
+    },
     subscribeDebug: _contentKeys.subscribeDebug,
     generateAndPublishContentKey: (ownerPubkey, options = {}) => _contentKeys.generateAndPublishContentKey({
       ownerPubkey,

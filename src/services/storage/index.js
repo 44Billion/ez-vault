@@ -45,6 +45,10 @@ state, keyPath "key"
   after the decoder version changes. No plaintext payload or identity metadata
   is stored outside the sealed state value.
 
+  ez-vault:trusted-signer-sync:content-key-asks:v1 stores public content-key
+  request coordinates, exact requested sets and retry deadlines. It never
+  stores secrets, payloads or ciphertext.
+
 revocationRotations, keyPath "key"
   key    stable rotation-intent coordinate
   value  content-key rotation intent and retry state

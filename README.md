@@ -441,6 +441,11 @@ because it identifies the database snapshot and supplies the empty-range anchor.
 Reply packers and NostrDB push chunks use content-scoped idempotency keys, so
 retries do not collapse distinct chunks. The queue applies latest-wins with at
 most one active successor without sharing trust, ACK/NACK or capacity policy.
+Content-key asks are coordinated durably per owner and peer: an identical
+missing-key set is suppressed until its announcement-driven retry deadline,
+while changed sets request immediately. Imported keys and removed peers clear
+the coordination state. NostrDB range retries grow from five minutes toward six
+hours as consecutive pending attempts are replaced.
 The durable inbox begins backpressure at 70% and resumes at 50%; NostrDB pushes
 park without polling while the messenger is paused and honor relay retry deadlines.
 Trusted-device sync payloads that are structurally incompatible are sealed in a

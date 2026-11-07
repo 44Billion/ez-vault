@@ -522,6 +522,7 @@ export function createNostrDbSyncController ({
     ? readState(storage)
     : (readRecords(NOSTRDB_SYNC).find(record => record.key === 'state')?.value || {})
   let stateWriteTail = Promise.resolve()
+  const askStats = { emitted: {}, suppressed: {} }
 
   function report (err) {
     try { onError?.(err) } catch {}
@@ -538,6 +539,18 @@ export function createNostrDbSyncController ({
     const write = stateWriteTail.then(() => replaceRecords(NOSTRDB_SYNC, [{ key: 'state', value: snapshot }]))
     stateWriteTail = write.catch(report)
     return write
+  }
+
+  function recordAskStat (kind, code, reason) {
+    const key = `${code}:${reason}`
+    askStats[kind][key] = (askStats[kind][key] || 0) + 1
+  }
+
+  function askStatsSnapshot () {
+    return {
+      emitted: { ...askStats.emitted },
+      suppressed: { ...askStats.suppressed }
+    }
   }
 
   function pruneRecentSyncEventIds () {
@@ -616,7 +629,12 @@ export function createNostrDbSyncController ({
     }
   }
 
-  async function maybeAsk (ownerPubkey, peerPubkey, context = runtime, { onlineHint = false, force = false, resume = false } = {}) {
+  async function maybeAsk (ownerPubkey, peerPubkey, context = runtime, {
+    onlineHint = false,
+    force = false,
+    resume = false,
+    reason = onlineHint ? 'advertise' : 'initial'
+  } = {}) {
     if (!context.messenger?.ask) return null
     const channelPubkey = ownerChannelPubkey(ownerPubkey, context)
     if (!isOwnerReady(ownerPubkey, context) || !channelPubkey) return null
@@ -633,6 +651,16 @@ export function createNostrDbSyncController ({
         ? Math.min(entry.pending.nextRetryAt || Infinity, entry.pending.onlineRetryAt || Infinity)
         : entry.pending.nextRetryAt
       if (!Number.isFinite(retryAt) || now < retryAt) {
+        recordAskStat('suppressed', NOSTRDB_SYNC_ASK_CODE, reason)
+        emitDebug(context.debug, 'ask-suppressed', {
+          code: NOSTRDB_SYNC_ASK_CODE,
+          ownerPubkey,
+          receiverPubkey: peerPubkey,
+          reason,
+          attempt: entry.pending.attempt || 0,
+          retryAt,
+          waitMs: Number.isFinite(retryAt) ? Math.max(0, retryAt - now) : null
+        })
         scheduleRetrySweep(context)
         return null
       }
@@ -660,7 +688,7 @@ export function createNostrDbSyncController ({
 
     const id = requestId(_random)
     const previousAttempt = entry.pending?.attempt || 0
-    const attempt = force || resume ? previousAttempt + 1 : 0
+    const attempt = entry.pending ? previousAttempt + 1 : 0
     const onlineDelay = Math.min(ONLINE_RETRY_MAX_MS, ONLINE_RETRY_MIN_MS * (2 ** attempt))
     const payload = {
       requestId: id,
@@ -713,18 +741,27 @@ export function createNostrDbSyncController ({
     }
 
     scheduleRetrySweep(context)
+    recordAskStat('emitted', NOSTRDB_SYNC_ASK_CODE, reason)
     emitDebug(context.debug, 'ask', {
       channelPubkey,
       ownerPubkey,
       receiverPubkey: peerPubkey,
       sinceScore: payload.sinceScore,
       untilScore: payload.untilScore,
-      excludeCount: payload.excludeIds.length
+      excludeCount: payload.excludeIds.length,
+      reason,
+      attempt,
+      onlineDelay,
+      retryAt: entry.pending.onlineRetryAt
     })
     return payload
   }
 
-  async function maybeAskAppBackfill (ownerPubkey, appId, peerPubkey, context = runtime, { onlineHint = false, resume = false } = {}) {
+  async function maybeAskAppBackfill (ownerPubkey, appId, peerPubkey, context = runtime, {
+    onlineHint = false,
+    resume = false,
+    reason = onlineHint ? 'online-hint' : resume ? 'resume' : 'initial'
+  } = {}) {
     if (!context.messenger?.ask) return null
     const channelPubkey = ownerChannelPubkey(ownerPubkey, context)
     if (!isOwnerReady(ownerPubkey, context) || !channelPubkey) return null
@@ -748,6 +785,17 @@ export function createNostrDbSyncController ({
         ? Math.min(entry.pending.nextRetryAt || Infinity, entry.pending.onlineRetryAt || Infinity)
         : entry.pending.nextRetryAt
       if (!Number.isFinite(retryAt) || now < retryAt) {
+        recordAskStat('suppressed', NOSTRDB_SYNC_APP_ASK_CODE, reason)
+        emitDebug(context.debug, 'app-ask-suppressed', {
+          code: NOSTRDB_SYNC_APP_ASK_CODE,
+          ownerPubkey,
+          appId,
+          receiverPubkey: peerPubkey,
+          reason,
+          attempt: entry.pending.attempt || 0,
+          retryAt,
+          waitMs: Number.isFinite(retryAt) ? Math.max(0, retryAt - now) : null
+        })
         scheduleRetrySweep(context)
         return null
       }
@@ -813,16 +861,27 @@ export function createNostrDbSyncController ({
     }
 
     scheduleRetrySweep(context)
+    recordAskStat('emitted', NOSTRDB_SYNC_APP_ASK_CODE, reason)
     emitDebug(context.debug, 'app-ask', {
       ownerPubkey,
       appId,
       receiverPubkey: peerPubkey,
-      after: payload.after
+      after: payload.after,
+      reason,
+      attempt,
+      onlineDelay,
+      retryAt: entry.pending.onlineRetryAt
     })
     return payload
   }
 
-  async function processAppBackfillsNow (context = runtime, { ownerPubkey = '', peerPubkey = '', onlineHint = false, resume = false } = {}) {
+  async function processAppBackfillsNow (context = runtime, {
+    ownerPubkey = '',
+    peerPubkey = '',
+    onlineHint = false,
+    resume = false,
+    reason = onlineHint ? 'online-hint' : resume ? 'resume' : 'initial'
+  } = {}) {
     const state = getState()
     const owners = state.appBackfills || {}
     const contextOwners = context.ownerPubkeys instanceof Set ? context.ownerPubkeys : new Set(context.ownerPubkeys || [])
@@ -849,7 +908,7 @@ export function createNostrDbSyncController ({
           changed = false
         }
         for (const peer of peers) {
-          await maybeAskAppBackfill(owner, appId, peer, context, { onlineHint, resume })
+          await maybeAskAppBackfill(owner, appId, peer, context, { onlineHint, resume, reason })
         }
       }
       if (Object.keys(apps || {}).length === 0) {
@@ -873,7 +932,8 @@ export function createNostrDbSyncController ({
           ? pending.options.peerPubkey
           : '',
         onlineHint: Boolean(pending.options.onlineHint || options.onlineHint),
-        resume: Boolean(pending.options.resume || options.resume)
+        resume: Boolean(pending.options.resume || options.resume),
+        reason: options.reason || pending.options.reason || ''
       }
       return pending.promise
     }
@@ -884,7 +944,8 @@ export function createNostrDbSyncController ({
         ownerPubkey: options.ownerPubkey || '',
         peerPubkey: options.peerPubkey || '',
         onlineHint: Boolean(options.onlineHint),
-        resume: Boolean(options.resume)
+        resume: Boolean(options.resume),
+        reason: options.reason || ''
       },
       promise: null
     }
@@ -917,7 +978,7 @@ export function createNostrDbSyncController ({
     entry.requestedAt = now
     entry.updatedAt = now
     setState(state)
-    processAppBackfills(context, { ownerPubkey: owner }).catch(report)
+    processAppBackfills(context, { ownerPubkey: owner, reason: 'initial' }).catch(report)
     scheduleRetrySweep(context)
     emitDebug(context.debug, 'app-backfill-requested', { ownerPubkey: owner, appId: app })
     return true
@@ -946,8 +1007,13 @@ export function createNostrDbSyncController ({
       minScore: advert.minScore,
       maxScore: advert.maxScore
     })
-    await maybeAsk(ownerPubkey, peerPubkey, context, { onlineHint: true })
-    await processAppBackfills(context, { ownerPubkey, peerPubkey, onlineHint: true })
+    await maybeAsk(ownerPubkey, peerPubkey, context, { onlineHint: true, reason: 'advertise' })
+    await processAppBackfills(context, {
+      ownerPubkey,
+      peerPubkey,
+      onlineHint: true,
+      reason: 'advertise'
+    })
     return true
   }
 
@@ -1138,7 +1204,7 @@ export function createNostrDbSyncController ({
           hasMore,
           untilScore: pending.untilScore
         })
-        await maybeAsk(ownerPubkey, peerPubkey, context, { force: true })
+        await maybeAsk(ownerPubkey, peerPubkey, context, { force: true, reason: 'has-more' })
         if (rejected) throw syncPayloadInvalid('jsonl-entries-invalid', { partial: true })
         return true
       }
@@ -1188,7 +1254,13 @@ export function createNostrDbSyncController ({
         hasMore,
         nextAfter
       })
-      if (hasMore) await processAppBackfills(context, { ownerPubkey, peerPubkey })
+      if (hasMore) {
+        await processAppBackfills(context, {
+          ownerPubkey,
+          peerPubkey,
+          reason: 'has-more'
+        })
+      }
       if (rejected) throw syncPayloadInvalid('jsonl-entries-invalid', { partial: true })
       return true
     }
@@ -1210,7 +1282,12 @@ export function createNostrDbSyncController ({
       senderPubkey: message.event?.pubkey || '',
       count: imported
     })
-    await processAppBackfills(context, { ownerPubkey, peerPubkey: message.event?.pubkey || '', onlineHint: true })
+    await processAppBackfills(context, {
+      ownerPubkey,
+      peerPubkey: message.event?.pubkey || '',
+      onlineHint: true,
+      reason: 'push'
+    })
     if (rejected) throw syncPayloadInvalid('jsonl-entries-invalid', { partial: true })
     return true
   }
@@ -1545,7 +1622,11 @@ export function createNostrDbSyncController ({
         if (!entry?.pending) continue
         if (resume ? !entry.pending.waitingForResume : entry.pending.waitingForResume) continue
         if (!resume && !force && (entry.pending.nextRetryAt || Infinity) > now) continue
-        await maybeAsk(ownerPubkey, peerPubkey, context, { force, resume })
+        await maybeAsk(ownerPubkey, peerPubkey, context, {
+          force,
+          resume,
+          reason: resume ? 'resume' : 'no-reply'
+        })
       }
     }
     if (!apps) {
@@ -1561,7 +1642,12 @@ export function createNostrDbSyncController ({
           if (!entry?.pending) continue
           if (resume ? !entry.pending.waitingForResume : entry.pending.waitingForResume) continue
           if (!resume && !force && (entry.pending.nextRetryAt || Infinity) > now) continue
-          await processAppBackfills(context, { ownerPubkey, peerPubkey, resume })
+          await processAppBackfills(context, {
+            ownerPubkey,
+            peerPubkey,
+            resume,
+            reason: resume ? 'resume' : 'no-reply'
+          })
           break
         }
       }
@@ -1604,7 +1690,7 @@ export function createNostrDbSyncController ({
     }
     await Promise.all(pushes)
     await retryDueRequests(runtime, { resume: true, apps: false })
-    await processAppBackfills(runtime, { resume: true })
+    await processAppBackfills(runtime, { resume: true, reason: 'resume' })
     scheduleRetrySweep(runtime)
   }
 
@@ -1619,7 +1705,7 @@ export function createNostrDbSyncController ({
     if (runtime.messenger?.readStatus?.().paused === false && hasWaitingForResume()) {
       resumeAfterPause(runtime).catch(report)
     }
-    processAppBackfills(runtime).catch(report)
+    processAppBackfills(runtime, { reason: 'initial' }).catch(report)
     scheduleRetrySweep(runtime)
   }
 
@@ -1646,6 +1732,7 @@ export function createNostrDbSyncController ({
     processAppBackfills,
     queuePush,
     stop,
+    getDebugSnapshot: () => ({ askStats: askStatsSnapshot() }),
     _getState: getState
   }
 }

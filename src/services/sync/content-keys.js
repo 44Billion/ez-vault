@@ -5,6 +5,7 @@ import * as store from '../accounts-store.js'
 import * as secrets from '../secrets.js'
 import { filterVisibleAccounts } from '../account-mutations.js'
 import { upsertContentKeyEvent } from '../content-key/index.js'
+import { getState, removeState, setState } from '../storage/index.js'
 import { assertSupportedPayloadVersion, syncPayloadInvalid } from './payload-error.js'
 
 // Flow notes:
@@ -29,11 +30,17 @@ export const CONTENT_KEYS_REPLY_CODE = 'contentKeys_reply_t7y8'
 
 const HEX32 = /^[0-9a-f]{64}$/i
 const MAX_SYNC_ENTRIES = 512
+export const CONTENT_KEY_ASK_STATE_KEY = 'ez-vault:trusted-signer-sync:content-key-asks:v1'
+const ASK_RETRY_BASE_MS = 5 * 60 * 1000
+const ASK_RETRY_MAX_MS = 6 * 60 * 60 * 1000
+const ASK_STATE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 const encoder = new TextEncoder()
 
 const listeners = new Set()
 const debugSourceByKey = new Map()
 const publishStatusByOwner = new Map()
+const askStats = { emitted: {}, suppressed: {} }
+let askStateWriteTail = Promise.resolve()
 
 function sourceKey (ownerPubkey, contentPubkey) {
   return `${ownerPubkey}:${contentPubkey}`
@@ -79,6 +86,80 @@ function normalizeSecretKey (entry) {
 
 function normalizePubkeyList (values) {
   return [...new Set((Array.isArray(values) ? values : []).map(normalizePubkey).filter(Boolean))]
+}
+
+function normalizeAskRecord (value) {
+  if (!isPlainObject(value)) return null
+  const pubkeys = normalizePubkeyList(value.pubkeys).sort()
+  if (!pubkeys.length ||
+      !Number.isSafeInteger(value.attempts) || value.attempts < 0 ||
+      !Number.isSafeInteger(value.sentAt) || value.sentAt < 0 ||
+      !Number.isSafeInteger(value.retryAt) || value.retryAt < 0) return null
+  return {
+    pubkeys,
+    attempts: value.attempts,
+    sentAt: value.sentAt,
+    retryAt: value.retryAt
+  }
+}
+
+function readAskState () {
+  const raw = getState(CONTENT_KEY_ASK_STATE_KEY, {})
+  const state = {}
+  if (!isPlainObject(raw)) return state
+  for (const [ownerPubkey, peers] of Object.entries(raw)) {
+    const owner = normalizePubkey(ownerPubkey)
+    if (!owner || !isPlainObject(peers)) continue
+    for (const [peerPubkey, value] of Object.entries(peers)) {
+      const peer = normalizePubkey(peerPubkey)
+      const record = normalizeAskRecord(value)
+      if (!peer || !record) continue
+      if (!state[owner]) state[owner] = {}
+      state[owner][peer] = record
+    }
+  }
+  return state
+}
+
+function mutateAskState (mutator) {
+  let result
+  const operation = askStateWriteTail
+    .catch(() => {})
+    .then(async () => {
+      const state = readAskState()
+      result = mutator(state) || null
+      if (result?.changed) {
+        await (Object.keys(state).length ? setState(CONTENT_KEY_ASK_STATE_KEY, state) : removeState(CONTENT_KEY_ASK_STATE_KEY))
+      }
+      return result?.value
+    })
+  askStateWriteTail = operation.catch(() => {})
+  return operation
+}
+
+function contentKeyAskRecord (state, ownerPubkey, peerPubkey) {
+  return state?.[ownerPubkey]?.[peerPubkey] || null
+}
+
+function samePubkeys (left, right) {
+  if (left.length !== right.length) return false
+  return left.every((value, index) => value === right[index])
+}
+
+function askRetryDelay (attempts) {
+  return Math.min(ASK_RETRY_MAX_MS, ASK_RETRY_BASE_MS * (2 ** Math.min(attempts, 16)))
+}
+
+function incrementAskStat (kind, code, reason) {
+  const key = `${code}:${reason}`
+  askStats[kind][key] = (askStats[kind][key] || 0) + 1
+}
+
+function askStatsSnapshot () {
+  return {
+    emitted: { ...askStats.emitted },
+    suppressed: { ...askStats.suppressed }
+  }
 }
 
 function coalescingDigest (parts) {
@@ -185,6 +266,90 @@ function contentKeyDiff (ownerPubkey, announcedKeys) {
   }
 }
 
+function contentKeyAskDecision (ownerPubkey, peerPubkey, pubkeys, now = Date.now()) {
+  const pending = contentKeyAskRecord(readAskState(), ownerPubkey, peerPubkey)
+  const requested = normalizePubkeyList(pubkeys).sort()
+  const same = Boolean(pending && samePubkeys(pending.pubkeys, requested))
+  if (same && now < pending.retryAt) {
+    return { suppress: true, reason: 'same-set-cooldown', record: pending }
+  }
+  const attempts = same ? pending.attempts + 1 : 0
+  return {
+    suppress: false,
+    reason: same ? 'retry' : pending ? 'changed-set' : 'initial',
+    attempts,
+    sentAt: now,
+    retryAt: now + askRetryDelay(attempts),
+    pubkeys: requested
+  }
+}
+
+function recordContentKeyAsk (ownerPubkey, peerPubkey, decision) {
+  return mutateAskState(state => {
+    if (!state[ownerPubkey]) state[ownerPubkey] = {}
+    state[ownerPubkey][peerPubkey] = {
+      pubkeys: decision.pubkeys,
+      attempts: decision.attempts,
+      sentAt: decision.sentAt,
+      retryAt: decision.retryAt
+    }
+    return { changed: true }
+  })
+}
+
+function clearContentKeyAsk (ownerPubkey, peerPubkey) {
+  return mutateAskState(state => {
+    if (!state[ownerPubkey]?.[peerPubkey]) return { changed: false }
+    delete state[ownerPubkey][peerPubkey]
+    if (!Object.keys(state[ownerPubkey]).length) delete state[ownerPubkey]
+    return { changed: true }
+  })
+}
+
+function removeImportedContentKeys (ownerPubkey, peerPubkey, importedPubkeys) {
+  const imported = new Set(normalizePubkeyList(importedPubkeys))
+  if (!imported.size) return Promise.resolve(false)
+  return mutateAskState(state => {
+    const current = state[ownerPubkey]?.[peerPubkey]
+    if (!current) return { changed: false, value: false }
+    const remaining = current.pubkeys.filter(pubkey => !imported.has(pubkey))
+    if (remaining.length === current.pubkeys.length) return { changed: false, value: false }
+    if (remaining.length) state[ownerPubkey][peerPubkey] = { ...current, pubkeys: remaining }
+    else {
+      delete state[ownerPubkey][peerPubkey]
+      if (!Object.keys(state[ownerPubkey]).length) delete state[ownerPubkey]
+    }
+    return { changed: true, value: true }
+  })
+}
+
+export function pruneContentKeyAskState ({
+  ownerPubkeys,
+  peerPubkeys,
+  now = Date.now()
+} = {}) {
+  const owners = ownerPubkeys instanceof Set ? ownerPubkeys : null
+  const peers = peerPubkeys instanceof Set ? peerPubkeys : null
+  return mutateAskState(state => {
+    let changed = false
+    for (const [ownerPubkey, owner] of Object.entries(state)) {
+      if (owners && !owners.has(ownerPubkey)) {
+        delete state[ownerPubkey]
+        changed = true
+        continue
+      }
+      for (const [peerPubkey, record] of Object.entries(owner)) {
+        if ((peers && !peers.has(peerPubkey)) || now - record.sentAt > ASK_STATE_TTL_MS) {
+          delete owner[peerPubkey]
+          changed = true
+        }
+      }
+      if (!Object.keys(owner).length) delete state[ownerPubkey]
+    }
+    return { changed }
+  })
+}
+
 export function subscribeDebug (fn) {
   listeners.add(fn)
   return () => listeners.delete(fn)
@@ -193,6 +358,8 @@ export function subscribeDebug (fn) {
 export function resetDebugSources () {
   debugSourceByKey.clear()
   publishStatusByOwner.clear()
+  askStats.emitted = {}
+  askStats.suppressed = {}
   notifyDebug()
 }
 
@@ -216,7 +383,7 @@ export function getDebugSnapshot () {
         publishStatus: publishStatusByOwner.get(account.pubkey) || null
       }
     })
-  return { unlocked: secrets.isUnlocked(), accounts }
+  return { unlocked: secrets.isUnlocked(), accounts, askStats: askStatsSnapshot() }
 }
 
 export async function announceContentKeys ({
@@ -302,6 +469,25 @@ async function handleAnnounce (message, context) {
   const rejected = body.keys.length - keys.length
   const { knownPubkeys, announcedPubkeys, missingPubkeys: pubkeys } = contentKeyDiff(ownerPubkey, keys)
   if (!pubkeys.length) {
+    await clearContentKeyAsk(ownerPubkey, message.event.pubkey)
+    if (rejected) throw syncPayloadInvalid('keys-entries-invalid', { partial: true })
+    return true
+  }
+
+  const decision = contentKeyAskDecision(ownerPubkey, message.event.pubkey, pubkeys)
+  if (decision.suppress) {
+    incrementAskStat('suppressed', CONTENT_KEYS_ASK_CODE, decision.reason)
+    emitDebug(context.debug, 'content-key-ask-suppressed', {
+      code: CONTENT_KEYS_ASK_CODE,
+      channelPubkey,
+      ownerPubkey,
+      receiverPubkey: message.event.pubkey,
+      reason: decision.reason,
+      count: decision.record.pubkeys.length,
+      attempts: decision.record.attempts,
+      retryAt: decision.record.retryAt,
+      waitMs: Math.max(0, decision.record.retryAt - Date.now())
+    })
     if (rejected) throw syncPayloadInvalid('keys-entries-invalid', { partial: true })
     return true
   }
@@ -315,7 +501,10 @@ async function handleAnnounce (message, context) {
     announcedCount: announcedPubkeys.length,
     knownCount: knownPubkeys.length,
     pubkeys,
-    count: pubkeys.length
+    count: pubkeys.length,
+    reason: decision.reason,
+    attempts: decision.attempts,
+    retryAt: decision.retryAt
   })
   await context.messenger.ask({
     channelPubkey,
@@ -324,6 +513,8 @@ async function handleAnnounce (message, context) {
     payload: { pubkeys },
     useBulkPacing: true
   })
+  await recordContentKeyAsk(ownerPubkey, message.event.pubkey, decision)
+  incrementAskStat('emitted', CONTENT_KEYS_ASK_CODE, decision.reason)
   if (rejected) throw syncPayloadInvalid('keys-entries-invalid', { partial: true })
   return true
 }
@@ -399,6 +590,7 @@ async function handleReply (message, context) {
   }
 
   if (changed) {
+    await removeImportedContentKeys(ownerPubkey, message.event.pubkey, importedPubkeys)
     notifyDebug()
     emitDebug(context.debug, 'import', {
       type: 'reply',

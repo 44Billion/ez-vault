@@ -7,17 +7,20 @@ import { DEFAULT_STALE_CHANNEL_SECONDS } from 'libp2r2p/private-messenger'
 import {
   announceContentKeys,
   CONTENT_KEYS_ANNOUNCE_CODE,
+  CONTENT_KEY_ASK_STATE_KEY,
   CONTENT_KEYS_REPLY_CODE,
   CONTENT_KEYS_ASK_CODE,
   generateAndPublishContentKey,
   getDebugSnapshot,
   handleMessage,
+  pruneContentKeyAskState,
   resetDebugSources
 } from '../src/services/sync/content-keys.js'
 import { TRUSTED_SIGNERS_STATE_CODE } from '../src/services/sync/trusted-signers.js'
 import { syncPayloadInvalid } from '../src/services/sync/payload-error.js'
 import * as store from '../src/services/accounts-store.js'
 import * as secrets from '../src/services/secrets.js'
+import { getState } from '../src/services/storage/index.js'
 import { bytesToHex, hexToBytes } from 'libp2r2p/base16'
 import { TEMPORARY_STORAGE_KEYS_KEY } from 'libp2r2p/temporary-storage'
 
@@ -266,6 +269,10 @@ test('sync orchestration watches nsec channels with identity-only sync options',
   await controller.init()
 
   assert.equal(instances.length, 1)
+  assert.deepEqual(controller.getDebugSnapshot().askStats, {
+    contentKeys: { emitted: {}, suppressed: {} },
+    nostrDb: { emitted: {}, suppressed: {} }
+  })
   assert.equal(instances[0].options.useContentKeys, false)
   assert.equal(typeof instances[0].options.resolveInboundCoalescing, 'function')
   assert.equal(instances[0].initOptions.userSigner, deviceSigner)
@@ -1522,6 +1529,182 @@ test('content-key announce routes asks over derived sync channels', async () => 
   assert.deepEqual(messenger.sent[0].options.payload, {
     pubkeys: [absentPubkey]
   })
+})
+
+test('content-key asks suppress exact sets and grow the cooldown', async t => {
+  let now = 1800000000000
+  t.mock.method(Date, 'now', () => now)
+  secrets.unlock(generateSecretKey(), null)
+  const owner = await addNsecAccount()
+  const first = pubkeyFromSecret(seckey())
+  const second = pubkeyFromSecret(seckey())
+  const trusted = '4'.repeat(64)
+  const messenger = fakeMessenger()
+  const context = {
+    messenger,
+    trustedByPubkey: new Map([[trusted, { pubkey: trusted }]])
+  }
+  const announce = (pubkeys, id) => handleMessage(syncMessage({
+    channelPubkey: owner.pubkey,
+    senderPubkey: trusted,
+    code: CONTENT_KEYS_ANNOUNCE_CODE,
+    id,
+    payload: {
+      keys: pubkeys.map(pubkey => ({ pubkey, createdAt: Math.floor(now / 1000) }))
+    }
+  }), context)
+
+  await announce([second, first], 'announce-1')
+  let record = getState(CONTENT_KEY_ASK_STATE_KEY)[owner.pubkey][trusted]
+  assert.deepEqual(record.pubkeys, [first, second].sort())
+  assert.equal(record.attempts, 0)
+  assert.equal(record.retryAt, now + 5 * 60 * 1000)
+
+  now += 60 * 1000
+  await announce([first, second], 'announce-2')
+  assert.equal(messenger.sent.length, 1)
+
+  now = record.retryAt
+  await announce([first, second], 'announce-3')
+  assert.equal(messenger.sent.length, 2)
+  record = getState(CONTENT_KEY_ASK_STATE_KEY)[owner.pubkey][trusted]
+  assert.equal(record.attempts, 1)
+  assert.equal(record.retryAt, now + 10 * 60 * 1000)
+
+  const stats = getDebugSnapshot().askStats
+  assert.equal(stats.emitted[`${CONTENT_KEYS_ASK_CODE}:initial`], 1)
+  assert.equal(stats.emitted[`${CONTENT_KEYS_ASK_CODE}:retry`], 1)
+  assert.equal(stats.suppressed[`${CONTENT_KEYS_ASK_CODE}:same-set-cooldown`], 1)
+})
+
+test('content-key asks do not suppress changed or subset requests', async t => {
+  let now = 1800000000000
+  t.mock.method(Date, 'now', () => now)
+  secrets.unlock(generateSecretKey(), null)
+  const owner = await addNsecAccount()
+  const first = pubkeyFromSecret(seckey())
+  const second = pubkeyFromSecret(seckey())
+  const trusted = '5'.repeat(64)
+  const messenger = fakeMessenger()
+  const context = {
+    messenger,
+    trustedByPubkey: new Map([[trusted, { pubkey: trusted }]])
+  }
+  const announce = (pubkeys, id) => handleMessage(syncMessage({
+    channelPubkey: owner.pubkey,
+    senderPubkey: trusted,
+    code: CONTENT_KEYS_ANNOUNCE_CODE,
+    id,
+    payload: {
+      keys: pubkeys.map(pubkey => ({ pubkey, createdAt: Math.floor(now / 1000) }))
+    }
+  }), context)
+
+  await announce([first, second], 'announce-both')
+  now += 1000
+  await announce([first], 'announce-subset')
+  assert.equal(messenger.sent.length, 2)
+  assert.deepEqual(messenger.sent[1].options.payload.pubkeys, [first])
+  assert.equal(getState(CONTENT_KEY_ASK_STATE_KEY)[owner.pubkey][trusted].attempts, 0)
+})
+
+test('content-key ask state clears imported keys and survives storage reads', async t => {
+  const now = 1800000000000
+  t.mock.method(Date, 'now', () => now)
+  secrets.unlock(generateSecretKey(), null)
+  const owner = await addNsecAccount()
+  const firstSecret = seckey()
+  const first = pubkeyFromSecret(firstSecret)
+  const secondSecret = seckey()
+  const second = pubkeyFromSecret(secondSecret)
+  const trusted = '6'.repeat(64)
+  const messenger = fakeMessenger()
+  const context = {
+    messenger,
+    trustedByPubkey: new Map([[trusted, { pubkey: trusted }]])
+  }
+
+  await handleMessage(syncMessage({
+    channelPubkey: owner.pubkey,
+    senderPubkey: trusted,
+    code: CONTENT_KEYS_ANNOUNCE_CODE,
+    payload: {
+      keys: [first, second].map(pubkey => ({ pubkey, createdAt: Math.floor(now / 1000) }))
+    }
+  }), context)
+  assert.deepEqual(
+    getState(CONTENT_KEY_ASK_STATE_KEY)[owner.pubkey][trusted].pubkeys,
+    [first, second].sort()
+  )
+
+  await handleMessage(syncMessage({
+    channelPubkey: owner.pubkey,
+    senderPubkey: trusted,
+    code: CONTENT_KEYS_REPLY_CODE,
+    payload: {
+      keys: [{ pubkey: first, seckey: firstSecret, createdAt: Math.floor(now / 1000) }]
+    }
+  }), context)
+  assert.deepEqual(getState(CONTENT_KEY_ASK_STATE_KEY)[owner.pubkey][trusted].pubkeys, [second])
+
+  await handleMessage(syncMessage({
+    channelPubkey: owner.pubkey,
+    senderPubkey: trusted,
+    code: CONTENT_KEYS_REPLY_CODE,
+    payload: {
+      keys: [{ pubkey: second, seckey: secondSecret, createdAt: Math.floor(now / 1000) }]
+    }
+  }), context)
+  assert.equal(getState(CONTENT_KEY_ASK_STATE_KEY, null), null)
+})
+
+test('content-key ask failures do not create pending state and stale state is pruned', async t => {
+  let now = 1800000000000
+  t.mock.method(Date, 'now', () => now)
+  secrets.unlock(generateSecretKey(), null)
+  const owner = await addNsecAccount()
+  const missing = pubkeyFromSecret(seckey())
+  const trusted = '7'.repeat(64)
+  const context = {
+    messenger: {
+      ask: async () => { throw new Error('ask unavailable') }
+    },
+    trustedByPubkey: new Map([[trusted, { pubkey: trusted }]])
+  }
+  const announce = id => handleMessage(syncMessage({
+    channelPubkey: owner.pubkey,
+    senderPubkey: trusted,
+    code: CONTENT_KEYS_ANNOUNCE_CODE,
+    id,
+    payload: { keys: [{ pubkey: missing, createdAt: Math.floor(now / 1000) }] }
+  }), context)
+
+  await assert.rejects(announce('failed-ask'), /ask unavailable/)
+  assert.equal(getState(CONTENT_KEY_ASK_STATE_KEY, null), null)
+
+  context.messenger = fakeMessenger()
+  await announce('successful-ask')
+  assert.ok(getState(CONTENT_KEY_ASK_STATE_KEY)[owner.pubkey][trusted])
+  await pruneContentKeyAskState({
+    ownerPubkeys: new Set([owner.pubkey]),
+    peerPubkeys: new Set()
+  })
+  assert.equal(getState(CONTENT_KEY_ASK_STATE_KEY, null), null)
+
+  await announce('successful-ask-again')
+  now += 8 * 24 * 60 * 60 * 1000
+  await pruneContentKeyAskState({
+    ownerPubkeys: new Set([owner.pubkey]),
+    peerPubkeys: new Set([trusted])
+  })
+  assert.equal(getState(CONTENT_KEY_ASK_STATE_KEY, null), null)
+
+  await announce('successful-ask-owner-removal')
+  await pruneContentKeyAskState({
+    ownerPubkeys: new Set(),
+    peerPubkeys: new Set([trusted])
+  })
+  assert.equal(getState(CONTENT_KEY_ASK_STATE_KEY, null), null)
 })
 
 test('content-key announce contains only public key metadata', async () => {

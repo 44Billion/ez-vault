@@ -566,6 +566,20 @@ default sink silent without that query.
 - Keep `generatedAt` in `nostrDbSync_advertise_kpkr` and use it as `sequence`.
   It is database snapshot freshness and the empty-range score anchor, not merely
   an event timestamp.
+- Persist content-key ask coordination under
+  `ez-vault:trusted-signer-sync:content-key-asks:v1` by owner and peer. Suppress
+  only an exact requested-key set until `retryAt`; changed sets request
+  immediately and subsets are not suppressed. Retry only when another
+  announcement arrives, using 5 minutes doubling to 6 hours. Clear imported
+  keys, empty-missing announcements, removed owners/peers and records older than
+  seven days. A failed publication must not create or advance pending state.
+- Range-ask attempts increment whenever an existing pending operation is
+  replaced, including advertisement, no-reply and resume retries. A new window
+  after a successful `hasMore` reply starts at attempt zero. Keep the two-day
+  no-reply deadline and the 5-minute..6-hour online retry gate.
+- Aggregate ask diagnostics may count emitted/suppressed requests by operation
+  code and reason when `?debug=1` is active. Public diagnostics contain counts,
+  attempts and timings only; never payloads, filters, event IDs or identities.
 - NostrDB pushes carry a per-chunk idempotency key derived only from the sorted
   set of event IDs. Chunk index, `isLast`, queue position and timestamps stay
   out, so an identical retry keeps the key while a repacked chunk gets a new one.
