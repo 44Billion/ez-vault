@@ -821,7 +821,6 @@ test('sync announces trusted-signer state over one-to-one device channels', asyn
       handleMessage: async () => false,
       stop: () => {}
     }),
-    _now: () => 7000,
     _setTimeout: (fn, ms) => {
       const timer = { fn, ms }
       timers.push(timer)
@@ -844,13 +843,11 @@ test('sync announces trusted-signer state over one-to-one device channels', asyn
   const otherTell = tells.find(call => call.receiverPubkey === other)
   assert.equal(trustedTell.channelPubkey, `device:shared:${trusted}:${SIGNER_LIST_SYNC_INFO}`)
   assert.equal(trustedTell.code, TRUSTED_SIGNERS_STATE_CODE)
-  assert.equal(trustedTell.payload.generatedAt, 7000)
   assert.deepEqual(trustedTell.payload.entries, [
     { pubkey: other, platform: 'Tablet', status: 'trusted', updatedAt: 11, actorPubkey: actor }
   ])
   assert.equal(otherTell.channelPubkey, `device:shared:${other}:${SIGNER_LIST_SYNC_INFO}`)
   assert.equal(otherTell.code, TRUSTED_SIGNERS_STATE_CODE)
-  assert.equal(otherTell.payload.generatedAt, 7000)
   assert.deepEqual(otherTell.payload.entries, [
     { pubkey: trusted, platform: 'Phone', status: 'trusted', updatedAt: 10, actorPubkey: actor }
   ])
@@ -1348,7 +1345,6 @@ test('setContentKeySecret causes one immediate announce through the sync subscri
     },
     _claimSigner: () => signer(owner.pubkey),
     _subscribeRelayListUpdates: () => () => {},
-    _now: () => 5000,
     _setTimeout: (fn, ms) => {
       const timer = { fn, ms }
       timers.push(timer)
@@ -1376,7 +1372,6 @@ test('setContentKeySecret causes one immediate announce through the sync subscri
   assert.equal(yells[0].channelPubkey, `${owner.pubkey}:shared:${owner.pubkey}:${SYNC_INFO}`)
   assert.equal(yells[0].code, CONTENT_KEYS_ANNOUNCE_CODE)
   assert.deepEqual(yells[0].receiverPubkeys, [trusted])
-  assert.equal(yells[0].payload.generatedAt, 5000)
   assert.deepEqual(yells[0].payload.keys, [{ pubkey: contentPubkey, createdAt: 60 }])
 
   controller.close()
@@ -1538,15 +1533,13 @@ test('content-key announce contains only public key metadata', async () => {
   await announceContentKeys({
     messenger,
     ownerPubkey: owner.pubkey,
-    receiverPubkeys: ['4'.repeat(64)],
-    _now: () => 1234
+    receiverPubkeys: ['4'.repeat(64)]
   })
 
   assert.equal(messenger.sent[0].method, 'yell')
   assert.equal(messenger.sent[0].options.code, CONTENT_KEYS_ANNOUNCE_CODE)
   assert.equal(messenger.sent[0].options.useBulkPacing, true)
   assert.deepEqual(messenger.sent[0].options.payload, {
-    generatedAt: 1234,
     keys: [{ pubkey: content.pubkey, createdAt: 30 }]
   })
   assert.equal(Object.hasOwn(messenger.sent[0].options.payload, 'ownerPubkey'), false)

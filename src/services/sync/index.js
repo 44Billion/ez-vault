@@ -169,7 +169,6 @@ export function createSyncController ({
   let announceTimer = null
   let announceTimerAt = 0
   let announceInterval = null
-  let announcementSequence = 0
   let pendingResetInterval = false
   let lastStoreIdentityKey = ''
   let stopRelayListWatcher = null
@@ -714,10 +713,6 @@ export function createSyncController ({
       : [...pendingAnnounceOwners]
     pendingAnnounceOwners.clear()
     const now = _now()
-    const nextAnnouncementSequence = () => {
-      announcementSequence = Math.max(_now(), announcementSequence + 1)
-      return announcementSequence
-    }
 
     if (receivers.length) {
       for (const ownerPubkey of owners) {
@@ -742,8 +737,7 @@ export function createSyncController ({
             channelPubkey,
             ownerPubkey,
             receiverPubkeys: receivers,
-            debug,
-            _now: nextAnnouncementSequence
+            debug
           }))
           if (HEX32.test(ownerPubkey)) {
             await assertPublished(await nostrDbSync.announceRange({
@@ -751,8 +745,7 @@ export function createSyncController ({
               channelPubkey,
               ownerPubkey,
               receiverPubkeys: receivers,
-              debug,
-              _nowMs: nextAnnouncementSequence
+              debug
             }))
           }
           announceRetryAtByOwner.delete(ownerPubkey)
@@ -771,8 +764,7 @@ export function createSyncController ({
           records: trustedRecords(),
           activePeerPubkeys: receivers,
           reminderRecords: removedReminderRecords(),
-          debug,
-          _now: nextAnnouncementSequence
+          debug
         })
         trustedAnnounceRetryAt = 0
       } catch (err) {

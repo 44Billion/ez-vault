@@ -150,23 +150,8 @@ export function coalescingHint (message) {
       body.keys.length > MAX_SYNC_ENTRIES || (body.v != null && body.v !== 1)) return null
   const keys = body.keys.map(normalizeMetaKey)
   if (!keys.length || keys.some(key => !key)) return null
-  keys.sort((left, right) => {
-    const leftValue = JSON.stringify(left)
-    const rightValue = JSON.stringify(right)
-    return leftValue < rightValue ? -1 : leftValue > rightValue ? 1 : 0
-  })
-
-  if (body.generatedAt != null) {
-    if (!Number.isSafeInteger(body.generatedAt) || body.generatedAt < 0) return null
-    return {
-      key: coalescingDigest(['content-keys-announce-stream']),
-      keep: 'latest',
-      sequence: body.generatedAt
-    }
-  }
-
   return {
-    key: coalescingDigest(['content-keys-announce-snapshot', keys]),
+    key: coalescingDigest(['content-keys-announce-stream']),
     keep: 'latest'
   }
 }
@@ -239,13 +224,11 @@ export async function announceContentKeys ({
   ownerPubkey,
   channelPubkey = ownerPubkey,
   receiverPubkeys,
-  debug,
-  _now = Date.now
+  debug
 }) {
   const keys = contentKeysForOwner(ownerPubkey)
   const receivers = normalizePubkeyList(receiverPubkeys)
   if (!keys.length || !receivers.length) return null
-  const generatedAt = _now()
   emitDebug(debug, 'announce', {
     type: 'yell',
     code: CONTENT_KEYS_ANNOUNCE_CODE,
@@ -260,7 +243,7 @@ export async function announceContentKeys ({
     channelPubkey,
     receiverPubkeys: receivers,
     code: CONTENT_KEYS_ANNOUNCE_CODE,
-    payload: { generatedAt, keys },
+    payload: { keys },
     useBulkPacing: true
   })
 }

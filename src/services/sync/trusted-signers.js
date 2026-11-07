@@ -61,23 +61,8 @@ export function coalescingHint (message) {
       body.entries.length > MAX_SYNC_ENTRIES || (body.v != null && body.v !== 1)) return null
   const entries = stateEntries(body.entries)
   if (!entries.length || entries.length !== body.entries.length) return null
-  entries.sort((left, right) => {
-    const leftValue = JSON.stringify(left)
-    const rightValue = JSON.stringify(right)
-    return leftValue < rightValue ? -1 : leftValue > rightValue ? 1 : 0
-  })
-
-  if (body.generatedAt != null) {
-    if (!Number.isSafeInteger(body.generatedAt) || body.generatedAt < 0) return null
-    return {
-      key: coalescingDigest(['trusted-signers-state-stream']),
-      keep: 'latest',
-      sequence: body.generatedAt
-    }
-  }
-
   return {
-    key: coalescingDigest(['trusted-signers-state-snapshot', entries]),
+    key: coalescingDigest(['trusted-signers-state-stream']),
     keep: 'latest'
   }
 }
@@ -105,14 +90,12 @@ export async function announceTrustedSignerState ({
   peerChannels,
   records,
   activePeerPubkeys,
-  reminderRecords,
-  _now = Date.now
+  reminderRecords
 } = {}) {
   if (!messenger) return { sent: 0 }
   const channels = peerChannels || new Map()
   const active = [...new Set(activePeerPubkeys || [])].map(normalizePubkey).filter(Boolean)
   const entries = stateEntries(records)
-  const generatedAt = _now()
   let sent = 0
 
   if (entries.length) {
@@ -125,7 +108,7 @@ export async function announceTrustedSignerState ({
         channelPubkey,
         receiverPubkey: peerPubkey,
         code: TRUSTED_SIGNERS_STATE_CODE,
-        payload: { generatedAt, entries: payloadEntries },
+        payload: { entries: payloadEntries },
         useBulkPacing: true
       }))
       sent += 1
@@ -141,7 +124,7 @@ export async function announceTrustedSignerState ({
       channelPubkey,
       receiverPubkey: record.pubkey,
       code: TRUSTED_SIGNERS_STATE_CODE,
-      payload: { generatedAt, entries: [record] },
+      payload: { entries: [record] },
       useBulkPacing: true
     }))
     sent += 1

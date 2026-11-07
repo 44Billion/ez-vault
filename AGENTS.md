@@ -495,7 +495,7 @@ default sink silent without that query.
 
 ## Launcher relay bridge
 
-- Use the coordinated libp2r2p 0.12.12 release, pinned exactly in the
+- Use the coordinated libp2r2p 0.12.13 release, pinned exactly in the
   dev dependency and lockfile. Its live readers stop definitive per-route refusals
   and recover transient errors through bounded offline-aware backoff/cooldowns.
   Keep the existing facade/protocol and standalone fallback. Validate sync,
@@ -557,12 +557,15 @@ default sink silent without that query.
   promotion must rekey this state with the existing local-state scope. Increment
   `SYNC_QUARANTINE_DECODER_VERSION` whenever an accepted sync payload shape or
   decoder compatibility rule changes.
-- Coalesce asks through semantic digests. Content-key announcements,
-  `nostrDbSync_advertise_kpkr` and `trustedSigners_state_v1` use complete-stream
-  keys plus their `generatedAt` as `sequence`; this orders full snapshots and
-  trusted-signer removal reminders independently of second-resolution envelope
-  timestamps. Legacy payloads without `generatedAt` fall back to normalized
-  snapshot digests. Do not coalesce partially invalid payloads.
+- Coalesce asks through semantic digests. Content-key announcements and
+  `trustedSigners_state_v1` use complete-stream keys ordered by the inner event
+  timestamp plus its `ms` tag. Do not read ordering from legacy payload
+  `generatedAt`; tolerate and ignore it without changing admission. Missing or
+  malformed milliseconds order as zero. Snapshots and trusted-signer removal
+  reminders remain in the same stream. Do not coalesce partially invalid payloads.
+- Keep `generatedAt` in `nostrDbSync_advertise_kpkr` and use it as `sequence`.
+  It is database snapshot freshness and the empty-range score anchor, not merely
+  an event timestamp.
 - NostrDB pushes carry a per-chunk idempotency key derived only from the sorted
   set of event IDs. Chunk index, `isLast`, queue position and timestamps stay
   out, so an identical retry keeps the key while a repacked chunk gets a new one.

@@ -177,6 +177,7 @@ try {
     tellPayloadId: '55'.repeat(32),
     messageEventId: '77'.repeat(32),
     messageIdempotencyKey: null,
+    messageCreatedAtMs: 30200,
     exposedInternalMetadata: false
   })
   const [a, b] = browsers

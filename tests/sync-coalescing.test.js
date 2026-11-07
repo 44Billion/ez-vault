@@ -117,7 +117,7 @@ test('content-key coalescing canonicalizes the requested pubkey set', () => {
   })))
 })
 
-test('content-key announcements use an ordered stream and preserve legacy snapshots', () => {
+test('content-key announcements always use the same stream and ignore generatedAt', () => {
   const keys = [
     { pubkey: PUBKEY_B, createdAt: 20 },
     { pubkey: PUBKEY_A, createdAt: 10 }
@@ -128,21 +128,18 @@ test('content-key announcements use an ordered stream and preserve legacy snapsh
     keys: [keys[1]]
   }))
   assert.equal(first.key, changed.key)
-  assert.equal(first.sequence, 100)
-  assert.equal(changed.sequence, 200)
+  assert.equal(first.sequence, undefined)
+  assert.equal(changed.sequence, undefined)
 
   const legacy = contentKeysHint(message(CONTENT_KEYS_ANNOUNCE_CODE, { keys }))
   const reordered = contentKeysHint(message(CONTENT_KEYS_ANNOUNCE_CODE, { keys: [...keys].reverse() }))
-  assert.equal(legacy.key, reordered.key)
+  assert.equal(legacy.key, first.key)
+  assert.equal(reordered.key, first.key)
   assert.equal(legacy.sequence, undefined)
-  assert.notEqual(
-    legacy.key,
-    contentKeysHint(message(CONTENT_KEYS_ANNOUNCE_CODE, { keys: [keys[1]] })).key
-  )
   assert.equal(contentKeysHint(message(CONTENT_KEYS_ANNOUNCE_CODE, {
     generatedAt: 'invalid',
     keys
-  })), null)
+  })).key, first.key)
   assert.equal(contentKeysHint(message(CONTENT_KEYS_ANNOUNCE_CODE, {
     generatedAt: 300,
     keys: [keys[0], { pubkey: 'invalid', createdAt: 10 }]
@@ -170,7 +167,7 @@ test('NostrDB advertisements use generatedAt as stream sequence', () => {
   })), null)
 })
 
-test('trusted signer snapshots and reminders share one ordered stream', () => {
+test('trusted signer snapshots and reminders always share one stream', () => {
   const trusted = { pubkey: PUBKEY_A, status: 'trusted', updatedAt: 10, actorPubkey: PUBKEY_B, platform: 'Phone' }
   const removed = { pubkey: PUBKEY_B, status: 'removed', updatedAt: 20, actorPubkey: PUBKEY_A, platform: 'Laptop' }
   const snapshot = trustedSignersHint(message(TRUSTED_SIGNERS_STATE_CODE, {
@@ -182,17 +179,14 @@ test('trusted signer snapshots and reminders share one ordered stream', () => {
     entries: [removed]
   }))
   assert.equal(snapshot.key, reminder.key)
-  assert.equal(snapshot.sequence, 100)
-  assert.equal(reminder.sequence, 200)
+  assert.equal(snapshot.sequence, undefined)
+  assert.equal(reminder.sequence, undefined)
 
   const legacy = trustedSignersHint(message(TRUSTED_SIGNERS_STATE_CODE, { entries: [trusted, removed] }))
-  const reordered = trustedSignersHint(message(TRUSTED_SIGNERS_STATE_CODE, { entries: [removed, trusted] }))
-  assert.equal(legacy.key, reordered.key)
+  const reminderLegacy = trustedSignersHint(message(TRUSTED_SIGNERS_STATE_CODE, { entries: [removed] }))
+  assert.equal(legacy.key, snapshot.key)
+  assert.equal(reminderLegacy.key, snapshot.key)
   assert.equal(legacy.sequence, undefined)
-  assert.notEqual(
-    legacy.key,
-    trustedSignersHint(message(TRUSTED_SIGNERS_STATE_CODE, { entries: [removed] })).key
-  )
   assert.equal(trustedSignersHint(message(TRUSTED_SIGNERS_STATE_CODE, {
     generatedAt: 300,
     entries: [trusted, { pubkey: 'invalid', status: 'trusted', updatedAt: 10 }]

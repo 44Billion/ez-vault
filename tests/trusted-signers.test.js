@@ -236,7 +236,6 @@ test('trusted signer announce omits the receiver own pubkey', async () => {
       [pk(2), 'channel-two']
     ]),
     activePeerPubkeys: [pk(1), pk(2)],
-    _now: () => 1234,
     records: [
       { pubkey: pk(1), platform: 'One', status: 'trusted', updatedAt: 10, actorPubkey: pk(9) },
       { pubkey: pk(2), platform: 'Two', status: 'trusted', updatedAt: 10, actorPubkey: pk(9) }
@@ -245,7 +244,6 @@ test('trusted signer announce omits the receiver own pubkey', async () => {
 
   assert.equal(sent.length, 2)
   assert.ok(sent.every(call => call.useBulkPacing === true))
-  assert.ok(sent.every(call => call.payload.generatedAt === 1234))
   assert.deepEqual(sent.find(call => call.receiverPubkey === pk(1)).payload.entries.map(entry => entry.pubkey), [pk(2)])
   assert.deepEqual(sent.find(call => call.receiverPubkey === pk(2)).payload.entries.map(entry => entry.pubkey), [pk(1)])
 })

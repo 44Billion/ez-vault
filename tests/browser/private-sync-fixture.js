@@ -24,6 +24,7 @@ const signer = pubkey => ({
 async function coalescingProbe () {
   let watch
   let messageIdempotencyKey
+  let messageCreatedAtMs
   const privateMessage = {
     watch: async options => {
       watch = options
@@ -43,11 +44,8 @@ async function coalescingProbe () {
     resolveInboundCoalescing: (message, context) => {
       if (message.type !== 'message') return null
       messageIdempotencyKey = context.idempotencyKey
-      return {
-        key: 'a'.repeat(64),
-        keep: 'latest',
-        sequence: message.payload.payload.sequence
-      }
+      messageCreatedAtMs = context.eventCreatedAtMs
+      return { key: 'a'.repeat(64), keep: 'latest' }
     }
   }).init({
     userSigner: signer(userPubkey),
@@ -58,19 +56,30 @@ async function coalescingProbe () {
     }]
   })
   await messenger.update({}, { waitForBackground: true })
-  const envelope = (type, id, createdAt, sequence = 0) => ({
+  const envelope = (
+    type,
+    id,
+    createdAt,
+    milliseconds = 0,
+    kind = type === 'tell' ? 7331 : 9,
+    senderPubkey = '33'.repeat(32)
+  ) => ({
     event: {
       id,
-      kind: type === 'tell' ? 7331 : 9,
+      kind,
       pubkey: '33'.repeat(32),
       created_at: createdAt,
-      tags: [['D', 'browser-operation'], ...(type === 'tell' ? [['r', userPubkey]] : [])],
+      tags: [
+        ['D', 'browser-operation'],
+        ['ms', String(milliseconds)],
+        ...(type === 'tell' ? [['r', userPubkey]] : [])
+      ],
       content: id
     },
     outer: { id: `outer-${id}`, created_at: createdAt },
     meta: { channelPubkey },
-    senderPubkey: '33'.repeat(32),
-    payload: { code: `${type}:code`, payload: { id, sequence } },
+    senderPubkey,
+    payload: { code: `${type}:code`, payload: { id } },
     ...(type === 'tell' ? { tell: { id } } : {})
   })
   const tellFirst = '44'.repeat(32)
@@ -80,8 +89,8 @@ async function coalescingProbe () {
   try {
     await watch.onTell(envelope('tell', tellFirst, 10))
     await watch.onTell(envelope('tell', tellSecond, 20))
-    await watch.onMessage(envelope('message', messageFirst, 30, 10))
-    await watch.onMessage(envelope('message', messageSecond, 30, 20))
+    await watch.onMessage(envelope('message', messageFirst, 30, 100, 7331, '34'.repeat(32)))
+    await watch.onMessage(envelope('message', messageSecond, 30, 200, 7331, '34'.repeat(32)))
     const tell = await messenger.nextMessage()
     const message = await messenger.nextMessage()
     await tell?.ack()
@@ -91,6 +100,7 @@ async function coalescingProbe () {
       tellPayloadId: tell?.message?.payload?.payload?.id || '',
       messageEventId: message?.message?.event?.id || '',
       messageIdempotencyKey,
+      messageCreatedAtMs,
       exposedInternalMetadata: Boolean(
         tell?.message?.coalescingKey ||
         tell?.message?.coalescingKeep ||

@@ -395,7 +395,7 @@ reseeding. Run it with
 `node ../44billion/bin/run-browser-tests.js -- node tests/browser/private-sync.js`.
 The runner caps the complete browser/runtime group at 3 GiB with no swap.
 
-Private synchronization uses the `libp2r2p@0.12.12` package pinned in
+Private synchronization uses the `libp2r2p@0.12.13` package pinned in
 `package-lock.json`, including live-overflow recovery with durable history gaps.
 Live readers stop definitive per-route refusals and recover transient failures
 with bounded offline-aware backoff and relay cooldowns. The launcher facade and
@@ -430,16 +430,16 @@ subscriptions and historical recovery continue in the background. ACK still
 requires successful persistence, and the vault keeps its local recovery seed store.
 
 
-The coordinated libp2r2p 0.12.12 release shares confirmed connectivity with automatic
+The coordinated libp2r2p 0.12.13 release shares confirmed connectivity with automatic
 pause recovery. Vault synchronization keeps its direct messenger and local seed
 storage; foreground-send urgency belongs to sessions that explicitly request it.
 Equivalent asks are coalesced by a stable semantic digest before inbox admission.
-Content-key announcements, NostrDB range advertisements and trusted-signer state
-messages use `generatedAt` as an ordered sequence, so full snapshots and removal
-reminders coalesce to the newest logical state even when their envelope timestamps
-match. Legacy announcements without `generatedAt` coalesce only by normalized
-snapshot. Reply packers and NostrDB push chunks use content-scoped idempotency keys,
-so retries do not collapse distinct chunks. The queue applies latest-wins with at
+Content-key announcements and trusted-signer snapshots/reminders share one stream
+ordered by the inner event's `created_at + ms`; `generatedAt` in older payloads is
+ignored without affecting admission. NostrDB advertisements retain `generatedAt`
+because it identifies the database snapshot and supplies the empty-range anchor.
+Reply packers and NostrDB push chunks use content-scoped idempotency keys, so
+retries do not collapse distinct chunks. The queue applies latest-wins with at
 most one active successor without sharing trust, ACK/NACK or capacity policy.
 The durable inbox begins backpressure at 70% and resumes at 50%; NostrDB pushes
 park without polling while the messenger is paused and honor relay retry deadlines.
