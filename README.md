@@ -395,7 +395,7 @@ reseeding. Run it with
 `node ../44billion/bin/run-browser-tests.js -- node tests/browser/private-sync.js`.
 The runner caps the complete browser/runtime group at 3 GiB with no swap.
 
-Private synchronization uses the `libp2r2p@0.12.14` package pinned in
+Private synchronization uses the `libp2r2p@0.12.15` package pinned in
 `package-lock.json`, including live-overflow recovery with durable history gaps.
 Live readers stop definitive per-route refusals and recover transient failures
 with bounded offline-aware backoff and relay cooldowns. The launcher facade and
@@ -430,10 +430,12 @@ subscriptions and historical recovery continue in the background. ACK still
 requires successful persistence, and the vault keeps its local recovery seed store.
 
 
-The coordinated libp2r2p 0.12.14 release shares confirmed connectivity with automatic
+The coordinated libp2r2p 0.12.15 release shares confirmed connectivity with automatic
 pause recovery. Vault synchronization keeps its direct messenger and local seed
 storage; foreground-send urgency belongs to sessions that explicitly request it.
 Equivalent asks are coalesced by a stable semantic digest before inbox admission.
+When no resolver or `D` identity applies, the inbox coalesces each type by Nostr
+address or event ID; replaceable/addressable versions follow NIP-01.
 Content-key announcements and trusted-signer snapshots/reminders share one stream
 ordered by the inner event's `created_at + ms`; `generatedAt` in older payloads is
 ignored without affecting admission. NostrDB advertisements retain `generatedAt`

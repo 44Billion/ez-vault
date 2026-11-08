@@ -180,6 +180,14 @@ try {
     messageCreatedAtMs: 30200,
     exposedInternalMetadata: false
   })
+  assert.deepEqual(await browsers[1].evaluate('syncProbe.identityProbe()', vaultOrigin), {
+    sameIdProvenance: 'signed',
+    newerAddressId: 'cc'.repeat(32),
+    lowerIdAddressId: 'dd'.repeat(32),
+    trustedAddressId: 'ff'.repeat(32),
+    remaining: true,
+    exposedInternalMetadata: false
+  })
   const [a, b] = browsers
   const peer = getPublicKey(generateSecretKey())
   assert.deepEqual(await evaluateApp(0, `syncApp.seed(${JSON.stringify(peer)})`), [true, true])

@@ -495,7 +495,7 @@ default sink silent without that query.
 
 ## Launcher relay bridge
 
-- Use the coordinated libp2r2p 0.12.14 release, pinned exactly in the
+- Use the coordinated libp2r2p 0.12.15 release, pinned exactly in the
   dev dependency and lockfile. Its live readers stop definitive per-route refusals
   and recover transient errors through bounded offline-aware backoff/cooldowns.
   Keep the existing facade/protocol and standalone fallback. Validate sync,
@@ -563,6 +563,10 @@ default sink silent without that query.
   `generatedAt`; tolerate and ignore it without changing admission. Missing or
   malformed milliseconds order as zero. Snapshots and trusted-signer removal
   reminders remain in the same stream. Do not coalesce partially invalid payloads.
+- With 0.12.15, resolver and `D` identities retain precedence and scope. If both
+  are absent, the messenger coalesces all inbox types by Nostr address or event
+  ID inside channel and type. Replaceable/addressable versions follow NIP-01;
+  hearsay cannot displace direct/signed state.
 - Keep `generatedAt` in `nostrDbSync_advertise_kpkr` and use it as `sequence`.
   It is database snapshot freshness and the empty-range score anchor, not merely
   an event timestamp.

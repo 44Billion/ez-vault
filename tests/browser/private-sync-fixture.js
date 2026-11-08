@@ -114,6 +114,94 @@ async function coalescingProbe () {
     await messenger.close()
   }
 }
+
+async function identityProbe () {
+  let watch
+  const privateMessage = {
+    watch: async options => {
+      watch = options
+      return () => {}
+    },
+    unwatch: async () => {},
+    clearChannelState: async () => {}
+  }
+  const userPubkey = '11'.repeat(32)
+  const channelPubkey = '22'.repeat(32)
+  const authorPubkey = '33'.repeat(32)
+  const messenger = await new PrivateMessenger({
+    _privateMessage: privateMessage,
+    _privateChannel: { fetchHistory: async () => [] },
+    _isOnline: async () => true,
+    _onOnline: () => () => {},
+    offlineRecoverySeconds: 0
+  }).init({
+    userSigner: signer(userPubkey),
+    channels: [{ signer: signer(channelPubkey), relays: ['wss://relay.example'], mode: 'leecher' }]
+  })
+  await messenger.update({}, { waitForBackground: true })
+  const envelope = (id, createdAt, {
+    tags = [],
+    senderPubkey = authorPubkey,
+    signed = false
+  } = {}) => ({
+    event: {
+      id,
+      kind: 9,
+      pubkey: authorPubkey,
+      created_at: createdAt,
+      tags,
+      content: id,
+      ...(signed ? { sig: 'browser-signature' } : {})
+    },
+    outer: { id: `outer-${id}`, created_at: createdAt },
+    meta: { channelPubkey },
+    senderPubkey
+  })
+  const take = async () => {
+    const delivery = await messenger.nextMessage()
+    const value = delivery?.message || null
+    await delivery?.ack()
+    return value
+  }
+  try {
+    await watch.onMessage(envelope('aa'.repeat(32), 10))
+    await watch.onMessage(envelope('aa'.repeat(32), 10, { signed: true }))
+    const sameId = await take()
+
+    await watch.onMessage(envelope('bb'.repeat(32), 20, { tags: [['d', 'state']] }))
+    await watch.onMessage(envelope('cc'.repeat(32), 30, { tags: [['d', 'state']] }))
+    const newerAddress = await take()
+
+    await watch.onMessage(envelope('ee'.repeat(32), 40, { tags: [['d', 'tie']] }))
+    await watch.onMessage(envelope('dd'.repeat(32), 40, { tags: [['d', 'tie']] }))
+    const lowerIdAddress = await take()
+
+    await watch.onMessage(envelope('ff'.repeat(32), 50, { tags: [['d', 'trust']] }))
+    await watch.onMessage(envelope('00'.repeat(32), 60, {
+      tags: [['d', 'trust']],
+      senderPubkey: '44'.repeat(32)
+    }))
+    const trustedAddress = await take()
+
+    return {
+      sameIdProvenance: sameId?.provenance || '',
+      newerAddressId: newerAddress?.event?.id || '',
+      lowerIdAddressId: lowerIdAddress?.event?.id || '',
+      trustedAddressId: trustedAddress?.event?.id || '',
+      remaining: await messenger.nextMessage() === null,
+      exposedInternalMetadata: Boolean(
+        sameId?.coalescingKey ||
+        sameId?.coalescingKeep ||
+        sameId?.coalescingOrder ||
+        newerAddress?.coalescingKey ||
+        newerAddress?.coalescingKeep ||
+        newerAddress?.coalescingOrder
+      )
+    }
+  } finally {
+    await messenger.close()
+  }
+}
 globalThis.syncProbe = {
   errors,
   async importAccount (secret) {
@@ -130,5 +218,6 @@ globalThis.syncProbe = {
   restoreLimits () { liveLimit = liveBytes = undefined },
   unlocked: () => secrets.isUnlocked(),
   debug: () => sync.getDebugSnapshot(),
-  coalescingProbe
+  coalescingProbe,
+  identityProbe
 }
