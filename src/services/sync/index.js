@@ -2,6 +2,7 @@ import { syncErrorDetails } from '../../helpers/sync-error.js'
 import { publicationErrorFromResult, publicationRetryAt } from '../../helpers/publication-retry.js'
 import { debugEnabledForWindow } from '../../helpers/diagnostics-mode.js'
 import { PrivateMessenger } from 'libp2r2p/private-messenger'
+import { PERSONAL_COPY } from 'libp2r2p/kind'
 import { claimSigner } from '../signer.js'
 import { subscribeRelayListUpdates } from 'libp2r2p/relay'
 import * as store from '../accounts-store.js'
@@ -11,7 +12,11 @@ import * as deviceRelays from '../device-relays.js'
 import * as contentKeys from './content-keys.js'
 import * as trustedSignerSync from './trusted-signers.js'
 import * as revocationRotation from './revocation-rotation.js'
-import { createNostrDbSyncController, coalescingHint as nostrDbCoalescingHint } from './nostrdb.js'
+import {
+  createNostrDbSyncController,
+  coalescingHint as nostrDbCoalescingHint,
+  NOSTRDB_SYNC_PUSH_CODE
+} from './nostrdb.js'
 import { createSyncPeerGuard } from './peer-guard.js'
 import { isSyncPayloadError, syncPayloadInvalid } from './payload-error.js'
 import { SYNC_QUARANTINE_DECODER_VERSION, syncQuarantine } from './quarantine.js'
@@ -117,6 +122,12 @@ function messagePayloadBytes (message) {
   return 0
 }
 
+function resolveInboundPriority (message) {
+  if (message?.payload?.code !== NOSTRDB_SYNC_PUSH_CODE) return null
+  const priority = message.payload.payload?.priority
+  return priority === 'lower' || priority === 'lowest' ? priority : null
+}
+
 export function resolveInboundCoalescing (message, hints = DEFAULT_COALESCING_HINTS) {
   for (const hint of hints) {
     const resolved = hint?.(message)
@@ -167,6 +178,7 @@ export function createSyncController ({
   let drainQueued = false
   let drainScheduled = false
   let draining = false
+  let drainRetryTimer = null
   let channelConfiguration = null
   let announceTimer = null
   let announceTimerAt = 0
@@ -188,6 +200,7 @@ export function createSyncController ({
   const ownerPubkeyByChannelPubkey = new Map()
   const signerChannelPubkeyByPeerPubkey = new Map()
   const readRelaysByOwnerPubkey = new Map()
+  const emptyPersonalCopyContextByOwner = new Map()
   const knownOwnerPubkeys = new Set()
   const readyOwnerPubkeys = new Set()
   const channelBuildFailuresByOwner = new Map()
@@ -355,6 +368,7 @@ export function createSyncController ({
     replaceMap(channelPubkeyByOwnerPubkey, snapshot.channelPubkeyByOwnerPubkey)
     replaceMap(ownerPubkeyByChannelPubkey, snapshot.ownerPubkeyByChannelPubkey)
     replaceMap(signerChannelPubkeyByPeerPubkey, snapshot.signerChannelPubkeyByPeerPubkey)
+    replaceMap(emptyPersonalCopyContextByOwner, snapshot.emptyPersonalCopyContextByOwner || [])
     if (snapshot.relayListRevision === relayListRevision) {
       replaceMap(readRelaysByOwnerPubkey, snapshot.readRelaysByOwnerPubkey)
     }
@@ -374,6 +388,7 @@ export function createSyncController ({
     const nextOwnerPubkeys = new Set()
     const nextReadyOwnerPubkeys = new Set()
     const nextReadRelaysByOwnerPubkey = new Map()
+    const nextEmptyPersonalCopyContextByOwner = new Map()
     const nextChannelBuildFailuresByOwner = new Map()
     for (const account of filterVisibleAccounts(_store.list())) {
       if (account.type !== 'nsec') continue
@@ -404,6 +419,15 @@ export function createSyncController ({
       } catch (err) {
         nextChannelBuildFailuresByOwner.set(account.pubkey, reportChannelBuildFailure(account.pubkey, 'resolve-read-relays', err))
         continue
+      }
+      try {
+        if (typeof accountSigner.obfuscate !== 'function') throw new Error('PERSONAL_COPY_OBFUSCATE_UNAVAILABLE')
+        const emptyContext = await accountSigner.obfuscate('', String(PERSONAL_COPY), '')
+        if (typeof emptyContext === 'string' && emptyContext) {
+          nextEmptyPersonalCopyContextByOwner.set(account.pubkey, emptyContext)
+        }
+      } catch (err) {
+        if (err?.message !== 'PERSONAL_COPY_OBFUSCATE_UNAVAILABLE') onError(err)
       }
       nextReadRelaysByOwnerPubkey.set(account.pubkey, relays)
       nextChannelPubkeyByOwnerPubkey.set(account.pubkey, channelPubkey)
@@ -447,6 +471,7 @@ export function createSyncController ({
       ownerPubkeyByChannelPubkey: nextOwnerPubkeyByChannelPubkey,
       signerChannelPubkeyByPeerPubkey: nextSignerChannelPubkeyByPeerPubkey,
       readRelaysByOwnerPubkey: nextReadRelaysByOwnerPubkey,
+      emptyPersonalCopyContextByOwner: nextEmptyPersonalCopyContextByOwner,
       knownOwnerPubkeys: nextOwnerPubkeys,
       readyOwnerPubkeys: nextReadyOwnerPubkeys,
       channelBuildFailuresByOwner: nextChannelBuildFailuresByOwner,
@@ -503,11 +528,24 @@ export function createSyncController ({
 
   function scheduleDrain () {
     if (!initialized) return
+    if (drainRetryTimer) {
+      _clearTimeout(drainRetryTimer)
+      drainRetryTimer = null
+    }
     const id = lifecycleId
     drainQueued = true
     if (channelConfiguration || draining || drainScheduled) return
     drainScheduled = true
     Promise.resolve().then(() => drainMessages(id))
+  }
+
+  function scheduleDrainRetry () {
+    if (drainRetryTimer || !initialized) return
+    drainRetryTimer = _setTimeout(() => {
+      drainRetryTimer = null
+      scheduleDrain()
+    }, 1000)
+    drainRetryTimer?.unref?.()
   }
 
   function flushMessengerResume (monitor = messengerStateMonitor) {
@@ -628,9 +666,16 @@ export function createSyncController ({
             }
             await nack()
             onError(failure)
-            // Do not spin on a persistent storage/permission failure. A later
-            // unlock, refresh or queued delivery schedules another attempt.
-            drainQueued = false
+            // Capacity and pause are admission/lifecycle conditions, not
+            // permanent handler failures. Keep the durable backlog moving.
+            if (isInboxAdmissionError(failure) || messenger?.readStatus?.().paused) {
+              drainQueued = true
+              scheduleDrainRetry()
+            } else {
+              // Do not spin on a persistent storage/permission failure. A later
+              // unlock, refresh or queued delivery schedules another attempt.
+              drainQueued = false
+            }
             break
           }
         }
@@ -821,6 +866,7 @@ export function createSyncController ({
       channelPubkeyForOwner,
       ownerPubkeyForChannel,
       ownerPubkeys: new Set(nostrDbOwnerPubkeys(_store)),
+      emptyPersonalCopyContextByOwner,
       readyOwnerPubkeys: new Set([...readyOwnerPubkeys].filter(pubkey => HEX32.test(pubkey))),
       debug
     }
@@ -885,11 +931,16 @@ export function createSyncController ({
     channelConfiguration = null
     drainQueued = false
     drainScheduled = false
+    if (drainRetryTimer) {
+      _clearTimeout(drainRetryTimer)
+      drainRetryTimer = null
+    }
     clearRelayListWatcher()
     channelPubkeyByOwnerPubkey.clear()
     ownerPubkeyByChannelPubkey.clear()
     signerChannelPubkeyByPeerPubkey.clear()
     readRelaysByOwnerPubkey.clear()
+    emptyPersonalCopyContextByOwner.clear()
     relayListRevision += 1
     knownOwnerPubkeys.clear()
     readyOwnerPubkeys.clear()
@@ -899,6 +950,13 @@ export function createSyncController ({
     nostrDbSync.stop()
     _contentKeys.resetDebugSources?.()
     return Promise.resolve(currentMessenger?.close?.()).catch(onError)
+  }
+
+  function isInboxAdmissionError (error) {
+    return error?.code === 'PRIVATE_MESSENGER_CAPACITY_PRESSURE' ||
+      error?.code === 'PRIVATE_MESSENGER_PAUSED' ||
+      error?.message === 'PRIVATE_MESSENGER_CAPACITY_PRESSURE' ||
+      error?.message === 'PRIVATE_MESSENGER_PAUSED'
   }
 
   async function refreshNow (id = lifecycleId) {
@@ -958,6 +1016,7 @@ export function createSyncController ({
           onError,
           onStateChanged: status => observeMessengerState(monitor, status),
           resolveInboundCoalescing: message => resolveInboundCoalescing(message, _coalescingHints),
+          resolveInboundPriority,
           admitInboundPeer: (message, context) => peerGuard.admit(message, context),
           useContentKeys: false,
           onDebug: debug

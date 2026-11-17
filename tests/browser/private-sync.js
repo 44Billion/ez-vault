@@ -188,6 +188,16 @@ try {
     remaining: true,
     exposedInternalMetadata: false
   })
+  assert.deepEqual(await browsers[1].evaluate('syncProbe.priorityProbe()', vaultOrigin), {
+    delivered: [
+      'normal'.padEnd(32, '0'),
+      'high'.padEnd(32, '0'),
+      'lower'.padEnd(32, '0'),
+      'lowest'.padEnd(32, '0')
+    ],
+    remaining: true,
+    exposedInternalMetadata: false
+  })
   const [a, b] = browsers
   const peer = getPublicKey(generateSecretKey())
   assert.deepEqual(await evaluateApp(0, `syncApp.seed(${JSON.stringify(peer)})`), [true, true])

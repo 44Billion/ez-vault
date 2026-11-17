@@ -1,6 +1,8 @@
 import * as nostrdb from '../nostrdb.js'
 import { createEventReplyPacker } from 'libp2r2p/private-messenger/recovery'
 import { bytesToHex } from 'libp2r2p/base16'
+import { PERSONAL_COPY } from 'libp2r2p/kind'
+import { createQueue } from 'libp2r2p/idb-queue'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { NOSTRDB_SYNC, readRecords, replaceRecords } from '../storage/index.js'
 import { publicationRetryAt } from '../../helpers/publication-retry.js'
@@ -16,8 +18,9 @@ import { assertSupportedPayloadVersion, syncPayloadInvalid } from './payload-err
 //   message drain, so we never block waiting for an offline peer to answer.
 //   Retries rebuild the ask from current advert/local IDs instead of resending
 //   stale payloads. Retry sweeps also walk owners/peers in series.
-// - Pushes are per owner: leading-edge immediate, then a trailing batched turn.
-//   RelayConnection applies bulk pacing and retry backoff per relay.
+// - Pushes are per owner and priority lane. Normal events are immediate;
+//   lower/lowest events share a short trailing batching window. RelayConnection
+//   applies bulk pacing and retry backoff per relay.
 // - App-install backfills use the same account channel, but page by app export
 //   cursor (`after` event id) instead of sync-anchor score windows.
 // - Sync windows use NostrDB `sa` millisecond scores, not Nostr created_at.
@@ -32,7 +35,8 @@ export const NOSTRDB_SYNC_ASK_CODE = 'nostrDbSync_ask_kpkr'
 // window itself: true means the responder hit its page cap, so the requester
 // should re-ask the same window after rebuilding its local excludeIds.
 export const NOSTRDB_SYNC_REPLY_CODE = 'nostrDbSync_reply_kpkr'
-// payload: { index, isLast, jsonl }
+// payload: { index, isLast, jsonl, priority? }
+// `priority` is optional and may only lower delivery to `lower` or `lowest`.
 export const NOSTRDB_SYNC_PUSH_CODE = 'nostrDbSync_push_kpkr'
 // payload: { requestId, appId, after, batchSize }
 export const NOSTRDB_SYNC_APP_ASK_CODE = 'nostrDbSync_appAsk_7c93'
@@ -60,6 +64,18 @@ const PUSH_EVENTS_PER_CHUNK = 100
 const SYNC_BYTES_PER_CHUNK = 128 * 1024
 const encoder = new TextEncoder()
 const RECENT_SYNC_EVENT_TTL_MS = 2 * 60 * 1000
+const PUSH_BATCH_WINDOW_MS = 200
+const PUSH_OUTBOX_PREFIX = 'ez-vault:trusted-signer-sync:nostrdb-push:v1'
+const PUSH_CHUNK_OUTBOX_PREFIX = 'ez-vault:trusted-signer-sync:nostrdb-push-chunks:v1'
+const PUSH_EVENT_OUTBOX_MAX_BYTES = 32 * 1024 * 1024
+const PUSH_CHUNK_OUTBOX_MAX_BYTES = 16 * 1024 * 1024
+const PUSH_RECOVERY_PAGE_SIZE = 200
+const PUSH_PRIORITIES = Object.freeze(['normal', 'lower', 'lowest'])
+const PUSH_PRIORITY_RANK = Object.freeze({
+  normal: 2,
+  lower: 1,
+  lowest: 0
+})
 
 const SYNC_CODES = new Set([
   NOSTRDB_SYNC_ADVERTISE_CODE,
@@ -122,6 +138,13 @@ function pushChunkIdempotencyKey (events) {
     'nostrdb-push',
     ...events.map(event => event.id).sort()
   ])
+}
+
+function personalCopyTag (event, name) {
+  const tags = Array.isArray(event?.tags)
+    ? event.tags.filter(tag => Array.isArray(tag) && tag[0] === name && tag.length === 2)
+    : []
+  return tags.length === 1 && typeof tags[0][1] === 'string' ? tags[0][1] : ''
 }
 
 function requireDataBody (message) {
@@ -283,6 +306,7 @@ function normalizeEventBatchPayload (payload) {
     index,
     isLast: payload.isLast,
     hasMore: typeof payload.hasMore === 'boolean' ? payload.hasMore : null,
+    priority: PUSH_PRIORITIES.includes(payload.priority) ? payload.priority : 'normal',
     jsonl: payload.jsonl
   }
 }
@@ -508,10 +532,14 @@ export function createNostrDbSyncController ({
   _nowMs = nowMs,
   _performanceNow = () => performance.now(),
   _random = Math.random,
+  _indexedDB = globalThis.indexedDB,
+  _createPushQueue = createQueue,
   onError = err => console.warn('nostrdb sync failed', err?.message ?? err)
 } = {}) {
   const subscriptions = new Map()
   const pushQueues = new Map()
+  const pushOutboxes = new Map()
+  const emptyContextByOwner = new Map()
   const recentSyncEventIds = new Map()
   let runtime = {}
   let retryTimer = null
@@ -533,10 +561,81 @@ export function createNostrDbSyncController ({
   }
 
   function setState (state) {
-    if (storage) return writeState(storage, state)
     const snapshot = structuredClone(state)
-    durableState = snapshot
-    const write = stateWriteTail.then(() => replaceRecords(NOSTRDB_SYNC, [{ key: 'state', value: snapshot }]))
+    if (storage) {
+      const current = getState()
+      const next = { ...current, ...snapshot }
+      if (snapshot.pushCursors === undefined && current.pushCursors !== undefined) {
+        next.pushCursors = current.pushCursors
+      }
+      writeState(storage, next)
+      return
+    }
+    const write = stateWriteTail.then(() => {
+      const current = getState()
+      const next = { ...current, ...snapshot }
+      if (snapshot.pushCursors === undefined && current.pushCursors !== undefined) {
+        next.pushCursors = current.pushCursors
+      }
+      durableState = structuredClone(next)
+      return replaceRecords(NOSTRDB_SYNC, [{ key: 'state', value: next }])
+    })
+    stateWriteTail = write.catch(report)
+    return write
+  }
+
+  function pushCursorForOwner (ownerPubkey) {
+    const value = getState().pushCursors?.[ownerPubkey]
+    return isSafeScore(value) ? value : null
+  }
+
+  function updatePushCursor (ownerPubkey, score) {
+    if (!normalizePubkey(ownerPubkey) || !isSafeScore(score)) return Promise.resolve()
+    if (storage) {
+      const state = getState()
+      const current = isSafeScore(state.pushCursors?.[ownerPubkey])
+        ? state.pushCursors[ownerPubkey]
+        : null
+      if (current != null && current >= score) return Promise.resolve()
+      state.pushCursors = isPlainObject(state.pushCursors) ? state.pushCursors : {}
+      state.pushCursors[ownerPubkey] = score
+      writeState(storage, state)
+      return Promise.resolve()
+    }
+    const write = stateWriteTail.then(() => {
+      const state = getState()
+      const current = isSafeScore(state.pushCursors?.[ownerPubkey])
+        ? state.pushCursors[ownerPubkey]
+        : null
+      if (current != null && current >= score) return
+      state.pushCursors = isPlainObject(state.pushCursors) ? state.pushCursors : {}
+      state.pushCursors[ownerPubkey] = score
+      durableState = structuredClone(state)
+      return replaceRecords(NOSTRDB_SYNC, [{ key: 'state', value: state }])
+    })
+    stateWriteTail = write.catch(report)
+    return write
+  }
+
+  function clearPushCursor (ownerPubkey) {
+    if (storage) {
+      const state = getState()
+      if (!isPlainObject(state.pushCursors) ||
+          !Object.hasOwn(state.pushCursors, ownerPubkey)) return Promise.resolve()
+      delete state.pushCursors[ownerPubkey]
+      if (!Object.keys(state.pushCursors).length) delete state.pushCursors
+      writeState(storage, state)
+      return Promise.resolve()
+    }
+    const write = stateWriteTail.then(() => {
+      const state = getState()
+      if (!isPlainObject(state.pushCursors) ||
+          !Object.hasOwn(state.pushCursors, ownerPubkey)) return
+      delete state.pushCursors[ownerPubkey]
+      if (!Object.keys(state.pushCursors).length) delete state.pushCursors
+      durableState = structuredClone(state)
+      return replaceRecords(NOSTRDB_SYNC, [{ key: 'state', value: state }])
+    })
     stateWriteTail = write.catch(report)
     return write
   }
@@ -1317,118 +1416,10 @@ export function createNostrDbSyncController ({
     }
   }
 
-  async function flushPushQueue (ownerPubkey) {
-    const queue = pushQueues.get(ownerPubkey)
-    if (!queue || queue.waitingForResume || queue.flushing || queue.events.size === 0) return
-    const target = pushRuntime(ownerPubkey)
-    if (!target) return
-    if (target.messenger.readStatus?.().paused === true) {
-      parkPushQueue(ownerPubkey, queue)
-      return
-    }
-
-    const current = () => pushQueues.get(ownerPubkey) === queue && runtime.messenger === target.messenger
-    const events = [...queue.events.values()]
-    queue.events.clear()
-    queue.flushing = true
-    let cursor = 0
-    let index = 0
-    let publishedBytes = 0
-    const flushStartedAt = runtime.debug ? _performanceNow() : 0
-    try {
-      while (cursor < events.length) {
-        if (!current()) return
-        const start = cursor
-        let jsonl = ''
-        let bytes = 0
-        while (cursor < events.length && cursor - start < PUSH_EVENTS_PER_CHUNK) {
-          const line = eventsToJsonl([events[cursor]])
-          const length = encoder.encode(line).length
-          if (cursor > start && bytes + length > SYNC_BYTES_PER_CHUNK) break
-          jsonl += line
-          bytes += length
-          cursor++
-        }
-        const chunkIndex = index++
-        const chunkEvents = events.slice(start, cursor)
-        const chunkStartedAt = runtime.debug ? _performanceNow() : 0
-        try {
-          await target.messenger.yell({
-            channelPubkey: target.channelPubkey,
-            receiverPubkeys: target.receiverPubkeys,
-            code: NOSTRDB_SYNC_PUSH_CODE,
-            payload: { index: chunkIndex, isLast: cursor === events.length, jsonl },
-            idempotencyKey: pushChunkIdempotencyKey(chunkEvents),
-            useBulkPacing: true
-          })
-          if (!current()) return
-          publishedBytes += bytes
-          emitDebug(runtime.debug, 'push-chunk', {
-            code: NOSTRDB_SYNC_PUSH_CODE,
-            chunkIndex,
-            eventCount: cursor - start,
-            bytes,
-            flushEventCount: events.length,
-            remainingEvents: events.length - cursor,
-            isLast: cursor === events.length,
-            elapsedMs: Math.max(0, Math.round(_performanceNow() - chunkStartedAt)),
-            outcome: 'published'
-          })
-        } catch (err) {
-          if (!current()) return
-          const failedAt = _nowMs()
-          const retryAt = publicationRetryAt(err, failedAt) || failedAt
-          emitDebug(runtime.debug, 'push-chunk', {
-            code: NOSTRDB_SYNC_PUSH_CODE,
-            chunkIndex,
-            eventCount: cursor - start,
-            bytes,
-            flushEventCount: events.length,
-            remainingEvents: events.length - cursor,
-            isLast: cursor === events.length,
-            elapsedMs: Math.max(0, Math.round(_performanceNow() - chunkStartedAt)),
-            outcome: 'failed',
-            errorCode: debugToken(err?.code) || debugToken(err?.name) || 'UNKNOWN',
-            retryAt,
-            retryAfterMs: Math.max(0, retryAt - failedAt)
-          })
-          // Keep the failed batch and its unsent tail for the next cooldown.
-          for (const event of events.slice(start)) {
-            if (!queue.events.has(event.id)) queue.events.set(event.id, event)
-          }
-          if (messengerPausedError(err)) {
-            parkPushQueue(ownerPubkey, queue, err)
-            return
-          }
-          queue.retryAt = retryAt
-          report(err)
-          startPushCooldown(ownerPubkey, queue)
-          return
-        }
-      }
-      if (!current()) return
-      queue.retryAt = 0
-      emitDebug(runtime.debug, 'push', {
-        receiverCount: target.receiverPubkeys.length,
-        count: events.length,
-        chunkCount: index,
-        bytes: publishedBytes,
-        elapsedMs: Math.max(0, Math.round(_performanceNow() - flushStartedAt))
-      })
-    } finally {
-      queue.flushing = false
-      if (current() && queue.resumePending) {
-        queue.resumePending = false
-        if (queue.events.size > 0 && !queue.waitingForResume) {
-          Promise.resolve().then(() => flushPushQueue(ownerPubkey)).catch(report)
-        }
-      }
-    }
-  }
-
   function clearPushTimer (queue) {
     if (queue.timer) _clearTimeout?.(queue.timer)
     queue.timer = null
+    queue.timerAt = Infinity
     queue.cooling = false
   }
 
@@ -1439,68 +1430,636 @@ export function createNostrDbSyncController ({
     clearPushTimer(queue)
     if (queue.retryAt > _nowMs() && runtime.messenger?.readStatus?.().paused !== true) {
       queue.waitingForResume = false
-      startPushCooldown(ownerPubkey, queue)
+      if (!queue.flushing) schedulePushWake(ownerPubkey, queue)
     } else {
       queue.waitingForResume = true
     }
   }
 
-  function startPushCooldown (ownerPubkey, queue) {
+  function isPushBackpressureError (error) {
+    return error?.code === 'QUEUE_CAPACITY_EXCEEDED' ||
+      error?.message === 'QUEUE_ITEM_TOO_LARGE' ||
+      error?.name === 'QuotaExceededError'
+  }
+
+  function getPushQueue (ownerPubkey) {
+    let queue = pushQueues.get(ownerPubkey)
+    if (!queue) {
+      queue = {
+        events: new Map(),
+        chunks: new Map(),
+        readyAt: {
+          normal: Infinity,
+          lower: Infinity,
+          lowest: Infinity
+        },
+        timer: null,
+        timerAt: Infinity,
+        cooling: false,
+        retryAt: 0,
+        waitingForResume: false,
+        resumePending: false,
+        eventBackpressure: false,
+        eventRetryAt: 0,
+        eventRetryDelayMs: 1000,
+        chunkBackpressure: false,
+        chunkRetryAt: 0,
+        chunkRetryDelayMs: 1000,
+        recovering: false,
+        recoveryAgain: false,
+        flushing: false,
+        rerun: false,
+        nextChunkIndex: 0
+      }
+      pushQueues.set(ownerPubkey, queue)
+    }
+    return queue
+  }
+
+  function pushRecordOrder (left, right) {
+    return (PUSH_PRIORITY_RANK[right.priority] || 0) - (PUSH_PRIORITY_RANK[left.priority] || 0) ||
+      (left.addedAt || 0) - (right.addedAt || 0)
+  }
+
+  function normalizePushEventRecord (ownerPubkey, record) {
+    const id = normalizePubkey(record?.id || record?.event?.id)
+    const event = record?.event
+    if (!id || !isPlainObject(event) || normalizePubkey(event.id) !== id) return null
+    return {
+      id,
+      event,
+      priority: PUSH_PRIORITIES.includes(record.priority)
+        ? record.priority
+        : pushPriorityForEvent(ownerPubkey, event),
+      score: isSafeScore(record.score) ? record.score : null,
+      addedAt: Number.isSafeInteger(record.addedAt) && record.addedAt >= 0
+        ? record.addedAt
+        : _nowMs()
+    }
+  }
+
+  function normalizePushChunkRecord (record) {
+    const id = normalizePubkey(record?.id)
+    const channelPubkey = normalizePubkey(record?.channelPubkey)
+    if (!id || !channelPubkey || !PUSH_PRIORITIES.includes(record?.priority) ||
+        typeof record.jsonl !== 'string' || !record.jsonl ||
+        encoder.encode(record.jsonl).byteLength > MAX_SYNC_JSONL_BYTES) return null
+    const eventIds = normalizeIdList(record.eventIds, Number.MAX_SAFE_INTEGER)
+    const receiverPubkeys = normalizeIdList(record.receiverPubkeys, Number.MAX_SAFE_INTEGER)
+    if (!eventIds.length || !receiverPubkeys.length) return null
+    return {
+      id,
+      channelPubkey,
+      receiverPubkeys,
+      eventIds,
+      eventCount: eventIds.length,
+      priority: record.priority,
+      index: Number.isSafeInteger(record.index) && record.index >= 0 ? record.index : 0,
+      isLast: record.isLast === true,
+      jsonl: record.jsonl,
+      bytes: Number.isSafeInteger(record.bytes) && record.bytes >= 0
+        ? record.bytes
+        : encoder.encode(record.jsonl).byteLength,
+      addedAt: Number.isSafeInteger(record.addedAt) && record.addedAt >= 0
+        ? record.addedAt
+        : _nowMs()
+    }
+  }
+
+  function getPushOutboxes (ownerPubkey) {
+    if (!_indexedDB || !_createPushQueue) return Promise.resolve(null)
+    let outboxes = pushOutboxes.get(ownerPubkey)
+    if (!outboxes) {
+      outboxes = Promise.all([
+        _createPushQueue({
+          prefix: `${PUSH_OUTBOX_PREFIX}:events:${ownerPubkey}`,
+          indexedDB: _indexedDB,
+          evictionPolicy: 'reject',
+          maxBytes: PUSH_EVENT_OUTBOX_MAX_BYTES,
+          indexes: { id: { keyPath: 'id', unique: true } }
+        }),
+        _createPushQueue({
+          prefix: `${PUSH_CHUNK_OUTBOX_PREFIX}:${ownerPubkey}`,
+          indexedDB: _indexedDB,
+          evictionPolicy: 'reject',
+          maxBytes: PUSH_CHUNK_OUTBOX_MAX_BYTES,
+          indexes: { id: { keyPath: 'id', unique: true } }
+        })
+      ]).then(([events, chunks]) => ({ events, chunks })).catch(error => {
+        pushOutboxes.delete(ownerPubkey)
+        throw error
+      })
+      pushOutboxes.set(ownerPubkey, outboxes)
+    }
+    return outboxes
+  }
+
+  async function refreshPushOutboxes (ownerPubkey, queue) {
+    const outboxes = await getPushOutboxes(ownerPubkey)
+    if (!outboxes) return
+    for await (const value of outboxes.events.storedItems()) {
+      const record = normalizePushEventRecord(ownerPubkey, value)
+      if (record) {
+        record.persisted = true
+        queue.events.set(record.id, record)
+      }
+    }
+    for await (const value of outboxes.chunks.storedItems()) {
+      const record = normalizePushChunkRecord(value)
+      if (record) queue.chunks.set(record.id, record)
+    }
+  }
+
+  async function persistPushEventRecord (ownerPubkey, queue, record) {
+    const outboxes = await getPushOutboxes(ownerPubkey)
+    if (!outboxes) return true
+    try {
+      await outboxes.events.putBy('id', record)
+      queue.eventBackpressure = false
+      queue.eventRetryAt = 0
+      queue.eventRetryDelayMs = 1000
+      return true
+    } catch (error) {
+      queue.eventBackpressure = true
+      queue.eventRetryAt = _nowMs() + queue.eventRetryDelayMs
+      queue.eventRetryDelayMs = Math.min(30000, queue.eventRetryDelayMs * 2)
+      if (isPushBackpressureError(error)) {
+        if (error?.message === 'QUEUE_ITEM_TOO_LARGE') report(error)
+        return false
+      }
+      report(error)
+      return false
+    }
+  }
+
+  async function persistPushChunkRecord (ownerPubkey, queue, record) {
+    const outboxes = await getPushOutboxes(ownerPubkey)
+    if (!outboxes) return true
+    try {
+      await outboxes.chunks.putBy('id', record)
+      queue.chunkBackpressure = false
+      queue.chunkRetryAt = 0
+      queue.chunkRetryDelayMs = 1000
+      return true
+    } catch (error) {
+      queue.chunkBackpressure = true
+      queue.chunkRetryAt = _nowMs() + queue.chunkRetryDelayMs
+      queue.chunkRetryDelayMs = Math.min(30000, queue.chunkRetryDelayMs * 2)
+      if (!isPushBackpressureError(error) || error?.message === 'QUEUE_ITEM_TOO_LARGE') report(error)
+      return false
+    }
+  }
+
+  async function removePushEventRecord (ownerPubkey, record) {
+    const outboxes = await getPushOutboxes(ownerPubkey)
+    if (!outboxes) return
+    try {
+      await outboxes.events.removeBy('id', record.id)
+    } catch (error) {
+      report(error)
+    }
+  }
+
+  async function removePushChunkRecord (ownerPubkey, record) {
+    const outboxes = await getPushOutboxes(ownerPubkey)
+    if (!outboxes) return
+    try {
+      await outboxes.chunks.removeBy('id', record.id)
+    } catch (error) {
+      report(error)
+    }
+  }
+
+  function nextPushDueAt (ownerPubkey, queue) {
+    if (queue.waitingForResume || runtime.messenger?.readStatus?.().paused === true) return Infinity
+    if (!pushRuntime(ownerPubkey)) return Infinity
+    const now = _nowMs()
+    if ((queue.retryAt || 0) > now) return queue.retryAt
+    let dueAt = Infinity
+    if (queue.eventBackpressure) {
+      dueAt = Math.min(dueAt, Math.max(now, queue.eventRetryAt || now))
+    }
+    for (const record of queue.events.values()) {
+      if (!record.persisted) continue
+      const readyAt = queue.readyAt[record.priority]
+      if (Number.isFinite(readyAt)) dueAt = Math.min(dueAt, Math.max(now, readyAt))
+    }
+    if (queue.chunkBackpressure && !queue.chunks.size) {
+      dueAt = Math.min(dueAt, Math.max(now, queue.chunkRetryAt || now))
+    }
+    if (queue.chunks.size) dueAt = Math.min(dueAt, Math.max(now, queue.retryAt || 0))
+    return dueAt
+  }
+
+  function schedulePushWake (ownerPubkey, queue) {
     if (pushQueues.get(ownerPubkey) !== queue) return
     if (queue.waitingForResume || runtime.messenger?.readStatus?.().paused === true) {
       parkPushQueue(ownerPubkey, queue)
       return
     }
-    if (queue.timer) _clearTimeout?.(queue.timer)
-    queue.timer = null
+    if (queue.flushing) {
+      queue.rerun = true
+      return
+    }
+    const now = _nowMs()
+    const dueAt = nextPushDueAt(ownerPubkey, queue)
+    if (!Number.isFinite(dueAt)) {
+      clearPushTimer(queue)
+      return
+    }
+    if (queue.timer && queue.timerAt <= dueAt) return
+    clearPushTimer(queue)
     queue.cooling = true
+    queue.timerAt = dueAt
     queue.timer = _setTimeout(async () => {
       queue.timer = null
+      queue.timerAt = Infinity
       queue.cooling = false
       if (pushQueues.get(ownerPubkey) !== queue) return
-      if (queue.events.size > 0) {
+      if (queue.events.size > 0 || queue.chunks.size > 0) {
         await flushPushQueue(ownerPubkey)
-        if (!queue.timer && !queue.waitingForResume) startPushCooldown(ownerPubkey, queue)
-      } else {
-        queue.retryAt = 0
-        queue.waitingForResume = false
+        if (!queue.timer && !queue.waitingForResume) schedulePushWake(ownerPubkey, queue)
       }
-    }, Math.max(0, (queue.retryAt || 0) - _nowMs()))
+    }, Math.max(0, dueAt - now))
     queue.timer?.unref?.()
   }
 
-  function queuePush (ownerPubkey, event) {
-    // Only local/non-sync subscription events are pushed; the cooldown gives us
-    // leading-edge delivery plus a trailing batch for bursts.
-    if (!normalizePubkey(event?.id) || isRecentSyncEvent(event)) return
-    let queue = pushQueues.get(ownerPubkey)
-    if (!queue) {
-      queue = {
-        events: new Map(),
-        timer: null,
-        cooling: false,
-        retryAt: 0,
-        waitingForResume: false,
-        resumePending: false
-      }
-      pushQueues.set(ownerPubkey, queue)
+  function pushPriorityForEvent (ownerPubkey, event) {
+    if (event?.kind !== PERSONAL_COPY) return 'lowest'
+    const innerKind = personalCopyTag(event, 'k')
+    if (innerKind === '34601') return 'lower'
+    const context = personalCopyTag(event, 'c')
+    if (emptyContextByOwner.has(ownerPubkey) &&
+        context === emptyContextByOwner.get(ownerPubkey)) return 'lower'
+    return 'normal'
+  }
+
+  function markPushPriorityReady (queue, priority) {
+    const now = _nowMs()
+    const readyAt = priority === 'normal' ? now : now + PUSH_BATCH_WINDOW_MS
+    queue.readyAt[priority] = Math.min(queue.readyAt[priority], readyAt)
+  }
+
+  async function restorePushQueue (ownerPubkey) {
+    const queue = getPushQueue(ownerPubkey)
+    await refreshPushOutboxes(ownerPubkey, queue)
+    for (const record of queue.events.values()) {
+      record.persisted = true
+      markPushPriorityReady(queue, record.priority)
     }
-    queue.events.set(event.id, event)
+    await recoverPendingPushEvents(ownerPubkey)
+    if (queue.events.size || queue.chunks.size) schedulePushWake(ownerPubkey, queue)
+  }
+
+  async function recoverPendingPushEvents (ownerPubkey) {
+    const queue = getPushQueue(ownerPubkey)
+    if (queue.recovering) {
+      queue.recoveryAgain = true
+      return
+    }
+    queue.recovering = true
+    queue.recoveryAgain = false
+    try {
+      const db = getDb(ownerPubkey)
+      if (typeof db?.query !== 'function') return
+      let cursor = pushCursorForOwner(ownerPubkey)
+      if (cursor == null) {
+        const restoredScores = [...queue.events.values()]
+          .map(record => record.score)
+          .filter(isSafeScore)
+        if (restoredScores.length) {
+          cursor = Math.max(...restoredScores)
+        } else {
+          const current = await db.query({ search: 'algo:sync sort:desc', limit: 1 })
+          const baseline = normalizeScore(current?.meta?.firstScore ?? current?.meta?.lastScore)
+          if (baseline == null) return
+          await updatePushCursor(ownerPubkey, baseline)
+          return
+        }
+      }
+
+      for (let page = 0; page < 20; page++) {
+        const response = await db.query(syncQuery(cursor, undefined, {
+          limit: PUSH_RECOVERY_PAGE_SIZE
+        }))
+        const records = Array.isArray(response?.results) ? response.results : []
+        if (!records.length) return
+        const scores = Array.isArray(response?.meta?.scores) ? response.meta.scores : []
+        let persisted = true
+        let nextCursor = cursor
+        for (let index = 0; index < records.length; index++) {
+          const event = records[index]
+          const score = normalizeScore(scores[index])
+          if (score != null) nextCursor = Math.max(nextCursor, score)
+          if (isRecentSyncEvent(event)) continue
+          const ok = await queuePush(ownerPubkey, event, score)
+          persisted = persisted && ok
+        }
+        const lastScore = normalizeScore(response?.meta?.lastScore)
+        if (lastScore != null) nextCursor = Math.max(nextCursor, lastScore)
+        if (!persisted) {
+          queue.recoveryAgain = true
+          return
+        }
+        if (nextCursor <= cursor) return
+        await updatePushCursor(ownerPubkey, nextCursor)
+        cursor = nextCursor
+        if (records.length < PUSH_RECOVERY_PAGE_SIZE) return
+      }
+      queue.recoveryAgain = true
+    } catch (error) {
+      queue.recoveryAgain = true
+      report(error)
+    } finally {
+      queue.recovering = false
+    }
+  }
+
+  async function enqueuePushInMemory (ownerPubkey, event, priority, score = null) {
+    const queue = getPushQueue(ownerPubkey)
+    const id = normalizePubkey(event?.id)
+    if (!id) return false
+    const existing = queue.events.get(id)
+    if (existing?.persisted) return true
+    const record = {
+      id,
+      event,
+      priority,
+      score: isSafeScore(score) ? score : null,
+      addedAt: existing?.addedAt ?? _nowMs(),
+      persisted: false
+    }
+    queue.events.set(id, record)
+    const persisted = await persistPushEventRecord(ownerPubkey, queue, record)
+    record.persisted = persisted
+    if (!persisted) {
+      queue.recoveryAgain = true
+      return false
+    }
+    markPushPriorityReady(queue, priority)
     if (runtime.messenger?.readStatus?.().paused === true) {
+      parkPushQueue(ownerPubkey, queue)
+      return true
+    }
+    schedulePushWake(ownerPubkey, queue)
+    return true
+  }
+
+  async function queuePush (ownerPubkey, event, score = null) {
+    if (!normalizePubkey(event?.id)) return true
+    if (isRecentSyncEvent(event)) {
+      if (isSafeScore(score)) await updatePushCursor(ownerPubkey, score)
+      return true
+    }
+    const priority = pushPriorityForEvent(ownerPubkey, event)
+    return enqueuePushInMemory(ownerPubkey, event, priority, score)
+  }
+
+  async function retryUnpersistedPushEvents (ownerPubkey, queue) {
+    if (!queue.eventBackpressure) return
+    for (const record of queue.events.values()) {
+      if (record.persisted) continue
+      const persisted = await persistPushEventRecord(ownerPubkey, queue, record)
+      record.persisted = persisted
+      if (!persisted) return
+      markPushPriorityReady(queue, record.priority)
+    }
+    queue.recoveryAgain = true
+  }
+
+  async function packPushPriority (ownerPubkey, queue, priority, target) {
+    const records = [...queue.events.values()]
+      .filter(record => record.persisted && record.priority === priority)
+      .sort((left, right) => left.addedAt - right.addedAt)
+    if (!records.length) return true
+    let cursor = 0
+    let persistedThroughScore = null
+    while (cursor < records.length) {
+      const start = cursor
+      let jsonl = ''
+      let bytes = 0
+      while (cursor < records.length && cursor - start < PUSH_EVENTS_PER_CHUNK) {
+        const line = eventsToJsonl([records[cursor].event])
+        const length = encoder.encode(line).length
+        if (cursor > start && bytes + length > SYNC_BYTES_PER_CHUNK) break
+        jsonl += line
+        bytes += length
+        cursor++
+      }
+      const chunkEvents = records.slice(start, cursor).map(record => record.event)
+      const id = pushChunkIdempotencyKey(chunkEvents)
+      const chunk = {
+        id,
+        channelPubkey: target.channelPubkey,
+        receiverPubkeys: [...target.receiverPubkeys],
+        eventIds: chunkEvents.map(event => event.id),
+        eventCount: chunkEvents.length,
+        priority,
+        index: queue.nextChunkIndex++,
+        isLast: cursor === records.length,
+        jsonl,
+        bytes,
+        addedAt: _nowMs()
+      }
+      const persisted = await persistPushChunkRecord(ownerPubkey, queue, chunk)
+      if (!persisted) return false
+      queue.chunks.set(chunk.id, chunk)
+      for (const record of records.slice(start, cursor)) {
+        if (queue.events.get(record.id) !== record) continue
+        if (isSafeScore(record.score)) {
+          persistedThroughScore = persistedThroughScore == null
+            ? record.score
+            : Math.max(persistedThroughScore, record.score)
+        }
+        queue.events.delete(record.id)
+        await removePushEventRecord(ownerPubkey, record)
+      }
+    }
+    if (persistedThroughScore != null) await updatePushCursor(ownerPubkey, persistedThroughScore)
+    queue.readyAt[priority] = Infinity
+    return true
+  }
+
+  async function sendPushChunk (ownerPubkey, queue, target, chunk) {
+    const receiverPubkeys = chunk.receiverPubkeys.filter(pubkey =>
+      target.receiverPubkeys.includes(pubkey)
+    )
+    if (!receiverPubkeys.length) {
+      queue.chunks.delete(chunk.id)
+      await removePushChunkRecord(ownerPubkey, chunk)
+      return { removed: true, empty: true }
+    }
+    if (receiverPubkeys.length !== chunk.receiverPubkeys.length ||
+        chunk.channelPubkey !== target.channelPubkey) {
+      chunk = {
+        ...chunk,
+        channelPubkey: target.channelPubkey,
+        receiverPubkeys
+      }
+      const persisted = await persistPushChunkRecord(ownerPubkey, queue, chunk)
+      if (!persisted) return { paused: true }
+      queue.chunks.set(chunk.id, chunk)
+    }
+    const payload = {
+      index: chunk.index,
+      isLast: chunk.isLast,
+      jsonl: chunk.jsonl
+    }
+    if (chunk.priority !== 'normal') payload.priority = chunk.priority
+    await target.messenger.yell({
+      channelPubkey: target.channelPubkey,
+      receiverPubkeys,
+      code: NOSTRDB_SYNC_PUSH_CODE,
+      payload,
+      idempotencyKey: chunk.id,
+      useBulkPacing: chunk.priority !== 'normal'
+    })
+    queue.chunks.delete(chunk.id)
+    await removePushChunkRecord(ownerPubkey, chunk)
+    return { removed: true }
+  }
+
+  async function flushPushQueue (ownerPubkey) {
+    const queue = pushQueues.get(ownerPubkey)
+    if (!queue || queue.waitingForResume) return
+    const target = pushRuntime(ownerPubkey)
+    if (!target) return
+    if (target.messenger.readStatus?.().paused === true) {
       parkPushQueue(ownerPubkey, queue)
       return
     }
-    if (queue.cooling) return
-    flushPushQueue(ownerPubkey).catch(report)
-    startPushCooldown(ownerPubkey, queue)
+    if (queue.flushing) {
+      queue.rerun = true
+      return
+    }
+
+    const current = () => pushQueues.get(ownerPubkey) === queue && runtime.messenger === target.messenger
+    queue.flushing = true
+    const flushStartedAt = runtime.debug ? _performanceNow() : 0
+    let publishedBytes = 0
+    let sentChunks = 0
+    try {
+      await refreshPushOutboxes(ownerPubkey, queue)
+      await retryUnpersistedPushEvents(ownerPubkey, queue)
+      const now = _nowMs()
+      if ((queue.retryAt || 0) <= now) {
+        const canPack = !queue.chunkBackpressure || queue.chunkRetryAt <= now
+        if (canPack) {
+          for (const priority of PUSH_PRIORITIES) {
+            if (!current()) return
+            if (queue.readyAt[priority] > now) continue
+            const packed = await packPushPriority(ownerPubkey, queue, priority, target)
+            if (!packed) break
+          }
+        }
+      }
+
+      const chunks = [...queue.chunks.values()]
+        .sort((left, right) => pushRecordOrder(left, right) || left.index - right.index)
+      for (const chunk of chunks) {
+        if (!current()) return
+        if ((queue.retryAt || 0) > _nowMs()) break
+        const startedAt = runtime.debug ? _performanceNow() : 0
+        try {
+          const result = await sendPushChunk(ownerPubkey, queue, target, chunk)
+          if (result.paused) break
+          sentChunks++
+          publishedBytes += chunk.bytes
+          emitDebug(runtime.debug, 'push-chunk', {
+            code: NOSTRDB_SYNC_PUSH_CODE,
+            priority: chunk.priority,
+            chunkIndex: chunk.index,
+            eventCount: chunk.eventCount,
+            bytes: chunk.bytes,
+            elapsedMs: Math.max(0, Math.round(_performanceNow() - startedAt)),
+            outcome: result.empty ? 'dropped-no-recipients' : 'published'
+          })
+        } catch (error) {
+          if (!current()) return
+          const failedAt = _nowMs()
+          const retryAt = publicationRetryAt(error, failedAt) || failedAt + 1000
+          emitDebug(runtime.debug, 'push-chunk', {
+            code: NOSTRDB_SYNC_PUSH_CODE,
+            priority: chunk.priority,
+            chunkIndex: chunk.index,
+            eventCount: chunk.eventCount,
+            bytes: chunk.bytes,
+            elapsedMs: Math.max(0, Math.round(_performanceNow() - startedAt)),
+            outcome: 'failed',
+            errorCode: debugToken(error?.code) || debugToken(error?.name) || 'UNKNOWN',
+            retryAt,
+            retryAfterMs: Math.max(0, retryAt - failedAt)
+          })
+          if (messengerPausedError(error)) {
+            parkPushQueue(ownerPubkey, queue, error)
+          } else {
+            queue.retryAt = retryAt
+            report(error)
+          }
+          break
+        }
+      }
+      if (current() && !queue.chunks.size && !queue.events.size) queue.retryAt = 0
+      if (current() && queue.chunks.size && (queue.retryAt || 0) <= _nowMs()) {
+        queue.retryAt = _nowMs()
+      }
+      if (current()) {
+        emitDebug(runtime.debug, 'push', {
+          receiverCount: target.receiverPubkeys.length,
+          chunkCount: sentChunks,
+          bytes: publishedBytes,
+          elapsedMs: Math.max(0, Math.round(_performanceNow() - flushStartedAt))
+        })
+      }
+    } finally {
+      queue.flushing = false
+      const rerun = queue.rerun
+      queue.rerun = false
+      if (pushQueues.get(ownerPubkey) === queue) {
+        if (rerun) {
+          Promise.resolve().then(() => flushPushQueue(ownerPubkey)).catch(report)
+        } else {
+          if (queue.recoveryAgain && !queue.eventBackpressure) {
+            queue.recoveryAgain = false
+            Promise.resolve().then(() => recoverPendingPushEvents(ownerPubkey)).catch(report)
+          }
+          schedulePushWake(ownerPubkey, queue)
+        }
+      }
+    }
   }
 
-  function stopSubscription (ownerPubkey) {
+  function stopSubscription (ownerPubkey, { removePending = false } = {}) {
     const sub = subscriptions.get(ownerPubkey)
-    if (!sub) return
-    sub.stopped = true
-    sub.iterator?.return?.().catch?.(() => {})
-    subscriptions.delete(ownerPubkey)
+    if (sub) {
+      sub.stopped = true
+      sub.iterator?.return?.().catch?.(() => {})
+      subscriptions.delete(ownerPubkey)
+    }
+    if (removePending) clearPushOwner(ownerPubkey).catch(report)
+  }
+
+  async function clearPushOwner (ownerPubkey) {
+    const queue = pushQueues.get(ownerPubkey)
+    if (queue) clearPushTimer(queue)
+    pushQueues.delete(ownerPubkey)
+    const outboxes = pushOutboxes.get(ownerPubkey)
+    pushOutboxes.delete(ownerPubkey)
+    try {
+      if (outboxes) {
+        const current = await outboxes
+        await Promise.all([
+          current.events.clear(),
+          current.chunks.clear()
+        ])
+        await Promise.all([
+          current.events.close?.(),
+          current.chunks.close?.()
+        ])
+      }
+    } finally {
+      await clearPushCursor(ownerPubkey)
+    }
   }
 
   function startSubscription (ownerPubkey) {
@@ -1519,9 +2078,14 @@ export function createNostrDbSyncController ({
     subscriptions.set(ownerPubkey, sub)
     ;(async () => {
       try {
+        try {
+          await restorePushQueue(ownerPubkey)
+        } catch (error) {
+          report(error)
+        }
         for await (const item of iterator) {
           if (sub.stopped) break
-          if (item?.type === 'event') queuePush(ownerPubkey, item.event)
+          if (item?.type === 'event') await queuePush(ownerPubkey, item.event, item.meta?.score)
         }
       } catch (err) {
         if (!sub.stopped) report(err)
@@ -1573,6 +2137,12 @@ export function createNostrDbSyncController ({
         }
         if (Object.keys(apps).length === 0) delete state.appBackfills[ownerPubkey]
       }
+    }
+    if (isPlainObject(state.pushCursors)) {
+      for (const ownerPubkey of Object.keys(state.pushCursors)) {
+        if (!owners.has(ownerPubkey)) delete state.pushCursors[ownerPubkey]
+      }
+      if (!Object.keys(state.pushCursors).length) delete state.pushCursors
     }
     setState(state)
   }
@@ -1679,11 +2249,11 @@ export function createNostrDbSyncController ({
         continue
       }
       if ((queue.retryAt || 0) > _nowMs()) {
-        startPushCooldown(ownerPubkey, queue)
+        schedulePushWake(ownerPubkey, queue)
         continue
       }
       queue.retryAt = 0
-      if (queue.events.size > 0) {
+      if (queue.events.size > 0 || queue.chunks.size > 0) {
         if (queue.flushing) queue.resumePending = true
         else pushes.push(flushPushQueue(ownerPubkey).catch(report))
       }
@@ -1696,11 +2266,21 @@ export function createNostrDbSyncController ({
 
   function ensureSubscriptions (context = {}) {
     runtime = { ...runtime, ...context }
+    emptyContextByOwner.clear()
+    for (const [ownerPubkey, value] of context.emptyPersonalCopyContextByOwner || []) {
+      emptyContextByOwner.set(ownerPubkey, value)
+    }
     const owners = runtime.ownerPubkeys instanceof Set ? runtime.ownerPubkeys : new Set(runtime.ownerPubkeys || [])
     for (const ownerPubkey of [...subscriptions.keys()]) {
-      if (!owners.has(ownerPubkey)) stopSubscription(ownerPubkey)
+      if (!owners.has(ownerPubkey)) stopSubscription(ownerPubkey, { removePending: true })
+    }
+    for (const ownerPubkey of [...pushQueues.keys()]) {
+      if (!owners.has(ownerPubkey)) clearPushOwner(ownerPubkey).catch(report)
     }
     for (const ownerPubkey of owners) startSubscription(ownerPubkey)
+    for (const [ownerPubkey, queue] of pushQueues) {
+      if (queue.events.size || queue.chunks.size) schedulePushWake(ownerPubkey, queue)
+    }
     pruneState({ ownerPubkeys: owners, trustedByPubkey: runtime.trustedByPubkey })
     if (runtime.messenger?.readStatus?.().paused === false && hasWaitingForResume()) {
       resumeAfterPause(runtime).catch(report)
@@ -1715,6 +2295,14 @@ export function createNostrDbSyncController ({
       if (queue.timer) _clearTimeout?.(queue.timer)
     }
     pushQueues.clear()
+    for (const outboxes of pushOutboxes.values()) {
+      Promise.resolve(outboxes).then(({ events, chunks }) => Promise.all([
+        events.close?.(),
+        chunks.close?.()
+      ])).catch(report)
+    }
+    pushOutboxes.clear()
+    emptyContextByOwner.clear()
     if (retryTimer) _clearTimeout?.(retryTimer)
     retryTimer = null
     appBackfillProcessGeneration += 1

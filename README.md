@@ -339,6 +339,25 @@ the sync controller immediately retries existing announcements, parked asks and
 app-backfills, queued pushes and inbox delivery once, without bypassing relay
 retry deadlines.
 
+NostrDB push payloads may include an additive `priority` value of `lower` or
+`lowest`; omission means `normal`, and unknown values cannot promote a message.
+The vault derives the class from stored events rather than app-supplied
+metadata. A personal copy with an inner `k` of `34601`, or with the locally
+obfuscated empty-context value in `c`, is `lower`; another personal copy is
+`normal`; every non-personal-copy event is `lowest`. Normal chunks are published
+immediately and without bulk pacing. Lower and lowest events share a 200 ms
+trailing window, remain separated into priority-specific chunks, and use bulk
+pacing. FIFO is preserved within each class.
+
+Pending source events and packed chunks are persisted per owner in bounded,
+rejecting IndexedDB queues. A durable NostrDB score cursor advances only after
+the event is present in that outbox. A chunk is removed only after publication
+acceptance; interruption, pause, reload or a failed relay leaves it available
+for retry under the same idempotency key. Filling an outbox pauses further
+production instead of evicting events. Account removal clears both queues and
+their cursor. Capacity pressure blocks new inbox admission but still wakes the
+existing drain, so durable rows are processed and acknowledged without reload.
+
 ### Deferred bunker synchronization
 
 Trusted-device synchronization currently includes local `nsec` accounts only.
@@ -395,7 +414,7 @@ reseeding. Run it with
 `node ../44billion/bin/run-browser-tests.js -- node tests/browser/private-sync.js`.
 The runner caps the complete browser/runtime group at 3 GiB with no swap.
 
-Private synchronization uses the `libp2r2p@0.12.15` package pinned in
+Private synchronization uses the `libp2r2p@0.12.16` package pinned in
 `package-lock.json`, including live-overflow recovery with durable history gaps.
 Live readers stop definitive per-route refusals and recover transient failures
 with bounded offline-aware backoff and relay cooldowns. The launcher facade and
@@ -430,7 +449,7 @@ subscriptions and historical recovery continue in the background. ACK still
 requires successful persistence, and the vault keeps its local recovery seed store.
 
 
-The coordinated libp2r2p 0.12.15 release shares confirmed connectivity with automatic
+The coordinated libp2r2p 0.12.16 release shares confirmed connectivity with automatic
 pause recovery. Vault synchronization keeps its direct messenger and local seed
 storage; foreground-send urgency belongs to sessions that explicitly request it.
 Equivalent asks are coalesced by a stable semantic digest before inbox admission.

@@ -202,6 +202,68 @@ async function identityProbe () {
     await messenger.close()
   }
 }
+
+async function priorityProbe () {
+  let watch
+  const privateMessage = {
+    watch: async options => {
+      watch = options
+      return () => {}
+    },
+    unwatch: async () => {},
+    clearChannelState: async () => {}
+  }
+  const userPubkey = '55'.repeat(32)
+  const channelPubkey = '66'.repeat(32)
+  const senderPubkey = '77'.repeat(32)
+  const messenger = await new PrivateMessenger({
+    _privateMessage: privateMessage,
+    _privateChannel: { fetchHistory: async () => [] },
+    _isOnline: async () => true,
+    _onOnline: () => () => {},
+    offlineRecoverySeconds: 0,
+    resolveInboundPriority: message => message.payload?.payload?.priority
+  }).init({
+    userSigner: signer(userPubkey),
+    channels: [{ signer: signer(channelPubkey), relays: ['wss://relay.example'], mode: 'leecher' }]
+  })
+  await messenger.update({}, { waitForBackground: true })
+  const envelope = (id, priority) => ({
+    event: {
+      id,
+      kind: 9,
+      pubkey: senderPubkey,
+      created_at: 10,
+      tags: [],
+      content: id
+    },
+    outer: { id: `outer-${id}`, created_at: 10 },
+    meta: { channelPubkey },
+    senderPubkey,
+    payload: { code: 'priority-probe', payload: { priority } }
+  })
+  try {
+    for (const priority of ['lower', 'lowest', 'normal', 'high']) {
+      await watch.onMessage(envelope(priority.padEnd(32, '0'), priority))
+    }
+    const delivered = []
+    let exposedInternalMetadata = false
+    for (let index = 0; index < 4; index++) {
+      const delivery = await messenger.nextMessage()
+      if (!delivery) break
+      delivered.push(delivery.message.event.content)
+      exposedInternalMetadata ||= Object.hasOwn(delivery.message, 'deliveryPriority')
+      await delivery.ack()
+    }
+    return {
+      delivered,
+      remaining: await messenger.nextMessage() === null,
+      exposedInternalMetadata
+    }
+  } finally {
+    await messenger.close()
+  }
+}
 globalThis.syncProbe = {
   errors,
   async importAccount (secret) {
@@ -219,5 +281,6 @@ globalThis.syncProbe = {
   unlocked: () => secrets.isUnlocked(),
   debug: () => sync.getDebugSnapshot(),
   coalescingProbe,
-  identityProbe
+  identityProbe,
+  priorityProbe
 }

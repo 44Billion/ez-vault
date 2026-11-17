@@ -18,6 +18,7 @@ import {
 } from '../src/services/sync/content-keys.js'
 import { TRUSTED_SIGNERS_STATE_CODE } from '../src/services/sync/trusted-signers.js'
 import { syncPayloadInvalid } from '../src/services/sync/payload-error.js'
+import { NOSTRDB_SYNC_PUSH_CODE } from '../src/services/sync/nostrdb.js'
 import * as store from '../src/services/accounts-store.js'
 import * as secrets from '../src/services/secrets.js'
 import { getState } from '../src/services/storage/index.js'
@@ -276,6 +277,13 @@ test('sync orchestration watches nsec channels with identity-only sync options',
   assert.equal(controller.getDebugSnapshot().peerGuard.admitted, 0)
   assert.equal(instances[0].options.useContentKeys, false)
   assert.equal(typeof instances[0].options.resolveInboundCoalescing, 'function')
+  const deliveryMessage = priority => ({
+    payload: { code: NOSTRDB_SYNC_PUSH_CODE, payload: { priority } }
+  })
+  assert.equal(instances[0].options.resolveInboundPriority(deliveryMessage('lower')), 'lower')
+  assert.equal(instances[0].options.resolveInboundPriority(deliveryMessage('lowest')), 'lowest')
+  assert.equal(instances[0].options.resolveInboundPriority(deliveryMessage('normal')), null)
+  assert.equal(instances[0].options.resolveInboundPriority(deliveryMessage('high')), null)
   assert.equal(typeof instances[0].options.admitInboundPeer, 'function')
   assert.equal(instances[0].initOptions.userSigner, deviceSigner)
   assert.equal(instances[0].initOptions.contentKeySigner, null)
@@ -1006,6 +1014,66 @@ test('sync drains messages enqueued while another message is being handled', asy
     [2]
   )
 
+  controller.close()
+})
+
+test('capacity pressure wakes the drain for already-persisted inbox items', async () => {
+  const storeStub = createSubscribable({
+    list: () => [{ type: 'nsec', pubkey: 'nsec1' }]
+  })
+  const secretsStub = createSubscribable({
+    isUnlocked: () => true,
+    getDeviceSigner: async () => signer('device')
+  })
+  const trustedStub = createSubscribable({
+    list: () => [{ pubkey: 'trusted1', platform: 'Laptop' }]
+  })
+  const handled = []
+  let messenger = null
+  class FakeMessenger {
+    constructor (options) {
+      this.options = options
+      this.queue = []
+      messenger = this
+    }
+
+    async init () { return this }
+    readStatus () { return { closed: false, paused: true, pauseReasons: ['capacity'] } }
+    async nextMessage () {
+      const message = this.queue.shift()
+      return message
+        ? { message, ack: async () => true, nack: async () => false }
+        : null
+    }
+
+    close () {}
+  }
+
+  const controller = createSyncController({
+    MessengerClass: FakeMessenger,
+    _store: storeStub,
+    _secrets: secretsStub,
+    _trustedSigners: trustedStub,
+    _contentKeys: {
+      resetDebugSources: () => {},
+      announceContentKeys: async () => {},
+      handleMessage: async message => { handled.push(message.id) }
+    },
+    _claimSigner: () => signer('nsec1'),
+    _setTimeout: () => ({}),
+    _clearTimeout: () => {},
+    _setInterval: () => ({}),
+    _clearInterval: () => {}
+  })
+
+  await controller.init()
+  await flushMicrotasks()
+  messenger.queue.push({ id: 'durable-capacity-item' })
+  messenger.options.onMessageQueued()
+  await flushMicrotasks()
+
+  assert.deepEqual(handled, ['durable-capacity-item'])
+  assert.equal(await messenger.nextMessage(), null)
   controller.close()
 })
 

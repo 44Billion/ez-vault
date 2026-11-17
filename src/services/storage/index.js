@@ -56,6 +56,8 @@ revocationRotations, keyPath "key"
 nostrDbSync, keyPath "key"
   key    sync-controller state record name
   value  evolving normalized NostrDB sync state
+         state.pushCursors maps owner pubkeys to the last NostrDB sync score
+         durably admitted to the per-owner push outbox
 
 messengerLog, keyPath "id", autoIncrement
   id        monotonically assigned log entry id
@@ -69,6 +71,20 @@ messengerLog, keyPath "id", autoIncrement
 messengerLog indexes
   byApp     [appKey, id]
   byPubkey  pubkey
+*/
+
+/*
+NostrDB push durability uses two additional reject-policy IDB queues per owner:
+
+  ez-vault:trusted-signer-sync:nostrdb-push:v1:events:<owner>:idb-queue
+    source records awaiting priority packing; unique id, 32 MiB logical cap
+
+  ez-vault:trusted-signer-sync:nostrdb-push-chunks:v1:<owner>:idb-queue
+    packed JSONL, receiver snapshot, priority and idempotency key; unique id,
+    16 MiB logical cap
+
+A chunk is removed only after publication acceptance. Source records are
+removed only after their packed chunk is durable. Account removal clears both.
 */
 
 const textEncoder = new TextEncoder()

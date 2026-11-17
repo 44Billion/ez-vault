@@ -9,6 +9,8 @@ import {
   NOSTRDB_SYNC_APP_ASK_CODE,
   NOSTRDB_SYNC_APP_REPLY_CODE
 } from '../src/services/sync/nostrdb.js'
+import { createQueue } from 'libp2r2p/idb-queue'
+import { NOSTRDB_SYNC, readRecords, replaceRecords } from '../src/services/storage/index.js'
 
 const data = new Map()
 globalThis.localStorage = {
@@ -22,9 +24,11 @@ const OWNER = 'a'.repeat(64)
 const PEER = 'b'.repeat(64)
 const PEER2 = 'e'.repeat(64)
 const EVENT_ID = 'c'.repeat(64)
+const PUSH_EVENT_OUTBOX = `ez-vault:trusted-signer-sync:nostrdb-push:v1:events:${OWNER}:idb-queue`
+const PUSH_CHUNK_OUTBOX = `ez-vault:trusted-signer-sync:nostrdb-push-chunks:v1:${OWNER}:idb-queue`
 
 function createNostrDbSyncController (options = {}) {
-  return createController({ storage: globalThis.localStorage, ...options })
+  return createController({ storage: globalThis.localStorage, _indexedDB: null, ...options })
 }
 
 afterEach(() => {
@@ -77,8 +81,35 @@ function event (number) {
   return { id: eventId(number), pubkey: PEER, kind: 1, created_at: number, tags: [], content: '', sig: 'd'.repeat(128) }
 }
 
+function pushEvent (number) {
+  return {
+    id: eventId(number),
+    pubkey: PEER,
+    kind: 1006,
+    created_at: number,
+    tags: [['k', '9'], ['c', 'nonempty-context']],
+    content: '',
+    sig: 'd'.repeat(128)
+  }
+}
+
 async function flushMicrotasks (turns = 30) {
   for (let index = 0; index < turns; index++) await Promise.resolve()
+}
+
+function deleteDatabase (name) {
+  return new Promise((resolve, reject) => {
+    const request = globalThis.indexedDB.deleteDatabase(name)
+    request.onsuccess = () => resolve()
+    request.onerror = () => reject(request.error)
+    request.onblocked = () => reject(new Error(`database blocked: ${name}`))
+  })
+}
+
+async function storedCount (queue) {
+  let count = 0
+  for await (const _ of queue.storedItems()) count++
+  return count
 }
 
 test('nostrdb sync advertises one account range without ownerPubkey in payload', async () => {
@@ -150,6 +181,9 @@ test('nostrdb sync infers owner from channel and builds bounded ask', async () =
     getDb: () => ({
       subscribe: emptySubscription,
       async query (filter) {
+        if (filter.search === 'algo:sync sort:desc') {
+          return { results: [], meta: { firstScore: 1000, lastScore: 1000 } }
+        }
         assert.equal(filter.search, 'algo:sync sort:asc')
         assert.equal(filter.ids_only, true)
         assert.equal(filter.limit, 200)
@@ -810,8 +844,9 @@ test('resuming a pause flushes queued NostrDB pushes without waiting for cooldow
     getDb: () => ({ subscribe: emptySubscription })
   })
   controller.ensureSubscriptions(context(msg))
-  controller.queuePush(OWNER, event(1))
-  await new Promise(resolve => setImmediate(resolve))
+  await controller.queuePush(OWNER, pushEvent(1))
+  assert.equal(timers.length, 1)
+  await timers.shift().fn()
   assert.equal(attempts, 1)
   assert.equal(timers.length, 0)
   assert.deepEqual(errors, [])
@@ -848,8 +883,8 @@ test('paused push queues retain events without polling and flush once after resu
     getDb: () => ({ subscribe: emptySubscription })
   })
   controller.ensureSubscriptions(context(msg))
-  controller.queuePush(OWNER, event(1))
-  controller.queuePush(OWNER, event(2))
+  await controller.queuePush(OWNER, pushEvent(1))
+  await controller.queuePush(OWNER, pushEvent(2))
   await flushMicrotasks()
 
   assert.equal(attempts, 0)
@@ -894,8 +929,9 @@ test('paused push preserves a relay retry deadline across resume', async () => {
     getDb: () => ({ subscribe: emptySubscription })
   })
   controller.ensureSubscriptions(context(msg))
-  controller.queuePush(OWNER, event(1))
-  await flushMicrotasks()
+  await controller.queuePush(OWNER, pushEvent(1))
+  assert.equal(timers.length, 1)
+  await timers.shift().fn()
 
   assert.equal(attempts, 1)
   assert.deepEqual(errors, [])
@@ -1194,13 +1230,13 @@ test('nostrdb sync ingests with mergeSource sync and suppresses echo pushes', as
   assert.deepEqual(msg.sent, [])
 })
 
-test('nostrdb sync pushes local events on the leading edge then a trailing queue turn', async () => {
+test('nostrdb sync batches normal events without mixing priority lanes', async () => {
   const msg = messenger()
   const timers = []
   const diagnostics = []
   let performanceTime = 0
-  const event1 = { id: '1'.repeat(64), kind: 1, tags: [], content: '' }
-  const event2 = { id: '2'.repeat(64), kind: 1, tags: [], content: '' }
+  const event1 = pushEvent(1)
+  const event2 = pushEvent(2)
   const controller = createNostrDbSyncController({
     getDb: () => ({ subscribe: emptySubscription }),
     _performanceNow: () => performanceTime++,
@@ -1213,38 +1249,195 @@ test('nostrdb sync pushes local events on the leading edge then a trailing queue
   })
   controller.ensureSubscriptions(context(msg, { debug: event => diagnostics.push(event) }))
 
-  controller.queuePush(OWNER, event1)
-  await Promise.resolve()
-  controller.queuePush(OWNER, event2)
-  await Promise.resolve()
+  await controller.queuePush(OWNER, event1)
+  await controller.queuePush(OWNER, event2)
+  assert.equal(timers.length, 1)
+  assert.equal(timers[0].ms, 0)
+  await timers[0].fn()
 
   assert.equal(msg.sent.length, 1)
   assert.equal(msg.sent[0].options.code, NOSTRDB_SYNC_PUSH_CODE)
-  assert.equal(msg.sent[0].options.useBulkPacing, true)
-  assert.match(msg.sent[0].options.idempotencyKey, /^[0-9a-f]{64}$/)
-  assert.equal(JSON.parse(msg.sent[0].options.payload.jsonl.trim()).id, event1.id)
-  assert.equal(timers[0].ms, 0)
-  const firstChunk = diagnostics.find(entry => entry.action === 'push-chunk')
-  assert.equal(firstChunk.code, NOSTRDB_SYNC_PUSH_CODE)
-  assert.equal(firstChunk.eventCount, 1)
-  assert.equal(firstChunk.flushEventCount, 1)
-  assert.equal(firstChunk.outcome, 'published')
-  assert.ok(firstChunk.bytes > 0)
-  assert.ok(firstChunk.elapsedMs >= 0)
-
-  await timers[0].fn()
-  assert.equal(msg.sent.length, 2)
-  assert.equal(JSON.parse(msg.sent[1].options.payload.jsonl.trim()).id, event2.id)
-  assert.match(msg.sent[1].options.idempotencyKey, /^[0-9a-f]{64}$/)
-  assert.notEqual(msg.sent[1].options.idempotencyKey, msg.sent[0].options.idempotencyKey)
-  assert.equal(diagnostics.filter(entry => entry.action === 'push-chunk').length, 2)
+  assert.equal(msg.sent[0].options.useBulkPacing, false)
+  assert.equal(msg.sent[0].options.payload.priority, undefined)
+  assert.equal(
+    msg.sent[0].options.payload.jsonl.trim().split('\n').map(line => JSON.parse(line).id).join(','),
+    `${event1.id},${event2.id}`
+  )
+  const chunk = diagnostics.find(entry => entry.action === 'push-chunk')
+  assert.equal(chunk.eventCount, 2)
+  assert.equal(chunk.priority, 'normal')
+  assert.equal(chunk.outcome, 'published')
+  assert.ok(chunk.bytes > 0)
+  assert.ok(chunk.elapsedMs >= 0)
   assert.ok(diagnostics.filter(entry => entry.action === 'push').every(entry => !Object.hasOwn(entry, 'channelPubkey')))
   assert.ok(diagnostics.every(entry => !Object.hasOwn(entry, 'ownerPubkey')))
 })
 
+test('nostrdb push classifies trusted metadata and separates priority lanes', async () => {
+  let now = 1000
+  const timers = []
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => now,
+    getDb: () => ({ subscribe: emptySubscription }),
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: timer => {
+      const index = timers.indexOf(timer)
+      if (index >= 0) timers.splice(index, 1)
+    }
+  })
+  controller.ensureSubscriptions(context(msg, {
+    emptyPersonalCopyContextByOwner: new Map([[OWNER, 'empty-context-ciphertext']])
+  }))
+
+  const normal = pushEvent(1)
+  const emptyContext = { ...pushEvent(2), tags: [['k', '9'], ['c', 'empty-context-ciphertext']] }
+  const mediaChunk = { ...pushEvent(3), tags: [['k', '34601'], ['c', 'dm:' + PEER]] }
+  const publicEvent = event(4)
+  await controller.queuePush(OWNER, normal)
+  await controller.queuePush(OWNER, emptyContext)
+  await controller.queuePush(OWNER, mediaChunk)
+  await controller.queuePush(OWNER, publicEvent)
+
+  assert.deepEqual(timers.map(timer => timer.ms), [0])
+  await timers.shift().fn()
+  assert.equal(msg.sent.length, 1)
+  assert.equal(msg.sent[0].options.payload.priority, undefined)
+  assert.equal(msg.sent[0].options.useBulkPacing, false)
+
+  assert.equal(timers.length, 1)
+  assert.equal(timers[0].ms, 200)
+  now = 1200
+  await timers.shift().fn()
+
+  assert.deepEqual(msg.sent.slice(1).map(({ options }) => options.payload.priority), ['lower', 'lowest'])
+  assert.deepEqual(
+    msg.sent.slice(1).flatMap(({ options }) =>
+      options.payload.jsonl.trim().split('\n').map(line => JSON.parse(line).id)
+    ),
+    [emptyContext.id, mediaChunk.id, publicEvent.id]
+  )
+  assert.ok(msg.sent.slice(1).every(({ options }) => options.useBulkPacing))
+})
+
+test('durable push outbox survives reload and removes chunks only after publication', async () => {
+  await deleteDatabase(PUSH_EVENT_OUTBOX)
+  await deleteDatabase(PUSH_CHUNK_OUTBOX)
+  const queryFilters = []
+  const db = {
+    subscribe: emptySubscription,
+    async query (filter) {
+      queryFilters.push(filter)
+      if (filter.search === 'algo:sync sort:desc') {
+        return { results: [], meta: { firstScore: 1 } }
+      }
+      return { results: [], meta: { firstScore: 1, lastScore: 1, scores: [] } }
+    }
+  }
+  const firstTimers = []
+  const first = createNostrDbSyncController({
+    _indexedDB: globalThis.indexedDB,
+    getDb: () => db,
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      firstTimers.push(timer)
+      return timer
+    },
+    _clearTimeout: () => {}
+  })
+  first.ensureSubscriptions(context(messenger()))
+  await new Promise(resolve => setImmediate(resolve))
+  await first.queuePush(OWNER, pushEvent(1), 2)
+  assert.equal(firstTimers.length, 1)
+  first.stop()
+  await new Promise(resolve => setTimeout(resolve, 20))
+
+  let eventOutbox = await createQueue({
+    prefix: PUSH_EVENT_OUTBOX.slice(0, -':idb-queue'.length),
+    indexedDB: globalThis.indexedDB,
+    evictionPolicy: 'reject',
+    indexes: { id: { keyPath: 'id', unique: true } }
+  })
+  assert.equal(await storedCount(eventOutbox), 1)
+  await eventOutbox.close()
+
+  const msg = messenger()
+  const timers = []
+  const second = createNostrDbSyncController({
+    _indexedDB: globalThis.indexedDB,
+    getDb: () => db,
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: timer => {
+      const index = timers.indexOf(timer)
+      if (index >= 0) timers.splice(index, 1)
+    }
+  })
+  second.ensureSubscriptions(context(msg))
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.ok(timers.length > 0)
+  assert.equal(timers[0].ms, 0)
+  await timers.shift().fn()
+  assert.equal(msg.sent.length, 1)
+  assert.equal(JSON.parse(msg.sent[0].options.payload.jsonl.trim()).id, pushEvent(1).id)
+
+  eventOutbox = await createQueue({
+    prefix: PUSH_EVENT_OUTBOX.slice(0, -':idb-queue'.length),
+    indexedDB: globalThis.indexedDB,
+    evictionPolicy: 'reject',
+    indexes: { id: { keyPath: 'id', unique: true } }
+  })
+  const chunkOutbox = await createQueue({
+    prefix: PUSH_CHUNK_OUTBOX.slice(0, -':idb-queue'.length),
+    indexedDB: globalThis.indexedDB,
+    evictionPolicy: 'reject',
+    indexes: { id: { keyPath: 'id', unique: true } }
+  })
+  assert.equal(await storedCount(eventOutbox), 0)
+  assert.equal(await storedCount(chunkOutbox), 0)
+  assert.equal(second._getState().pushCursors[OWNER], 2)
+  assert.ok(queryFilters.some(filter => filter.since === 2))
+
+  second.stop()
+  await Promise.all([eventOutbox.close(), chunkOutbox.close()])
+  await new Promise(resolve => setTimeout(resolve, 20))
+  await deleteDatabase(PUSH_EVENT_OUTBOX)
+  await deleteDatabase(PUSH_CHUNK_OUTBOX)
+})
+
+test('NostrDB push cursor serializes through the durable state store without external localStorage', async () => {
+  const msg = messenger()
+  const controller = createController({
+    _indexedDB: null,
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { firstScore: 42, lastScore: 42, scores: [] } }
+      }
+    }),
+    _setTimeout: () => ({}),
+    _clearTimeout: () => {}
+  })
+  controller.ensureSubscriptions(context(msg))
+  await new Promise(resolve => setTimeout(resolve, 20))
+
+  const record = readRecords(NOSTRDB_SYNC).find(value => value.key === 'state')
+  assert.equal(record.value.pushCursors[OWNER], 42)
+  controller.stop()
+  await replaceRecords(NOSTRDB_SYNC, [])
+})
+
 test('nostrdb live envelopes push only events, excluding control markers and IDs', async () => {
   const msg = messenger()
-  const item = event(100)
+  const item = pushEvent(100)
+  const timers = []
   const controller = createNostrDbSyncController({
     getDb: () => ({
       async * subscribe () {
@@ -1253,10 +1446,17 @@ test('nostrdb live envelopes push only events, excluding control markers and IDs
         yield { type: 'event', event: item, meta: { algorithm: 'sync', sort: 'asc', score: 2 } }
       }
     }),
-    _setTimeout: () => ({}), _clearTimeout: () => {}
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: () => {}
   })
   controller.ensureSubscriptions(context(msg))
   await new Promise(resolve => setImmediate(resolve))
+  assert.equal(timers.length, 1)
+  await timers.shift().fn()
   assert.equal(msg.sent.length, 1)
   assert.equal(msg.sent[0].options.code, NOSTRDB_SYNC_PUSH_CODE)
   assert.deepEqual(JSON.parse(msg.sent[0].options.payload.jsonl.trim()), item)
@@ -1268,6 +1468,7 @@ for (const stopped of [false, true]) {
     const timers = new Set()
     const errors = []
     const gate = Promise.withResolvers()
+    const started = Promise.withResolvers()
     const msg = messenger()
     const controller = createNostrDbSyncController({
       getDb: () => ({ subscribe: emptySubscription }),
@@ -1276,15 +1477,19 @@ for (const stopped of [false, true]) {
       _clearTimeout: timer => timers.delete(timer)
     })
     controller.ensureSubscriptions(context(msg))
-    controller.queuePush(OWNER, event(1))
-    await Promise.resolve()
+    await controller.queuePush(OWNER, pushEvent(1))
     // More than one chunk must remain when the first in-flight call settles.
-    for (let i = 2; i < 205; i++) controller.queuePush(OWNER, event(i))
+    for (let i = 2; i < 205; i++) await controller.queuePush(OWNER, pushEvent(i))
     let calls = 0
-    msg.yell = async () => { calls++; await gate.promise }
+    msg.yell = async () => {
+      calls++
+      started.resolve()
+      await gate.promise
+    }
     const timer = [...timers].find(timer => timer.ms === 0)
     timers.delete(timer)
     const flushing = timer.fn()
+    await started.promise
     assert.equal(calls, 1)
     if (stopped) controller.stop()
     const error = new DOMException('The database connection is closing.', 'InvalidStateError')
@@ -1331,38 +1536,47 @@ for (const app of [false, true]) {
 test('push batches bound UTF-8 bytes, retry failures and never overlap in-flight sends', async () => {
   const timers = []
   const errors = []
+  let now = 1000
   const msg = messenger()
   const controller = createNostrDbSyncController({
     getDb: () => ({ subscribe: emptySubscription }),
     onError: error => errors.push(error),
+    _nowMs: () => now,
     _setTimeout: fn => { const timer = { fn }; timers.push(timer); return timer },
     _clearTimeout: () => {}
   })
   controller.ensureSubscriptions(context(msg))
-  controller.queuePush(OWNER, event(1))
-  await Promise.resolve()
-  const pending = Array.from({ length: 10 }, (_, i) => ({ ...event(i + 2), content: 'á'.repeat(20000) }))
-  for (const item of pending) controller.queuePush(OWNER, item)
+  await controller.queuePush(OWNER, pushEvent(1))
+  const pending = Array.from({ length: 10 }, (_, i) => ({ ...pushEvent(i + 2), content: 'á'.repeat(20000) }))
+  for (const item of pending) await controller.queuePush(OWNER, item)
   const gate = Promise.withResolvers()
+  const started = Promise.withResolvers()
   let active = 0
   let maxActive = 0
   const successfulReply = msg.yell
-  msg.yell = async () => { active++; maxActive = Math.max(maxActive, active); try { await gate.promise } finally { active-- } }
+  msg.yell = async () => {
+    active++
+    maxActive = Math.max(maxActive, active)
+    started.resolve()
+    try { await gate.promise } finally { active-- }
+  }
   const flush = timers.shift().fn()
+  await started.promise
   // New input while the earlier send is pending cannot start another send.
-  controller.queuePush(OWNER, event(100))
-  await Promise.resolve()
+  await controller.queuePush(OWNER, pushEvent(100))
   assert.equal(maxActive, 1)
   gate.reject(new Error('rate-limited: busy'))
   await flush
+  await flushMicrotasks()
   assert.equal(errors.length, 1)
   msg.yell = successfulReply
+  now += 1000
   await timers.shift().fn()
-  const replies = msg.sent.slice(1).map(({ options }) => options.payload)
+  const replies = msg.sent.map(({ options }) => options.payload)
   for (const reply of replies) assert.ok(Buffer.byteLength(reply.jsonl) <= 128 * 1024)
   const ids = replies.flatMap(reply => reply.jsonl.trim().split('\n').map(row => JSON.parse(row).id))
-  assert.deepEqual(new Set(ids), new Set([...pending.map(item => item.id), event(100).id]))
-  assert.equal(ids.length, 11)
+  assert.deepEqual(new Set(ids), new Set([event(1).id, ...pending.map(item => item.id), event(100).id]))
+  assert.equal(ids.length, 12)
   controller.stop()
 })
 
@@ -1397,8 +1611,10 @@ test('nostrdb push preserves the relay deadline already capped by the pool', asy
     _clearTimeout: timer => timers.delete(timer)
   })
   controller.ensureSubscriptions(context(msg))
-  controller.queuePush(OWNER, event(1))
-  await new Promise(resolve => setImmediate(resolve))
+  await controller.queuePush(OWNER, pushEvent(1))
+  const initial = [...timers][0]
+  timers.delete(initial)
+  await initial.fn()
 
   assert.equal(attempts, 1)
   assert.equal(timers.size, 1)

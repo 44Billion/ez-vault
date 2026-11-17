@@ -492,10 +492,27 @@ iframe query and report sanitized queue age, payload bytes, batch sizes, elapsed
 time, subscription interruption/recovery and recovery-range outcomes. Keep the
 default sink silent without that query.
 
+NostrDB push priority is derived only from stored events. A push payload may
+carry additive `priority: 'lower' | 'lowest'`; omission is `normal`, and unknown
+or promoting values never raise priority. Personal copies with inner kind 34601
+or the obfuscated empty `c` context are `lower`; other personal copies are
+`normal`; non-personal-copy events are `lowest`. Never inspect a literal app
+context or accept app priority. The library persists this rank internally and
+reserves it through the `byDeliveryPriority` IDB index, whose cursor preserves
+FIFO within each lane; legacy rows are backfilled to `normal`. Normal chunks
+publish immediately without bulk
+pacing. Lower/lowest events wait for one 200 ms trailing window, remain separate
+by priority, preserve FIFO inside the class, and use bulk pacing. Persist source
+events and packed chunks in bounded rejecting IndexedDB queues, advance a
+NostrDB score cursor only after source durability, and remove a chunk only after
+publication acceptance. Outbox capacity pauses production instead of evicting.
+Owner removal clears queues and cursor. Capacity pressure blocks new admission
+but still wakes the drain and permits existing durable rows through ACK/NACK.
+
 
 ## Launcher relay bridge
 
-- Use the coordinated libp2r2p 0.12.15 release, pinned exactly in the
+- Use the coordinated libp2r2p 0.12.16 release, pinned exactly in the
   dev dependency and lockfile. Its live readers stop definitive per-route refusals
   and recover transient errors through bounded offline-aware backoff/cooldowns.
   Keep the existing facade/protocol and standalone fallback. Validate sync,
@@ -533,8 +550,9 @@ default sink silent without that query.
   once and preserves any relay `retryAt`. Sync JSONL batches target 128 KiB UTF-8
   plus the 100-record cap; an indivisible oversized event travels alone. Keep
   non-pause native errors visible and never raise browser storage quotas or
-  acknowledge an unsent final response. Mark synchronization publications with
-  `useBulkPacing: true`; RelayConnection owns the one-second serial pacing and
+  acknowledge an unsent final response. Mark lower/lowest synchronization
+  publications with `useBulkPacing: true`; normal priority push chunks stay
+  interactive. RelayConnection owns the one-second serial pacing and
   the 1..30 second exponential retry. A relay `retryAt` overrides that local
   backoff. RelayPool owns the configurable rate-limit cap, defaulting to five
   minutes; consumers must not duplicate either mechanism.
@@ -563,7 +581,7 @@ default sink silent without that query.
   `generatedAt`; tolerate and ignore it without changing admission. Missing or
   malformed milliseconds order as zero. Snapshots and trusted-signer removal
   reminders remain in the same stream. Do not coalesce partially invalid payloads.
-- With 0.12.15, resolver and `D` identities retain precedence and scope. If both
+- With 0.12.16, resolver and `D` identities retain precedence and scope. If both
   are absent, the messenger coalesces all inbox types by Nostr address or event
   ID inside channel and type. Replaceable/addressable versions follow NIP-01;
   hearsay cannot displace direct/signed state.
