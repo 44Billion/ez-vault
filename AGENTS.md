@@ -508,11 +508,15 @@ NostrDB score cursor only after source durability, and remove a chunk only after
 publication acceptance. Outbox capacity pauses production instead of evicting.
 Owner removal clears queues and cursor. Capacity pressure blocks new admission
 but still wakes the drain and permits existing durable rows through ACK/NACK.
+NostrDB recovery replies inherit the additive ask priority, defaulting to
+`lower`. An empty push flush must not emit the aggregate `push` debug event;
+expose `push.idleWakeCount`, `push.idleWakeMs` and `push.lastIdleWakeAt` in the
+debug snapshot instead.
 
 
 ## Launcher relay bridge
 
-- Use the coordinated libp2r2p 0.12.16 release, pinned exactly in the
+- Use the coordinated libp2r2p 0.12.17 release, pinned exactly in the
   dev dependency and lockfile. Its live readers stop definitive per-route refusals
   and recover transient errors through bounded offline-aware backoff/cooldowns.
   Keep the existing facade/protocol and standalone fallback. Validate sync,
@@ -581,7 +585,7 @@ but still wakes the drain and permits existing durable rows through ACK/NACK.
   `generatedAt`; tolerate and ignore it without changing admission. Missing or
   malformed milliseconds order as zero. Snapshots and trusted-signer removal
   reminders remain in the same stream. Do not coalesce partially invalid payloads.
-- With 0.12.16, resolver and `D` identities retain precedence and scope. If both
+- With 0.12.17, resolver and `D` identities retain precedence and scope. If both
   are absent, the messenger coalesces all inbox types by Nostr address or event
   ID inside channel and type. Replaceable/addressable versions follow NIP-01;
   hearsay cannot displace direct/signed state.

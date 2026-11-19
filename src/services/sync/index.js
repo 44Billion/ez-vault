@@ -15,7 +15,8 @@ import * as revocationRotation from './revocation-rotation.js'
 import {
   createNostrDbSyncController,
   coalescingHint as nostrDbCoalescingHint,
-  NOSTRDB_SYNC_PUSH_CODE
+  NOSTRDB_SYNC_PUSH_CODE,
+  NOSTRDB_SYNC_REPLY_CODE
 } from './nostrdb.js'
 import { createSyncPeerGuard } from './peer-guard.js'
 import { isSyncPayloadError, syncPayloadInvalid } from './payload-error.js'
@@ -123,7 +124,8 @@ function messagePayloadBytes (message) {
 }
 
 function resolveInboundPriority (message) {
-  if (message?.payload?.code !== NOSTRDB_SYNC_PUSH_CODE) return null
+  const code = message?.payload?.code
+  if (code !== NOSTRDB_SYNC_PUSH_CODE && code !== NOSTRDB_SYNC_REPLY_CODE) return null
   const priority = message.payload.payload?.priority
   return priority === 'lower' || priority === 'lowest' ? priority : null
 }
@@ -1161,6 +1163,11 @@ export function createSyncController ({
         askStats: {
           contentKeys: contentKeys.askStats || { emitted: {}, suppressed: {} },
           nostrDb: nostrDb.askStats || { emitted: {}, suppressed: {} }
+        },
+        push: nostrDb.push || {
+          idleWakeCount: 0,
+          idleWakeMs: 0,
+          lastIdleWakeAt: null
         },
         peerGuard: peerGuardSnapshot
       }

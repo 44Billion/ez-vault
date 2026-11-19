@@ -551,6 +551,11 @@ export function createNostrDbSyncController ({
     : (readRecords(NOSTRDB_SYNC).find(record => record.key === 'state')?.value || {})
   let stateWriteTail = Promise.resolve()
   const askStats = { emitted: {}, suppressed: {} }
+  const pushStats = {
+    idleWakeCount: 0,
+    idleWakeMs: 0,
+    lastIdleWakeAt: null
+  }
 
   function report (err) {
     try { onError?.(err) } catch {}
@@ -1140,7 +1145,8 @@ export function createNostrDbSyncController ({
         requestId: ask.requestId,
         sinceScore: ask.sinceScore,
         untilScore: ask.untilScore,
-        hasMore
+        hasMore,
+        priority: 'lower'
       },
       bytesPerChunk: SYNC_BYTES_PER_CHUNK,
       sendEmptyReply: true
@@ -1935,7 +1941,7 @@ export function createNostrDbSyncController ({
 
     const current = () => pushQueues.get(ownerPubkey) === queue && runtime.messenger === target.messenger
     queue.flushing = true
-    const flushStartedAt = runtime.debug ? _performanceNow() : 0
+    const flushStartedAt = _performanceNow()
     let publishedBytes = 0
     let sentChunks = 0
     try {
@@ -2003,13 +2009,17 @@ export function createNostrDbSyncController ({
       if (current() && queue.chunks.size && (queue.retryAt || 0) <= _nowMs()) {
         queue.retryAt = _nowMs()
       }
-      if (current()) {
+      if (current() && (sentChunks > 0 || publishedBytes > 0)) {
         emitDebug(runtime.debug, 'push', {
           receiverCount: target.receiverPubkeys.length,
           chunkCount: sentChunks,
           bytes: publishedBytes,
           elapsedMs: Math.max(0, Math.round(_performanceNow() - flushStartedAt))
         })
+      } else if (current()) {
+        pushStats.idleWakeCount++
+        pushStats.idleWakeMs += Math.max(0, Math.round(_performanceNow() - flushStartedAt))
+        pushStats.lastIdleWakeAt = _nowMs()
       }
     } finally {
       queue.flushing = false
@@ -2320,7 +2330,10 @@ export function createNostrDbSyncController ({
     processAppBackfills,
     queuePush,
     stop,
-    getDebugSnapshot: () => ({ askStats: askStatsSnapshot() }),
+    getDebugSnapshot: () => ({
+      askStats: askStatsSnapshot(),
+      push: { ...pushStats }
+    }),
     _getState: getState
   }
 }

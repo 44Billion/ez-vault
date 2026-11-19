@@ -361,6 +361,7 @@ test('nostrdb sync replies with an empty final chunk when no events are missing'
     sinceScore: 1,
     untilScore: 2,
     hasMore: false,
+    priority: 'lower',
     index: 0,
     isLast: true,
     jsonl: ''
@@ -1322,6 +1323,47 @@ test('nostrdb push classifies trusted metadata and separates priority lanes', as
     [emptyContext.id, mediaChunk.id, publicEvent.id]
   )
   assert.ok(msg.sent.slice(1).every(({ options }) => options.useBulkPacing))
+})
+
+test('nostrdb zero-output push wakes are counted without an empty push log', async () => {
+  let now = 1000
+  const performanceReadings = [10, 11, 12, 17]
+  const timers = []
+  const diagnostics = []
+  const msg = messenger()
+  msg.yell = async () => {
+    throw Object.assign(new Error('relay unavailable'), { category: 'timeout' })
+  }
+  const controller = createNostrDbSyncController({
+    _nowMs: () => now,
+    _performanceNow: () => performanceReadings.shift() ?? 17,
+    onError: () => {},
+    getDb: () => ({ subscribe: emptySubscription }),
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: timer => {
+      const index = timers.indexOf(timer)
+      if (index >= 0) timers.splice(index, 1)
+    }
+  })
+  controller.ensureSubscriptions(context(msg, { debug: event => diagnostics.push(event) }))
+  await controller.queuePush(OWNER, pushEvent(1))
+  const flush = timers.find(timer => timer.ms === 0)
+  assert.ok(flush)
+  now = 2000
+  await flush.fn()
+
+  assert.equal(diagnostics.some(event => event.action === 'push'), false)
+  assert.equal(diagnostics.find(event => event.action === 'push-chunk').outcome, 'failed')
+  assert.deepEqual(controller.getDebugSnapshot().push, {
+    idleWakeCount: 1,
+    idleWakeMs: 7,
+    lastIdleWakeAt: 2000
+  })
+  controller.stop()
 })
 
 test('durable push outbox survives reload and removes chunks only after publication', async () => {

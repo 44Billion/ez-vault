@@ -349,6 +349,11 @@ immediately and without bulk pacing. Lower and lowest events share a 200 ms
 trailing window, remain separated into priority-specific chunks, and use bulk
 pacing. FIFO is preserved within each class.
 
+NostrDB recovery replies also carry the additive priority inherited from their
+ask and default to `lower`. Flushes that publish no chunk no longer print a
+zero-byte `push` debug record. The debug snapshot tracks `idleWakeCount`,
+`idleWakeMs` and `lastIdleWakeAt` for those turns instead.
+
 Pending source events and packed chunks are persisted per owner in bounded,
 rejecting IndexedDB queues. A durable NostrDB score cursor advances only after
 the event is present in that outbox. A chunk is removed only after publication
@@ -414,7 +419,7 @@ reseeding. Run it with
 `node ../44billion/bin/run-browser-tests.js -- node tests/browser/private-sync.js`.
 The runner caps the complete browser/runtime group at 3 GiB with no swap.
 
-Private synchronization uses the `libp2r2p@0.12.16` package pinned in
+Private synchronization uses the `libp2r2p@0.12.17` package pinned in
 `package-lock.json`, including live-overflow recovery with durable history gaps.
 Live readers stop definitive per-route refusals and recover transient failures
 with bounded offline-aware backoff and relay cooldowns. The launcher facade and
@@ -449,7 +454,7 @@ subscriptions and historical recovery continue in the background. ACK still
 requires successful persistence, and the vault keeps its local recovery seed store.
 
 
-The coordinated libp2r2p 0.12.16 release shares confirmed connectivity with automatic
+The coordinated libp2r2p 0.12.17 release shares confirmed connectivity with automatic
 pause recovery. Vault synchronization keeps its direct messenger and local seed
 storage; foreground-send urgency belongs to sessions that explicitly request it.
 Equivalent asks are coalesced by a stable semantic digest before inbox admission.
