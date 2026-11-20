@@ -175,6 +175,16 @@ function messageTimeMs (message) {
   return Number.isSafeInteger(seconds) && seconds > 0 ? seconds * 1000 : 0
 }
 
+function messageExpirationSeconds (message) {
+  const tags = Array.isArray(message?.outer?.tags) ? message.outer.tags : []
+  const values = tags
+    .filter(tag => Array.isArray(tag) && tag[0] === 'expiration')
+    .map(tag => Number(tag[1]))
+  return values.length === 1 && Number.isSafeInteger(values[0]) && values[0] > 0
+    ? values[0]
+    : null
+}
+
 function isSafeScore (value) {
   return Number.isSafeInteger(value) && value >= 0
 }
@@ -2135,6 +2145,8 @@ export function createNostrDbSyncController ({
     if (!ask) return true
     const peerPubkey = normalizePubkey(message.event?.pubkey)
     if (!peerPubkey) return true
+    const expiresAt = messageExpirationSeconds(message)
+    if (expiresAt != null && expiresAt <= Math.floor(_nowMs() / 1000)) return true
     const previousState = getState()
     const previousRecord = exchangeRecord(
       previousState,
@@ -2183,7 +2195,10 @@ export function createNostrDbSyncController ({
     }
     const trackedMessenger = {
       reply: async replyOptions => {
-        const result = await context.messenger.reply(replyOptions)
+        const result = await context.messenger.reply({
+          ...replyOptions,
+          ...(expiresAt == null ? {} : { expiresAt })
+        })
         await trackPublication({
           ownerPubkey,
           peerPubkey,
@@ -2222,6 +2237,8 @@ export function createNostrDbSyncController ({
     if (!ask) return true
     const peerPubkey = normalizePubkey(message.event?.pubkey)
     if (!peerPubkey) return true
+    const expiresAt = messageExpirationSeconds(message)
+    if (expiresAt != null && expiresAt <= Math.floor(_nowMs() / 1000)) return true
     const previousState = getState()
     const previousRecord = exchangeRecord(
       previousState,
@@ -2274,7 +2291,10 @@ export function createNostrDbSyncController ({
     }
     const trackedMessenger = {
       reply: async replyOptions => {
-        const result = await context.messenger.reply(replyOptions)
+        const result = await context.messenger.reply({
+          ...replyOptions,
+          ...(expiresAt == null ? {} : { expiresAt })
+        })
         await trackPublication({
           ownerPubkey,
           peerPubkey,

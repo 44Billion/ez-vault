@@ -627,6 +627,43 @@ test('a present app ask regenerates its complete app reply after five minutes', 
   assert.equal(replies[1].payload.appId, 'app-1')
 })
 
+for (const app of [false, true]) {
+  test(`${app ? 'app ' : ''}replies inherit the ask expiration and drop already-expired asks`, async () => {
+    const msg = messenger()
+    const controller = createNostrDbSyncController({
+      _nowMs: () => 1_000_000,
+      _setTimeout: () => ({}),
+      getDb: () => ({
+        async query () {
+          return { results: [], meta: { scores: [] } }
+        },
+        async exportEventsByAppPage () {
+          return { events: [], hasMore: false, nextAfter: '' }
+        }
+      })
+    })
+    const code = app ? NOSTRDB_SYNC_APP_ASK_CODE : NOSTRDB_SYNC_ASK_CODE
+    const payload = app
+      ? { requestId: 'expiring-app', appId: 'app-1', after: '', batchSize: 200 }
+      : { requestId: 'expiring-range', sinceScore: 1, untilScore: 2, excludeIds: [], limit: 200 }
+    const valid = syncMessage({ code, payload })
+    valid.outer = { id: eventId(870), created_at: 1000, tags: [['expiration', '1060']] }
+
+    await controller.handleMessage(valid, context(msg))
+    assert.equal(msg.sent.length, 1)
+    assert.equal(msg.sent[0].method, 'reply')
+    assert.equal(msg.sent[0].options.expiresAt, 1060)
+
+    const expired = syncMessage({
+      code,
+      payload: { ...payload, requestId: `${payload.requestId}-expired` }
+    })
+    expired.outer = { id: eventId(871), created_at: 1000, tags: [['expiration', '1000']] }
+    await controller.handleMessage(expired, context(msg))
+    assert.equal(msg.sent.length, 1)
+  })
+}
+
 test('deletion tries the s-tag capability and regular author deletion without AUTH', async () => {
   const now = 1000
   const relay = 'wss://relay.test'
