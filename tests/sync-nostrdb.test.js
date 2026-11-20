@@ -174,6 +174,123 @@ test('nostrdb sync advertises current score anchors for empty databases', async 
   })
 })
 
+test('advert envelopes are tracked and republished after five minutes when absent', async () => {
+  let now = 1000
+  const relay = 'wss://relay.test'
+  const msg = messenger()
+  let advertNumber = 0
+  msg.yell = async options => {
+    msg.sent.push({ method: 'yell', options })
+    advertNumber++
+    return {
+      delivery: {
+        reports: [{
+          outerEventId: eventId(400 + advertNumber),
+          succeededRelays: [relay],
+          receiverPubkeys: [PEER],
+          success: true
+        }],
+        deletionSeckey: 'd'.repeat(64)
+      }
+    }
+  }
+  const controller = createNostrDbSyncController({
+    _nowMs: () => now,
+    _setTimeout: () => ({}),
+    _isOnline: async () => true,
+    _relayPool: {
+      async getEvents (filter, relays) {
+        return {
+          result: [],
+          relays: relays.map(relay => ({ relay, status: 'eose' }))
+        }
+      }
+    },
+    getDb: () => ({
+      async query (filter) {
+        if (filter.search === 'algo:sync sort:asc') {
+          return { results: [{ id: 'first' }], meta: { firstScore: 1000 } }
+        }
+        return { results: [{ id: 'last' }], meta: { firstScore: 2000 } }
+      }
+    })
+  })
+
+  await controller.announceRange({
+    messenger: msg,
+    ownerPubkey: OWNER,
+    channelPubkey: 'channel',
+    receiverPubkeys: [PEER]
+  })
+  const advertEntries = () => Object.entries(controller._getState().exchanges[OWNER][PEER])
+    .filter(([, record]) => record.direction === 'advert')
+  assert.equal(advertEntries().length, 1)
+  assert.equal(advertEntries()[0][1].events.advert.length, 1)
+  const requestId = advertEntries()[0][1].requestId
+
+  now += 5 * 60 * 1000 - 1
+  await controller.runExchangeMaintenance(context(msg))
+  assert.equal(msg.sent.length, 1)
+
+  now += 1
+  await controller.runExchangeMaintenance(context(msg))
+  assert.equal(msg.sent.length, 2)
+  assert.equal(msg.sent[1].options.code, NOSTRDB_SYNC_ADVERTISE_CODE)
+  assert.equal(advertEntries()[0][1].requestId, requestId)
+  assert.equal(advertEntries()[0][1].events.advert.length, 2)
+  assert.equal(controller.getDebugSnapshot().exchange.advertsRepublished, 1)
+})
+
+test('a newer advert marks the previous advert exchange for deletion', async () => {
+  let now = 1000
+  const msg = messenger()
+  let advertNumber = 0
+  msg.yell = async options => {
+    msg.sent.push({ method: 'yell', options })
+    advertNumber++
+    return {
+      delivery: {
+        reports: [{
+          outerEventId: eventId(500 + advertNumber),
+          succeededRelays: ['wss://relay.test'],
+          receiverPubkeys: [PEER],
+          success: true
+        }]
+      }
+    }
+  }
+  const controller = createNostrDbSyncController({
+    _nowMs: () => now,
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      async query (filter) {
+        if (filter.search === 'algo:sync sort:asc') {
+          return { results: [{ id: 'first' }], meta: { firstScore: 1000 } }
+        }
+        return { results: [{ id: 'last' }], meta: { firstScore: now } }
+      }
+    })
+  })
+  const announce = () => controller.announceRange({
+    messenger: msg,
+    ownerPubkey: OWNER,
+    channelPubkey: 'channel',
+    receiverPubkeys: [PEER]
+  })
+
+  await announce()
+  now += 1
+  await announce()
+
+  const adverts = Object.values(controller._getState().exchanges[OWNER][PEER])
+    .filter(record => record.direction === 'advert')
+  assert.equal(adverts.length, 2)
+  assert.deepEqual(adverts.map(record => record.status).sort(), [
+    'advert-published',
+    'deleting-advert'
+  ].sort())
+})
+
 test('advert updates are immediately visible to the recent recovery lane without localStorage', async () => {
   const msg = messenger()
   const controller = createController({
@@ -216,6 +333,7 @@ test('a new advert replaces a legacy future recent target with its current maxSc
     owners: {
       [OWNER]: {
         [PEER]: {
+          completedScore: 9999999999999,
           recent: {
             targetScore: 9999999999999,
             windowMs: 900000,
@@ -248,9 +366,35 @@ test('a new advert replaces a legacy future recent target with its current maxSc
   }), context(msg))
 
   const recent = controller._getState().owners[OWNER][PEER].recent
+  assert.equal(controller._getState().owners[OWNER][PEER].completedScore, 999)
   assert.equal(recent.targetScore, 10000)
   assert.equal(recent.pending.untilScore, 10000)
   assert.notEqual(recent.pending.requestId, 'legacy-future')
+})
+
+test('stale adverts use the five-second local score margin in both lanes', async () => {
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { firstScore: 1000, lastScore: 1000 } }
+      }
+    })
+  })
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: 900, minScore: 100, maxScore: 500 }
+  }), context(msg))
+
+  const owner = controller._getState().owners[OWNER][PEER]
+  assert.equal(owner.pending.untilScore, 6000)
+  assert.equal(owner.recent.targetScore, 6000)
+  assert.equal(owner.recent.pending.untilScore, 6000)
 })
 
 test('state mutations become readable synchronously before IndexedDB persistence resolves', async () => {
@@ -306,7 +450,7 @@ test('nostrdb sync infers owner from channel and builds bounded ask', async () =
   assert.equal(historyAsk.options.channelPubkey, 'channel')
   assert.equal(historyAsk.options.receiverPubkey, PEER)
   assert.equal(historyAsk.options.payload.sinceScore, 1000)
-  assert.equal(historyAsk.options.payload.untilScore, 2000)
+  assert.equal(historyAsk.options.payload.untilScore, 6000)
   assert.deepEqual(historyAsk.options.payload.excludeIds, [EVENT_ID])
   assert.equal(historyAsk.options.payload.limit, 200)
   assert.equal(Object.hasOwn(historyAsk.options.payload, 'ownerPubkey'), false)
@@ -2119,6 +2263,7 @@ test('nostrdb sync batches normal events without mixing priority lanes', async (
 test('nostrdb push classifies trusted metadata and separates priority lanes', async () => {
   let now = 1000
   const timers = []
+  const rangeChanges = []
   const msg = messenger()
   const controller = createNostrDbSyncController({
     _nowMs: () => now,
@@ -2134,7 +2279,8 @@ test('nostrdb push classifies trusted metadata and separates priority lanes', as
     }
   })
   controller.ensureSubscriptions(context(msg, {
-    emptyPersonalCopyContextByOwner: new Map([[OWNER, 'empty-context-ciphertext']])
+    emptyPersonalCopyContextByOwner: new Map([[OWNER, 'empty-context-ciphertext']]),
+    onRangeChanged: ownerPubkey => rangeChanges.push(ownerPubkey)
   }))
 
   const normal = pushEvent(1)
@@ -2165,6 +2311,7 @@ test('nostrdb push classifies trusted metadata and separates priority lanes', as
     [emptyContext.id, mediaChunk.id, publicEvent.id]
   )
   assert.ok(msg.sent.slice(1).every(({ options }) => options.useBulkPacing))
+  assert.deepEqual(rangeChanges, [OWNER])
 })
 
 test('lower-priority pushes reset the quiet window and flush at the one-second cap', async () => {

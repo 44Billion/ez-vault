@@ -517,8 +517,16 @@ debug snapshot instead.
 Persist NostrDB sync-state mutations into the in-memory authority synchronously
 before queuing IndexedDB writes. A caller that mutates and immediately reads the
 state must observe the mutation even when the prior write is still pending.
-After a persisted local range change, debounce a new advert so a lost push can be
-reconciled without waiting for the periodic announcement interval.
+After a persisted normal-priority local range change, debounce a new advert so a
+lost push can be reconciled without waiting for the periodic announcement
+interval. Bulk/recovery changes must not trigger advert storms.
+
+Both score lanes target `max(advert.maxScore, now + 5s)`, matching the database's
+bounded future skew. A legacy `completedScore` above the advertised max is
+untrusted and resets below `minScore` so the ascending lane rebuilds it. Track
+advert outer envelopes like asks/replies: verify every 20 minutes, republish
+missing adverts after at least five minutes, delete superseded adverts, and
+retain IDs/secrets until confirmed deletion or expiration plus ten minutes.
 
 
 ## Launcher relay bridge

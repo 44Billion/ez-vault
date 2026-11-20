@@ -59,6 +59,7 @@ const MAX_SYNC_JSONL_BYTES = 4 * 1024 * 1024
 const DEFAULT_WINDOW_MS = 15 * 60 * 1000
 const MIN_WINDOW_MS = 60 * 1000
 const MAX_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
+const SYNC_ANCHOR_MAX_FUTURE_SKEW_MS = 5000
 const INVENTORY_LIMIT = 200
 const REQUEST_LIMIT = 200
 const SMALL_REPLY_COUNT = 20
@@ -445,7 +446,7 @@ function exchangeRecord (state, ownerPubkey, peerPubkey, direction, requestId, c
   const record = peers[key]
   if (!isPlainObject(record)) return null
   if (!isPlainObject(record.events)) record.events = {}
-  for (const kind of ['ask', 'reply']) {
+  for (const kind of ['ask', 'reply', 'advert']) {
     if (!Array.isArray(record.events[kind])) record.events[kind] = []
   }
   record.ownerPubkey = ownerPubkey
@@ -721,6 +722,7 @@ export function createNostrDbSyncController ({
     absent: 0,
     unknown: 0,
     asksRepublished: 0,
+    advertsRepublished: 0,
     repliesRegenerated: 0,
     deletionAttempts: 0,
     deletionConfirmed: 0,
@@ -755,7 +757,8 @@ export function createNostrDbSyncController ({
     return write
   }
 
-  function notifyRangeChanged (ownerPubkey, context = runtime) {
+  function notifyRangeChanged (ownerPubkey, priority, context = runtime) {
+    if (priority !== 'normal') return
     try {
       context.onRangeChanged?.(ownerPubkey)
     } catch (error) {
@@ -800,7 +803,7 @@ export function createNostrDbSyncController ({
     const record = exchangeRecord(state, ownerPubkey, peerPubkey, direction, requestId)
     if (!record) return
     let changed = false
-    for (const kind of ['ask', 'reply']) {
+    for (const kind of ['ask', 'reply', 'advert']) {
       for (const event of record.events[kind]) {
         if (event.id !== eventId) continue
         const next = normalizeRelayList([...(event.relays || []), ...relays])
@@ -854,6 +857,20 @@ export function createNostrDbSyncController ({
       record.requestPayload = structuredClone(range)
       if (code === NOSTRDB_SYNC_APP_ASK_CODE) record.appId = normalizeAppId(range.appId)
     }
+    if (direction === 'advert' && range) {
+      record.requestPayload = structuredClone(range)
+      if (publicationSucceeded(result)) {
+        for (const peer of Object.values(state.exchanges?.[ownerPubkey] || {})) {
+          for (const existing of Object.values(peer || {})) {
+            if (existing === record || existing.direction !== 'advert' || existing.requestId === requestId) continue
+            if (existing.status !== 'deleting-advert') {
+              existing.status = 'deleting-advert'
+              existing.updatedAt = now
+            }
+          }
+        }
+      }
+    }
     const incoming = reports
       .map(report => ({
         id: normalizePubkey(report?.outerEventId),
@@ -866,9 +883,12 @@ export function createNostrDbSyncController ({
     if (direction === 'ask') {
       record.status = 'awaiting-reply'
       record.lastAskPublishedAt = now
-    } else {
+    } else if (direction === 'reply') {
       record.status = 'reply-published'
       record.lastReplyPublishedAt = now
+    } else {
+      record.status = 'advert-published'
+      record.lastAdvertPublishedAt = now
     }
     trimOwnerExchanges(state, ownerPubkey)
     trimExchangeOwners(state)
@@ -1238,6 +1258,38 @@ export function createNostrDbSyncController ({
     return true
   }
 
+  async function republishTrackedAdvert (entry, context) {
+    const record = entry.record
+    if (!record.requestPayload || !record.channelPubkey || !record.peerPubkey) return false
+    const result = await context.messenger.yell({
+      channelPubkey: record.channelPubkey,
+      receiverPubkeys: [record.peerPubkey],
+      code: NOSTRDB_SYNC_ADVERTISE_CODE,
+      payload: record.requestPayload,
+      idempotencyKey: coalescingDigest(['nostrdb-advertise', record.requestId]),
+      useBulkPacing: true
+    })
+    if (!publicationSucceeded(result)) throw new Error('SYNC_PUBLICATION_FAILED')
+    await trackPublication({
+      ownerPubkey: entry.ownerPubkey,
+      peerPubkey: entry.peerPubkey,
+      direction: 'advert',
+      requestId: record.requestId,
+      code: NOSTRDB_SYNC_ADVERTISE_CODE,
+      channelPubkey: record.channelPubkey,
+      result,
+      range: record.requestPayload,
+      context
+    })
+    exchangeStats.advertsRepublished++
+    emitDebug(context.debug, 'advert-republished', {
+      ownerPubkey: entry.ownerPubkey,
+      receiverPubkey: entry.peerPubkey,
+      requestId: record.requestId
+    })
+    return true
+  }
+
   async function regenerateTrackedReply (entry, context) {
     const record = entry.record
     if (!record.question || !record.inboundPayload) return false
@@ -1264,7 +1316,7 @@ export function createNostrDbSyncController ({
   async function queryExchangePresence (state) {
     const groups = new Map()
     for (const entry of allExchangeRecords(state)) {
-      for (const kind of ['ask', 'reply']) {
+      for (const kind of ['ask', 'reply', 'advert']) {
         for (const event of entry.record.events[kind] || []) {
           const id = normalizePubkey(event.id)
           const relays = normalizeRelayList(event.relays)
@@ -1368,12 +1420,30 @@ export function createNostrDbSyncController ({
         const record = entry.record
         const asks = wireStatus(record, 'ask', presence)
         const replies = wireStatus(record, 'reply', presence)
+        const adverts = wireStatus(record, 'advert', presence)
         const askLastSent = record.lastAskPublishedAt || record.lastPublishedAt || 0
         const replyLastSent = record.lastReplyPublishedAt || record.lastPublishedAt || 0
+        const advertLastSent = record.lastAdvertPublishedAt || record.lastPublishedAt || 0
+        const primaryStatus = record.direction === 'advert' ? adverts : asks
         exchangeStats.checked++
-        if (asks.anyPresent) exchangeStats.present++
-        else if (asks.allAbsent) exchangeStats.absent++
+        if (primaryStatus.anyPresent) exchangeStats.present++
+        else if (primaryStatus.allAbsent) exchangeStats.absent++
         else exchangeStats.unknown++
+
+        if (record.direction === 'advert') {
+          if (record.status === 'deleting-advert') {
+            if (adverts.allAbsent) {
+              exchangeStats.deletionConfirmed++
+              actions.push({ type: 'prune', entry })
+            } else {
+              actions.push({ type: 'delete', entry, kind: 'advert', context, presence })
+            }
+          } else if ((adverts.allAbsent || !record.events.advert.length) &&
+              now - advertLastSent >= EXCHANGE_MIN_RESEND_MS) {
+            actions.push({ type: 'advert', entry, context })
+          }
+          continue
+        }
 
         if (record.direction === 'ask') {
           if (record.status === 'deleting-ask') {
@@ -1427,6 +1497,8 @@ export function createNostrDbSyncController ({
             await deleteWireEvents(action.entry, action.kind, action.context, action.presence)
           } else if (action.type === 'ask') {
             await republishTrackedAsk(action.entry, action.context)
+          } else if (action.type === 'advert') {
+            await republishTrackedAdvert(action.entry, action.context)
           } else if (action.type === 'reply') {
             await regenerateTrackedReply(action.entry, action.context)
           }
@@ -1552,13 +1624,47 @@ export function createNostrDbSyncController ({
       minScore: payload.minScore,
       maxScore: payload.maxScore
     })
-    return messenger.yell({
+    const advertRequestId = nextRequestId()
+    const result = await messenger.yell({
       channelPubkey,
       receiverPubkeys: receivers,
       code: NOSTRDB_SYNC_ADVERTISE_CODE,
       payload,
       useBulkPacing: true
     })
+    const reports = Array.isArray(result?.delivery?.reports) ? result.delivery.reports : []
+    if (reports.length) {
+      for (const receiverPubkey of receivers) {
+        const peerPubkey = normalizePubkey(receiverPubkey)
+        if (!peerPubkey) continue
+        const peerReports = reports.filter(report =>
+          !Array.isArray(report.receiverPubkeys) || report.receiverPubkeys.includes(peerPubkey)
+        )
+        if (!peerReports.length) continue
+        try {
+          await trackPublication({
+            ownerPubkey,
+            peerPubkey,
+            direction: 'advert',
+            requestId: advertRequestId,
+            code: NOSTRDB_SYNC_ADVERTISE_CODE,
+            channelPubkey,
+            result: {
+              ...result,
+              delivery: {
+                ...result.delivery,
+                reports: peerReports
+              }
+            },
+            range: payload,
+            context: runtime
+          })
+        } catch (error) {
+          report(error)
+        }
+      }
+    }
+    return result
   }
 
   async function localInventoryIds (db, sinceScore, untilScore) {
@@ -1618,10 +1724,15 @@ export function createNostrDbSyncController ({
       return null
     }
 
-    const completed = Number.isSafeInteger(entry.completedScore)
+    const storedCompleted = Number.isSafeInteger(entry.completedScore)
       ? entry.completedScore
       : advert.minScore - 1
-    const targetScore = advert.maxScore
+    const completedValue = storedCompleted > advert.maxScore
+      ? advert.minScore - 1
+      : storedCompleted
+    if (completedValue !== storedCompleted) entry.completedScore = completedValue
+    const targetScore = Math.max(advert.maxScore, now + SYNC_ANCHOR_MAX_FUTURE_SKEW_MS)
+    const completed = completedValue
     const sinceScore = Math.max(advert.minScore, completed + 1)
     if (sinceScore > targetScore) {
       entry.pending = null
@@ -1750,10 +1861,15 @@ export function createNostrDbSyncController ({
     const advert = entry.advert
     if (!advert || advert.maxScore == null || advert.minScore == null) return null
     const now = _nowMs()
-    const completed = Number.isSafeInteger(entry.completedScore)
+    const storedCompleted = Number.isSafeInteger(entry.completedScore)
       ? entry.completedScore
       : advert.minScore - 1
-    const advertisedTarget = advert.maxScore
+    const completedValue = storedCompleted > advert.maxScore
+      ? advert.minScore - 1
+      : storedCompleted
+    if (completedValue !== storedCompleted) entry.completedScore = completedValue
+    const advertisedTarget = Math.max(advert.maxScore, now + SYNC_ANCHOR_MAX_FUTURE_SKEW_MS)
+    const completed = completedValue
     const recent = isPlainObject(entry.recent) ? entry.recent : { targetScore: advertisedTarget }
     const pending = recent.pending
     if (pending && (
@@ -3020,7 +3136,7 @@ export function createNostrDbSyncController ({
       queue.recoveryAgain = true
       return false
     }
-    notifyRangeChanged(ownerPubkey)
+    notifyRangeChanged(ownerPubkey, priority)
     markPushPriorityReady(queue, priority)
     if (runtime.messenger?.readStatus?.().paused === true) {
       parkPushQueue(ownerPubkey, queue)
