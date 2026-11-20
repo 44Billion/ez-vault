@@ -273,6 +273,7 @@ try {
   for (const device of appContexts.keys()) {
     console.error('Pending-decryption fixture', device, await evaluateApp(device, 'pendingProbe.snapshot()').catch(error => error.message))
     console.error('Sync counts', device, await evaluateApp(device, 'syncApp.contents(9).then(rows=>({total:rows.length,burst:rows.filter(row=>row.content.startsWith("Burst ")).length}))').catch(error => error.message))
+    console.error('Sync debug', device, await browsers[device].evaluate('syncProbe.debug()', vaultOrigin).catch(error => error.message))
   }
   for (const [index, browser] of browsers.entries()) await browser.diagnose(root + '/tmp/browser-failures/private-sync-' + index)
   throw error

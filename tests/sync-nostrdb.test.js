@@ -10,6 +10,7 @@ import {
   NOSTRDB_SYNC_APP_REPLY_CODE
 } from '../src/services/sync/nostrdb.js'
 import { createQueue } from 'libp2r2p/idb-queue'
+import { keypairFromSeckey } from 'libp2r2p/key'
 import { NOSTRDB_SYNC, readRecords, replaceRecords } from '../src/services/storage/index.js'
 
 const data = new Map()
@@ -24,6 +25,7 @@ const OWNER = 'a'.repeat(64)
 const PEER = 'b'.repeat(64)
 const PEER2 = 'e'.repeat(64)
 const EVENT_ID = 'c'.repeat(64)
+const SYNC_STATE_KEY = 'ez-vault:trusted-signer-sync:nostrdb:v1'
 const PUSH_EVENT_OUTBOX = `ez-vault:trusted-signer-sync:nostrdb-push:v1:events:${OWNER}:idb-queue`
 const PUSH_CHUNK_OUTBOX = `ez-vault:trusted-signer-sync:nostrdb-push-chunks:v1:${OWNER}:idb-queue`
 
@@ -198,20 +200,21 @@ test('nostrdb sync infers owner from channel and builds bounded ask', async () =
     payload: { generatedAt: 900, minScore: 1000, maxScore: 2000 }
   }), context(msg))
 
-  assert.equal(msg.sent.length, 1)
-  assert.equal(msg.sent[0].method, 'ask')
-  assert.equal(msg.sent[0].options.code, NOSTRDB_SYNC_ASK_CODE)
-  assert.equal(msg.sent[0].options.useBulkPacing, true)
-  assert.equal(msg.sent[0].options.channelPubkey, 'channel')
-  assert.equal(msg.sent[0].options.receiverPubkey, PEER)
-  assert.equal(msg.sent[0].options.payload.sinceScore, 1000)
-  assert.equal(msg.sent[0].options.payload.untilScore, 900999)
-  assert.deepEqual(msg.sent[0].options.payload.excludeIds, [EVENT_ID])
-  assert.equal(msg.sent[0].options.payload.limit, 200)
-  assert.equal(Object.hasOwn(msg.sent[0].options.payload, 'ownerPubkey'), false)
+  const asks = msg.sent.filter(item => item.method === 'ask')
+  assert.equal(asks.length, 2)
+  const historyAsk = asks.find(item => item.options.payload.untilScore === 900999)
+  assert.ok(historyAsk)
+  assert.equal(historyAsk.options.code, NOSTRDB_SYNC_ASK_CODE)
+  assert.equal(historyAsk.options.useBulkPacing, true)
+  assert.equal(historyAsk.options.channelPubkey, 'channel')
+  assert.equal(historyAsk.options.receiverPubkey, PEER)
+  assert.equal(historyAsk.options.payload.sinceScore, 1000)
+  assert.deepEqual(historyAsk.options.payload.excludeIds, [EVENT_ID])
+  assert.equal(historyAsk.options.payload.limit, 200)
+  assert.equal(Object.hasOwn(historyAsk.options.payload, 'ownerPubkey'), false)
 })
 
-test('range ask retries grow and newer advertisements cannot reset the cooldown', async () => {
+test('newer advertisements do not bypass pending exchange verification', async () => {
   let now = 1000
   const msg = messenger()
   const controller = createNostrDbSyncController({
@@ -230,47 +233,68 @@ test('range ask retries grow and newer advertisements cannot reset the cooldown'
   }), context(msg))
 
   await advertise(now)
-  assert.equal(msg.sent.length, 1)
   let pending = controller._getState().owners[OWNER][PEER].pending
+  const historyRequestId = pending.requestId
+  const historySends = () => msg.sent.filter(item =>
+    item.options.payload.requestId === historyRequestId
+  )
+  assert.equal(historySends().length, 1)
   assert.equal(pending.attempt, 0)
   assert.equal(pending.onlineRetryAt, now + 5 * 60 * 1000)
 
   now = pending.onlineRetryAt
   await advertise(now)
-  assert.equal(msg.sent.length, 2)
+  assert.equal(historySends().length, 1)
   pending = controller._getState().owners[OWNER][PEER].pending
-  assert.equal(pending.attempt, 1)
-  assert.equal(pending.onlineRetryAt, now + 10 * 60 * 1000)
+  assert.equal(pending.attempt, 0)
 
   now += 1
   await advertise(now)
-  assert.equal(msg.sent.length, 2)
+  assert.equal(historySends().length, 1)
 
-  now = pending.onlineRetryAt
+  now += 15 * 60 * 1000
   await advertise(now)
-  assert.equal(msg.sent.length, 3)
+  assert.equal(historySends().length, 1)
   pending = controller._getState().owners[OWNER][PEER].pending
-  assert.equal(pending.attempt, 2)
-  assert.equal(pending.onlineRetryAt, now + 20 * 60 * 1000)
+  assert.equal(pending.attempt, 0)
 
   const stats = controller.getDebugSnapshot().askStats
-  assert.equal(stats.emitted[`${NOSTRDB_SYNC_ASK_CODE}:advertise`], 3)
-  assert.equal(stats.suppressed[`${NOSTRDB_SYNC_ASK_CODE}:advertise`], 1)
+  assert.equal(stats.emitted[`${NOSTRDB_SYNC_ASK_CODE}:advertise`], 5)
+  assert.equal(stats.suppressed[`${NOSTRDB_SYNC_ASK_CODE}:advertise`], 3)
 })
 
-test('no-reply range retries also advance the attempt and online backoff', async () => {
+test('missing range asks are republished only after the exchange check interval', async () => {
   let now = 1000
   const msg = messenger()
-  const timers = []
+  const relay = 'wss://relay.test'
+  const presenceQueries = []
+  msg.ask = async options => {
+    msg.sent.push({ method: 'ask', options })
+    return {
+      delivery: {
+        reports: [{
+          outerEventId: eventId(100 + msg.sent.length),
+          succeededRelays: [relay],
+          success: true
+        }]
+      }
+    }
+  }
   const controller = createNostrDbSyncController({
     _nowMs: () => now,
     _random: () => 0.5,
-    _setTimeout: (fn, ms) => {
-      const timer = { fn, ms }
-      timers.push(timer)
-      return timer
-    },
+    _setTimeout: () => ({}),
     _clearTimeout: () => {},
+    _isOnline: async () => true,
+    _relayPool: {
+      async getEvents (filter, relays, options) {
+        presenceQueries.push({ filter, relays, options })
+        return {
+          result: [],
+          relays: relays.map(url => ({ relay: url, status: 'eose' }))
+        }
+      }
+    },
     getDb: () => ({
       async query () {
         return { results: [], meta: { firstScore: now, lastScore: now } }
@@ -283,20 +307,561 @@ test('no-reply range retries also advance the attempt and online backoff', async
     payload: { generatedAt: now, minScore: now, maxScore: now + 1 }
   }), context(msg))
   const first = controller._getState().owners[OWNER][PEER].pending
-  const timer = timers.find(candidate => candidate.ms === first.nextRetryAt - now)
-  assert.ok(timer)
+  const firstPayload = msg.sent.find(item =>
+    item.options.payload.requestId === first.requestId
+  ).options.payload
 
-  now = first.nextRetryAt
-  await timer.fn()
-  await flushMicrotasks()
-  assert.equal(msg.sent.length, 2)
-  const second = controller._getState().owners[OWNER][PEER].pending
-  assert.equal(second.attempt, 1)
-  assert.equal(second.onlineRetryAt, now + 10 * 60 * 1000)
+  now += 5 * 60 * 1000 - 1
+  await controller.runExchangeMaintenance(context(msg))
   assert.equal(
-    controller.getDebugSnapshot().askStats.emitted[`${NOSTRDB_SYNC_ASK_CODE}:no-reply`],
+    msg.sent.filter(item => item.options.payload.requestId === first.requestId).length,
     1
   )
+
+  now += 1
+  await controller.runExchangeMaintenance(context(msg))
+  const republished = msg.sent.filter(item =>
+    item.options.payload.requestId === first.requestId
+  )
+  assert.equal(republished.length, 2)
+  assert.deepEqual(republished[1].options.payload, firstPayload)
+  assert.equal(controller._getState().owners[OWNER][PEER].pending.attempt, 1)
+  assert.ok(presenceQueries.every(query => query.filter.ids.length <= 200))
+  assert.ok(presenceQueries.every(query => query.options.deduplicateAcrossRelays === false))
+})
+
+test('legacy pending asks migrate to exchange tracking and recover their exact request', async () => {
+  let now = 1000000
+  const relay = 'wss://relay.test'
+  const requestId = 'legacy-request'
+  globalThis.localStorage.setItem(SYNC_STATE_KEY, JSON.stringify({
+    owners: {
+      [OWNER]: {
+        [PEER]: {
+          pending: {
+            requestId,
+            sinceScore: 100,
+            untilScore: 900,
+            excludeIds: [EVENT_ID],
+            limit: 200,
+            replyCount: 0,
+            replyIndexes: [],
+            attempt: 2,
+            sentAt: now - 30 * 60 * 1000,
+            nextRetryAt: now - 1,
+            onlineRetryAt: now - 1
+          },
+          updatedAt: now - 30 * 60 * 1000
+        }
+      }
+    }
+  }))
+  const msg = messenger()
+  msg.ask = async options => {
+    msg.sent.push({ method: 'ask', options })
+    return {
+      delivery: {
+        reports: [{
+          outerEventId: eventId(710),
+          succeededRelays: [relay],
+          success: true
+        }]
+      }
+    }
+  }
+  const controller = createNostrDbSyncController({
+    _nowMs: () => now,
+    _setTimeout: () => ({}),
+    _isOnline: async () => true,
+    _relayPool: {
+      async getEvents (filter, relays) {
+        return {
+          result: [],
+          relays: relays.map(relay => ({ relay, status: 'eose' }))
+        }
+      }
+    }
+  })
+
+  await controller.runExchangeMaintenance(context(msg, {
+    channelPubkeyForOwner: () => 'channel',
+    relaysForChannel: () => [relay]
+  }))
+
+  assert.equal(msg.sent.length, 1)
+  assert.deepEqual(msg.sent[0].options.payload, {
+    requestId,
+    sinceScore: 100,
+    untilScore: 900,
+    excludeIds: [EVENT_ID],
+    limit: 200
+  })
+  assert.ok(controller._getState().exchanges[OWNER][PEER][`ask:${requestId}`])
+  assert.equal(controller._getState().owners[OWNER][PEER].pending.attempt, 3)
+  now += 1
+})
+
+test('exchange presence checks group relays and bound each query to 200 ids', async () => {
+  const relayA = 'wss://relay-a.test'
+  const relayB = 'wss://relay-b.test'
+  const entries = {}
+  for (let index = 0; index < 450; index++) {
+    const id = eventId(index + 1)
+    const relays = index < 225 ? [relayA] : [relayB]
+    entries[`ask:req-${index}`] = {
+      direction: 'ask',
+      requestId: `req-${index}`,
+      status: 'awaiting-reply',
+      events: { ask: [{ id, relays, expiresAt: 9999999999999 }], reply: [] },
+      lastAskPublishedAt: 1000,
+      nextCheckAt: 1000,
+      expiresAt: 9999999999999
+    }
+  }
+  globalThis.localStorage.setItem(SYNC_STATE_KEY, JSON.stringify({
+    exchanges: { [OWNER]: { [PEER]: entries } }
+  }))
+  const queries = []
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _setTimeout: () => ({}),
+    _isOnline: async () => true,
+    _relayPool: {
+      async getEvents (filter, relays, options) {
+        queries.push({ filter, relays, options })
+        return {
+          result: filter.ids.map(id => ({ event: { id }, relay: relays[0] })),
+          relays: relays.map(relay => ({ relay, status: 'eose' }))
+        }
+      }
+    }
+  })
+
+  await controller.runExchangeMaintenance(context(msg))
+
+  assert.deepEqual(queries.map(query => query.filter.ids.length), [200, 25, 200, 25])
+  assert.ok(queries.every(query => query.options.deduplicateAcrossRelays === false))
+  assert.deepEqual(
+    new Set(queries.map(query => query.relays.join(','))),
+    new Set([relayA, relayB])
+  )
+})
+
+test('offline or indeterminate presence never republishes an exchange', async () => {
+  const relay = 'wss://relay.test'
+  const askId = eventId(700)
+  const record = {
+    direction: 'ask',
+    requestId: 'offline-check',
+    channelPubkey: 'channel',
+    code: NOSTRDB_SYNC_ASK_CODE,
+    status: 'awaiting-reply',
+    requestPayload: {
+      requestId: 'offline-check',
+      sinceScore: 1,
+      untilScore: 2,
+      excludeIds: [],
+      limit: 200
+    },
+    events: { ask: [{ id: askId, relays: [relay], expiresAt: 9999999999999 }], reply: [] },
+    lastAskPublishedAt: 1000,
+    nextCheckAt: 1000,
+    expiresAt: 9999999999999
+  }
+  globalThis.localStorage.setItem(SYNC_STATE_KEY, JSON.stringify({
+    exchanges: { [OWNER]: { [PEER]: { 'ask:offline-check': record } } }
+  }))
+  let now = 1000 + 10 * 60 * 1000
+  let queries = 0
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => now,
+    _setTimeout: () => ({}),
+    _isOnline: async () => true,
+    _relayPool: {
+      async getEvents (filter, relays) {
+        queries++
+        return {
+          result: [],
+          relays: relays.map(relay => ({ relay, status: 'timeout' }))
+        }
+      }
+    }
+  })
+
+  await controller.runExchangeMaintenance(context(msg))
+  assert.equal(queries, 1)
+  assert.equal(msg.sent.length, 0)
+  assert.ok(controller._getState().exchanges[OWNER][PEER]['ask:offline-check'])
+
+  now += 20 * 60 * 1000
+  const offline = createNostrDbSyncController({
+    _nowMs: () => now,
+    _setTimeout: () => ({}),
+    _isOnline: async () => false
+  })
+  await offline.runExchangeMaintenance(context(msg))
+  const deferred = offline._getState().exchanges[OWNER][PEER]['ask:offline-check']
+  assert.equal(deferred.nextCheckAt, now + 20 * 60 * 1000)
+  assert.equal(msg.sent.length, 0)
+})
+
+test('a present ask with a missing reply is answered again after five minutes', async () => {
+  let now = 1000
+  const relay = 'wss://relay.test'
+  const askId = eventId(800)
+  const replies = []
+  const msg = messenger()
+  msg.reply = async options => {
+    replies.push(options)
+    return {
+      delivery: {
+        reports: [{
+          outerEventId: eventId(801 + replies.length),
+          succeededRelays: [relay],
+          success: true
+        }],
+        deletionSeckey: 'd'.repeat(64)
+      }
+    }
+  }
+  const controller = createNostrDbSyncController({
+    _nowMs: () => now,
+    _setTimeout: () => ({}),
+    _isOnline: async () => true,
+    _relayPool: {
+      async getEvents (filter, relays) {
+        const present = filter.ids.includes(askId) ? [{ event: { id: askId }, relay }] : []
+        return {
+          result: present,
+          relays: relays.map(relay => ({ relay, status: 'eose' }))
+        }
+      }
+    },
+    getDb: () => ({
+      async query () {
+        return { results: [], meta: { scores: [] } }
+      }
+    })
+  })
+  const message = syncMessage({
+    code: NOSTRDB_SYNC_ASK_CODE,
+    payload: {
+      requestId: 'reply-recovery',
+      sinceScore: 1,
+      untilScore: 2,
+      excludeIds: [],
+      limit: 200
+    }
+  })
+  message.outer = { id: askId, created_at: 1 }
+  const syncContext = context(msg, { relaysForChannel: () => [relay] })
+
+  await controller.handleMessage(message, syncContext)
+  assert.equal(replies.length, 1)
+
+  now += 5 * 60 * 1000 - 1
+  await controller.runExchangeMaintenance(syncContext)
+  assert.equal(replies.length, 1)
+
+  now += 1
+  await controller.runExchangeMaintenance(syncContext)
+  assert.equal(replies.length, 2)
+  assert.equal(replies[1].payload.requestId, 'reply-recovery')
+  const record = controller._getState().exchanges[OWNER][PEER]['reply:reply-recovery']
+  assert.equal(record.events.reply.length, 2)
+  assert.equal(record.status, 'reply-published')
+})
+
+test('a present app ask regenerates its complete app reply after five minutes', async () => {
+  let now = 1000
+  const relay = 'wss://relay.test'
+  const askId = eventId(850)
+  const replies = []
+  const msg = messenger()
+  msg.reply = async options => {
+    replies.push(options)
+    return {
+      delivery: {
+        reports: [{
+          outerEventId: eventId(851 + replies.length),
+          succeededRelays: [relay],
+          success: true
+        }]
+      }
+    }
+  }
+  const controller = createNostrDbSyncController({
+    _nowMs: () => now,
+    _setTimeout: () => ({}),
+    _isOnline: async () => true,
+    _relayPool: {
+      async getEvents (filter, relays) {
+        return {
+          result: filter.ids.includes(askId) ? [{ event: { id: askId }, relay }] : [],
+          relays: relays.map(relay => ({ relay, status: 'eose' }))
+        }
+      }
+    },
+    getDb: () => ({
+      async exportEventsByAppPage () {
+        return { events: [], hasMore: false, nextAfter: '' }
+      }
+    })
+  })
+  const message = syncMessage({
+    code: NOSTRDB_SYNC_APP_ASK_CODE,
+    payload: { requestId: 'app-reply-recovery', appId: 'app-1', after: '', batchSize: 200 }
+  })
+  message.outer = { id: askId, created_at: 1 }
+  const syncContext = context(msg, { relaysForChannel: () => [relay] })
+
+  await controller.handleMessage(message, syncContext)
+  now += 5 * 60 * 1000
+  await controller.runExchangeMaintenance(syncContext)
+
+  assert.equal(replies.length, 2)
+  assert.equal(replies[1].code, NOSTRDB_SYNC_APP_REPLY_CODE)
+  assert.equal(replies[1].payload.requestId, 'app-reply-recovery')
+  assert.equal(replies[1].payload.appId, 'app-1')
+})
+
+test('deletion tries the s-tag capability and regular author deletion without AUTH', async () => {
+  const now = 1000
+  const relay = 'wss://relay.test'
+  const askId = eventId(900)
+  const channelPubkey = 'f'.repeat(64)
+  const deletionSeckey = 'd'.repeat(64)
+  const deletionPubkey = keypairFromSeckey(deletionSeckey).pubkey
+  let replyId = ''
+  let replyPresent = true
+  const sends = []
+  const msg = messenger()
+  msg.reply = async () => {
+    replyId = eventId(901)
+    return {
+      delivery: {
+        reports: [{
+          outerEventId: replyId,
+          succeededRelays: [relay],
+          success: true
+        }],
+        deletionSeckey
+      }
+    }
+  }
+  const controller = createNostrDbSyncController({
+    _nowMs: () => now,
+    _setTimeout: () => ({}),
+    _isOnline: async () => true,
+    _relayPool: {
+      async getEvents (filter, relays) {
+        const present = replyPresent && filter.ids.includes(replyId)
+          ? [{ event: { id: replyId }, relay }]
+          : []
+        return {
+          result: present,
+          relays: relays.map(relay => ({ relay, status: 'eose' }))
+        }
+      },
+      async sendEvent (event, relays, options) {
+        sends.push({ event, relays, options })
+        return {
+          success: true,
+          promise: Promise.resolve({ succeededRelays: relays })
+        }
+      }
+    },
+    getDb: () => ({
+      async query () {
+        return { results: [], meta: { scores: [] } }
+      }
+    })
+  })
+  const message = syncMessage({
+    code: NOSTRDB_SYNC_ASK_CODE,
+    payload: {
+      requestId: 'deletion',
+      sinceScore: 1,
+      untilScore: 2,
+      excludeIds: [],
+      limit: 200
+    }
+  })
+  message.outer = { id: askId, created_at: 1 }
+  const channelSigner = {
+    async signEvent (template) {
+      return { ...template, pubkey: channelPubkey }
+    }
+  }
+  const syncContext = context(msg, {
+    relaysForChannel: () => [relay],
+    channelSignerFor: () => channelSigner
+  })
+
+  await controller.handleMessage(message, syncContext)
+  await controller.runExchangeMaintenance(syncContext)
+
+  assert.equal(sends.length, 2)
+  assert.ok(sends.every(({ event }) => event.kind === 5))
+  assert.ok(sends.every(({ event }) => event.tags.some(tag => tag[0] === 'e' && tag[1] === replyId)))
+  assert.deepEqual(new Set(sends.map(({ event }) => event.pubkey)), new Set([deletionPubkey, channelPubkey]))
+  assert.ok(sends.every(({ options }) => !Object.hasOwn(options, 'getAuthEvent')))
+  assert.ok(controller._getState().exchanges[OWNER][PEER]['reply:deletion'])
+
+  replyPresent = false
+  await controller.runExchangeMaintenance(syncContext)
+  assert.equal(controller._getState().exchanges?.[OWNER]?.[PEER]?.['reply:deletion'], undefined)
+})
+
+test('regular author deletion remains the fallback when an envelope has no s capability', async () => {
+  const relay = 'wss://relay.test'
+  const channelPubkey = 'f'.repeat(64)
+  const askId = eventId(910)
+  const replyId = eventId(911)
+  globalThis.localStorage.setItem(SYNC_STATE_KEY, JSON.stringify({
+    exchanges: {
+      [OWNER]: {
+        [PEER]: {
+          'reply:no-s': {
+            direction: 'reply',
+            requestId: 'no-s',
+            channelPubkey: 'channel',
+            status: 'deleting-reply',
+            events: {
+              ask: [{ id: askId, relays: [relay], expiresAt: 9999999999999 }],
+              reply: [{ id: replyId, relays: [relay], expiresAt: 9999999999999 }]
+            },
+            nextCheckAt: 1000,
+            expiresAt: 9999999999999
+          }
+        }
+      }
+    }
+  }))
+  const sends = []
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _setTimeout: () => ({}),
+    _isOnline: async () => true,
+    _relayPool: {
+      async getEvents (filter, relays) {
+        return {
+          result: filter.ids.includes(replyId) ? [{ event: { id: replyId }, relay }] : [],
+          relays: relays.map(relay => ({ relay, status: 'eose' }))
+        }
+      },
+      async sendEvent (event, relays, options) {
+        sends.push({ event, relays, options })
+        return { success: true, promise: Promise.resolve({ succeededRelays: relays }) }
+      }
+    }
+  })
+  const channelSigner = {
+    async signEvent (template) {
+      return { ...template, pubkey: channelPubkey }
+    }
+  }
+
+  await controller.runExchangeMaintenance(context(messenger(), {
+    channelSignerFor: () => channelSigner
+  }))
+
+  assert.equal(sends.length, 1)
+  assert.equal(sends[0].event.pubkey, channelPubkey)
+  assert.ok(sends[0].event.tags.some(tag => tag[0] === 'e' && tag[1] === replyId))
+  assert.equal(Object.hasOwn(sends[0].options, 'getAuthEvent'), false)
+})
+
+test('exchange retention expires after the ten-minute grace even while offline', async () => {
+  let now = 2000
+  const makeRecord = requestId => ({
+    direction: 'ask',
+    requestId,
+    status: 'awaiting-reply',
+    events: { ask: [], reply: [] },
+    nextCheckAt: now,
+    expiresAt: now + (requestId === 'expired' ? 0 : 1)
+  })
+  globalThis.localStorage.setItem(SYNC_STATE_KEY, JSON.stringify({
+    owners: {
+      [OWNER]: {
+        [PEER]: {
+          pending: { requestId: 'expired' },
+          recent: { pending: { requestId: 'fresh' } },
+          updatedAt: now
+        }
+      }
+    },
+    exchanges: {
+      [OWNER]: {
+        [PEER]: {
+          'ask:expired': makeRecord('expired'),
+          'ask:fresh': makeRecord('fresh')
+        }
+      }
+    }
+  }))
+  const controller = createNostrDbSyncController({
+    _nowMs: () => now,
+    _setTimeout: () => ({}),
+    _isOnline: async () => false
+  })
+
+  await controller.runExchangeMaintenance(context(messenger()))
+  const records = controller._getState().exchanges[OWNER][PEER]
+  assert.equal(records['ask:expired'], undefined)
+  assert.ok(records['ask:fresh'])
+  assert.equal(records['ask:fresh'].nextCheckAt, now + 20 * 60 * 1000)
+  assert.equal(controller._getState().owners[OWNER][PEER].pending, null)
+  assert.ok(controller._getState().owners[OWNER][PEER].recent.pending)
+  now += 1
+})
+
+test('non-contiguous reply indexes do not complete or delete the ask', async () => {
+  const diagnostics = []
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { scores: [] } }
+      },
+      async add () {
+        return { ok: true, stored: true }
+      }
+    })
+  })
+  const syncContext = context(msg, { debug: event => diagnostics.push(event) })
+  controller.ensureSubscriptions(syncContext)
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: 900, minScore: 1000, maxScore: 10000000 }
+  }), syncContext)
+  const historyAsk = msg.sent.find(item => item.options.payload.untilScore === 900999).options.payload
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_REPLY_CODE,
+    payload: {
+      requestId: historyAsk.requestId,
+      sinceScore: historyAsk.sinceScore,
+      untilScore: historyAsk.untilScore,
+      hasMore: false,
+      index: 1,
+      isLast: true,
+      jsonl: `${JSON.stringify(event(1))}\n`
+    }
+  }), syncContext)
+
+  const owner = controller._getState().owners[OWNER][PEER]
+  assert.equal(owner.pending.requestId, historyAsk.requestId)
+  assert.equal(owner.completedScore, undefined)
+  assert.equal(owner.pending.replyIndexes.join(','), '1')
+  assert.ok(diagnostics.some(entry => entry.action === 'reply-incomplete'))
 })
 
 test('nostrdb data payload validation quarantines shape errors and ignores invalid requests', async () => {
@@ -567,7 +1132,7 @@ test('nostrdb app backfill retains pending state when publication fails', async 
 test('nostrdb app backfill does not retry before a publication circuit deadline', async () => {
   let now = 1000
   let attempts = 0
-  const retryAt = now + 5 * 60 * 1000
+  const retryAt = now + 30 * 60 * 1000
   const errors = []
   const msg = messenger()
   msg.ask = async options => {
@@ -581,12 +1146,29 @@ test('nostrdb app backfill does not retry before a publication circuit deadline'
         retryWhenAvailable: true
       })
     }
-    return { delivery: { reports: [{ success: true }] } }
+    return {
+      delivery: {
+        reports: [{
+          outerEventId: eventId(100 + attempts),
+          succeededRelays: ['wss://relay.test'],
+          success: true
+        }]
+      }
+    }
   }
   const controller = createNostrDbSyncController({
     _nowMs: () => now,
     _random: () => 0.5,
     _setTimeout: () => ({}),
+    _isOnline: async () => true,
+    _relayPool: {
+      async getEvents (filter, relays) {
+        return {
+          result: [],
+          relays: relays.map(relay => ({ relay, status: 'eose' }))
+        }
+      }
+    },
     onError: err => errors.push(err),
     getDb: () => ({ subscribe: emptySubscription })
   })
@@ -601,17 +1183,17 @@ test('nostrdb app backfill does not retry before a publication circuit deadline'
   assert.equal(errors.at(-1).code, 'RELAY_CIRCUIT_OPEN')
 
   now = retryAt - 1
-  await controller.processAppBackfills(context(msg))
+  await controller.runExchangeMaintenance(context(msg))
   assert.equal(attempts, 1)
 
   now = retryAt
-  await controller.processAppBackfills(context(msg))
+  await controller.runExchangeMaintenance(context(msg))
   assert.equal(attempts, 2)
 })
 
 test('nostrdb range sync does not retry before a publication circuit deadline', async () => {
   let now = 1000
-  const retryAt = now + 5 * 60 * 1000
+  const retryAt = now + 30 * 60 * 1000
   let attempts = 0
   const msg = messenger()
   msg.ask = async options => {
@@ -628,6 +1210,15 @@ test('nostrdb range sync does not retry before a publication circuit deadline', 
     _nowMs: () => now,
     _random: () => 0.5,
     _setTimeout: () => ({}),
+    _isOnline: async () => true,
+    _relayPool: {
+      async getEvents (filter, relays) {
+        return {
+          result: [],
+          relays: relays.map(relay => ({ relay, status: 'eose' }))
+        }
+      }
+    },
     onError: () => {},
     getDb: () => ({
       async query () {
@@ -642,16 +1233,17 @@ test('nostrdb range sync does not retry before a publication circuit deadline', 
   }), context(msg))
 
   const owner = controller._getState().owners[OWNER][PEER]
-  assert.equal(attempts, 1)
+  assert.equal(attempts, 2)
   assert.equal(owner.pending.nextRetryAt, retryAt)
   assert.equal(owner.pending.onlineRetryAt, retryAt)
 
   now = retryAt - 1
-  await controller.handleMessage(syncMessage({
-    code: NOSTRDB_SYNC_ADVERTISE_CODE,
-    payload: { generatedAt: now, minScore: now, maxScore: now + 1 }
-  }), context(msg))
-  assert.equal(attempts, 1)
+  await controller.runExchangeMaintenance(context(msg))
+  assert.equal(attempts, 2)
+
+  now = retryAt
+  await controller.runExchangeMaintenance(context(msg))
+  assert.equal(attempts, 4)
 })
 
 test('paused range asks wait for explicit resume without spending backoff', async () => {
@@ -661,17 +1253,34 @@ test('paused range asks wait for explicit resume without spending backoff', asyn
   msg.ask = async options => {
     attempts++
     msg.sent.push({ method: 'ask', options })
-    if (attempts === 1) {
+    if (attempts <= 2) {
       throw Object.assign(new Error('PRIVATE_MESSENGER_PAUSED'), {
         code: 'PRIVATE_MESSENGER_PAUSED',
         pauseReasons: ['capacity']
       })
     }
-    return { delivery: { reports: [{ success: true }] } }
+    return {
+      delivery: {
+        reports: [{
+          outerEventId: eventId(100 + attempts),
+          succeededRelays: ['wss://relay.test'],
+          success: true
+        }]
+      }
+    }
   }
   const controller = createNostrDbSyncController({
     _nowMs: () => 1000,
     _random: () => 0.5,
+    _isOnline: async () => true,
+    _relayPool: {
+      async getEvents (filter, relays) {
+        return {
+          result: [],
+          relays: relays.map(relay => ({ relay, status: 'eose' }))
+        }
+      }
+    },
     _setTimeout: (fn, ms) => {
       const timer = { fn, ms }
       timers.push(timer)
@@ -701,9 +1310,17 @@ test('paused range asks wait for explicit resume without spending backoff', asyn
   assert.equal(timers.some(timer => timer.ms === 5 * 60 * 1000), false)
 
   await controller.resumeAfterPause(context(msg))
-  assert.equal(attempts, 2)
+  assert.equal(attempts, 3)
   assert.equal(controller._getState().owners[OWNER][PEER].pending.waitingForResume, undefined)
   assert.equal(controller._getState().owners[OWNER][PEER].pending.attempt, 1)
+
+  const exchangeFlush = timers.find(timer => timer.ms === 0)
+  assert.ok(exchangeFlush)
+  await exchangeFlush.fn()
+  await flushMicrotasks()
+  assert.equal(attempts, 4)
+  assert.equal(controller._getState().owners[OWNER][PEER].recent.pending.waitingForResume, undefined)
+  assert.equal(controller._getState().owners[OWNER][PEER].recent.pending.attempt, 1)
 })
 
 test('waiting-for-resume state recovers after reload once the messenger is active', async () => {
@@ -776,7 +1393,7 @@ test('resume does not bypass a relay retry deadline attached to a paused error',
   assert.equal(pending.waitingForResume, undefined)
   assert.equal(pending.nextRetryAt, retryAt)
   await controller.resumeAfterPause(context(msg))
-  assert.equal(attempts, 1)
+  assert.equal(attempts, 2)
 })
 
 test('paused app backfills resume immediately without increasing backoff', async () => {
@@ -1089,7 +1706,7 @@ test('nostrdb sync re-asks same start when final reply hasMore is true', async (
     code: NOSTRDB_SYNC_ADVERTISE_CODE,
     payload: { generatedAt: 900, minScore: 1000, maxScore: 10000000 }
   }), context(msg))
-  const firstAsk = msg.sent[0].options.payload
+  const firstAsk = msg.sent.find(item => item.options.payload.untilScore === 900999).options.payload
 
   await controller.handleMessage(syncMessage({
     code: NOSTRDB_SYNC_REPLY_CODE,
@@ -1104,12 +1721,63 @@ test('nostrdb sync re-asks same start when final reply hasMore is true', async (
     }
   }), context(msg))
 
-  assert.equal(msg.sent.length, 2)
-  const secondAsk = msg.sent[1].options.payload
+  const secondAsk = msg.sent
+    .map(item => item.options.payload)
+    .find(payload => payload.requestId !== firstAsk.requestId &&
+      payload.sinceScore === firstAsk.sinceScore &&
+      payload.untilScore === firstAsk.sinceScore + 450000 - 1)
+  assert.ok(secondAsk)
   assert.equal(secondAsk.sinceScore, firstAsk.sinceScore)
   assert.equal(secondAsk.untilScore, firstAsk.sinceScore + 450000 - 1)
   assert.deepEqual(secondAsk.excludeIds, [imported.id])
   assert.equal(controller._getState().owners[OWNER][PEER].pending.attempt, 0)
+})
+
+test('recent recovery walks backward independently of the historical lane', async () => {
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { scores: [] } }
+      },
+      async add () {
+        return { ok: true, stored: true }
+      }
+    })
+  })
+  const syncContext = context(msg)
+  controller.ensureSubscriptions(syncContext)
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: 900, minScore: 1000000, maxScore: 10000000 }
+  }), syncContext)
+
+  const firstRecent = controller._getState().owners[OWNER][PEER].recent.pending
+  assert.ok(firstRecent.sinceScore > 10000000)
+  assert.ok(msg.sent.some(item => item.options.payload.requestId === firstRecent.requestId))
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_REPLY_CODE,
+    payload: {
+      requestId: firstRecent.requestId,
+      sinceScore: firstRecent.sinceScore,
+      untilScore: firstRecent.untilScore,
+      hasMore: false,
+      index: 0,
+      isLast: true,
+      jsonl: ''
+    }
+  }), syncContext)
+
+  const secondRecent = controller._getState().owners[OWNER][PEER].recent.pending
+  assert.ok(secondRecent)
+  assert.equal(secondRecent.untilScore, firstRecent.sinceScore - 1)
+  assert.ok(secondRecent.requestId !== firstRecent.requestId)
+  assert.ok(msg.sent.some(item => item.options.payload.requestId === secondRecent.requestId))
 })
 
 test('nostrdb sync advances only when final reply is complete', async () => {
@@ -1134,7 +1802,7 @@ test('nostrdb sync advances only when final reply is complete', async () => {
     code: NOSTRDB_SYNC_ADVERTISE_CODE,
     payload: { generatedAt: 900, minScore: 1000, maxScore: 10000000 }
   }), context(msg))
-  const firstAsk = msg.sent[0].options.payload
+  const firstAsk = msg.sent.find(item => item.options.payload.untilScore === 900999).options.payload
 
   await controller.handleMessage(syncMessage({
     code: NOSTRDB_SYNC_REPLY_CODE,
@@ -1150,7 +1818,9 @@ test('nostrdb sync advances only when final reply is complete', async () => {
   }), context(msg))
 
   assert.equal(msg.sent.length, 2)
-  assert.equal(msg.sent[1].options.payload.sinceScore, firstAsk.untilScore + 1)
+  const owner = controller._getState().owners[OWNER][PEER]
+  assert.equal(owner.pending, null)
+  assert.equal(owner.completedScore, firstAsk.untilScore)
 })
 
 test('nostrdb sync treats missing hasMore full pages as incomplete', async () => {
@@ -1179,7 +1849,7 @@ test('nostrdb sync treats missing hasMore full pages as incomplete', async () =>
     code: NOSTRDB_SYNC_ADVERTISE_CODE,
     payload: { generatedAt: 900, minScore: 1000, maxScore: 10000000 }
   }), context(msg))
-  const firstAsk = msg.sent[0].options.payload
+  const firstAsk = msg.sent.find(item => item.options.payload.untilScore === 900999).options.payload
 
   await controller.handleMessage(syncMessage({
     code: NOSTRDB_SYNC_REPLY_CODE,
@@ -1193,10 +1863,15 @@ test('nostrdb sync treats missing hasMore full pages as incomplete', async () =>
     }
   }), context(msg))
 
-  assert.equal(msg.sent.length, 2)
-  assert.equal(msg.sent[1].options.payload.sinceScore, firstAsk.sinceScore)
-  assert.equal(msg.sent[1].options.payload.untilScore, firstAsk.sinceScore + 60000 - 1)
-  assert.equal(msg.sent[1].options.payload.excludeIds.length, 200)
+  const nextAsk = msg.sent
+    .map(item => item.options.payload)
+    .find(payload => payload.requestId !== firstAsk.requestId &&
+      payload.sinceScore === firstAsk.sinceScore &&
+      payload.untilScore === firstAsk.sinceScore + 60000 - 1)
+  assert.ok(nextAsk)
+  assert.equal(nextAsk.sinceScore, firstAsk.sinceScore)
+  assert.equal(nextAsk.untilScore, firstAsk.sinceScore + 60000 - 1)
+  assert.equal(nextAsk.excludeIds.length, 200)
 })
 
 test('nostrdb sync ingests with mergeSource sync and suppresses echo pushes', async () => {
@@ -1325,6 +2000,56 @@ test('nostrdb push classifies trusted metadata and separates priority lanes', as
   assert.ok(msg.sent.slice(1).every(({ options }) => options.useBulkPacing))
 })
 
+test('lower-priority pushes reset the quiet window and flush at the one-second cap', async () => {
+  let now = 1000
+  const timers = []
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => now,
+    getDb: () => ({ subscribe: emptySubscription }),
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: timer => {
+      const index = timers.indexOf(timer)
+      if (index >= 0) timers.splice(index, 1)
+    }
+  })
+  controller.ensureSubscriptions(context(msg, {
+    emptyPersonalCopyContextByOwner: new Map([[OWNER, 'empty-context-ciphertext']])
+  }))
+  const lowerEvent = number => ({
+    ...pushEvent(number),
+    tags: [['k', '9'], ['c', 'empty-context-ciphertext']]
+  })
+
+  await controller.queuePush(OWNER, lowerEvent(1))
+  assert.equal(timers.length, 1)
+  assert.equal(timers[0].ms, 200)
+
+  now = 1100
+  await controller.queuePush(OWNER, lowerEvent(2))
+  assert.equal(timers.length, 1)
+  assert.equal(timers[0].ms, 200)
+
+  for (let elapsed = 1200; elapsed <= 1900; elapsed += 100) {
+    now = elapsed
+    await controller.queuePush(OWNER, lowerEvent((elapsed - 1000) / 100 + 2))
+  }
+  assert.equal(timers.length, 1)
+  // The timer was armed at t=1800 for the absolute t=2000 deadline. It must
+  // not be rescheduled to the later quiet deadline at t=2100.
+  assert.equal(timers[0].ms, 200)
+
+  now = 2000
+  await timers.shift().fn()
+  assert.equal(msg.sent.length, 1)
+  assert.equal(msg.sent[0].options.payload.priority, 'lower')
+  assert.equal(msg.sent[0].options.payload.jsonl.trim().split('\n').length, 10)
+})
+
 test('nostrdb zero-output push wakes are counted without an empty push log', async () => {
   let now = 1000
   const performanceReadings = [10, 11, 12, 17]
@@ -1394,7 +2119,7 @@ test('durable push outbox survives reload and removes chunks only after publicat
   first.ensureSubscriptions(context(messenger()))
   await new Promise(resolve => setImmediate(resolve))
   await first.queuePush(OWNER, pushEvent(1), 2)
-  assert.equal(firstTimers.length, 1)
+  assert.ok(firstTimers.length > 0)
   first.stop()
   await new Promise(resolve => setTimeout(resolve, 20))
 

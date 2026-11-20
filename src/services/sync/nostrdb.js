@@ -1,8 +1,13 @@
 import * as nostrdb from '../nostrdb.js'
 import { createEventReplyPacker } from 'libp2r2p/private-messenger/recovery'
 import { bytesToHex } from 'libp2r2p/base16'
+import { finalizeEvent } from 'libp2r2p/event'
 import { PERSONAL_COPY } from 'libp2r2p/kind'
 import { createQueue } from 'libp2r2p/idb-queue'
+import { keypairFromSeckey } from 'libp2r2p/key'
+import { isOnline as defaultIsOnline } from 'libp2r2p/network'
+import { PRIVATE_BROADCAST_KIND } from 'libp2r2p/private-channel'
+import { relayPool as defaultRelayPool } from 'libp2r2p/relay'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { NOSTRDB_SYNC, readRecords, replaceRecords } from '../storage/index.js'
 import { publicationRetryAt } from '../../helpers/publication-retry.js'
@@ -13,14 +18,16 @@ import { assertSupportedPayloadVersion, syncPayloadInvalid } from './payload-err
 //   or local changes, then every four hours from the parent sync controller.
 // - The parent currently flushes owner accounts in series; each advert is one
 //   yell to all trusted peer pubkeys on that owner's derived sync channel.
-// - Asks are per owner+peer and are created/published serially as adverts,
-//   retries, or replies are processed; replies arrive later through the normal
-//   message drain, so we never block waiting for an offline peer to answer.
-//   Retries rebuild the ask from current advert/local IDs instead of resending
-//   stale payloads. Retry sweeps also walk owners/peers in series.
+// - Asks are per owner+peer and replies arrive later through the normal message
+//   drain, so we never block waiting for an offline peer to answer. Published
+//   wire envelopes are checked every 20 minutes; missing asks/replies are
+//   republished only after five minutes, and observed envelopes are deleted.
+// - A recent lane walks backward from the advertised edge while the historical
+//   lane advances from local completeness, so an old blocked range cannot hide
+//   current messages.
 // - Pushes are per owner and priority lane. Normal events are immediate;
-//   lower/lowest events share a short trailing batching window. RelayConnection
-//   applies bulk pacing and retry backoff per relay.
+//   lower/lowest events use a 200 ms quiet window capped at one second.
+//   RelayConnection applies bulk pacing and retry backoff per relay.
 // - App-install backfills use the same account channel, but page by app export
 //   cursor (`after` event id) instead of sync-anchor score windows.
 // - Sync windows use NostrDB `sa` millisecond scores, not Nostr created_at.
@@ -56,15 +63,24 @@ const ADVERT_EDGE_EXTENSION_MS = 4 * 60 * 60 * 1000
 const INVENTORY_LIMIT = 200
 const REQUEST_LIMIT = 200
 const SMALL_REPLY_COUNT = 20
-const NO_REPLY_RETRY_MS = 2 * 24 * 60 * 60 * 1000
 const ONLINE_RETRY_MIN_MS = 5 * 60 * 1000
 const ONLINE_RETRY_MAX_MS = 6 * 60 * 60 * 1000
+const EXCHANGE_CHECK_INTERVAL_MS = 20 * 60 * 1000
+const EXCHANGE_MIN_RESEND_MS = 5 * 60 * 1000
+const EXCHANGE_EXPIRY_GRACE_MS = 10 * 60 * 1000
+const EXCHANGE_PRESENCE_BATCH_SIZE = 200
+const EXCHANGE_DELETE_BATCH_SIZE = 100
+const EXCHANGE_MAX_OWNERS = 32
+const EXCHANGE_MAX_PER_OWNER = 1024
+const EXCHANGE_PRESENCE_TIMEOUT_MS = 5000
+const SYNC_EVENT_EXPIRATION_MS = 2 * 24 * 60 * 60 * 1000
 const STATE_PRUNE_MS = 30 * 24 * 60 * 60 * 1000
 const PUSH_EVENTS_PER_CHUNK = 100
 const SYNC_BYTES_PER_CHUNK = 128 * 1024
 const encoder = new TextEncoder()
 const RECENT_SYNC_EVENT_TTL_MS = 2 * 60 * 1000
 const PUSH_BATCH_WINDOW_MS = 200
+const PUSH_BATCH_MAX_WAIT_MS = 1000
 const PUSH_OUTBOX_PREFIX = 'ez-vault:trusted-signer-sync:nostrdb-push:v1'
 const PUSH_CHUNK_OUTBOX_PREFIX = 'ez-vault:trusted-signer-sync:nostrdb-push-chunks:v1'
 const PUSH_EVENT_OUTBOX_MAX_BYTES = 32 * 1024 * 1024
@@ -362,6 +378,136 @@ function writeState (storage, state) {
   }
 }
 
+function normalizeRelayUrl (value) {
+  try {
+    const url = new URL(value)
+    if (!['ws:', 'wss:'].includes(url.protocol)) return ''
+    url.hash = ''
+    return url.toString().replace(/\/$/, '')
+  } catch {
+    return ''
+  }
+}
+
+function normalizeRelayList (values) {
+  return [...new Set((Array.isArray(values) ? values : [])
+    .map(normalizeRelayUrl)
+    .filter(Boolean))]
+}
+
+function normalizeSecret (value) {
+  const secret = typeof value === 'string' ? value.toLowerCase() : ''
+  return /^[0-9a-f]{64}$/.test(secret) ? secret : ''
+}
+
+function exchangesState (state) {
+  if (!isPlainObject(state.exchanges)) state.exchanges = {}
+  return state.exchanges
+}
+
+function ownerExchangesState (state, ownerPubkey) {
+  const exchanges = exchangesState(state)
+  if (!isPlainObject(exchanges[ownerPubkey])) exchanges[ownerPubkey] = {}
+  return exchanges[ownerPubkey]
+}
+
+function peerExchangesState (state, ownerPubkey, peerPubkey) {
+  const owner = ownerExchangesState(state, ownerPubkey)
+  if (!isPlainObject(owner[peerPubkey])) owner[peerPubkey] = {}
+  return owner[peerPubkey]
+}
+
+function exchangeStateKey (direction, requestId) {
+  return `${direction}:${requestId}`
+}
+
+function exchangeRecord (state, ownerPubkey, peerPubkey, direction, requestId, create = false) {
+  const existingPeers = state.exchanges?.[ownerPubkey]?.[peerPubkey]
+  if (!isPlainObject(existingPeers) && !create) return null
+  const peers = isPlainObject(existingPeers)
+    ? existingPeers
+    : peerExchangesState(state, ownerPubkey, peerPubkey)
+  const key = exchangeStateKey(direction, requestId)
+  if (!isPlainObject(peers[key]) && create) peers[key] = { direction, requestId, events: {} }
+  const record = peers[key]
+  if (!isPlainObject(record)) return null
+  if (!isPlainObject(record.events)) record.events = {}
+  for (const kind of ['ask', 'reply']) {
+    if (!Array.isArray(record.events[kind])) record.events[kind] = []
+  }
+  record.ownerPubkey = ownerPubkey
+  record.peerPubkey = peerPubkey
+  record.direction = direction
+  record.requestId = requestId
+  return record
+}
+
+function allExchangeRecords (state) {
+  const records = []
+  for (const [ownerPubkey, peers] of Object.entries(state.exchanges || {})) {
+    for (const [peerPubkey, entries] of Object.entries(peers || {})) {
+      for (const [key, record] of Object.entries(entries || {})) {
+        if (isPlainObject(record)) records.push({ ownerPubkey, peerPubkey, key, record })
+      }
+    }
+  }
+  return records
+}
+
+function trimOwnerExchanges (state, ownerPubkey) {
+  const records = allExchangeRecords(state).filter(entry => entry.ownerPubkey === ownerPubkey)
+  if (records.length <= EXCHANGE_MAX_PER_OWNER) return
+  records
+    .sort((left, right) => (left.record.updatedAt || 0) - (right.record.updatedAt || 0))
+    .slice(0, records.length - EXCHANGE_MAX_PER_OWNER)
+    .forEach(entry => {
+      delete state.exchanges?.[entry.ownerPubkey]?.[entry.peerPubkey]?.[entry.key]
+    })
+}
+
+function trimExchangeOwners (state) {
+  const owners = Object.keys(state.exchanges || {})
+  if (owners.length <= EXCHANGE_MAX_OWNERS) return
+  owners
+    .map(ownerPubkey => ({
+      ownerPubkey,
+      updatedAt: Math.max(0, ...allExchangeRecords(state)
+        .filter(entry => entry.ownerPubkey === ownerPubkey)
+        .map(entry => entry.record.updatedAt || 0))
+    }))
+    .sort((left, right) => left.updatedAt - right.updatedAt)
+    .slice(0, owners.length - EXCHANGE_MAX_OWNERS)
+    .forEach(({ ownerPubkey }) => { delete state.exchanges[ownerPubkey] })
+}
+
+function mergeWireEvents (current, incoming) {
+  const merged = new Map((Array.isArray(current) ? current : [])
+    .filter(event => normalizePubkey(event?.id))
+    .map(event => [event.id, event]))
+  for (const event of incoming || []) {
+    const id = normalizePubkey(event?.id)
+    if (!id) continue
+    const next = {
+      id,
+      relays: normalizeRelayList(event.relays),
+      deletionSeckey: normalizeSecret(event.deletionSeckey),
+      expiresAt: isSafeScore(event.expiresAt)
+        ? event.expiresAt
+        : 0
+    }
+    const previous = merged.get(id)
+    merged.set(id, previous
+      ? {
+          ...previous,
+          relays: normalizeRelayList([...(previous.relays || []), ...next.relays]),
+          deletionSeckey: previous.deletionSeckey || next.deletionSeckey,
+          expiresAt: Math.max(previous.expiresAt || 0, next.expiresAt || 0)
+        }
+      : next)
+  }
+  return [...merged.values()]
+}
+
 function ownerState (state, ownerPubkey) {
   if (!isPlainObject(state.owners)) state.owners = {}
   if (!isPlainObject(state.owners[ownerPubkey])) state.owners[ownerPubkey] = {}
@@ -420,10 +566,6 @@ function compareAdvert (next, current) {
   if ((next.generatedAt || 0) !== (current.generatedAt || 0)) return (next.generatedAt || 0) - (current.generatedAt || 0)
   if ((next.messageAt || 0) !== (current.messageAt || 0)) return (next.messageAt || 0) - (current.messageAt || 0)
   return String(next.eventId || '').localeCompare(String(current.eventId || ''))
-}
-
-function requestId (random = Math.random) {
-  return `${Date.now().toString(36)}:${random().toString(36).slice(2)}`
 }
 
 function syncQuery (since, until, extra = {}) {
@@ -492,16 +634,18 @@ function messengerPausedError (error) {
   return false
 }
 
-function markPendingForResume (entry, error, now) {
+function markPendingForResume (entry, error, now, lane = 'history') {
+  const pending = lane === 'recent' ? entry?.recent?.pending : entry?.pending
+  if (!pending) return
   const retryAt = publicationRetryAt(error, now)
   if (retryAt > now) {
-    delete entry.pending.waitingForResume
-    entry.pending.nextRetryAt = retryAt
-    entry.pending.onlineRetryAt = retryAt
+    delete pending.waitingForResume
+    pending.nextRetryAt = retryAt
+    pending.onlineRetryAt = retryAt
   } else {
-    entry.pending.waitingForResume = true
-    entry.pending.nextRetryAt = 0
-    entry.pending.onlineRetryAt = 0
+    pending.waitingForResume = true
+    pending.nextRetryAt = 0
+    pending.onlineRetryAt = 0
   }
   entry.updatedAt = now
 }
@@ -534,6 +678,8 @@ export function createNostrDbSyncController ({
   _random = Math.random,
   _indexedDB = globalThis.indexedDB,
   _createPushQueue = createQueue,
+  _relayPool = defaultRelayPool,
+  _isOnline = defaultIsOnline,
   onError = err => console.warn('nostrdb sync failed', err?.message ?? err)
 } = {}) {
   const subscriptions = new Map()
@@ -543,6 +689,11 @@ export function createNostrDbSyncController ({
   const recentSyncEventIds = new Map()
   let runtime = {}
   let retryTimer = null
+  let exchangeTimer = null
+  let exchangeChecking = false
+  let exchangeAgain = false
+  let exchangeGeneration = 0
+  let requestSequence = 0
   let appBackfillProcessTail = Promise.resolve()
   let appBackfillProcessGeneration = 0
   let pendingAppBackfillProcess = null
@@ -551,6 +702,17 @@ export function createNostrDbSyncController ({
     : (readRecords(NOSTRDB_SYNC).find(record => record.key === 'state')?.value || {})
   let stateWriteTail = Promise.resolve()
   const askStats = { emitted: {}, suppressed: {} }
+  const exchangeStats = {
+    checked: 0,
+    present: 0,
+    absent: 0,
+    unknown: 0,
+    asksRepublished: 0,
+    repliesRegenerated: 0,
+    deletionAttempts: 0,
+    deletionConfirmed: 0,
+    pruned: 0
+  }
   const pushStats = {
     idleWakeCount: 0,
     idleWakeMs: 0,
@@ -565,11 +727,24 @@ export function createNostrDbSyncController ({
     return storage ? readState(storage) : structuredClone(durableState)
   }
 
-  function setState (state) {
+  function nextRequestId () {
+    requestSequence += 1
+    return `${_nowMs().toString(36)}:${requestSequence.toString(36)}:${_random().toString(36).slice(2)}`
+  }
+
+  function setState (state, { replaceKeys = [] } = {}) {
     const snapshot = structuredClone(state)
+    const merge = current => {
+      const next = { ...current, ...snapshot }
+      for (const key of replaceKeys) {
+        if (snapshot[key] === undefined) delete next[key]
+        else next[key] = structuredClone(snapshot[key])
+      }
+      return next
+    }
     if (storage) {
       const current = getState()
-      const next = { ...current, ...snapshot }
+      const next = merge(current)
       if (snapshot.pushCursors === undefined && current.pushCursors !== undefined) {
         next.pushCursors = current.pushCursors
       }
@@ -578,7 +753,7 @@ export function createNostrDbSyncController ({
     }
     const write = stateWriteTail.then(() => {
       const current = getState()
-      const next = { ...current, ...snapshot }
+      const next = merge(current)
       if (snapshot.pushCursors === undefined && current.pushCursors !== undefined) {
         next.pushCursors = current.pushCursors
       }
@@ -587,6 +762,662 @@ export function createNostrDbSyncController ({
     })
     stateWriteTail = write.catch(report)
     return write
+  }
+
+  function channelRelays (channelPubkey, context = runtime) {
+    return normalizeRelayList(context.relaysForChannel?.(channelPubkey))
+  }
+
+  function updateWireRelays (ownerPubkey, peerPubkey, direction, requestId, eventId, relays) {
+    const state = getState()
+    const record = exchangeRecord(state, ownerPubkey, peerPubkey, direction, requestId)
+    if (!record) return
+    let changed = false
+    for (const kind of ['ask', 'reply']) {
+      for (const event of record.events[kind]) {
+        if (event.id !== eventId) continue
+        const next = normalizeRelayList([...(event.relays || []), ...relays])
+        if (next.length === event.relays.length) continue
+        event.relays = next
+        changed = true
+      }
+    }
+    if (changed) {
+      record.updatedAt = _nowMs()
+      setState(state)
+    }
+  }
+
+  async function trackPublication ({
+    ownerPubkey,
+    peerPubkey,
+    direction,
+    requestId,
+    code,
+    channelPubkey,
+    result,
+    question,
+    range,
+    lane,
+    context = runtime
+  }) {
+    ownerPubkey = normalizePubkey(ownerPubkey)
+    peerPubkey = normalizePubkey(peerPubkey)
+    if (!ownerPubkey || !peerPubkey) throw new Error('SYNC_EXCHANGE_IDENTITY_REQUIRED')
+    const reports = Array.isArray(result?.delivery?.reports) ? result.delivery.reports : []
+    const fallbackRelays = channelRelays(channelPubkey, context)
+    const deletionSeckey = normalizeSecret(result?.delivery?.deletionSeckey)
+    const now = _nowMs()
+    const state = getState()
+    const record = exchangeRecord(state, ownerPubkey, peerPubkey, direction, requestId, true)
+    record.code = code
+    record.channelPubkey = channelPubkey
+    record.updatedAt = now
+    record.lastPublishedAt = now
+    record.notBeforeAt = 0
+    record.nextCheckAt = now + EXCHANGE_CHECK_INTERVAL_MS
+    record.expiresAt = Math.max(
+      record.expiresAt || 0,
+      now + SYNC_EVENT_EXPIRATION_MS + EXCHANGE_EXPIRY_GRACE_MS
+    )
+    record.range = range ? structuredClone(range) : record.range
+    if (lane) record.lane = lane
+    if (question) record.question = structuredClone(question)
+    if (direction === 'ask' && range) {
+      record.requestPayload = structuredClone(range)
+      if (code === NOSTRDB_SYNC_APP_ASK_CODE) record.appId = normalizeAppId(range.appId)
+    }
+    const incoming = reports
+      .map(report => ({
+        id: normalizePubkey(report?.outerEventId),
+        relays: normalizeRelayList(report?.succeededRelays || fallbackRelays),
+        deletionSeckey,
+        expiresAt: now + SYNC_EVENT_EXPIRATION_MS
+      }))
+      .filter(event => event.id)
+    record.events[direction] = mergeWireEvents(record.events[direction], incoming)
+    if (direction === 'ask') {
+      record.status = 'awaiting-reply'
+      record.lastAskPublishedAt = now
+    } else {
+      record.status = 'reply-published'
+      record.lastReplyPublishedAt = now
+    }
+    trimOwnerExchanges(state, ownerPubkey)
+    trimExchangeOwners(state)
+    await setState(state)
+    scheduleExchangeMaintenance(context)
+    for (let index = 0; index < reports.length; index++) {
+      const report = reports[index]
+      const eventId = normalizePubkey(report?.outerEventId)
+      if (!eventId || !report?.promise?.then) continue
+      report.promise
+        .then(summary => updateWireRelays(
+          ownerPubkey,
+          peerPubkey,
+          direction,
+          requestId,
+          eventId,
+          summary?.succeededRelays || fallbackRelays
+        ))
+        .then(() => scheduleExchangeMaintenance(context))
+        .catch(() => {})
+    }
+    return record
+  }
+
+  async function trackInboundAsk ({
+    ownerPubkey,
+    peerPubkey,
+    message,
+    code,
+    ask,
+    context = runtime
+  }) {
+    const requestId = ask.requestId
+    const now = _nowMs()
+    const state = getState()
+    const record = exchangeRecord(state, ownerPubkey, peerPubkey, 'reply', requestId, true)
+    record.code = code
+    record.channelPubkey = message.channelPubkey
+    record.question = structuredClone(message.event)
+    record.inboundPayload = structuredClone(message.payload)
+    record.range = code === NOSTRDB_SYNC_APP_ASK_CODE
+      ? { appId: ask.appId, after: ask.after, batchSize: ask.batchSize }
+      : { sinceScore: ask.sinceScore, untilScore: ask.untilScore }
+    record.updatedAt = now
+    record.nextCheckAt = now + EXCHANGE_CHECK_INTERVAL_MS
+    const askId = normalizePubkey(message.outer?.id)
+    if (askId) {
+      const createdAt = Number.isSafeInteger(message.outer?.created_at)
+        ? message.outer.created_at * 1000
+        : now
+      record.events.ask = mergeWireEvents(record.events.ask, [{
+        id: askId,
+        relays: channelRelays(message.channelPubkey, context),
+        expiresAt: createdAt + SYNC_EVENT_EXPIRATION_MS
+      }])
+      record.expiresAt = Math.max(
+        record.expiresAt || 0,
+        createdAt + SYNC_EVENT_EXPIRATION_MS + EXCHANGE_EXPIRY_GRACE_MS
+      )
+    }
+    if (!record.expiresAt) record.expiresAt = now + SYNC_EVENT_EXPIRATION_MS + EXCHANGE_EXPIRY_GRACE_MS
+    trimOwnerExchanges(state, ownerPubkey)
+    trimExchangeOwners(state)
+    await setState(state)
+    scheduleExchangeMaintenance(context)
+    return record
+  }
+
+  function exchangeDeadline (state) {
+    let next = Infinity
+    for (const entry of allExchangeRecords(state)) {
+      if (entry.record.status === 'done') continue
+      next = Math.min(next, entry.record.nextCheckAt || Infinity)
+    }
+    return next
+  }
+
+  function hasPendingExchangeWork (state) {
+    if (allExchangeRecords(state).length) return true
+    for (const peers of Object.values(state.owners || {})) {
+      for (const entry of Object.values(peers || {})) {
+        if (entry?.pending || entry?.recent?.pending) return true
+      }
+    }
+    for (const apps of Object.values(state.appBackfills || {})) {
+      for (const app of Object.values(apps || {})) {
+        for (const entry of Object.values(app?.peers || {})) if (entry?.pending) return true
+      }
+    }
+    return false
+  }
+
+  function syncPendingCheckDeadline (state, record, nextCheckAt) {
+    if (record.direction !== 'ask') return
+    for (const peer of [
+      state.owners?.[record.ownerPubkey]?.[record.peerPubkey],
+      state.appBackfills?.[record.ownerPubkey]?.[appStateKey(record.code === NOSTRDB_SYNC_APP_ASK_CODE ? record.appId : '')]?.peers?.[record.peerPubkey]
+    ]) {
+      if (!peer) continue
+      if (peer.pending?.requestId === record.requestId) {
+        peer.pending.nextRetryAt = nextCheckAt
+        peer.pending.onlineRetryAt = nextCheckAt
+      }
+      if (peer.recent?.pending?.requestId === record.requestId) {
+        peer.recent.pending.nextRetryAt = nextCheckAt
+        peer.recent.pending.onlineRetryAt = nextCheckAt
+      }
+    }
+  }
+
+  async function migratePendingExchanges (context = runtime) {
+    const state = getState()
+    let changed = false
+    for (const [ownerPubkey, peers] of Object.entries(state.owners || {})) {
+      for (const [peerPubkey, entry] of Object.entries(peers || {})) {
+        for (const [lane, pending] of [['history', entry?.pending], ['recent', entry?.recent?.pending]]) {
+          if (!pending?.requestId || exchangeRecord(state, ownerPubkey, peerPubkey, 'ask', pending.requestId)) continue
+          const record = exchangeRecord(state, ownerPubkey, peerPubkey, 'ask', pending.requestId, true)
+          const sentAt = pending.sentAt || _nowMs()
+          record.code = NOSTRDB_SYNC_ASK_CODE
+          record.channelPubkey = ownerChannelPubkey(ownerPubkey, context)
+          record.lane = lane
+          record.requestPayload = {
+            requestId: pending.requestId,
+            sinceScore: pending.sinceScore,
+            untilScore: pending.untilScore,
+            excludeIds: Array.isArray(pending.excludeIds) ? pending.excludeIds : [],
+            limit: pending.limit || REQUEST_LIMIT
+          }
+          record.lastPublishedAt = sentAt
+          record.lastAskPublishedAt = sentAt
+          record.notBeforeAt = Math.max(pending.nextRetryAt || 0, pending.onlineRetryAt || 0)
+          record.nextCheckAt = Math.max(
+            sentAt + EXCHANGE_CHECK_INTERVAL_MS,
+            record.notBeforeAt
+          )
+          record.expiresAt = sentAt + SYNC_EVENT_EXPIRATION_MS + EXCHANGE_EXPIRY_GRACE_MS
+          record.status = pending.waitingForResume ? 'paused' : 'awaiting-reply'
+          changed = true
+        }
+      }
+    }
+    for (const [ownerPubkey, apps] of Object.entries(state.appBackfills || {})) {
+      for (const app of Object.values(apps || {})) {
+        for (const [peerPubkey, entry] of Object.entries(app?.peers || {})) {
+          const pending = entry?.pending
+          if (!pending?.requestId || exchangeRecord(state, ownerPubkey, peerPubkey, 'ask', pending.requestId)) continue
+          const record = exchangeRecord(state, ownerPubkey, peerPubkey, 'ask', pending.requestId, true)
+          const sentAt = pending.sentAt || _nowMs()
+          record.code = NOSTRDB_SYNC_APP_ASK_CODE
+          record.channelPubkey = ownerChannelPubkey(ownerPubkey, context)
+          record.lane = 'app-backfill'
+          record.appId = pending.appId
+          record.requestPayload = {
+            requestId: pending.requestId,
+            appId: pending.appId,
+            after: pending.after || '',
+            batchSize: pending.batchSize || REQUEST_LIMIT
+          }
+          record.lastPublishedAt = sentAt
+          record.lastAskPublishedAt = sentAt
+          record.notBeforeAt = Math.max(pending.nextRetryAt || 0, pending.onlineRetryAt || 0)
+          record.nextCheckAt = Math.max(
+            sentAt + EXCHANGE_CHECK_INTERVAL_MS,
+            record.notBeforeAt
+          )
+          record.expiresAt = sentAt + SYNC_EVENT_EXPIRATION_MS + EXCHANGE_EXPIRY_GRACE_MS
+          record.status = pending.waitingForResume ? 'paused' : 'awaiting-reply'
+          changed = true
+        }
+      }
+    }
+    if (changed) await setState(state)
+    return changed
+  }
+
+  function scheduleExchangeMaintenance (context = runtime, { immediate = false } = {}) {
+    if (exchangeTimer) _clearTimeout?.(exchangeTimer)
+    exchangeTimer = null
+    const state = getState()
+    if (!hasPendingExchangeWork(state)) return
+    const next = immediate ? _nowMs() : exchangeDeadline(state)
+    if (!Number.isFinite(next)) return
+    const generation = exchangeGeneration
+    exchangeTimer = _setTimeout(() => {
+      exchangeTimer = null
+      runExchangeMaintenance(context, generation).catch(report)
+    }, Math.max(0, next - _nowMs()))
+    exchangeTimer?.unref?.()
+  }
+
+  function stopExchangeMaintenance () {
+    exchangeGeneration += 1
+    if (exchangeTimer) _clearTimeout?.(exchangeTimer)
+    exchangeTimer = null
+    exchangeChecking = false
+    exchangeAgain = false
+  }
+
+  function wireStatus (record, kind, presence) {
+    const events = record.events?.[kind] || []
+    if (!events.length) return { allPresent: false, anyPresent: false, allAbsent: true, unknown: false }
+    let allPresent = true
+    let anyPresent = false
+    let allAbsent = true
+    let unknown = false
+    for (const event of events) {
+      const status = presence.get(event.id)
+      if (!status || status.unknown) unknown = true
+      if (status?.present) {
+        anyPresent = true
+        allAbsent = false
+      } else {
+        allPresent = false
+      }
+      if (!status?.absent) allAbsent = false
+    }
+    return { allPresent, anyPresent, allAbsent, unknown }
+  }
+
+  async function pruneExchangeRecord (ownerPubkey, peerPubkey, key) {
+    const state = getState()
+    const entries = state.exchanges?.[ownerPubkey]?.[peerPubkey]
+    if (!isPlainObject(entries) || !Object.hasOwn(entries, key)) return false
+    const record = entries[key]
+    if (record.direction === 'ask') {
+      const peer = state.owners?.[ownerPubkey]?.[peerPubkey]
+      if (isPlainObject(peer)) {
+        if (peer.pending?.requestId === record.requestId) peer.pending = null
+        if (peer.recent?.pending?.requestId === record.requestId) peer.recent.pending = null
+        peer.updatedAt = _nowMs()
+      }
+      const appId = normalizeAppId(
+        record.appId ||
+        record.requestPayload?.appId ||
+        record.range?.appId
+      )
+      const appPeer = state.appBackfills?.[ownerPubkey]?.[appStateKey(appId)]?.peers?.[peerPubkey]
+      if (appPeer?.pending?.requestId === record.requestId) appPeer.pending = null
+    }
+    delete entries[key]
+    if (!Object.keys(entries).length) delete state.exchanges[ownerPubkey][peerPubkey]
+    if (isPlainObject(state.exchanges?.[ownerPubkey]) && !Object.keys(state.exchanges[ownerPubkey]).length) {
+      delete state.exchanges[ownerPubkey]
+    }
+    if (isPlainObject(state.exchanges) && !Object.keys(state.exchanges).length) delete state.exchanges
+    await setState(state, { replaceKeys: ['exchanges'] })
+    exchangeStats.pruned++
+    return true
+  }
+
+  async function deleteWireEvents (entry, kind, context, presence) {
+    const events = (entry.record.events?.[kind] || []).filter(event => normalizePubkey(event.id))
+    if (!events.length) return
+    const groups = new Map()
+    for (const event of events) {
+      const presentRelays = presence.get(event.id)?.relays || []
+      const relays = normalizeRelayList(event.relays.filter(relay => presentRelays.includes(normalizeRelayUrl(relay))))
+      const secret = normalizeSecret(event.deletionSeckey)
+      if (!relays.length) continue
+      const key = `${secret}\n${relays.slice().sort().join('\n')}`
+      const group = groups.get(key) || { secret, relays, ids: [] }
+      group.ids.push(event.id)
+      groups.set(key, group)
+    }
+    const channelSigner = context.channelSignerFor?.(entry.record.channelPubkey)
+    for (const group of groups.values()) {
+      for (let offset = 0; offset < group.ids.length; offset += EXCHANGE_DELETE_BATCH_SIZE) {
+        const ids = [...new Set(group.ids.slice(offset, offset + EXCHANGE_DELETE_BATCH_SIZE))]
+        if (!ids.length) continue
+        const tags = [['k', String(PRIVATE_BROADCAST_KIND)], ...ids.map(id => ['e', id])]
+        if (group.secret) {
+          const keypair = keypairFromSeckey(group.secret)
+          const deletion = finalizeEvent({
+            kind: 5,
+            created_at: Math.floor(_nowMs() / 1000),
+            tags,
+            content: ''
+          }, keypair.secretKey)
+          const result = await _relayPool.sendEvent(deletion, group.relays, {
+            rateLimitRetries: 0
+          })
+          await result.promise?.catch?.(() => {})
+          exchangeStats.deletionAttempts++
+        }
+        if (channelSigner) {
+          const deletion = await channelSigner.signEvent({
+            kind: 5,
+            created_at: Math.floor(_nowMs() / 1000),
+            tags,
+            content: ''
+          })
+          const result = await _relayPool.sendEvent(deletion, group.relays, {
+            rateLimitRetries: 0
+          })
+          await result.promise?.catch?.(() => {})
+          exchangeStats.deletionAttempts++
+        }
+      }
+    }
+    const state = getState()
+    const current = exchangeRecord(
+      state,
+      entry.ownerPubkey,
+      entry.peerPubkey,
+      entry.record.direction,
+      entry.record.requestId
+    )
+    if (current) {
+      current.lastDeleteAt = _nowMs()
+      current.updatedAt = _nowMs()
+      await setState(state)
+    }
+  }
+
+  async function republishTrackedAsk (entry, context) {
+    const record = entry.record
+    if ((record.notBeforeAt || 0) > _nowMs()) return false
+    if (!record.requestPayload || !record.channelPubkey || !record.peerPubkey) return false
+    const result = await context.messenger.ask({
+      channelPubkey: record.channelPubkey,
+      receiverPubkey: record.peerPubkey,
+      code: record.code,
+      payload: record.requestPayload,
+      idempotencyKey: coalescingDigest(['nostrdb-ask', record.code, record.requestId]),
+      useBulkPacing: true
+    })
+    if (!publicationSucceeded(result)) throw new Error('SYNC_PUBLICATION_FAILED')
+    await trackPublication({
+      ownerPubkey: entry.ownerPubkey,
+      peerPubkey: entry.peerPubkey,
+      direction: 'ask',
+      requestId: record.requestId,
+      code: record.code,
+      channelPubkey: record.channelPubkey,
+      result,
+      range: record.requestPayload,
+      context
+    })
+    const updatedState = getState()
+    const peer = peerState(updatedState, entry.ownerPubkey, entry.peerPubkey)
+    for (const pending of [peer.pending, peer.recent?.pending]) {
+      if (pending?.requestId !== record.requestId) continue
+      delete pending.waitingForResume
+      pending.attempt = (pending.attempt || 0) + 1
+      pending.sentAt = _nowMs()
+      pending.nextRetryAt = _nowMs() + EXCHANGE_CHECK_INTERVAL_MS
+      pending.onlineRetryAt = pending.nextRetryAt
+    }
+    const appPeer = updatedState.appBackfills?.[entry.ownerPubkey]?.[appStateKey(record.appId)]?.peers?.[entry.peerPubkey]
+    if (appPeer?.pending?.requestId === record.requestId) {
+      delete appPeer.pending.waitingForResume
+      appPeer.pending.attempt = (appPeer.pending.attempt || 0) + 1
+      appPeer.pending.sentAt = _nowMs()
+      appPeer.pending.nextRetryAt = _nowMs() + EXCHANGE_CHECK_INTERVAL_MS
+      appPeer.pending.onlineRetryAt = appPeer.pending.nextRetryAt
+    }
+    peer.updatedAt = _nowMs()
+    await setState(updatedState)
+    exchangeStats.asksRepublished++
+    emitDebug(context.debug, 'ask-republished', {
+      code: record.code,
+      ownerPubkey: entry.ownerPubkey,
+      receiverPubkey: entry.peerPubkey,
+      requestId: record.requestId
+    })
+    return true
+  }
+
+  async function regenerateTrackedReply (entry, context) {
+    const record = entry.record
+    if (!record.question || !record.inboundPayload) return false
+    const message = {
+      channelPubkey: record.channelPubkey,
+      event: record.question,
+      payload: record.inboundPayload
+    }
+    if (record.code === NOSTRDB_SYNC_APP_REPLY_CODE) {
+      await handleAppAsk(entry.ownerPubkey, message, context, { tracking: false })
+    } else {
+      await handleAsk(entry.ownerPubkey, message, context, { tracking: false })
+    }
+    exchangeStats.repliesRegenerated++
+    emitDebug(context.debug, 'reply-regenerated', {
+      code: record.code,
+      ownerPubkey: entry.ownerPubkey,
+      receiverPubkey: entry.peerPubkey,
+      requestId: record.requestId
+    })
+    return true
+  }
+
+  async function queryExchangePresence (state) {
+    const groups = new Map()
+    for (const entry of allExchangeRecords(state)) {
+      for (const kind of ['ask', 'reply']) {
+        for (const event of entry.record.events[kind] || []) {
+          const id = normalizePubkey(event.id)
+          const relays = normalizeRelayList(event.relays)
+          if (!id || !relays.length) continue
+          const key = relays.slice().sort().join('\n')
+          const group = groups.get(key) || { relays, ids: new Set() }
+          group.ids.add(id)
+          groups.set(key, group)
+        }
+      }
+    }
+    const presence = new Map()
+    for (const group of groups.values()) {
+      const ids = [...group.ids]
+      for (let offset = 0; offset < ids.length; offset += EXCHANGE_PRESENCE_BATCH_SIZE) {
+        const batch = ids.slice(offset, offset + EXCHANGE_PRESENCE_BATCH_SIZE)
+        let response
+        try {
+          response = await _relayPool.getEvents({ kinds: [PRIVATE_BROADCAST_KIND], ids: batch }, group.relays, {
+            deduplicateAcrossRelays: false,
+            rateLimitRetries: 0,
+            timeout: EXCHANGE_PRESENCE_TIMEOUT_MS,
+            timeoutAfterFirstEose: null
+          })
+        } catch {
+          response = { result: [], relays: group.relays.map(relay => ({ relay, status: 'error' })) }
+        }
+        const presentRelays = new Map()
+        for (const item of response?.result || []) {
+          const id = normalizePubkey(item?.event?.id)
+          if (!id) continue
+          const set = presentRelays.get(id) || new Set()
+          if (item.relay) set.add(normalizeRelayUrl(item.relay))
+          presentRelays.set(id, set)
+        }
+        const complete = (response?.relays || []).length === group.relays.length &&
+          response.relays.every(relay => ['eose', 'satisfied'].includes(relay.status))
+        for (const id of batch) {
+          const current = presence.get(id) || { present: false, absent: false, unknown: false, relays: [] }
+          const relays = presentRelays.get(id)
+          if (relays?.size) {
+            current.present = true
+            current.absent = false
+            current.relays = [...new Set([...current.relays, ...relays])]
+          } else if (complete && !current.present && !current.unknown) {
+            current.absent = true
+          } else if (!complete && !current.present) {
+            current.unknown = true
+            current.absent = false
+          }
+          presence.set(id, current)
+        }
+      }
+    }
+    return presence
+  }
+
+  async function deferExchangeChecks () {
+    const state = getState()
+    const nextCheckAt = _nowMs() + EXCHANGE_CHECK_INTERVAL_MS
+    for (const entry of allExchangeRecords(state)) {
+      entry.record.nextCheckAt = Math.max(nextCheckAt, entry.record.notBeforeAt || 0)
+      entry.record.updatedAt = _nowMs()
+      syncPendingCheckDeadline(state, entry.record, entry.record.nextCheckAt)
+    }
+    await setState(state)
+  }
+
+  async function runExchangeMaintenance (context = runtime, generation = exchangeGeneration) {
+    if (generation !== exchangeGeneration) return null
+    if (exchangeChecking) {
+      exchangeAgain = true
+      return null
+    }
+    exchangeChecking = true
+    const actions = []
+    try {
+      await migratePendingExchanges(context)
+      let state = getState()
+      const now = _nowMs()
+      for (const entry of allExchangeRecords(state)) {
+        if (entry.record.expiresAt && entry.record.expiresAt <= now) {
+          await pruneExchangeRecord(entry.ownerPubkey, entry.peerPubkey, entry.key)
+        }
+      }
+      state = getState()
+      let online = false
+      try {
+        online = await _isOnline()
+      } catch {
+        online = false
+      }
+      if (runtime.messenger?.readStatus?.().paused === true || !online) {
+        await deferExchangeChecks()
+        return null
+      }
+      const exchanges = allExchangeRecords(state)
+      const presence = await queryExchangePresence(state)
+      if (generation !== exchangeGeneration) return null
+      for (const entry of exchanges) {
+        const record = entry.record
+        const asks = wireStatus(record, 'ask', presence)
+        const replies = wireStatus(record, 'reply', presence)
+        const askLastSent = record.lastAskPublishedAt || record.lastPublishedAt || 0
+        const replyLastSent = record.lastReplyPublishedAt || record.lastPublishedAt || 0
+        exchangeStats.checked++
+        if (asks.anyPresent) exchangeStats.present++
+        else if (asks.allAbsent) exchangeStats.absent++
+        else exchangeStats.unknown++
+
+        if (record.direction === 'ask') {
+          if (record.status === 'deleting-ask') {
+            if (asks.allAbsent) {
+              exchangeStats.deletionConfirmed++
+              actions.push({ type: 'prune', entry })
+            } else {
+              actions.push({ type: 'delete', entry, kind: 'ask', context, presence })
+            }
+          } else if (record.status === 'paused' ||
+              ((asks.allAbsent || !record.events.ask.length) && now - askLastSent >= EXCHANGE_MIN_RESEND_MS)) {
+            actions.push({ type: 'ask', entry, context })
+          }
+          continue
+        }
+
+        if (record.status === 'deleting-reply') {
+          if (asks.allAbsent && replies.allAbsent) {
+            exchangeStats.deletionConfirmed++
+            actions.push({ type: 'prune', entry })
+          } else {
+            actions.push({ type: 'delete', entry, kind: 'reply', context, presence })
+          }
+          continue
+        }
+        if (asks.allAbsent) {
+          record.status = 'deleting-reply'
+          actions.push({ type: 'delete', entry, kind: 'reply', context, presence })
+          continue
+        }
+        if (!asks.unknown && (asks.anyPresent || asks.allPresent) &&
+            !replies.unknown && !replies.allPresent && now - replyLastSent >= EXCHANGE_MIN_RESEND_MS) {
+          actions.push({ type: 'reply', entry, context })
+        }
+      }
+      for (const entry of exchanges) {
+        entry.record.nextCheckAt = Math.max(
+          now + EXCHANGE_CHECK_INTERVAL_MS,
+          entry.record.notBeforeAt || 0
+        )
+        entry.record.updatedAt = now
+        syncPendingCheckDeadline(state, entry.record, entry.record.nextCheckAt)
+      }
+      await setState(state)
+      for (const action of actions) {
+        if (generation !== exchangeGeneration) return null
+        try {
+          if (action.type === 'prune') {
+            await pruneExchangeRecord(action.entry.ownerPubkey, action.entry.peerPubkey, action.entry.key)
+          } else if (action.type === 'delete') {
+            await deleteWireEvents(action.entry, action.kind, action.context, action.presence)
+          } else if (action.type === 'ask') {
+            await republishTrackedAsk(action.entry, action.context)
+          } else if (action.type === 'reply') {
+            await regenerateTrackedReply(action.entry, action.context)
+          }
+        } catch (error) {
+          report(error)
+        }
+      }
+      return { actions: actions.length, checked: exchangeStats.checked }
+    } catch (error) {
+      report(error)
+      return null
+    } finally {
+      exchangeChecking = false
+      if (generation === exchangeGeneration) {
+        scheduleExchangeMaintenance(context, { immediate: exchangeAgain })
+        exchangeAgain = false
+      }
+    }
   }
 
   function pushCursorForOwner (ownerPubkey) {
@@ -751,23 +1582,21 @@ export function createNostrDbSyncController ({
     if (entry.pending?.waitingForResume && !resume) return null
     if (entry.pending && resume && !entry.pending.waitingForResume) return null
     if (entry.pending && !force && !resume) {
-      const retryAt = onlineHint
-        ? Math.min(entry.pending.nextRetryAt || Infinity, entry.pending.onlineRetryAt || Infinity)
-        : entry.pending.nextRetryAt
-      if (!Number.isFinite(retryAt) || now < retryAt) {
+      if (onlineHint) {
         recordAskStat('suppressed', NOSTRDB_SYNC_ASK_CODE, reason)
         emitDebug(context.debug, 'ask-suppressed', {
           code: NOSTRDB_SYNC_ASK_CODE,
           ownerPubkey,
           receiverPubkey: peerPubkey,
+          requestId: entry.pending.requestId,
           reason,
           attempt: entry.pending.attempt || 0,
-          retryAt,
-          waitMs: Number.isFinite(retryAt) ? Math.max(0, retryAt - now) : null
+          retryAt: now + EXCHANGE_CHECK_INTERVAL_MS,
+          waitMs: EXCHANGE_CHECK_INTERVAL_MS
         })
-        scheduleRetrySweep(context)
-        return null
       }
+      scheduleExchangeMaintenance(context)
+      return null
     }
 
     const completed = Number.isSafeInteger(entry.completedScore)
@@ -790,7 +1619,7 @@ export function createNostrDbSyncController ({
       return null
     }
 
-    const id = requestId(_random)
+    const id = entry.pending?.requestId || nextRequestId()
     const previousAttempt = entry.pending?.attempt || 0
     const attempt = entry.pending ? previousAttempt + 1 : 0
     const onlineDelay = Math.min(ONLINE_RETRY_MAX_MS, ONLINE_RETRY_MIN_MS * (2 ** attempt))
@@ -807,11 +1636,13 @@ export function createNostrDbSyncController ({
       requestId: id,
       sinceScore: askWindow.sinceScore,
       untilScore: askWindow.untilScore,
+      excludeIds: [...askWindow.excludeIds],
       limit: REQUEST_LIMIT,
       replyCount: 0,
+      replyIndexes: [],
       attempt,
       sentAt: now,
-      nextRetryAt: now + NO_REPLY_RETRY_MS,
+      nextRetryAt: now + EXCHANGE_CHECK_INTERVAL_MS,
       onlineRetryAt: now + onlineDelay
     }
     entry.updatedAt = now
@@ -823,10 +1654,23 @@ export function createNostrDbSyncController ({
         receiverPubkey: peerPubkey,
         code: NOSTRDB_SYNC_ASK_CODE,
         payload,
+        idempotencyKey: coalescingDigest(['nostrdb-ask', NOSTRDB_SYNC_ASK_CODE, id]),
         useBulkPacing: true
       })
       if (!publicationSucceeded(result)) throw new Error('SYNC_PUBLICATION_FAILED')
       if (resume) delete entry.pending?.waitingForResume
+      await trackPublication({
+        ownerPubkey,
+        peerPubkey,
+        direction: 'ask',
+        requestId: id,
+        code: NOSTRDB_SYNC_ASK_CODE,
+        channelPubkey,
+        result,
+        range: payload,
+        lane: 'history',
+        context
+      })
     } catch (err) {
       const now = _nowMs()
       if (messengerPausedError(err)) {
@@ -845,11 +1689,13 @@ export function createNostrDbSyncController ({
     }
 
     scheduleRetrySweep(context)
+    scheduleExchangeMaintenance(context)
     recordAskStat('emitted', NOSTRDB_SYNC_ASK_CODE, reason)
     emitDebug(context.debug, 'ask', {
       channelPubkey,
       ownerPubkey,
       receiverPubkey: peerPubkey,
+      requestId: id,
       sinceScore: payload.sinceScore,
       untilScore: payload.untilScore,
       excludeCount: payload.excludeIds.length,
@@ -857,6 +1703,153 @@ export function createNostrDbSyncController ({
       attempt,
       onlineDelay,
       retryAt: entry.pending.onlineRetryAt
+    })
+    return payload
+  }
+
+  async function buildRecentAskWindow (db, minScore, targetScore, windowMs) {
+    let size = clampWindow(windowMs)
+    while (true) {
+      const sinceScore = Math.max(minScore, targetScore - size + 1)
+      const excludeIds = await localInventoryIds(db, sinceScore, targetScore)
+      if (excludeIds.length < INVENTORY_LIMIT || size <= MIN_WINDOW_MS) {
+        return { sinceScore, untilScore: targetScore, excludeIds, windowMs: size }
+      }
+      size = Math.max(MIN_WINDOW_MS, Math.floor(size / 2))
+    }
+  }
+
+  async function maybeAskRecent (ownerPubkey, peerPubkey, context = runtime, {
+    reason = 'recent'
+  } = {}) {
+    if (!context.messenger?.ask) return null
+    const channelPubkey = ownerChannelPubkey(ownerPubkey, context)
+    if (!isOwnerReady(ownerPubkey, context) || !channelPubkey) return null
+    const state = getState()
+    const entry = peerState(state, ownerPubkey, peerPubkey)
+    const advert = entry.advert
+    if (!advert || advert.maxScore == null || advert.minScore == null) return null
+    const now = _nowMs()
+    const completed = Number.isSafeInteger(entry.completedScore)
+      ? entry.completedScore
+      : advert.minScore - 1
+    const advertisedTarget = advert.maxScore + ADVERT_EDGE_EXTENSION_MS
+    const recent = isPlainObject(entry.recent) ? entry.recent : { targetScore: advertisedTarget }
+    const pending = recent.pending
+    if (pending && pending.untilScore >= advertisedTarget) {
+      scheduleExchangeMaintenance(context)
+      return null
+    }
+    if (pending && pending.untilScore < advertisedTarget) {
+      const previous = exchangeRecord(state, ownerPubkey, peerPubkey, 'ask', pending.requestId)
+      if (previous) {
+        previous.status = 'deleting-ask'
+        previous.updatedAt = now
+      }
+    }
+    const targetScore = reason === 'advertise'
+      ? Math.max(recent.targetScore || 0, advertisedTarget)
+      : (isSafeScore(recent.targetScore) ? recent.targetScore : advertisedTarget)
+    const minScore = Math.max(advert.minScore, completed + 1)
+    if (targetScore < minScore) {
+      entry.recent = { ...recent, targetScore: minScore - 1, pending: null }
+      entry.updatedAt = now
+      await setState(state)
+      return null
+    }
+    let askWindow
+    try {
+      askWindow = await buildRecentAskWindow(
+        getDb(ownerPubkey),
+        minScore,
+        targetScore,
+        recent.windowMs || entry.windowMs
+      )
+    } catch (error) {
+      report(error)
+      return null
+    }
+    const id = nextRequestId()
+    const attempt = 0
+    const payload = {
+      requestId: id,
+      sinceScore: askWindow.sinceScore,
+      untilScore: askWindow.untilScore,
+      excludeIds: askWindow.excludeIds,
+      limit: REQUEST_LIMIT
+    }
+    entry.recent = {
+      targetScore,
+      windowMs: askWindow.windowMs,
+      pending: {
+        requestId: id,
+        sinceScore: askWindow.sinceScore,
+        untilScore: askWindow.untilScore,
+        excludeIds: [...askWindow.excludeIds],
+        limit: REQUEST_LIMIT,
+        replyCount: 0,
+        replyIndexes: [],
+        attempt,
+        sentAt: now,
+        nextRetryAt: now + EXCHANGE_CHECK_INTERVAL_MS,
+        onlineRetryAt: now + ONLINE_RETRY_MIN_MS
+      }
+    }
+    entry.updatedAt = now
+    await setState(state)
+    try {
+      const result = await context.messenger.ask({
+        channelPubkey,
+        receiverPubkey: peerPubkey,
+        code: NOSTRDB_SYNC_ASK_CODE,
+        payload,
+        idempotencyKey: coalescingDigest(['nostrdb-ask', NOSTRDB_SYNC_ASK_CODE, id]),
+        useBulkPacing: true
+      })
+      if (!publicationSucceeded(result)) throw new Error('SYNC_PUBLICATION_FAILED')
+      await trackPublication({
+        ownerPubkey,
+        peerPubkey,
+        direction: 'ask',
+        requestId: id,
+        code: NOSTRDB_SYNC_ASK_CODE,
+        channelPubkey,
+        result,
+        range: payload,
+        lane: 'recent',
+        context
+      })
+    } catch (error) {
+      const nextState = getState()
+      const nextEntry = peerState(nextState, ownerPubkey, peerPubkey)
+      if (nextEntry.recent?.pending?.requestId === id) {
+        const failedAt = _nowMs()
+        if (messengerPausedError(error)) {
+          markPendingForResume(nextEntry, error, failedAt, 'recent')
+        } else {
+          const retryAt = publicationRetryAt(error, failedAt) || failedAt + 1
+          nextEntry.recent.pending.nextRetryAt = retryAt
+          nextEntry.recent.pending.onlineRetryAt = retryAt
+          nextEntry.updatedAt = failedAt
+        }
+        await setState(nextState)
+        scheduleRetrySweep(context)
+      }
+      report(error)
+      return null
+    }
+    recordAskStat('emitted', NOSTRDB_SYNC_ASK_CODE, reason)
+    emitDebug(context.debug, 'ask', {
+      channelPubkey,
+      ownerPubkey,
+      receiverPubkey: peerPubkey,
+      requestId: id,
+      sinceScore: payload.sinceScore,
+      untilScore: payload.untilScore,
+      excludeCount: payload.excludeIds.length,
+      reason,
+      lane: 'recent',
+      attempt
     })
     return payload
   }
@@ -885,27 +1878,25 @@ export function createNostrDbSyncController ({
     if (entry.pending?.waitingForResume && !resume) return null
     if (entry.pending && resume && !entry.pending.waitingForResume) return null
     if (entry.pending && !resume) {
-      const retryAt = onlineHint
-        ? Math.min(entry.pending.nextRetryAt || Infinity, entry.pending.onlineRetryAt || Infinity)
-        : entry.pending.nextRetryAt
-      if (!Number.isFinite(retryAt) || now < retryAt) {
+      if (onlineHint) {
         recordAskStat('suppressed', NOSTRDB_SYNC_APP_ASK_CODE, reason)
         emitDebug(context.debug, 'app-ask-suppressed', {
           code: NOSTRDB_SYNC_APP_ASK_CODE,
           ownerPubkey,
           appId,
           receiverPubkey: peerPubkey,
+          requestId: entry.pending.requestId,
           reason,
           attempt: entry.pending.attempt || 0,
-          retryAt,
-          waitMs: Number.isFinite(retryAt) ? Math.max(0, retryAt - now) : null
+          retryAt: now + EXCHANGE_CHECK_INTERVAL_MS,
+          waitMs: EXCHANGE_CHECK_INTERVAL_MS
         })
-        scheduleRetrySweep(context)
-        return null
       }
+      scheduleExchangeMaintenance(context)
+      return null
     }
 
-    const id = requestId(_random)
+    const id = entry.pending?.requestId || nextRequestId()
     const previousAttempt = entry.pending?.attempt || 0
     const attempt = entry.pending ? previousAttempt + 1 : 0
     const onlineDelay = Math.min(ONLINE_RETRY_MAX_MS, ONLINE_RETRY_MIN_MS * (2 ** attempt))
@@ -923,9 +1914,10 @@ export function createNostrDbSyncController ({
       after: payload.after,
       batchSize: REQUEST_LIMIT,
       replyCount: 0,
+      replyIndexes: [],
       attempt,
       sentAt: now,
-      nextRetryAt: now + NO_REPLY_RETRY_MS,
+      nextRetryAt: now + EXCHANGE_CHECK_INTERVAL_MS,
       onlineRetryAt: now + onlineDelay
     }
     entry.updatedAt = now
@@ -938,10 +1930,23 @@ export function createNostrDbSyncController ({
         receiverPubkey: peerPubkey,
         code: NOSTRDB_SYNC_APP_ASK_CODE,
         payload,
+        idempotencyKey: coalescingDigest(['nostrdb-app-ask', NOSTRDB_SYNC_APP_ASK_CODE, id]),
         useBulkPacing: true
       })
       if (!publicationSucceeded(result)) throw new Error('SYNC_PUBLICATION_FAILED')
       if (resume) delete entry.pending?.waitingForResume
+      await trackPublication({
+        ownerPubkey,
+        peerPubkey,
+        direction: 'ask',
+        requestId: id,
+        code: NOSTRDB_SYNC_APP_ASK_CODE,
+        channelPubkey,
+        result,
+        range: payload,
+        lane: 'app-backfill',
+        context
+      })
     } catch (err) {
       const nextState = getState()
       const { app: nextApp, entry: nextEntry } = existingAppBackfillPeerState(nextState, ownerPubkey, appId, peerPubkey)
@@ -965,11 +1970,13 @@ export function createNostrDbSyncController ({
     }
 
     scheduleRetrySweep(context)
+    scheduleExchangeMaintenance(context)
     recordAskStat('emitted', NOSTRDB_SYNC_APP_ASK_CODE, reason)
     emitDebug(context.debug, 'app-ask', {
       ownerPubkey,
       appId,
       receiverPubkey: peerPubkey,
+      requestId: id,
       after: payload.after,
       reason,
       attempt,
@@ -1084,6 +2091,7 @@ export function createNostrDbSyncController ({
     setState(state)
     processAppBackfills(context, { ownerPubkey: owner, reason: 'initial' }).catch(report)
     scheduleRetrySweep(context)
+    scheduleExchangeMaintenance(context)
     emitDebug(context.debug, 'app-backfill-requested', { ownerPubkey: owner, appId: app })
     return true
   }
@@ -1111,6 +2119,7 @@ export function createNostrDbSyncController ({
       minScore: advert.minScore,
       maxScore: advert.maxScore
     })
+    await maybeAskRecent(ownerPubkey, peerPubkey, context, { reason: 'advertise' })
     await maybeAsk(ownerPubkey, peerPubkey, context, { onlineHint: true, reason: 'advertise' })
     await processAppBackfills(context, {
       ownerPubkey,
@@ -1121,9 +2130,30 @@ export function createNostrDbSyncController ({
     return true
   }
 
-  async function handleAsk (ownerPubkey, message, context) {
+  async function handleAsk (ownerPubkey, message, context, { tracking = true } = {}) {
     const ask = normalizeAsk(messageBody(message))
     if (!ask) return true
+    const peerPubkey = normalizePubkey(message.event?.pubkey)
+    if (!peerPubkey) return true
+    const previousState = getState()
+    const previousRecord = exchangeRecord(
+      previousState,
+      ownerPubkey,
+      peerPubkey,
+      'reply',
+      ask.requestId
+    )
+    await trackInboundAsk({
+      ownerPubkey,
+      peerPubkey,
+      message,
+      code: NOSTRDB_SYNC_ASK_CODE,
+      ask,
+      context
+    })
+    if (tracking &&
+        previousRecord?.status === 'reply-published' &&
+        previousRecord.events.reply.length) return true
 
     const db = getDb(ownerPubkey)
     const effectiveLimit = Math.min(ask.limit, REQUEST_LIMIT)
@@ -1151,9 +2181,28 @@ export function createNostrDbSyncController ({
       bytesPerChunk: SYNC_BYTES_PER_CHUNK,
       sendEmptyReply: true
     }
-    const packer = typeof context.messenger?.createEventReplyPacker === 'function'
-      ? context.messenger.createEventReplyPacker(options)
-      : createEventReplyPacker({ messenger: context.messenger, ...options })
+    const trackedMessenger = {
+      reply: async replyOptions => {
+        const result = await context.messenger.reply(replyOptions)
+        await trackPublication({
+          ownerPubkey,
+          peerPubkey,
+          direction: 'reply',
+          requestId: ask.requestId,
+          code: NOSTRDB_SYNC_REPLY_CODE,
+          channelPubkey: message.channelPubkey,
+          result,
+          question: message.event,
+          range: {
+            sinceScore: ask.sinceScore,
+            untilScore: ask.untilScore
+          },
+          context
+        })
+        return result
+      }
+    }
+    const packer = createEventReplyPacker({ messenger: trackedMessenger, ...options })
 
     // Failures reach the parent drain, which nacks instead of acknowledging.
     for (const event of results) await packer.update(event)
@@ -1168,9 +2217,30 @@ export function createNostrDbSyncController ({
     return true
   }
 
-  async function handleAppAsk (ownerPubkey, message, context) {
+  async function handleAppAsk (ownerPubkey, message, context, { tracking = true } = {}) {
     const ask = normalizeAppAsk(messageBody(message))
     if (!ask) return true
+    const peerPubkey = normalizePubkey(message.event?.pubkey)
+    if (!peerPubkey) return true
+    const previousState = getState()
+    const previousRecord = exchangeRecord(
+      previousState,
+      ownerPubkey,
+      peerPubkey,
+      'reply',
+      ask.requestId
+    )
+    await trackInboundAsk({
+      ownerPubkey,
+      peerPubkey,
+      message,
+      code: NOSTRDB_SYNC_APP_ASK_CODE,
+      ask,
+      context
+    })
+    if (tracking &&
+        previousRecord?.status === 'reply-published' &&
+        previousRecord.events.reply.length) return true
 
     let results = []
     let hasMore = false
@@ -1202,9 +2272,25 @@ export function createNostrDbSyncController ({
       bytesPerChunk: SYNC_BYTES_PER_CHUNK,
       sendEmptyReply: true
     }
-    const packer = typeof context.messenger?.createEventReplyPacker === 'function'
-      ? context.messenger.createEventReplyPacker(options)
-      : createEventReplyPacker({ messenger: context.messenger, ...options })
+    const trackedMessenger = {
+      reply: async replyOptions => {
+        const result = await context.messenger.reply(replyOptions)
+        await trackPublication({
+          ownerPubkey,
+          peerPubkey,
+          direction: 'reply',
+          requestId: ask.requestId,
+          code: NOSTRDB_SYNC_APP_REPLY_CODE,
+          channelPubkey: message.channelPubkey,
+          result,
+          question: message.event,
+          range: { appId: ask.appId, after: ask.after, batchSize: ask.batchSize },
+          context
+        })
+        return result
+      }
+    }
+    const packer = createEventReplyPacker({ messenger: trackedMessenger, ...options })
 
     // Failures reach the parent drain, which nacks instead of acknowledging.
     for (const event of results) await packer.update(event)
@@ -1286,30 +2372,78 @@ export function createNostrDbSyncController ({
 
     const state = getState()
     const entry = peerState(state, ownerPubkey, peerPubkey)
-    const pending = entry?.pending
-    if (pending && payload.requestId && pending.requestId === payload.requestId) {
+    const historyPending = entry.pending?.requestId === payload.requestId
+      ? entry.pending
+      : null
+    const recentPending = entry.recent?.pending?.requestId === payload.requestId
+      ? entry.recent.pending
+      : null
+    const pending = historyPending || recentPending
+    if (pending) {
+      const lane = historyPending ? 'history' : 'recent'
       pending.replyCount = (pending.replyCount || 0) + events.length
+      if (Number.isSafeInteger(payload.index) && payload.index >= 0) {
+        pending.replyIndexes = [...new Set([...(pending.replyIndexes || []), payload.index])]
+          .sort((left, right) => left - right)
+      }
       if (payload.isLast) {
+        const expectedReplyIndexes = Number.isSafeInteger(payload.index)
+          ? Array.from({ length: payload.index + 1 }, (_, index) => index)
+          : [0]
+        const contiguous = expectedReplyIndexes.every(index =>
+          (pending.replyIndexes || []).includes(index)
+        )
+        if (!contiguous) {
+          entry.updatedAt = _nowMs()
+          setState(state)
+          emitDebug(context.debug, 'reply-incomplete', {
+            ownerPubkey,
+            senderPubkey: peerPubkey,
+            requestId: payload.requestId,
+            lane,
+            lastIndex: payload.index,
+            receivedIndexes: pending.replyIndexes || []
+          })
+          scheduleExchangeMaintenance(context)
+          return true
+        }
         const replyCount = pending.replyCount || 0
         const hasMore = payload.hasMore ?? replyCount >= (pending.limit || REQUEST_LIMIT)
         if (hasMore) {
-          entry.windowMs = shrinkWindow(entry.windowMs)
+          if (lane === 'history') entry.windowMs = shrinkWindow(entry.windowMs)
+          else entry.recent.windowMs = shrinkWindow(entry.recent.windowMs)
         } else {
-          entry.completedScore = Math.max(entry.completedScore || 0, pending.untilScore)
-          entry.windowMs = adaptWindow(entry.windowMs, replyCount, pending.limit || REQUEST_LIMIT)
+          if (lane === 'history') {
+            entry.completedScore = Math.max(entry.completedScore || 0, pending.untilScore)
+            entry.windowMs = adaptWindow(entry.windowMs, replyCount, pending.limit || REQUEST_LIMIT)
+          } else {
+            entry.recent.targetScore = Math.min(entry.recent.targetScore, pending.sinceScore - 1)
+            entry.recent.windowMs = adaptWindow(entry.recent.windowMs, replyCount, pending.limit || REQUEST_LIMIT)
+          }
         }
-        entry.pending = null
+        if (lane === 'history') entry.pending = null
+        else entry.recent.pending = null
+        const exchange = exchangeRecord(state, ownerPubkey, peerPubkey, 'ask', payload.requestId, true)
+        exchange.status = 'deleting-ask'
+        exchange.updatedAt = _nowMs()
         entry.updatedAt = _nowMs()
-        setState(state)
+        await setState(state)
         emitDebug(context.debug, 'reply-received', {
           ownerPubkey,
           senderPubkey: peerPubkey,
           requestId: payload.requestId,
           count: replyCount,
           hasMore,
-          untilScore: pending.untilScore
+          untilScore: pending.untilScore,
+          lane
         })
-        await maybeAsk(ownerPubkey, peerPubkey, context, { force: true, reason: 'has-more' })
+        scheduleExchangeMaintenance(context, { immediate: true })
+        if (hasMore) {
+          if (lane === 'history') await maybeAsk(ownerPubkey, peerPubkey, context, { force: true, reason: 'has-more' })
+          else await maybeAskRecent(ownerPubkey, peerPubkey, context, { reason: 'has-more' })
+        } else if (lane === 'recent') {
+          await maybeAskRecent(ownerPubkey, peerPubkey, context, { reason: 'recent-next' })
+        }
         if (rejected) throw syncPayloadInvalid('jsonl-entries-invalid', { partial: true })
         return true
       }
@@ -1338,18 +2472,44 @@ export function createNostrDbSyncController ({
     const { events, rejected } = parseJsonlEventsDetailed(payload.jsonl)
     await ingestAppEvents(ownerPubkey, payload.appId, events)
     pending.replyCount = (pending.replyCount || 0) + events.length
+    if (Number.isSafeInteger(payload.index) && payload.index >= 0) {
+      pending.replyIndexes = [...new Set([...(pending.replyIndexes || []), payload.index])]
+        .sort((left, right) => left - right)
+    }
     if (events.length) pending.lastEventId = events.at(-1).id
 
     if (payload.isLast) {
+      const expectedReplyIndexes = Number.isSafeInteger(payload.index)
+        ? Array.from({ length: payload.index + 1 }, (_, index) => index)
+        : [0]
+      if (!expectedReplyIndexes.every(index => (pending.replyIndexes || []).includes(index))) {
+        entry.updatedAt = _nowMs()
+        app.updatedAt = entry.updatedAt
+        setState(state)
+        emitDebug(context.debug, 'app-reply-incomplete', {
+          ownerPubkey,
+          appId: payload.appId,
+          senderPubkey: peerPubkey,
+          requestId: payload.requestId,
+          lastIndex: payload.index,
+          receivedIndexes: pending.replyIndexes || []
+        })
+        scheduleExchangeMaintenance(context)
+        return true
+      }
       const replyCount = pending.replyCount || 0
       const nextAfter = payload.nextAfter || pending.lastEventId || pending.after || ''
       const hasMore = payload.hasMore ?? replyCount >= (pending.batchSize || REQUEST_LIMIT)
       entry.after = nextAfter
       entry.completed = !hasMore
       entry.pending = null
+      const exchange = exchangeRecord(state, ownerPubkey, peerPubkey, 'ask', payload.requestId, true)
+      exchange.status = 'deleting-ask'
+      exchange.updatedAt = _nowMs()
       entry.updatedAt = _nowMs()
       app.updatedAt = entry.updatedAt
       setState(state)
+      scheduleExchangeMaintenance(context, { immediate: true })
       emitDebug(context.debug, 'app-reply-received', {
         ownerPubkey,
         appId: payload.appId,
@@ -1456,6 +2616,14 @@ export function createNostrDbSyncController ({
         chunks: new Map(),
         readyAt: {
           normal: Infinity,
+          lower: Infinity,
+          lowest: Infinity
+        },
+        batchStartedAt: {
+          lower: Infinity,
+          lowest: Infinity
+        },
+        batchQuietAt: {
           lower: Infinity,
           lowest: Infinity
         },
@@ -1673,7 +2841,14 @@ export function createNostrDbSyncController ({
       clearPushTimer(queue)
       return
     }
-    if (queue.timer && queue.timerAt <= dueAt) return
+    let trailingDueAt = Infinity
+    for (const priority of ['lower', 'lowest']) {
+      if (Number.isFinite(queue.readyAt[priority])) {
+        trailingDueAt = Math.min(trailingDueAt, Math.max(now, queue.readyAt[priority]))
+      }
+    }
+    const extendsTrailingWindow = dueAt > queue.timerAt && dueAt === trailingDueAt
+    if (queue.timer && queue.timerAt <= dueAt && !extendsTrailingWindow) return
     clearPushTimer(queue)
     queue.cooling = true
     queue.timerAt = dueAt
@@ -1702,8 +2877,18 @@ export function createNostrDbSyncController ({
 
   function markPushPriorityReady (queue, priority) {
     const now = _nowMs()
-    const readyAt = priority === 'normal' ? now : now + PUSH_BATCH_WINDOW_MS
-    queue.readyAt[priority] = Math.min(queue.readyAt[priority], readyAt)
+    if (priority === 'normal') {
+      queue.readyAt[priority] = now
+      return
+    }
+    if (!Number.isFinite(queue.batchStartedAt[priority])) {
+      queue.batchStartedAt[priority] = now
+    }
+    queue.batchQuietAt[priority] = now + PUSH_BATCH_WINDOW_MS
+    queue.readyAt[priority] = Math.min(
+      queue.batchStartedAt[priority] + PUSH_BATCH_MAX_WAIT_MS,
+      queue.batchQuietAt[priority]
+    )
   }
 
   async function restorePushQueue (ownerPubkey) {
@@ -1883,6 +3068,10 @@ export function createNostrDbSyncController ({
     }
     if (persistedThroughScore != null) await updatePushCursor(ownerPubkey, persistedThroughScore)
     queue.readyAt[priority] = Infinity
+    if (priority !== 'normal') {
+      queue.batchStartedAt[priority] = Infinity
+      queue.batchQuietAt[priority] = Infinity
+    }
     return true
   }
 
@@ -2148,13 +3337,39 @@ export function createNostrDbSyncController ({
         if (Object.keys(apps).length === 0) delete state.appBackfills[ownerPubkey]
       }
     }
+    if (isPlainObject(state.exchanges)) {
+      for (const [ownerPubkey, peerEntries] of Object.entries(state.exchanges)) {
+        if (!owners.has(ownerPubkey)) {
+          delete state.exchanges[ownerPubkey]
+          continue
+        }
+        for (const [peerPubkey, entries] of Object.entries(peerEntries || {})) {
+          if (!peers.has(peerPubkey)) {
+            delete peerEntries[peerPubkey]
+            continue
+          }
+          for (const [key, record] of Object.entries(entries || {})) {
+            const expiresAt = Number.isSafeInteger(record?.expiresAt) ? record.expiresAt : 0
+            if ((!expiresAt || expiresAt + EXCHANGE_EXPIRY_GRACE_MS < _nowMs()) &&
+                (record?.updatedAt || 0) < cutoff) {
+              delete entries[key]
+            }
+          }
+          if (!Object.keys(entries || {}).length) delete peerEntries[peerPubkey]
+        }
+        if (!Object.keys(peerEntries || {}).length) delete state.exchanges[ownerPubkey]
+      }
+      if (!Object.keys(state.exchanges).length) delete state.exchanges
+    }
     if (isPlainObject(state.pushCursors)) {
       for (const ownerPubkey of Object.keys(state.pushCursors)) {
         if (!owners.has(ownerPubkey)) delete state.pushCursors[ownerPubkey]
       }
       if (!Object.keys(state.pushCursors).length) delete state.pushCursors
     }
-    setState(state)
+    setState(state, {
+      replaceKeys: ['owners', 'appBackfills', 'exchanges', 'pushCursors']
+    })
   }
 
   function nextRetryAt (context = runtime) {
@@ -2163,9 +3378,10 @@ export function createNostrDbSyncController ({
     for (const [ownerPubkey, owner] of Object.entries(state.owners || {})) {
       if (!isOwnerReady(ownerPubkey, context)) continue
       for (const entry of Object.values(owner || {})) {
-        const pending = entry?.pending
-        if (!pending || pending.waitingForResume) continue
-        next = Math.min(next, pending.nextRetryAt || Infinity)
+        for (const pending of [entry?.pending, entry?.recent?.pending]) {
+          if (!pending || pending.waitingForResume) continue
+          next = Math.min(next, pending.nextRetryAt || Infinity)
+        }
       }
     }
     for (const [ownerPubkey, apps] of Object.entries(state.appBackfills || {})) {
@@ -2194,6 +3410,10 @@ export function createNostrDbSyncController ({
   }
 
   async function retryDueRequests (context = runtime, { force = false, resume = false, apps = true } = {}) {
+    if (!force && !resume) {
+      await runExchangeMaintenance(context)
+      return
+    }
     const state = getState()
     const now = _nowMs()
     for (const [ownerPubkey, owner] of Object.entries(state.owners || {})) {
@@ -2237,7 +3457,9 @@ export function createNostrDbSyncController ({
 
   function hasWaitingForResume (state = getState()) {
     for (const owner of Object.values(state.owners || {})) {
-      for (const entry of Object.values(owner || {})) if (entry?.pending?.waitingForResume) return true
+      for (const entry of Object.values(owner || {})) {
+        if (entry?.pending?.waitingForResume || entry?.recent?.pending?.waitingForResume) return true
+      }
     }
     for (const apps of Object.values(state.appBackfills || {})) {
       for (const app of Object.values(apps || {})) {
@@ -2272,6 +3494,7 @@ export function createNostrDbSyncController ({
     await retryDueRequests(runtime, { resume: true, apps: false })
     await processAppBackfills(runtime, { resume: true, reason: 'resume' })
     scheduleRetrySweep(runtime)
+    scheduleExchangeMaintenance(runtime, { immediate: true })
   }
 
   function ensureSubscriptions (context = {}) {
@@ -2297,6 +3520,9 @@ export function createNostrDbSyncController ({
     }
     processAppBackfills(runtime, { reason: 'initial' }).catch(report)
     scheduleRetrySweep(runtime)
+    migratePendingExchanges(runtime)
+      .then(() => scheduleExchangeMaintenance(runtime))
+      .catch(report)
   }
 
   function stop () {
@@ -2315,6 +3541,7 @@ export function createNostrDbSyncController ({
     emptyContextByOwner.clear()
     if (retryTimer) _clearTimeout?.(retryTimer)
     retryTimer = null
+    stopExchangeMaintenance()
     appBackfillProcessGeneration += 1
     appBackfillProcessTail = Promise.resolve()
     pendingAppBackfillProcess = null
@@ -2329,10 +3556,12 @@ export function createNostrDbSyncController ({
     requestAppBackfill,
     processAppBackfills,
     queuePush,
+    runExchangeMaintenance,
     stop,
     getDebugSnapshot: () => ({
       askStats: askStatsSnapshot(),
-      push: { ...pushStats }
+      push: { ...pushStats },
+      exchange: { ...exchangeStats }
     }),
     _getState: getState
   }

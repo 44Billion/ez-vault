@@ -123,6 +123,11 @@ function messagePayloadBytes (message) {
   return 0
 }
 
+function messageRequestId (message) {
+  const value = message?.payload?.payload?.requestId
+  return typeof value === 'string' && value.length > 0 && value.length <= 256 ? value : ''
+}
+
 function resolveInboundPriority (message) {
   const code = message?.payload?.code
   if (code !== NOSTRDB_SYNC_PUSH_CODE && code !== NOSTRDB_SYNC_REPLY_CODE) return null
@@ -139,10 +144,12 @@ export function resolveInboundCoalescing (message, hints = DEFAULT_COALESCING_HI
 }
 
 function messageDebugInfo (message) {
+  const requestId = messageRequestId(message)
   return {
     type: message?.type || '',
     code: messageCode(message),
-    payloadBytes: messagePayloadBytes(message)
+    payloadBytes: messagePayloadBytes(message),
+    ...(requestId ? { requestId } : {})
   }
 }
 
@@ -200,6 +207,8 @@ export function createSyncController ({
   const unsubscribers = []
   const channelPubkeyByOwnerPubkey = new Map()
   const ownerPubkeyByChannelPubkey = new Map()
+  const channelSignerByChannelPubkey = new Map()
+  const relaySetByChannelPubkey = new Map()
   const signerChannelPubkeyByPeerPubkey = new Map()
   const readRelaysByOwnerPubkey = new Map()
   const emptyPersonalCopyContextByOwner = new Map()
@@ -223,6 +232,8 @@ export function createSyncController ({
       devicePubkey,
       ownerPubkeyForChannel,
       channelPubkeyForOwner,
+      channelSignerFor: channelPubkey => channelSignerByChannelPubkey.get(channelPubkey) || null,
+      relaysForChannel: channelPubkey => [...(relaySetByChannelPubkey.get(channelPubkey) || [])],
       ownerPubkeys: new Set(nostrDbOwnerPubkeys(_store)),
       trustedSigners: _trustedSigners,
       debug
@@ -369,6 +380,8 @@ export function createSyncController ({
   function publishChannelSnapshot (snapshot) {
     replaceMap(channelPubkeyByOwnerPubkey, snapshot.channelPubkeyByOwnerPubkey)
     replaceMap(ownerPubkeyByChannelPubkey, snapshot.ownerPubkeyByChannelPubkey)
+    replaceMap(channelSignerByChannelPubkey, snapshot.channelSignerByChannelPubkey)
+    replaceMap(relaySetByChannelPubkey, snapshot.relaySetByChannelPubkey)
     replaceMap(signerChannelPubkeyByPeerPubkey, snapshot.signerChannelPubkeyByPeerPubkey)
     replaceMap(emptyPersonalCopyContextByOwner, snapshot.emptyPersonalCopyContextByOwner || [])
     if (snapshot.relayListRevision === relayListRevision) {
@@ -386,6 +399,7 @@ export function createSyncController ({
     const channels = []
     const nextChannelPubkeyByOwnerPubkey = new Map()
     const nextOwnerPubkeyByChannelPubkey = new Map()
+    const nextChannelSignerByChannelPubkey = new Map()
     const nextSignerChannelPubkeyByPeerPubkey = new Map()
     const nextOwnerPubkeys = new Set()
     const nextReadyOwnerPubkeys = new Set()
@@ -434,6 +448,7 @@ export function createSyncController ({
       nextReadRelaysByOwnerPubkey.set(account.pubkey, relays)
       nextChannelPubkeyByOwnerPubkey.set(account.pubkey, channelPubkey)
       nextOwnerPubkeyByChannelPubkey.set(channelPubkey, account.pubkey)
+      nextChannelSignerByChannelPubkey.set(channelPubkey, channelSigner)
       nextReadyOwnerPubkeys.add(account.pubkey)
       channels.push({
         pubkey: channelPubkey,
@@ -454,6 +469,7 @@ export function createSyncController ({
         const channelPubkey = await channelSigner.getPublicKey()
         const peerRelays = await resolveDeviceSyncRelays(peer.pubkey)
         nextSignerChannelPubkeyByPeerPubkey.set(peer.pubkey, channelPubkey)
+        nextChannelSignerByChannelPubkey.set(channelPubkey, channelSigner)
         channels.push({
           pubkey: channelPubkey,
           signer: channelSigner,
@@ -471,6 +487,11 @@ export function createSyncController ({
       devicePubkey: nextDevicePubkey,
       channelPubkeyByOwnerPubkey: nextChannelPubkeyByOwnerPubkey,
       ownerPubkeyByChannelPubkey: nextOwnerPubkeyByChannelPubkey,
+      channelSignerByChannelPubkey: nextChannelSignerByChannelPubkey,
+      relaySetByChannelPubkey: new Map(channels.map(channel => [
+        channel.pubkey,
+        [...new Set([...(channel.relays || []), ...(channel.sendRelays || [])])]
+      ])),
       signerChannelPubkeyByPeerPubkey: nextSignerChannelPubkeyByPeerPubkey,
       readRelaysByOwnerPubkey: nextReadRelaysByOwnerPubkey,
       emptyPersonalCopyContextByOwner: nextEmptyPersonalCopyContextByOwner,
@@ -605,6 +626,7 @@ export function createSyncController ({
                 syncType: message?.type || '',
                 syncCode: message?.code || '',
                 operationCode: messageCode(message),
+                requestId: messageRequestId(message) || undefined,
                 payloadBytes: messagePayloadBytes(message),
                 queuedAgeMs: Number.isSafeInteger(message?.receivedAt)
                   ? Math.max(0, _now() - message.receivedAt * 1000)
@@ -870,6 +892,8 @@ export function createSyncController ({
       ownerPubkeys: new Set(nostrDbOwnerPubkeys(_store)),
       emptyPersonalCopyContextByOwner,
       readyOwnerPubkeys: new Set([...readyOwnerPubkeys].filter(pubkey => HEX32.test(pubkey))),
+      channelSignerFor: channelPubkey => channelSignerByChannelPubkey.get(channelPubkey) || null,
+      relaysForChannel: channelPubkey => [...(relaySetByChannelPubkey.get(channelPubkey) || [])],
       debug
     }
   }
@@ -1169,6 +1193,7 @@ export function createSyncController ({
           idleWakeMs: 0,
           lastIdleWakeAt: null
         },
+        exchange: nostrDb.exchange || {},
         peerGuard: peerGuardSnapshot
       }
     },
