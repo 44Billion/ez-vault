@@ -298,13 +298,15 @@ test('nostrdb sync infers owner from channel and builds bounded ask', async () =
 
   const asks = msg.sent.filter(item => item.method === 'ask')
   assert.equal(asks.length, 2)
-  const historyAsk = asks.find(item => item.options.payload.untilScore === 900999)
+  const historyPending = controller._getState().owners[OWNER][PEER].pending
+  const historyAsk = asks.find(item => item.options.payload.requestId === historyPending.requestId)
   assert.ok(historyAsk)
   assert.equal(historyAsk.options.code, NOSTRDB_SYNC_ASK_CODE)
   assert.equal(historyAsk.options.useBulkPacing, true)
   assert.equal(historyAsk.options.channelPubkey, 'channel')
   assert.equal(historyAsk.options.receiverPubkey, PEER)
   assert.equal(historyAsk.options.payload.sinceScore, 1000)
+  assert.equal(historyAsk.options.payload.untilScore, 2000)
   assert.deepEqual(historyAsk.options.payload.excludeIds, [EVENT_ID])
   assert.equal(historyAsk.options.payload.limit, 200)
   assert.equal(Object.hasOwn(historyAsk.options.payload, 'ownerPubkey'), false)
@@ -975,7 +977,7 @@ test('non-contiguous reply indexes do not complete or delete the ask', async () 
     code: NOSTRDB_SYNC_ADVERTISE_CODE,
     payload: { generatedAt: 900, minScore: 1000, maxScore: 10000000 }
   }), syncContext)
-  const historyAsk = msg.sent.find(item => item.options.payload.untilScore === 900999).options.payload
+  const historyAsk = msg.sent.find(item => item.options.payload.priority === 'lower').options.payload
 
   await controller.handleMessage(syncMessage({
     code: NOSTRDB_SYNC_REPLY_CODE,
@@ -1864,7 +1866,7 @@ test('nostrdb sync re-asks same start when final reply hasMore is true', async (
     code: NOSTRDB_SYNC_ADVERTISE_CODE,
     payload: { generatedAt: 900, minScore: 1000, maxScore: 10000000 }
   }), context(msg))
-  const firstAsk = msg.sent.find(item => item.options.payload.untilScore === 900999).options.payload
+  const firstAsk = msg.sent.find(item => item.options.payload.priority === 'lower').options.payload
 
   await controller.handleMessage(syncMessage({
     code: NOSTRDB_SYNC_REPLY_CODE,
@@ -1961,7 +1963,7 @@ test('nostrdb sync advances only when final reply is complete', async () => {
     code: NOSTRDB_SYNC_ADVERTISE_CODE,
     payload: { generatedAt: 900, minScore: 1000, maxScore: 10000000 }
   }), context(msg))
-  const firstAsk = msg.sent.find(item => item.options.payload.untilScore === 900999).options.payload
+  const firstAsk = msg.sent.find(item => item.options.payload.priority === 'lower').options.payload
 
   await controller.handleMessage(syncMessage({
     code: NOSTRDB_SYNC_REPLY_CODE,
@@ -2008,7 +2010,7 @@ test('nostrdb sync treats missing hasMore full pages as incomplete', async () =>
     code: NOSTRDB_SYNC_ADVERTISE_CODE,
     payload: { generatedAt: 900, minScore: 1000, maxScore: 10000000 }
   }), context(msg))
-  const firstAsk = msg.sent.find(item => item.options.payload.untilScore === 900999).options.payload
+  const firstAsk = msg.sent.find(item => item.options.payload.priority === 'lower').options.payload
 
   await controller.handleMessage(syncMessage({
     code: NOSTRDB_SYNC_REPLY_CODE,

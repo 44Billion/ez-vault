@@ -59,7 +59,6 @@ const MAX_SYNC_JSONL_BYTES = 4 * 1024 * 1024
 const DEFAULT_WINDOW_MS = 15 * 60 * 1000
 const MIN_WINDOW_MS = 60 * 1000
 const MAX_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
-const ADVERT_EDGE_EXTENSION_MS = 4 * 60 * 60 * 1000
 const INVENTORY_LIMIT = 200
 const REQUEST_LIMIT = 200
 const SMALL_REPLY_COUNT = 20
@@ -1622,7 +1621,7 @@ export function createNostrDbSyncController ({
     const completed = Number.isSafeInteger(entry.completedScore)
       ? entry.completedScore
       : advert.minScore - 1
-    const targetScore = advert.maxScore + ADVERT_EDGE_EXTENSION_MS
+    const targetScore = advert.maxScore
     const sinceScore = Math.max(advert.minScore, completed + 1)
     if (sinceScore > targetScore) {
       entry.pending = null
