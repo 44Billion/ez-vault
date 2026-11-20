@@ -1754,14 +1754,17 @@ export function createNostrDbSyncController ({
     const completed = Number.isSafeInteger(entry.completedScore)
       ? entry.completedScore
       : advert.minScore - 1
-    const advertisedTarget = advert.maxScore + ADVERT_EDGE_EXTENSION_MS
+    const advertisedTarget = advert.maxScore
     const recent = isPlainObject(entry.recent) ? entry.recent : { targetScore: advertisedTarget }
     const pending = recent.pending
-    if (pending && pending.untilScore >= advertisedTarget) {
+    if (pending && (
+      (reason !== 'advertise' && pending.untilScore >= advertisedTarget) ||
+      (reason === 'advertise' && pending.untilScore === advertisedTarget)
+    )) {
       scheduleExchangeMaintenance(context)
       return null
     }
-    if (pending && pending.untilScore < advertisedTarget) {
+    if (pending && (reason === 'advertise' || pending.untilScore < advertisedTarget)) {
       const previous = exchangeRecord(state, ownerPubkey, peerPubkey, 'ask', pending.requestId)
       if (previous) {
         previous.status = 'deleting-ask'
@@ -1769,7 +1772,7 @@ export function createNostrDbSyncController ({
       }
     }
     const targetScore = reason === 'advertise'
-      ? Math.max(recent.targetScore || 0, advertisedTarget)
+      ? advertisedTarget
       : (isSafeScore(recent.targetScore) ? recent.targetScore : advertisedTarget)
     const minScore = Math.max(advert.minScore, completed + 1)
     if (targetScore < minScore) {

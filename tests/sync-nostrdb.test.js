@@ -204,9 +204,53 @@ test('advert updates are immediately visible to the recent recovery lane without
     eventId: 'message-id'
   })
   assert.ok(owner.recent.pending)
+  assert.equal(owner.recent.pending.untilScore, 10000000)
   assert.ok(owner.pending)
   assert.equal(msg.sent.filter(item => item.method === 'ask').length, 2)
   controller.stop()
+})
+
+test('a new advert replaces a legacy future recent target with its current maxScore', async () => {
+  const msg = messenger()
+  globalThis.localStorage.setItem(SYNC_STATE_KEY, JSON.stringify({
+    owners: {
+      [OWNER]: {
+        [PEER]: {
+          recent: {
+            targetScore: 9999999999999,
+            windowMs: 900000,
+            pending: {
+              requestId: 'legacy-future',
+              sinceScore: 9999999999999 - 900000 + 1,
+              untilScore: 9999999999999
+            }
+          },
+          updatedAt: 1000
+        }
+      }
+    }
+  }))
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { firstScore: 1000, lastScore: 1000 } }
+      }
+    })
+  })
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: 900, minScore: 1000, maxScore: 10000 }
+  }), context(msg))
+
+  const recent = controller._getState().owners[OWNER][PEER].recent
+  assert.equal(recent.targetScore, 10000)
+  assert.equal(recent.pending.untilScore, 10000)
+  assert.notEqual(recent.pending.requestId, 'legacy-future')
 })
 
 test('state mutations become readable synchronously before IndexedDB persistence resolves', async () => {
@@ -1871,7 +1915,8 @@ test('recent recovery walks backward independently of the historical lane', asyn
   }), syncContext)
 
   const firstRecent = controller._getState().owners[OWNER][PEER].recent.pending
-  assert.ok(firstRecent.sinceScore > 10000000)
+  assert.equal(firstRecent.untilScore, 10000000)
+  assert.ok(firstRecent.sinceScore < 10000000)
   assert.ok(msg.sent.some(item => item.options.payload.requestId === firstRecent.requestId))
 
   await controller.handleMessage(syncMessage({
