@@ -508,10 +508,17 @@ NostrDB score cursor only after source durability, and remove a chunk only after
 publication acceptance. Outbox capacity pauses production instead of evicting.
 Owner removal clears queues and cursor. Capacity pressure blocks new admission
 but still wakes the drain and permits existing durable rows through ACK/NACK.
-NostrDB recovery replies inherit the additive ask priority, defaulting to
-`lower`. An empty push flush must not emit the aggregate `push` debug event;
+NostrDB historical range recovery asks use `lower`; the recent tail lane uses
+`normal`, and replies inherit only an explicitly lower ask priority. An empty
+push flush must not emit the aggregate `push` debug event;
 expose `push.idleWakeCount`, `push.idleWakeMs` and `push.lastIdleWakeAt` in the
 debug snapshot instead.
+
+Persist NostrDB sync-state mutations into the in-memory authority synchronously
+before queuing IndexedDB writes. A caller that mutates and immediately reads the
+state must observe the mutation even when the prior write is still pending.
+After a persisted local range change, debounce a new advert so a lost push can be
+reconciled without waiting for the periodic announcement interval.
 
 
 ## Launcher relay bridge

@@ -174,6 +174,58 @@ test('nostrdb sync advertises current score anchors for empty databases', async 
   })
 })
 
+test('advert updates are immediately visible to the recent recovery lane without localStorage', async () => {
+  const msg = messenger()
+  const controller = createController({
+    _indexedDB: null,
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    _clearTimeout: () => {},
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { firstScore: 1000, lastScore: 1000 } }
+      }
+    })
+  })
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: 900, minScore: 1000, maxScore: 10000000 }
+  }), context(msg))
+
+  const owner = controller._getState().owners[OWNER][PEER]
+  assert.deepEqual(owner.advert, {
+    generatedAt: 900,
+    minScore: 1000,
+    maxScore: 10000000,
+    messageAt: 10000,
+    eventId: 'message-id'
+  })
+  assert.ok(owner.recent.pending)
+  assert.ok(owner.pending)
+  assert.equal(msg.sent.filter(item => item.method === 'ask').length, 2)
+  controller.stop()
+})
+
+test('state mutations become readable synchronously before IndexedDB persistence resolves', async () => {
+  const controller = createController({
+    _indexedDB: null,
+    _nowMs: () => 1000,
+    _setTimeout: () => ({}),
+    _clearTimeout: () => {},
+    getDb: () => ({ subscribe: emptySubscription })
+  })
+
+  controller.requestAppBackfill({ ownerPubkey: OWNER, appId: 'app-visible' }, context(messenger()))
+
+  const state = controller._getState()
+  assert.equal(Object.values(state.appBackfills[OWNER])[0].appId, 'app-visible')
+  await flushMicrotasks()
+  controller.stop()
+})
+
 test('nostrdb sync infers owner from channel and builds bounded ask', async () => {
   const msg = messenger()
   const controller = createNostrDbSyncController({
@@ -963,11 +1015,36 @@ test('nostrdb sync replies with an empty final chunk when no events are missing'
     sinceScore: 1,
     untilScore: 2,
     hasMore: false,
-    priority: 'lower',
+    priority: 'normal',
     index: 0,
     isLast: true,
     jsonl: ''
   })
+})
+
+test('nostrdb sync preserves an explicitly lower recovery ask in its reply', async () => {
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    getDb: () => ({
+      async query () {
+        return { results: [], meta: { scores: [] } }
+      }
+    })
+  })
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ASK_CODE,
+    payload: {
+      requestId: 'req-lower',
+      sinceScore: 1,
+      untilScore: 2,
+      excludeIds: [],
+      limit: 200,
+      priority: 'lower'
+    }
+  }), context(msg))
+
+  assert.equal(msg.sent[0].options.payload.priority, 'lower')
 })
 
 test('nostrdb sync replies with hasMore when responder cap is hit', async () => {
@@ -1947,6 +2024,7 @@ test('nostrdb sync batches normal events without mixing priority lanes', async (
   const msg = messenger()
   const timers = []
   const diagnostics = []
+  const rangeChanges = []
   let performanceTime = 0
   const event1 = pushEvent(1)
   const event2 = pushEvent(2)
@@ -1960,7 +2038,10 @@ test('nostrdb sync batches normal events without mixing priority lanes', async (
     },
     _clearTimeout: () => {}
   })
-  controller.ensureSubscriptions(context(msg, { debug: event => diagnostics.push(event) }))
+  controller.ensureSubscriptions(context(msg, {
+    debug: event => diagnostics.push(event),
+    onRangeChanged: ownerPubkey => rangeChanges.push(ownerPubkey)
+  }))
 
   await controller.queuePush(OWNER, event1)
   await controller.queuePush(OWNER, event2)
@@ -1984,6 +2065,8 @@ test('nostrdb sync batches normal events without mixing priority lanes', async (
   assert.ok(chunk.elapsedMs >= 0)
   assert.ok(diagnostics.filter(entry => entry.action === 'push').every(entry => !Object.hasOwn(entry, 'channelPubkey')))
   assert.ok(diagnostics.every(entry => !Object.hasOwn(entry, 'ownerPubkey')))
+  assert.ok(rangeChanges.length > 0)
+  assert.ok(rangeChanges.every(ownerPubkey => ownerPubkey === OWNER))
 })
 
 test('nostrdb push classifies trusted metadata and separates priority lanes', async () => {

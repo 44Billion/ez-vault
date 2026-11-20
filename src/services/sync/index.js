@@ -234,6 +234,7 @@ export function createSyncController ({
       channelPubkeyForOwner,
       channelSignerFor: channelPubkey => channelSignerByChannelPubkey.get(channelPubkey) || null,
       relaysForChannel: channelPubkey => [...(relaySetByChannelPubkey.get(channelPubkey) || [])],
+      onRangeChanged: ownerPubkey => scheduleAnnounce(ownerPubkey),
       ownerPubkeys: new Set(nostrDbOwnerPubkeys(_store)),
       trustedSigners: _trustedSigners,
       debug
@@ -894,6 +895,7 @@ export function createSyncController ({
       readyOwnerPubkeys: new Set([...readyOwnerPubkeys].filter(pubkey => HEX32.test(pubkey))),
       channelSignerFor: channelPubkey => channelSignerByChannelPubkey.get(channelPubkey) || null,
       relaysForChannel: channelPubkey => [...(relaySetByChannelPubkey.get(channelPubkey) || [])],
+      onRangeChanged: ownerPubkey => scheduleAnnounce(ownerPubkey),
       debug
     }
   }

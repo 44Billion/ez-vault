@@ -254,7 +254,10 @@ function normalizeAsk (payload) {
     sinceScore,
     untilScore,
     excludeIds: normalizeIdList(payload.excludeIds),
-    limit: normalizePositiveInteger(payload.limit, REQUEST_LIMIT, REQUEST_LIMIT)
+    limit: normalizePositiveInteger(payload.limit, REQUEST_LIMIT, REQUEST_LIMIT),
+    priority: payload.priority === 'lower' || payload.priority === 'lowest'
+      ? payload.priority
+      : 'normal'
   }
 }
 
@@ -285,7 +288,8 @@ export function askCoalescingDigest (message) {
       ask.sinceScore,
       ask.untilScore,
       [...ask.excludeIds].sort(),
-      ask.limit
+      ask.limit,
+      ask.priority
     ])
   }
   if (code === NOSTRDB_SYNC_APP_ASK_CODE) {
@@ -742,6 +746,24 @@ export function createNostrDbSyncController ({
     return `${_nowMs().toString(36)}:${requestSequence.toString(36)}:${_random().toString(36).slice(2)}`
   }
 
+  function queueStateWrite (state) {
+    const snapshot = structuredClone(state)
+    const write = stateWriteTail.then(() => replaceRecords(
+      NOSTRDB_SYNC,
+      [{ key: 'state', value: snapshot }]
+    ))
+    stateWriteTail = write.catch(report)
+    return write
+  }
+
+  function notifyRangeChanged (ownerPubkey, context = runtime) {
+    try {
+      context.onRangeChanged?.(ownerPubkey)
+    } catch (error) {
+      report(error)
+    }
+  }
+
   function setState (state, { replaceKeys = [] } = {}) {
     const snapshot = structuredClone(state)
     const merge = current => {
@@ -761,17 +783,13 @@ export function createNostrDbSyncController ({
       writeState(storage, next)
       return
     }
-    const write = stateWriteTail.then(() => {
-      const current = getState()
-      const next = merge(current)
-      if (snapshot.pushCursors === undefined && current.pushCursors !== undefined) {
-        next.pushCursors = current.pushCursors
-      }
-      durableState = structuredClone(next)
-      return replaceRecords(NOSTRDB_SYNC, [{ key: 'state', value: next }])
-    })
-    stateWriteTail = write.catch(report)
-    return write
+    const current = getState()
+    const next = merge(current)
+    if (snapshot.pushCursors === undefined && current.pushCursors !== undefined) {
+      next.pushCursors = current.pushCursors
+    }
+    durableState = structuredClone(next)
+    return queueStateWrite(next)
   }
 
   function channelRelays (channelPubkey, context = runtime) {
@@ -1448,19 +1466,15 @@ export function createNostrDbSyncController ({
       writeState(storage, state)
       return Promise.resolve()
     }
-    const write = stateWriteTail.then(() => {
-      const state = getState()
-      const current = isSafeScore(state.pushCursors?.[ownerPubkey])
-        ? state.pushCursors[ownerPubkey]
-        : null
-      if (current != null && current >= score) return
-      state.pushCursors = isPlainObject(state.pushCursors) ? state.pushCursors : {}
-      state.pushCursors[ownerPubkey] = score
-      durableState = structuredClone(state)
-      return replaceRecords(NOSTRDB_SYNC, [{ key: 'state', value: state }])
-    })
-    stateWriteTail = write.catch(report)
-    return write
+    const state = getState()
+    const current = isSafeScore(state.pushCursors?.[ownerPubkey])
+      ? state.pushCursors[ownerPubkey]
+      : null
+    if (current != null && current >= score) return Promise.resolve()
+    state.pushCursors = isPlainObject(state.pushCursors) ? state.pushCursors : {}
+    state.pushCursors[ownerPubkey] = score
+    durableState = structuredClone(state)
+    return queueStateWrite(state)
   }
 
   function clearPushCursor (ownerPubkey) {
@@ -1473,17 +1487,13 @@ export function createNostrDbSyncController ({
       writeState(storage, state)
       return Promise.resolve()
     }
-    const write = stateWriteTail.then(() => {
-      const state = getState()
-      if (!isPlainObject(state.pushCursors) ||
-          !Object.hasOwn(state.pushCursors, ownerPubkey)) return
-      delete state.pushCursors[ownerPubkey]
-      if (!Object.keys(state.pushCursors).length) delete state.pushCursors
-      durableState = structuredClone(state)
-      return replaceRecords(NOSTRDB_SYNC, [{ key: 'state', value: state }])
-    })
-    stateWriteTail = write.catch(report)
-    return write
+    const state = getState()
+    if (!isPlainObject(state.pushCursors) ||
+        !Object.hasOwn(state.pushCursors, ownerPubkey)) return Promise.resolve()
+    delete state.pushCursors[ownerPubkey]
+    if (!Object.keys(state.pushCursors).length) delete state.pushCursors
+    durableState = structuredClone(state)
+    return queueStateWrite(state)
   }
 
   function recordAskStat (kind, code, reason) {
@@ -1638,7 +1648,8 @@ export function createNostrDbSyncController ({
       sinceScore: askWindow.sinceScore,
       untilScore: askWindow.untilScore,
       excludeIds: askWindow.excludeIds,
-      limit: REQUEST_LIMIT
+      limit: REQUEST_LIMIT,
+      priority: 'lower'
     }
 
     entry.windowMs = askWindow.windowMs
@@ -2122,7 +2133,7 @@ export function createNostrDbSyncController ({
     if (compareAdvert(nextAdvert, entry.advert) <= 0) return true
     entry.advert = nextAdvert
     entry.updatedAt = _nowMs()
-    setState(state)
+    await setState(state)
     emitDebug(context.debug, 'advertise-received', {
       ownerPubkey,
       senderPubkey: peerPubkey,
@@ -2188,7 +2199,7 @@ export function createNostrDbSyncController ({
         sinceScore: ask.sinceScore,
         untilScore: ask.untilScore,
         hasMore,
-        priority: 'lower'
+        priority: ask.priority
       },
       bytesPerChunk: SYNC_BYTES_PER_CHUNK,
       sendEmptyReply: true
@@ -3007,6 +3018,7 @@ export function createNostrDbSyncController ({
       queue.recoveryAgain = true
       return false
     }
+    notifyRangeChanged(ownerPubkey)
     markPushPriorityReady(queue, priority)
     if (runtime.messenger?.readStatus?.().paused === true) {
       parkPushQueue(ownerPubkey, queue)
