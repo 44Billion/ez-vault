@@ -33,6 +33,9 @@ const ANNOUNCE_ALL = '*'
 const TRUSTED_SIGNER_SYNC_INFO = 'trusted-signer-sync-v1'
 const HEX32 = /^[0-9a-f]{64}$/i
 const APP_ID_MAX_LENGTH = 512
+const INBOX_HANDLER_DEADLINE_MS = 5 * 60 * 1000
+const INBOX_HANDLER_RETRY_MS = 30 * 1000
+const MAX_STALLED_INBOX_HANDLERS = 4
 const encoder = new TextEncoder()
 const DEFAULT_COALESCING_HINTS = [
   contentKeys.coalescingHint,
@@ -153,6 +156,17 @@ function messageDebugInfo (message) {
   }
 }
 
+function inboxDeliveryKey (message) {
+  const eventId = message?.event?.id
+  if (typeof eventId !== 'string' || !eventId) return ''
+  return JSON.stringify([
+    message?.channelPubkey || '',
+    message?.type || '',
+    eventId,
+    message?.provenance || ''
+  ])
+}
+
 export function createSyncController ({
   MessengerClass = PrivateMessenger,
   _store = store,
@@ -215,6 +229,8 @@ export function createSyncController ({
   const knownOwnerPubkeys = new Set()
   const readyOwnerPubkeys = new Set()
   const channelBuildFailuresByOwner = new Map()
+  const stalledInboxHandlers = new Set()
+  const stalledInboxHandlerKeys = new Map()
   let devicePubkey = ''
   const debug = _debug === undefined ? defaultDebugSink() : _debug
   const peerGuard = _createPeerGuard({ onDebug: debug, now: _now })
@@ -225,11 +241,13 @@ export function createSyncController ({
     onError
   })
 
-  function syncHandlerContext () {
+  function syncHandlerContext ({ messenger: handlerMessenger, signal } = {}) {
     return {
-      messenger,
+      messenger: handlerMessenger || messenger,
+      backgroundMessenger: messenger,
       trustedByPubkey,
       devicePubkey,
+      signal,
       ownerPubkeyForChannel,
       channelPubkeyForOwner,
       channelSignerFor: channelPubkey => channelSignerByChannelPubkey.get(channelPubkey) || null,
@@ -241,8 +259,8 @@ export function createSyncController ({
     }
   }
 
-  async function handleSyncMessage (message) {
-    const context = syncHandlerContext()
+  async function handleSyncMessage (message, options) {
+    const context = syncHandlerContext(options)
     const handled = await _contentKeys.handleMessage(message, context)
     if (handled) return true
     const handledTrustedSigners = await _trustedSignerSync.handleMessage(message, context)
@@ -563,12 +581,12 @@ export function createSyncController ({
     Promise.resolve().then(() => drainMessages(id))
   }
 
-  function scheduleDrainRetry () {
+  function scheduleDrainRetry (delayMs = 1000) {
     if (drainRetryTimer || !initialized) return
     drainRetryTimer = _setTimeout(() => {
       drainRetryTimer = null
       scheduleDrain()
-    }, 1000)
+    }, delayMs)
     drainRetryTimer?.unref?.()
   }
 
@@ -597,6 +615,29 @@ export function createSyncController ({
     queueMicrotask(() => flushMessengerResume(monitor))
   }
 
+  function releaseStalledInboxHandler (entry) {
+    if (!stalledInboxHandlers.delete(entry)) return
+    if (entry.key && stalledInboxHandlerKeys.get(entry.key) === entry) {
+      stalledInboxHandlerKeys.delete(entry.key)
+    }
+    if (initialized && _secrets.isUnlocked()) scheduleDrain()
+  }
+
+  function stallInboxHandler (entry) {
+    stalledInboxHandlers.add(entry)
+    if (entry.key) stalledInboxHandlerKeys.set(entry.key, entry)
+    entry.handler.then(
+      () => releaseStalledInboxHandler(entry),
+      () => releaseStalledInboxHandler(entry)
+    )
+  }
+
+  function abortStalledInboxHandlers (reason) {
+    for (const entry of stalledInboxHandlers) entry.controller.abort(reason)
+    stalledInboxHandlers.clear()
+    stalledInboxHandlerKeys.clear()
+  }
+
   async function drainMessages (id = lifecycleId) {
     drainScheduled = false
     if (!isCurrentLifecycle(id)) return
@@ -612,6 +653,10 @@ export function createSyncController ({
         let reachedEmptyQueue = false
         // eslint-disable-next-line no-unmodified-loop-condition
         while (isCurrentLifecycle(id) && messenger && !channelConfiguration && _secrets.isUnlocked()) {
+          if (stalledInboxHandlers.size >= MAX_STALLED_INBOX_HANDLERS) {
+            drainQueued = false
+            break
+          }
           const delivery = await messenger.nextMessage?.()
           if (!delivery) {
             reachedEmptyQueue = true
@@ -619,6 +664,12 @@ export function createSyncController ({
           }
           const { message, ack, nack } = delivery
           if (!isCurrentLifecycle(id) || channelConfiguration || !_secrets.isUnlocked()) { await nack(); break }
+          const deliveryKey = inboxDeliveryKey(message)
+          if (deliveryKey && stalledInboxHandlerKeys.has(deliveryKey)) {
+            await nack({ retryAfterMs: INBOX_HANDLER_RETRY_MS })
+            scheduleDrainRetry(INBOX_HANDLER_RETRY_MS)
+            continue
+          }
           handled += 1
           if (debug) emitDebug('handle', messageDebugInfo(message))
           const processStartedAt = debug ? _performanceNow() : 0
@@ -636,18 +687,52 @@ export function createSyncController ({
               }
             : null
           try {
-            try {
-              await handleSyncMessage(message)
-            } catch (error) {
-              if (processDiagnostic) processDiagnostic.outcome = 'failed'
-              throw error
-            } finally {
+            const controller = new AbortController()
+            const handler = Promise.resolve()
+              .then(() => handleSyncMessage(message, {
+                messenger: delivery.capacityEgress || messenger,
+                signal: controller.signal
+              }))
+              .then(
+                value => ({ status: 'resolved', value }),
+                error => ({ status: 'rejected', error })
+              )
+            let deadlineTimer
+            const deadline = new Promise(resolve => {
+              deadlineTimer = _setTimeout(() => resolve({ status: 'timeout' }), INBOX_HANDLER_DEADLINE_MS)
+              deadlineTimer?.unref?.()
+            })
+            const outcome = await Promise.race([handler, deadline])
+            _clearTimeout(deadlineTimer)
+            if (outcome.status === 'timeout') {
+              if (processDiagnostic) processDiagnostic.outcome = 'timeout'
+              const timeoutError = Object.assign(new Error('INBOX_HANDLER_TIMEOUT'), {
+                code: 'INBOX_HANDLER_TIMEOUT',
+                retryAfterMs: INBOX_HANDLER_RETRY_MS
+              })
+              const entry = { key: deliveryKey, controller, handler, startedAt: _now() }
+              stallInboxHandler(entry)
+              controller.abort(timeoutError)
               if (processDiagnostic) {
-                emitDebug('message-processed', {
+                emitDebug('inbox-handler-timeout', {
                   ...processDiagnostic,
-                  elapsedMs: Math.max(0, Math.round(_performanceNow() - processStartedAt))
+                  handlerDurationMs: INBOX_HANDLER_DEADLINE_MS,
+                  stalledHandlerCount: stalledInboxHandlers.size,
+                  maxStalledHandlers: MAX_STALLED_INBOX_HANDLERS,
+                  retryAfterMs: INBOX_HANDLER_RETRY_MS
                 })
               }
+              try {
+                await nack({ retryAfterMs: INBOX_HANDLER_RETRY_MS })
+              } catch (error) {
+                onError(error)
+              }
+              scheduleDrainRetry(INBOX_HANDLER_RETRY_MS)
+              continue
+            }
+            if (outcome.status === 'rejected') {
+              if (processDiagnostic) processDiagnostic.outcome = 'failed'
+              throw outcome.error
             }
             await ack()
           } catch (err) {
@@ -702,6 +787,13 @@ export function createSyncController ({
               drainQueued = false
             }
             break
+          } finally {
+            if (processDiagnostic) {
+              emitDebug('message-processed', {
+                ...processDiagnostic,
+                elapsedMs: Math.max(0, Math.round(_performanceNow() - processStartedAt))
+              })
+            }
           }
         }
         if (reachedEmptyQueue) drainQueued = false
@@ -951,6 +1043,7 @@ export function createSyncController ({
 
   function stop () {
     const currentMessenger = messenger
+    abortStalledInboxHandlers(new DOMException('Sync stopped', 'AbortError'))
     messenger = null
     if (messengerStateMonitor) {
       messengerStateMonitor.messenger = null
@@ -1196,6 +1289,12 @@ export function createSyncController ({
           lastIdleWakeAt: null
         },
         exchange: nostrDb.exchange || {},
+        inboxHandlers: {
+          stalled: stalledInboxHandlers.size,
+          maxStalled: MAX_STALLED_INBOX_HANDLERS,
+          deadlineMs: INBOX_HANDLER_DEADLINE_MS,
+          retryAfterMs: INBOX_HANDLER_RETRY_MS
+        },
         peerGuard: peerGuardSnapshot
       }
     },

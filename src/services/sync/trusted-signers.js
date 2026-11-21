@@ -134,6 +134,7 @@ export async function announceTrustedSignerState ({
 }
 
 export async function handleMessage (message, context = {}) {
+  context.signal?.throwIfAborted()
   if (messageCode(message) !== TRUSTED_SIGNERS_STATE_CODE) return false
   const senderPubkey = normalizePubkey(message?.event?.pubkey)
   if (!senderPubkey || !context.trustedByPubkey?.has?.(senderPubkey)) return true
@@ -160,6 +161,7 @@ export async function handleMessage (message, context = {}) {
       if (rejected) throw syncPayloadInvalid('entries-invalid', { partial: true })
       return true
     }
+    context.signal?.throwIfAborted()
     await context.trustedSigners?.clearActive?.({
       actorPubkey: devicePubkey,
       updatedAt: selfRemoval.updatedAt,
@@ -170,7 +172,10 @@ export async function handleMessage (message, context = {}) {
   }
 
   const mergeEntries = entriesExceptPubkey(entries, devicePubkey)
-  if (mergeEntries.length) await context.trustedSigners?.mergeRecords?.(mergeEntries, { action: 'sync' })
+  if (mergeEntries.length) {
+    context.signal?.throwIfAborted()
+    await context.trustedSigners?.mergeRecords?.(mergeEntries, { action: 'sync' })
+  }
   if (rejected) throw syncPayloadInvalid('entries-invalid', { partial: true })
   return true
 }

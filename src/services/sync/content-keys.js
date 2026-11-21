@@ -458,6 +458,7 @@ export async function generateAndPublishContentKey ({
 }
 
 async function handleAnnounce (message, context) {
+  context.signal?.throwIfAborted()
   const ownerPubkey = localOwnerForChannel(message.channelPubkey, context)
   if (!ownerPubkey) return false
   const channelPubkey = message.channelPubkey || ownerPubkey
@@ -469,6 +470,7 @@ async function handleAnnounce (message, context) {
   const rejected = body.keys.length - keys.length
   const { knownPubkeys, announcedPubkeys, missingPubkeys: pubkeys } = contentKeyDiff(ownerPubkey, keys)
   if (!pubkeys.length) {
+    context.signal?.throwIfAborted()
     await clearContentKeyAsk(ownerPubkey, message.event.pubkey)
     if (rejected) throw syncPayloadInvalid('keys-entries-invalid', { partial: true })
     return true
@@ -506,6 +508,7 @@ async function handleAnnounce (message, context) {
     attempts: decision.attempts,
     retryAt: decision.retryAt
   })
+  context.signal?.throwIfAborted()
   await context.messenger.ask({
     channelPubkey,
     receiverPubkey: message.event.pubkey,
@@ -513,6 +516,7 @@ async function handleAnnounce (message, context) {
     payload: { pubkeys },
     useBulkPacing: true
   })
+  context.signal?.throwIfAborted()
   await recordContentKeyAsk(ownerPubkey, message.event.pubkey, decision)
   incrementAskStat('emitted', CONTENT_KEYS_ASK_CODE, decision.reason)
   if (rejected) throw syncPayloadInvalid('keys-entries-invalid', { partial: true })
@@ -520,6 +524,7 @@ async function handleAnnounce (message, context) {
 }
 
 async function handleRequest (message, context) {
+  context.signal?.throwIfAborted()
   const ownerPubkey = localOwnerForChannel(message.channelPubkey, context)
   if (!ownerPubkey || !message.event?.id) return false
   const channelPubkey = message.channelPubkey || ownerPubkey
@@ -533,6 +538,7 @@ async function handleRequest (message, context) {
     ownerPubkey,
     pubkeys,
     send: payload => {
+      context.signal?.throwIfAborted()
       const keys = Array.isArray(payload?.keys) ? payload.keys : []
       emitDebug(context.debug, 'reply', {
         type: 'reply',
@@ -558,6 +564,7 @@ async function handleRequest (message, context) {
 }
 
 async function handleReply (message, context) {
+  context.signal?.throwIfAborted()
   const ownerPubkey = localOwnerForChannel(message.channelPubkey, context)
   if (!ownerPubkey) return false
   const channelPubkey = message.channelPubkey || ownerPubkey
@@ -572,6 +579,7 @@ async function handleReply (message, context) {
   let rejected = 0
 
   for (const key of body.keys) {
+    context.signal?.throwIfAborted()
     const normalized = normalizeSecretKey(key)
     if (!normalized) {
       rejected++
@@ -582,6 +590,7 @@ async function handleReply (message, context) {
     if (existing && (existing.createdAt || 0) >= normalized.createdAt) continue
 
     const signer = await secrets.setContentKeySecret(ownerPubkey, normalized.seckey, normalized.createdAt)
+    context.signal?.throwIfAborted()
     if (!signer) continue
     existingByPubkey.set(normalized.pubkey, { pubkey: normalized.pubkey, createdAt: normalized.createdAt })
     debugSourceByKey.set(sourceKey(ownerPubkey, normalized.pubkey), `synced from ${label}`)
@@ -590,6 +599,7 @@ async function handleReply (message, context) {
   }
 
   if (changed) {
+    context.signal?.throwIfAborted()
     await removeImportedContentKeys(ownerPubkey, message.event.pubkey, importedPubkeys)
     notifyDebug()
     emitDebug(context.debug, 'import', {
@@ -607,6 +617,7 @@ async function handleReply (message, context) {
 }
 
 export async function handleMessage (message, context) {
+  context.signal?.throwIfAborted()
   const code = messageCode(message)
   if (
     code !== CONTENT_KEYS_ANNOUNCE_CODE &&

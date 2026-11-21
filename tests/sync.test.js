@@ -167,6 +167,28 @@ async function waitUntil (predicate, timeoutMs = 2000) {
   }
 }
 
+function createManualTimeouts () {
+  const timeouts = []
+  return {
+    timeouts,
+    setTimeout (fn, ms) {
+      const timer = { fn, ms, cleared: false }
+      timeouts.push(timer)
+      return timer
+    },
+    clearTimeout (timer) {
+      if (timer) timer.cleared = true
+    },
+    fire (ms) {
+      const timer = timeouts.find(entry => !entry.cleared && entry.ms === ms)
+      if (!timer) assert.fail(`no active ${ms}ms timeout`)
+      timer.cleared = true
+      timer.fn()
+      return timer
+    }
+  }
+}
+
 test('sync initialization clears private messenger temporary storage before unlock', async () => {
   globalThis.sessionStorage.setItem('tmp.session', 'encrypted')
   globalThis.sessionStorage.setItem(TEMPORARY_STORAGE_KEYS_KEY, JSON.stringify(['tmp.session']))
@@ -1003,7 +1025,7 @@ test('sync drains messages enqueued while another message is being handled', asy
   })
 
   await controller.init()
-  await flushMicrotasks()
+  await flushMicrotasks(32)
 
   assert.deepEqual(handled, ['a', 'b'])
   assert.equal(await messenger.nextMessage(), null)
@@ -1015,6 +1037,187 @@ test('sync drains messages enqueued while another message is being handled', asy
   )
 
   controller.close()
+})
+
+test('sync defers a timed-out handler, runs the next item and never overlaps the stalled one', async () => {
+  const timers = createManualTimeouts()
+  const firstHandler = Promise.withResolvers()
+  const handled = []
+  const acknowledgements = []
+  const deferrals = []
+  const signals = []
+  const debugEvents = []
+  const scopedMessenger = Object.freeze({
+    ask: async () => {},
+    reply: async () => {},
+    tell: async () => {},
+    yell: async () => {}
+  })
+  const firstMessage = { type: 'reply', channelPubkey: 'channel', provenance: 'direct', event: { id: 'event-first', pubkey: 'trusted1' }, payload: { code: 'probe' } }
+  const secondMessage = { type: 'reply', channelPubkey: 'channel', provenance: 'direct', event: { id: 'event-second', pubkey: 'trusted1' }, payload: { code: 'probe' } }
+  let messenger = null
+
+  class FakeMessenger {
+    constructor (options) {
+      this.options = options
+      this.queue = [firstMessage, secondMessage]
+      messenger = this
+    }
+
+    async init () { return this }
+    async nextMessage () {
+      const message = this.queue.shift()
+      return message
+        ? {
+            message,
+            capacityEgress: scopedMessenger,
+            ack: async () => { acknowledgements.push(message.event.id); return true },
+            nack: async options => { deferrals.push({ id: message.event.id, options }); return true }
+          }
+        : null
+    }
+
+    close () {}
+  }
+
+  const controller = createSyncController({
+    MessengerClass: FakeMessenger,
+    _store: createSubscribable({ list: () => [{ type: 'nsec', pubkey: 'nsec1' }] }),
+    _secrets: createSubscribable({ isUnlocked: () => true, getDeviceSigner: async () => signer('device') }),
+    _trustedSigners: createSubscribable({ list: () => [{ pubkey: 'trusted1', platform: 'Laptop' }] }),
+    _contentKeys: {
+      resetDebugSources: () => {},
+      announceContentKeys: async () => {},
+      handleMessage: async (message, context) => {
+        handled.push(message.event.id)
+        signals.push(context.signal)
+        assert.equal(context.messenger, scopedMessenger)
+        if (message === firstMessage) await firstHandler.promise
+        return true
+      }
+    },
+    _claimSigner: () => signer('nsec1'),
+    _setTimeout: timers.setTimeout,
+    _clearTimeout: timers.clearTimeout,
+    _setInterval: () => ({}),
+    _clearInterval: () => {},
+    _debug: event => debugEvents.push(event)
+  })
+
+  try {
+    await controller.init()
+    await waitUntil(() => handled.length === 1)
+    timers.fire(5 * 60 * 1000)
+    await waitUntil(() => handled.length === 2 && acknowledgements.includes('event-second'))
+
+    assert.deepEqual(acknowledgements, ['event-second'])
+    assert.deepEqual(deferrals, [{ id: 'event-first', options: { retryAfterMs: 30000 } }])
+    assert.equal(signals[0].aborted, true)
+    assert.equal(controller.getDebugSnapshot().inboxHandlers.stalled, 1)
+    const timeoutDiagnostic = debugEvents.find(event => event.action === 'inbox-handler-timeout')
+    assert.equal(timeoutDiagnostic?.operationCode, 'probe')
+    assert.equal(timeoutDiagnostic?.stalledHandlerCount, 1)
+    assert.equal(JSON.stringify(timeoutDiagnostic).includes('event-first'), false)
+
+    messenger.queue.push(firstMessage)
+    messenger.options.onMessageQueued()
+    await waitUntil(() => deferrals.length === 2)
+    assert.deepEqual(handled, ['event-first', 'event-second'])
+    assert.deepEqual(deferrals[1], { id: 'event-first', options: { retryAfterMs: 30000 } })
+
+    firstHandler.resolve()
+    await waitUntil(() => controller.getDebugSnapshot().inboxHandlers.stalled === 0)
+  } finally {
+    firstHandler.resolve()
+    controller.close()
+  }
+})
+
+test('sync bounds timed-out handlers at four and resumes when one settles', async () => {
+  const timers = createManualTimeouts()
+  const handled = []
+  const acknowledgements = []
+  const deferrals = []
+  const debugEvents = []
+  const pending = Array.from({ length: 4 }, () => Promise.withResolvers())
+  const messages = Array.from({ length: 6 }, (_, index) => ({
+    type: 'reply',
+    channelPubkey: 'channel',
+    provenance: 'direct',
+    event: { id: `event-${index}`, pubkey: 'trusted1' },
+    payload: { code: 'bounded-probe' }
+  }))
+  let nextCalls = 0
+
+  class FakeMessenger {
+    constructor (options) {
+      this.options = options
+      this.queue = [...messages]
+    }
+
+    async init () { return this }
+    async nextMessage () {
+      nextCalls++
+      const message = this.queue.shift()
+      return message
+        ? {
+            message,
+            ack: async () => { acknowledgements.push(message.event.id); return true },
+            nack: async options => { deferrals.push({ id: message.event.id, options }); return true }
+          }
+        : null
+    }
+
+    close () {}
+  }
+
+  const controller = createSyncController({
+    MessengerClass: FakeMessenger,
+    _store: createSubscribable({ list: () => [{ type: 'nsec', pubkey: 'nsec1' }] }),
+    _secrets: createSubscribable({ isUnlocked: () => true, getDeviceSigner: async () => signer('device') }),
+    _trustedSigners: createSubscribable({ list: () => [{ pubkey: 'trusted1', platform: 'Laptop' }] }),
+    _contentKeys: {
+      resetDebugSources: () => {},
+      announceContentKeys: async () => {},
+      handleMessage: async message => {
+        handled.push(message.event.id)
+        const index = messages.indexOf(message)
+        if (index < pending.length) await pending[index].promise
+        return true
+      }
+    },
+    _claimSigner: () => signer('nsec1'),
+    _setTimeout: timers.setTimeout,
+    _clearTimeout: timers.clearTimeout,
+    _setInterval: () => ({}),
+    _clearInterval: () => {},
+    _debug: event => debugEvents.push(event)
+  })
+
+  try {
+    await controller.init()
+    await waitUntil(() => handled.length === 1)
+    for (let count = 1; count <= 4; count++) {
+      timers.fire(5 * 60 * 1000)
+      await waitUntil(() => deferrals.length === count)
+      if (count < 4) await waitUntil(() => handled.length === count + 1)
+    }
+
+    assert.equal(nextCalls, 4)
+    assert.deepEqual(handled, ['event-0', 'event-1', 'event-2', 'event-3'])
+    assert.deepEqual(deferrals.map(entry => entry.options), Array(4).fill({ retryAfterMs: 30000 }))
+    assert.equal(debugEvents.filter(event => event.action === 'inbox-handler-timeout').length, 4)
+    assert.equal(controller.getDebugSnapshot().inboxHandlers.stalled, 4)
+
+    pending[0].resolve()
+    await waitUntil(() => handled.includes('event-4') && acknowledgements.includes('event-4'))
+    await waitUntil(() => acknowledgements.includes('event-5'))
+    assert.equal(nextCalls >= 5, true)
+    assert.equal(controller.getDebugSnapshot().inboxHandlers.stalled, 3)
+  } finally {
+    controller.close()
+    for (const handler of pending) handler.resolve()
+  }
 })
 
 test('capacity pressure wakes the drain for already-persisted inbox items', async () => {

@@ -738,6 +738,19 @@ export function createNostrDbSyncController ({
     try { onError?.(err) } catch {}
   }
 
+  function throwIfHandlerAborted (context) {
+    context.signal?.throwIfAborted()
+  }
+
+  function backgroundContext (context = runtime) {
+    if (!context?.signal && !context?.backgroundMessenger) return context
+    return {
+      ...context,
+      messenger: context.backgroundMessenger || context.messenger,
+      signal: undefined
+    }
+  }
+
   function getState () {
     return storage ? readState(storage) : structuredClone(durableState)
   }
@@ -798,7 +811,8 @@ export function createNostrDbSyncController ({
     return normalizeRelayList(context.relaysForChannel?.(channelPubkey))
   }
 
-  function updateWireRelays (ownerPubkey, peerPubkey, direction, requestId, eventId, relays) {
+  function updateWireRelays (ownerPubkey, peerPubkey, direction, requestId, eventId, relays, context) {
+    throwIfHandlerAborted(context)
     const state = getState()
     const record = exchangeRecord(state, ownerPubkey, peerPubkey, direction, requestId)
     if (!record) return
@@ -831,6 +845,7 @@ export function createNostrDbSyncController ({
     lane,
     context = runtime
   }) {
+    throwIfHandlerAborted(context)
     ownerPubkey = normalizePubkey(ownerPubkey)
     peerPubkey = normalizePubkey(peerPubkey)
     if (!ownerPubkey || !peerPubkey) throw new Error('SYNC_EXCHANGE_IDENTITY_REQUIRED')
@@ -905,7 +920,8 @@ export function createNostrDbSyncController ({
           direction,
           requestId,
           eventId,
-          summary?.succeededRelays || fallbackRelays
+          summary?.succeededRelays || fallbackRelays,
+          context
         ))
         .then(() => scheduleExchangeMaintenance(context))
         .catch(() => {})
@@ -921,6 +937,7 @@ export function createNostrDbSyncController ({
     ask,
     context = runtime
   }) {
+    throwIfHandlerAborted(context)
     const requestId = ask.requestId
     const now = _nowMs()
     const state = getState()
@@ -1066,6 +1083,7 @@ export function createNostrDbSyncController ({
   }
 
   function scheduleExchangeMaintenance (context = runtime, { immediate = false } = {}) {
+    context = backgroundContext(context)
     if (exchangeTimer) _clearTimeout?.(exchangeTimer)
     exchangeTimer = null
     const state = getState()
@@ -1695,6 +1713,7 @@ export function createNostrDbSyncController ({
     resume = false,
     reason = onlineHint ? 'advertise' : 'initial'
   } = {}) {
+    throwIfHandlerAborted(context)
     if (!context.messenger?.ask) return null
     const channelPubkey = ownerChannelPubkey(ownerPubkey, context)
     if (!isOwnerReady(ownerPubkey, context) || !channelPubkey) return null
@@ -1744,7 +1763,9 @@ export function createNostrDbSyncController ({
     let askWindow
     try {
       askWindow = await buildAskWindow(getDb(ownerPubkey), sinceScore, targetScore, entry.windowMs)
+      throwIfHandlerAborted(context)
     } catch (err) {
+      if (context.signal?.aborted) throw err
       report(err)
       return null
     }
@@ -1777,9 +1798,11 @@ export function createNostrDbSyncController ({
       onlineRetryAt: now + onlineDelay
     }
     entry.updatedAt = now
+    throwIfHandlerAborted(context)
     setState(state)
 
     try {
+      throwIfHandlerAborted(context)
       const result = await context.messenger.ask({
         channelPubkey,
         receiverPubkey: peerPubkey,
@@ -1788,6 +1811,7 @@ export function createNostrDbSyncController ({
         idempotencyKey: coalescingDigest(['nostrdb-ask', NOSTRDB_SYNC_ASK_CODE, id]),
         useBulkPacing: true
       })
+      throwIfHandlerAborted(context)
       if (!publicationSucceeded(result)) throw new Error('SYNC_PUBLICATION_FAILED')
       if (resume) delete entry.pending?.waitingForResume
       await trackPublication({
@@ -1803,6 +1827,7 @@ export function createNostrDbSyncController ({
         context
       })
     } catch (err) {
+      if (context.signal?.aborted) throw err
       const now = _nowMs()
       if (messengerPausedError(err)) {
         markPendingForResume(entry, err, now)
@@ -1853,6 +1878,7 @@ export function createNostrDbSyncController ({
   async function maybeAskRecent (ownerPubkey, peerPubkey, context = runtime, {
     reason = 'recent'
   } = {}) {
+    throwIfHandlerAborted(context)
     if (!context.messenger?.ask) return null
     const channelPubkey = ownerChannelPubkey(ownerPubkey, context)
     if (!isOwnerReady(ownerPubkey, context) || !channelPubkey) return null
@@ -1893,6 +1919,7 @@ export function createNostrDbSyncController ({
     if (targetScore < minScore) {
       entry.recent = { ...recent, targetScore: minScore - 1, pending: null }
       entry.updatedAt = now
+      throwIfHandlerAborted(context)
       await setState(state)
       return null
     }
@@ -1904,7 +1931,9 @@ export function createNostrDbSyncController ({
         targetScore,
         recent.windowMs || entry.windowMs
       )
+      throwIfHandlerAborted(context)
     } catch (error) {
+      if (context.signal?.aborted) throw error
       report(error)
       return null
     }
@@ -1935,8 +1964,10 @@ export function createNostrDbSyncController ({
       }
     }
     entry.updatedAt = now
+    throwIfHandlerAborted(context)
     await setState(state)
     try {
+      throwIfHandlerAborted(context)
       const result = await context.messenger.ask({
         channelPubkey,
         receiverPubkey: peerPubkey,
@@ -1945,6 +1976,7 @@ export function createNostrDbSyncController ({
         idempotencyKey: coalescingDigest(['nostrdb-ask', NOSTRDB_SYNC_ASK_CODE, id]),
         useBulkPacing: true
       })
+      throwIfHandlerAborted(context)
       if (!publicationSucceeded(result)) throw new Error('SYNC_PUBLICATION_FAILED')
       await trackPublication({
         ownerPubkey,
@@ -1959,6 +1991,7 @@ export function createNostrDbSyncController ({
         context
       })
     } catch (error) {
+      if (context.signal?.aborted) throw error
       const nextState = getState()
       const nextEntry = peerState(nextState, ownerPubkey, peerPubkey)
       if (nextEntry.recent?.pending?.requestId === id) {
@@ -1998,6 +2031,7 @@ export function createNostrDbSyncController ({
     resume = false,
     reason = onlineHint ? 'online-hint' : resume ? 'resume' : 'initial'
   } = {}) {
+    throwIfHandlerAborted(context)
     if (!context.messenger?.ask) return null
     const channelPubkey = ownerChannelPubkey(ownerPubkey, context)
     if (!isOwnerReady(ownerPubkey, context) || !channelPubkey) return null
@@ -2061,9 +2095,11 @@ export function createNostrDbSyncController ({
     }
     entry.updatedAt = now
     app.updatedAt = now
+    throwIfHandlerAborted(context)
     setState(state)
 
     try {
+      throwIfHandlerAborted(context)
       const result = await context.messenger.ask({
         channelPubkey,
         receiverPubkey: peerPubkey,
@@ -2072,6 +2108,7 @@ export function createNostrDbSyncController ({
         idempotencyKey: coalescingDigest(['nostrdb-app-ask', NOSTRDB_SYNC_APP_ASK_CODE, id]),
         useBulkPacing: true
       })
+      throwIfHandlerAborted(context)
       if (!publicationSucceeded(result)) throw new Error('SYNC_PUBLICATION_FAILED')
       if (resume) delete entry.pending?.waitingForResume
       await trackPublication({
@@ -2087,6 +2124,7 @@ export function createNostrDbSyncController ({
         context
       })
     } catch (err) {
+      if (context.signal?.aborted) throw err
       const nextState = getState()
       const { app: nextApp, entry: nextEntry } = existingAppBackfillPeerState(nextState, ownerPubkey, appId, peerPubkey)
       if (nextEntry?.pending?.requestId === id) {
@@ -2132,6 +2170,7 @@ export function createNostrDbSyncController ({
     resume = false,
     reason = onlineHint ? 'online-hint' : resume ? 'resume' : 'initial'
   } = {}) {
+    throwIfHandlerAborted(context)
     const state = getState()
     const owners = state.appBackfills || {}
     const contextOwners = context.ownerPubkeys instanceof Set ? context.ownerPubkeys : new Set(context.ownerPubkeys || [])
@@ -2154,10 +2193,12 @@ export function createNostrDbSyncController ({
           ? (Object.hasOwn(appState.peers || {}, peerPubkey) ? [peerPubkey] : [])
           : appBackfillPeerKeys(appState)
         if (changed) {
+          throwIfHandlerAborted(context)
           setState(state)
           changed = false
         }
         for (const peer of peers) {
+          throwIfHandlerAborted(context)
           await maybeAskAppBackfill(owner, appId, peer, context, { onlineHint, resume, reason })
         }
       }
@@ -2166,7 +2207,10 @@ export function createNostrDbSyncController ({
         changed = true
       }
     }
-    if (changed) setState(state)
+    if (changed) {
+      throwIfHandlerAborted(context)
+      setState(state)
+    }
   }
 
   function processAppBackfills (context = runtime, options = {}) {
@@ -2236,6 +2280,7 @@ export function createNostrDbSyncController ({
   }
 
   async function handleAdvertise (ownerPubkey, message, context) {
+    throwIfHandlerAborted(context)
     const advert = normalizeAdvert(requireDataBody(message))
     const peerPubkey = normalizePubkey(message?.event?.pubkey)
     if (!advert) throw syncPayloadInvalid('advertise-payload-invalid')
@@ -2251,6 +2296,7 @@ export function createNostrDbSyncController ({
     if (compareAdvert(nextAdvert, entry.advert) <= 0) return true
     entry.advert = nextAdvert
     entry.updatedAt = _nowMs()
+    throwIfHandlerAborted(context)
     await setState(state)
     emitDebug(context.debug, 'advertise-received', {
       ownerPubkey,
@@ -2270,6 +2316,7 @@ export function createNostrDbSyncController ({
   }
 
   async function handleAsk (ownerPubkey, message, context, { tracking = true } = {}) {
+    throwIfHandlerAborted(context)
     const ask = normalizeAsk(messageBody(message))
     if (!ask) return true
     const peerPubkey = normalizePubkey(message.event?.pubkey)
@@ -2284,6 +2331,7 @@ export function createNostrDbSyncController ({
       'reply',
       ask.requestId
     )
+    throwIfHandlerAborted(context)
     await trackInboundAsk({
       ownerPubkey,
       peerPubkey,
@@ -2295,6 +2343,7 @@ export function createNostrDbSyncController ({
     if (tracking &&
         previousRecord?.status === 'reply-published' &&
         previousRecord.events.reply.length) return true
+    throwIfHandlerAborted(context)
 
     const db = getDb(ownerPubkey)
     const effectiveLimit = Math.min(ask.limit, REQUEST_LIMIT)
@@ -2302,6 +2351,7 @@ export function createNostrDbSyncController ({
       '!ids': ask.excludeIds,
       limit: effectiveLimit + 1
     }))
+    throwIfHandlerAborted(context)
     const queried = Array.isArray(response?.results) ? response.results : []
     const hasMore = queried.length > effectiveLimit
     const results = queried.slice(0, effectiveLimit)
@@ -2324,10 +2374,12 @@ export function createNostrDbSyncController ({
     }
     const trackedMessenger = {
       reply: async replyOptions => {
+        throwIfHandlerAborted(context)
         const result = await context.messenger.reply({
           ...replyOptions,
           ...(expiresAt == null ? {} : { expiresAt })
         })
+        throwIfHandlerAborted(context)
         await trackPublication({
           ownerPubkey,
           peerPubkey,
@@ -2349,7 +2401,11 @@ export function createNostrDbSyncController ({
     const packer = createEventReplyPacker({ messenger: trackedMessenger, ...options })
 
     // Failures reach the parent drain, which nacks instead of acknowledging.
-    for (const event of results) await packer.update(event)
+    for (const event of results) {
+      throwIfHandlerAborted(context)
+      await packer.update(event)
+    }
+    throwIfHandlerAborted(context)
     await packer.finalize()
     emitDebug(context.debug, 'reply', {
       ownerPubkey,
@@ -2362,6 +2418,7 @@ export function createNostrDbSyncController ({
   }
 
   async function handleAppAsk (ownerPubkey, message, context, { tracking = true } = {}) {
+    throwIfHandlerAborted(context)
     const ask = normalizeAppAsk(messageBody(message))
     if (!ask) return true
     const peerPubkey = normalizePubkey(message.event?.pubkey)
@@ -2376,6 +2433,7 @@ export function createNostrDbSyncController ({
       'reply',
       ask.requestId
     )
+    throwIfHandlerAborted(context)
     await trackInboundAsk({
       ownerPubkey,
       peerPubkey,
@@ -2387,6 +2445,7 @@ export function createNostrDbSyncController ({
     if (tracking &&
         previousRecord?.status === 'reply-published' &&
         previousRecord.events.reply.length) return true
+    throwIfHandlerAborted(context)
 
     let results = []
     let hasMore = false
@@ -2397,6 +2456,7 @@ export function createNostrDbSyncController ({
         after: ask.after,
         batchSize: ask.batchSize
       })
+      throwIfHandlerAborted(context)
       results = Array.isArray(page?.events) ? page.events.slice(0, ask.batchSize) : []
       hasMore = page?.hasMore === true
       nextAfter = normalizeOptionalEventId(page?.nextAfter) || results.at(-1)?.id || ask.after
@@ -2420,10 +2480,12 @@ export function createNostrDbSyncController ({
     }
     const trackedMessenger = {
       reply: async replyOptions => {
+        throwIfHandlerAborted(context)
         const result = await context.messenger.reply({
           ...replyOptions,
           ...(expiresAt == null ? {} : { expiresAt })
         })
+        throwIfHandlerAborted(context)
         await trackPublication({
           ownerPubkey,
           peerPubkey,
@@ -2442,7 +2504,11 @@ export function createNostrDbSyncController ({
     const packer = createEventReplyPacker({ messenger: trackedMessenger, ...options })
 
     // Failures reach the parent drain, which nacks instead of acknowledging.
-    for (const event of results) await packer.update(event)
+    for (const event of results) {
+      throwIfHandlerAborted(context)
+      await packer.update(event)
+    }
+    throwIfHandlerAborted(context)
     await packer.finalize()
     emitDebug(context.debug, 'app-reply', {
       ownerPubkey,
@@ -2511,6 +2577,7 @@ export function createNostrDbSyncController ({
   }
 
   async function handleReply (ownerPubkey, message, context) {
+    throwIfHandlerAborted(context)
     const payload = normalizeEventBatchPayload(requireDataBody(message))
     const peerPubkey = normalizePubkey(message?.event?.pubkey)
     if (!payload) throw syncPayloadInvalid('reply-payload-invalid')
@@ -2518,6 +2585,7 @@ export function createNostrDbSyncController ({
 
     const { events, rejected } = parseJsonlEventsDetailed(payload.jsonl)
     await ingestEvents(ownerPubkey, events)
+    throwIfHandlerAborted(context)
 
     const state = getState()
     const entry = peerState(state, ownerPubkey, peerPubkey)
@@ -2544,6 +2612,7 @@ export function createNostrDbSyncController ({
         )
         if (!contiguous) {
           entry.updatedAt = _nowMs()
+          throwIfHandlerAborted(context)
           setState(state)
           emitDebug(context.debug, 'reply-incomplete', {
             ownerPubkey,
@@ -2576,6 +2645,7 @@ export function createNostrDbSyncController ({
         exchange.status = 'deleting-ask'
         exchange.updatedAt = _nowMs()
         entry.updatedAt = _nowMs()
+        throwIfHandlerAborted(context)
         await setState(state)
         emitDebug(context.debug, 'reply-received', {
           ownerPubkey,
@@ -2587,6 +2657,7 @@ export function createNostrDbSyncController ({
           lane
         })
         scheduleExchangeMaintenance(context, { immediate: true })
+        throwIfHandlerAborted(context)
         if (hasMore) {
           if (lane === 'history') await maybeAsk(ownerPubkey, peerPubkey, context, { force: true, reason: 'has-more' })
           else await maybeAskRecent(ownerPubkey, peerPubkey, context, { reason: 'has-more' })
@@ -2597,6 +2668,7 @@ export function createNostrDbSyncController ({
         return true
       }
       entry.updatedAt = _nowMs()
+      throwIfHandlerAborted(context)
       setState(state)
     }
     if (rejected) throw syncPayloadInvalid('jsonl-entries-invalid', { partial: true })
@@ -2604,6 +2676,7 @@ export function createNostrDbSyncController ({
   }
 
   async function handleAppReply (ownerPubkey, message, context) {
+    throwIfHandlerAborted(context)
     const payload = normalizeAppEventBatchPayload(requireDataBody(message))
     const peerPubkey = normalizePubkey(message?.event?.pubkey)
     if (!payload) throw syncPayloadInvalid('app-reply-payload-invalid')
@@ -2620,6 +2693,7 @@ export function createNostrDbSyncController ({
 
     const { events, rejected } = parseJsonlEventsDetailed(payload.jsonl)
     await ingestAppEvents(ownerPubkey, payload.appId, events)
+    throwIfHandlerAborted(context)
     pending.replyCount = (pending.replyCount || 0) + events.length
     if (Number.isSafeInteger(payload.index) && payload.index >= 0) {
       pending.replyIndexes = [...new Set([...(pending.replyIndexes || []), payload.index])]
@@ -2634,6 +2708,7 @@ export function createNostrDbSyncController ({
       if (!expectedReplyIndexes.every(index => (pending.replyIndexes || []).includes(index))) {
         entry.updatedAt = _nowMs()
         app.updatedAt = entry.updatedAt
+        throwIfHandlerAborted(context)
         setState(state)
         emitDebug(context.debug, 'app-reply-incomplete', {
           ownerPubkey,
@@ -2657,6 +2732,7 @@ export function createNostrDbSyncController ({
       exchange.updatedAt = _nowMs()
       entry.updatedAt = _nowMs()
       app.updatedAt = entry.updatedAt
+      throwIfHandlerAborted(context)
       setState(state)
       scheduleExchangeMaintenance(context, { immediate: true })
       emitDebug(context.debug, 'app-reply-received', {
@@ -2681,16 +2757,19 @@ export function createNostrDbSyncController ({
 
     entry.updatedAt = _nowMs()
     app.updatedAt = entry.updatedAt
+    throwIfHandlerAborted(context)
     setState(state)
     if (rejected) throw syncPayloadInvalid('jsonl-entries-invalid', { partial: true })
     return true
   }
 
   async function handlePush (ownerPubkey, message, context) {
+    throwIfHandlerAborted(context)
     const payload = normalizeEventBatchPayload(requireDataBody(message))
     if (!payload) throw syncPayloadInvalid('push-payload-invalid')
     const { events, rejected } = parseJsonlEventsDetailed(payload.jsonl)
     const imported = await ingestEvents(ownerPubkey, events)
+    throwIfHandlerAborted(context)
     emitDebug(context.debug, 'push-received', {
       ownerPubkey,
       senderPubkey: message.event?.pubkey || '',
@@ -2707,6 +2786,7 @@ export function createNostrDbSyncController ({
   }
 
   async function handleMessage (message, context = runtime) {
+    throwIfHandlerAborted(context)
     const code = messageCode(message)
     if (!SYNC_CODES.has(code)) return false
     const ownerPubkey = localOwnerForMessage(message, context)
@@ -3548,6 +3628,7 @@ export function createNostrDbSyncController ({
   }
 
   function scheduleRetrySweep (context = runtime) {
+    context = backgroundContext(context)
     if (retryTimer) _clearTimeout?.(retryTimer)
     retryTimer = null
     const next = nextRetryAt(context)
