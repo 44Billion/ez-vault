@@ -100,6 +100,7 @@ function pushEvent (number) {
 }
 
 function readStateEvent (number, {
+  innerKind = '30078',
   coordinate = 'read-state-coordinate',
   createdAt = number,
   context = 'empty-context-ciphertext'
@@ -108,7 +109,7 @@ function readStateEvent (number, {
     ...pushEvent(number),
     created_at: createdAt,
     tags: [
-      ['k', '30078'],
+      ['k', innerKind],
       ['c', context],
       ['d', coordinate]
     ]
@@ -132,6 +133,91 @@ async function storedCount (queue) {
   let count = 0
   for await (const _ of queue.storedItems()) count++
   return count
+}
+
+function storedPushChunk (number, {
+  eventNumber = number,
+  channelPubkey = 'f'.repeat(64),
+  receiverPubkeys = [PEER],
+  priority = 'normal',
+  isLast = false,
+  content = ''
+} = {}) {
+  const item = { ...pushEvent(eventNumber), content }
+  const jsonl = `${JSON.stringify(item)}\n`
+  return {
+    id: eventId(1000 + number),
+    channelPubkey,
+    receiverPubkeys,
+    eventIds: [item.id],
+    eventCount: 1,
+    priority,
+    index: number,
+    isLast,
+    jsonl,
+    bytes: Buffer.byteLength(jsonl),
+    addedAt: number
+  }
+}
+
+async function seedPushChunks (records) {
+  await deleteDatabase(PUSH_CHUNK_OUTBOX)
+  const queue = await createQueue({
+    prefix: PUSH_CHUNK_OUTBOX.slice(0, -':idb-queue'.length),
+    indexedDB: globalThis.indexedDB,
+    evictionPolicy: 'reject',
+    indexes: { id: { keyPath: 'id', unique: true } }
+  })
+  try {
+    for (const record of records) await queue.putBy('id', record)
+  } finally {
+    await queue.close()
+  }
+}
+
+async function waitForCondition (condition, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error('timed out waiting for test condition')
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+}
+
+async function flushSeededPushChunks (records) {
+  await deleteDatabase(PUSH_EVENT_OUTBOX)
+  await seedPushChunks(records)
+  const channelPubkey = records[0].channelPubkey
+  const timers = []
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _indexedDB: globalThis.indexedDB,
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { firstScore: 1, lastScore: 1, scores: [] } }
+      }
+    }),
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: timer => {
+      const index = timers.indexOf(timer)
+      if (index >= 0) timers.splice(index, 1)
+    }
+  })
+  controller.ensureSubscriptions(context(msg, {
+    trustedByPubkey: new Map([...new Set(records.flatMap(record => record.receiverPubkeys))]
+      .map(pubkey => [pubkey, { pubkey }])),
+    ownerPubkeyForChannel: channel => channel === channelPubkey ? OWNER : '',
+    channelPubkeyForOwner: ownerPubkey => ownerPubkey === OWNER ? channelPubkey : ''
+  }))
+  await waitForCondition(() => timers.some(timer => timer.ms === 0))
+  const flush = timers.find(timer => timer.ms === 0)
+  assert.ok(flush)
+  await flush.fn()
+  return { channelPubkey, controller, msg, timers }
 }
 
 test('nostrdb sync advertises one account range without ownerPubkey in payload', async () => {
@@ -1161,6 +1247,170 @@ test('non-contiguous reply indexes do not complete or delete the ask', async () 
   assert.equal(owner.completedScore, undefined)
   assert.equal(owner.pending.replyIndexes.join(','), '1')
   assert.ok(diagnostics.some(entry => entry.action === 'reply-incomplete'))
+})
+
+for (const testCase of [
+  {
+    name: 'mismatched',
+    range: { sinceScore: 101, untilScore: 200 }
+  },
+  {
+    name: 'incomplete',
+    range: { sinceScore: 100 }
+  }
+]) {
+  test(`${testCase.name} reply range metadata is rejected before ingestion`, async () => {
+    globalThis.localStorage.setItem(SYNC_STATE_KEY, JSON.stringify({
+      owners: {
+        [OWNER]: {
+          [PEER]: {
+            pending: {
+              requestId: 'range-request',
+              sinceScore: 100,
+              untilScore: 200,
+              excludeIds: [],
+              limit: 200,
+              replyCount: 0,
+              replyIndexes: []
+            }
+          }
+        }
+      }
+    }))
+    const addCalls = []
+    const msg = messenger()
+    const controller = createNostrDbSyncController({
+      _setTimeout: () => ({}),
+      getDb: () => ({
+        async add (imported) {
+          addCalls.push(imported)
+          return { ok: true, stored: true }
+        }
+      })
+    })
+
+    await assert.rejects(controller.handleMessage(syncMessage({
+      code: NOSTRDB_SYNC_REPLY_CODE,
+      payload: {
+        requestId: 'range-request',
+        ...testCase.range,
+        index: 0,
+        isLast: true,
+        jsonl: `${JSON.stringify(event(1))}\n`
+      }
+    }), context(msg)), error => {
+      assert.equal(error.code, 'SYNC_PAYLOAD_INVALID')
+      assert.equal(
+        error.reason,
+        testCase.name === 'incomplete' ? 'reply-range-incomplete' : 'reply-range-mismatch'
+      )
+      return true
+    })
+    assert.deepEqual(addCalls, [])
+    const pending = controller._getState().owners[OWNER][PEER].pending
+    assert.equal(pending.replyCount, 0)
+    assert.deepEqual(pending.replyIndexes, [])
+    controller.stop()
+  })
+}
+
+test('legacy replies without range metadata still complete a pending request', async () => {
+  globalThis.localStorage.setItem(SYNC_STATE_KEY, JSON.stringify({
+    owners: {
+      [OWNER]: {
+        [PEER]: {
+          pending: {
+            requestId: 'legacy-range-request',
+            sinceScore: 100,
+            untilScore: 200,
+            excludeIds: [],
+            limit: 200,
+            replyCount: 0,
+            replyIndexes: []
+          }
+        }
+      }
+    }
+  }))
+  const imported = event(1)
+  const addCalls = []
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      async add (added) {
+        addCalls.push(added)
+        return { ok: true, stored: true }
+      }
+    })
+  })
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_REPLY_CODE,
+    payload: {
+      requestId: 'legacy-range-request',
+      index: 0,
+      isLast: true,
+      hasMore: false,
+      jsonl: `${JSON.stringify(imported)}\n`
+    }
+  }), context(msg))
+
+  assert.deepEqual(addCalls, [imported])
+  const owner = controller._getState().owners[OWNER][PEER]
+  assert.equal(owner.pending, null)
+  assert.equal(owner.completedScore, 200)
+  controller.stop()
+})
+
+test('late replies without a pending request are ingested without changing the active cursor', async () => {
+  globalThis.localStorage.setItem(SYNC_STATE_KEY, JSON.stringify({
+    owners: {
+      [OWNER]: {
+        [PEER]: {
+          pending: {
+            requestId: 'current-request',
+            sinceScore: 100,
+            untilScore: 200,
+            excludeIds: [],
+            limit: 200,
+            replyCount: 0,
+            replyIndexes: []
+          }
+        }
+      }
+    }
+  }))
+  const imported = event(1)
+  const addCalls = []
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      async add (added) {
+        addCalls.push(added)
+        return { ok: true, stored: true }
+      }
+    })
+  })
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_REPLY_CODE,
+    payload: {
+      requestId: 'superseded-request',
+      index: 0,
+      isLast: true,
+      hasMore: false,
+      jsonl: `${JSON.stringify(imported)}\n`
+    }
+  }), context(msg))
+
+  assert.deepEqual(addCalls, [imported])
+  const owner = controller._getState().owners[OWNER][PEER]
+  assert.equal(owner.pending.requestId, 'current-request')
+  assert.equal(owner.pending.replyCount, 0)
+  assert.equal(owner.completedScore, undefined)
+  controller.stop()
 })
 
 test('nostrdb data payload validation quarantines shape errors and ignores invalid requests', async () => {
@@ -2429,6 +2679,64 @@ test('read-state pushes coalesce to the latest stored version per coordinate', a
   )
 })
 
+test('all coordinate personal copies coalesce while unaddressed copies remain distinct', async () => {
+  let now = 1000
+  const timers = []
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => now,
+    getDb: () => ({ subscribe: emptySubscription }),
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: timer => {
+      const index = timers.indexOf(timer)
+      if (index >= 0) timers.splice(index, 1)
+    }
+  })
+  controller.ensureSubscriptions(context(msg, {
+    emptyPersonalCopyContextByOwner: new Map([[OWNER, 'empty-context-ciphertext']])
+  }))
+
+  const olderProfile = readStateEvent(1, { innerKind: '0', coordinate: 'profile-coordinate', createdAt: 10 })
+  const newerProfile = readStateEvent(2, { innerKind: '0', coordinate: 'profile-coordinate', createdAt: 20 })
+  const olderSet = readStateEvent(3, { innerKind: '30000', coordinate: 'shared-coordinate', createdAt: 30 })
+  const newerSet = readStateEvent(4, { innerKind: '30000', coordinate: 'shared-coordinate', createdAt: 40 })
+  const differentKind = readStateEvent(5, { innerKind: '30001', coordinate: 'shared-coordinate', createdAt: 50 })
+  const noCoordinate = { ...pushEvent(6), tags: [['k', '1'], ['c', 'empty-context-ciphertext']] }
+  const duplicateCoordinate = {
+    ...pushEvent(7),
+    tags: [
+      ['k', '30002'],
+      ['c', 'empty-context-ciphertext'],
+      ['d', 'duplicate-coordinate'],
+      ['d', 'duplicate-coordinate']
+    ]
+  }
+  for (const item of [
+    olderProfile,
+    newerProfile,
+    olderSet,
+    newerSet,
+    differentKind,
+    noCoordinate,
+    duplicateCoordinate
+  ]) {
+    await controller.queuePush(OWNER, item)
+  }
+
+  now = 1200
+  await timers.shift().fn()
+  assert.equal(msg.sent.length, 1)
+  assert.deepEqual(
+    msg.sent[0].options.payload.jsonl.trim().split('\n').map(line => JSON.parse(line).id),
+    [newerProfile.id, newerSet.id, differentKind.id, noCoordinate.id, duplicateCoordinate.id]
+  )
+  controller.stop()
+})
+
 test('durable read-state push outbox keeps one latest record per coordinate', async () => {
   await deleteDatabase(PUSH_EVENT_OUTBOX)
   await deleteDatabase(PUSH_CHUNK_OUTBOX)
@@ -2819,6 +3127,174 @@ test('push batches bound UTF-8 bytes, retry failures and never overlap in-flight
   assert.deepEqual(new Set(ids), new Set([event(1).id, ...pending.map(item => item.id), event(100).id]))
   assert.equal(ids.length, 12)
   controller.stop()
+})
+
+test('one compatible pending push chunk pair is concatenated per flush', async () => {
+  const first = storedPushChunk(1, {
+    receiverPubkeys: [PEER, PEER2],
+    isLast: false
+  })
+  const second = storedPushChunk(2, {
+    receiverPubkeys: [PEER2, PEER],
+    isLast: true
+  })
+  const third = storedPushChunk(3, {
+    receiverPubkeys: [PEER, PEER2],
+    isLast: true
+  })
+  const { controller, msg } = await flushSeededPushChunks([first, second, third])
+  try {
+    assert.equal(msg.sent.length, 2)
+    assert.deepEqual(
+      msg.sent[0].options.payload.jsonl.trim().split('\n').map(line => JSON.parse(line).id),
+      [pushEvent(1).id, pushEvent(2).id]
+    )
+    assert.equal(msg.sent[0].options.payload.index, first.index)
+    assert.equal(msg.sent[0].options.payload.isLast, second.isLast)
+    assert.deepEqual(msg.sent[1].options.payload.jsonl.trim().split('\n').map(line => JSON.parse(line).id), [
+      pushEvent(3).id
+    ])
+    assert.match(msg.sent[0].options.idempotencyKey, /^[0-9a-f]{64}$/)
+  } finally {
+    controller.stop()
+    await new Promise(resolve => setImmediate(resolve))
+    await deleteDatabase(PUSH_EVENT_OUTBOX)
+    await deleteDatabase(PUSH_CHUNK_OUTBOX)
+  }
+})
+
+for (const testCase of [
+  {
+    name: 'different receivers',
+    records: [
+      storedPushChunk(1, { receiverPubkeys: [PEER], isLast: false }),
+      storedPushChunk(2, { receiverPubkeys: [PEER2], isLast: true })
+    ]
+  },
+  {
+    name: 'different priorities',
+    records: [
+      storedPushChunk(1, { priority: 'normal', isLast: false }),
+      storedPushChunk(2, { priority: 'lower', isLast: true })
+    ]
+  },
+  {
+    name: 'different channels',
+    records: [
+      storedPushChunk(1, { channelPubkey: 'f'.repeat(64), isLast: false }),
+      storedPushChunk(2, { channelPubkey: 'd'.repeat(64), isLast: true })
+    ]
+  },
+  {
+    name: 'the event-count cap',
+    records: [
+      {
+        ...storedPushChunk(1, { isLast: false }),
+        eventIds: Array.from({ length: 51 }, (_, index) => eventId(index + 1)),
+        eventCount: 51
+      },
+      {
+        ...storedPushChunk(2, { isLast: true }),
+        eventIds: Array.from({ length: 51 }, (_, index) => eventId(index + 101)),
+        eventCount: 51
+      }
+    ]
+  },
+  {
+    name: 'the byte cap',
+    records: [
+      storedPushChunk(1, { content: 'á'.repeat(40000), isLast: false }),
+      storedPushChunk(2, { content: 'á'.repeat(40000), isLast: true })
+    ]
+  }
+]) {
+  test(`push chunk coalescing preserves originals for ${testCase.name}`, async () => {
+    const { controller, msg } = await flushSeededPushChunks(testCase.records)
+    try {
+      assert.equal(msg.sent.length, 2)
+      assert.ok(msg.sent.every(item => item.options.payload.jsonl.trim().split('\n').length >= 1))
+    } finally {
+      controller.stop()
+      await new Promise(resolve => setImmediate(resolve))
+      await deleteDatabase(PUSH_EVENT_OUTBOX)
+      await deleteDatabase(PUSH_CHUNK_OUTBOX)
+    }
+  })
+}
+
+test('a failed substitute chunk persistence leaves both originals queued', async () => {
+  const first = storedPushChunk(1, { isLast: false })
+  const second = storedPushChunk(2, { isLast: true })
+  await deleteDatabase(PUSH_EVENT_OUTBOX)
+  await seedPushChunks([first, second])
+  const channelPubkey = first.channelPubkey
+  const timers = []
+  const msg = messenger()
+  msg.yell = async () => {
+    throw new Error('RELAY_UNAVAILABLE')
+  }
+  let failSubstitute = true
+  const controller = createNostrDbSyncController({
+    _indexedDB: globalThis.indexedDB,
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { firstScore: 1, lastScore: 1, scores: [] } }
+      }
+    }),
+    _createPushQueue: async options => {
+      const queue = await createQueue(options)
+      if (!options.prefix.includes('push-chunks')) return queue
+      const putBy = queue.putBy.bind(queue)
+      queue.putBy = async (...args) => {
+        if (failSubstitute && args[1]?.eventIds?.length === 2) {
+          failSubstitute = false
+          throw new Error('IDB_UNAVAILABLE')
+        }
+        return putBy(...args)
+      }
+      return queue
+    },
+    onError: () => {},
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: timer => {
+      const index = timers.indexOf(timer)
+      if (index >= 0) timers.splice(index, 1)
+    }
+  })
+  controller.ensureSubscriptions(context(msg, {
+    ownerPubkeyForChannel: channel => channel === channelPubkey ? OWNER : '',
+    channelPubkeyForOwner: ownerPubkey => ownerPubkey === OWNER ? channelPubkey : ''
+  }))
+  await waitForCondition(() => timers.some(timer => timer.ms === 0))
+  const flush = timers.find(timer => timer.ms === 0)
+  assert.ok(flush)
+  await flush.fn()
+
+  try {
+    const chunks = await createQueue({
+      prefix: PUSH_CHUNK_OUTBOX.slice(0, -':idb-queue'.length),
+      indexedDB: globalThis.indexedDB,
+      evictionPolicy: 'reject',
+      indexes: { id: { keyPath: 'id', unique: true } }
+    })
+    try {
+      const ids = []
+      for await (const chunk of chunks.storedItems()) ids.push(chunk.id)
+      assert.deepEqual(ids.sort(), [first.id, second.id].sort())
+    } finally {
+      await chunks.close()
+    }
+  } finally {
+    controller.stop()
+    await new Promise(resolve => setImmediate(resolve))
+    await deleteDatabase(PUSH_EVENT_OUTBOX)
+    await deleteDatabase(PUSH_CHUNK_OUTBOX)
+  }
 })
 
 test('nostrdb push preserves the relay deadline already capped by the pool', async () => {

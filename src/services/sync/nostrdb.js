@@ -157,6 +157,20 @@ function pushChunkIdempotencyKey (events) {
   ])
 }
 
+function pushChunkReceiverKey (chunk) {
+  return normalizeIdList(chunk?.receiverPubkeys, Number.MAX_SAFE_INTEGER).sort().join(',')
+}
+
+function canCoalescePushChunks (first, second) {
+  if (!first || !second || first.id === second.id ||
+      first.channelPubkey !== second.channelPubkey ||
+      first.priority !== second.priority ||
+      pushChunkReceiverKey(first) !== pushChunkReceiverKey(second)) return false
+  if (first.eventIds.length + second.eventIds.length > PUSH_EVENTS_PER_CHUNK) return false
+  return encoder.encode(first.jsonl).byteLength + encoder.encode(second.jsonl).byteLength <=
+    SYNC_BYTES_PER_CHUNK
+}
+
 function personalCopyTag (event, name) {
   const tags = Array.isArray(event?.tags)
     ? event.tags.filter(tag => Array.isArray(tag) && tag[0] === name && tag.length === 2)
@@ -165,13 +179,14 @@ function personalCopyTag (event, name) {
 }
 
 function pushEventCoalescingKey (event) {
-  // Kind 30078 is addressable; the derived wrapper d already binds context,
-  // effective author and inner d-tag without exposing their plaintext values.
-  if (event?.kind !== PERSONAL_COPY || personalCopyTag(event, 'k') !== '30078') return ''
+  // The derived wrapper d binds context, inner kind, effective author and
+  // inner d-tag without exposing their plaintext values.
+  if (event?.kind !== PERSONAL_COPY) return ''
+  const innerKind = personalCopyTag(event, 'k')
   const context = personalCopyTag(event, 'c')
   const coordinate = personalCopyTag(event, 'd')
-  if (!context || !coordinate) return ''
-  return coalescingDigest(['nostrdb-read-state', context, coordinate])
+  if (!innerKind || !context || !coordinate) return ''
+  return coalescingDigest(['nostrdb-personal-copy', innerKind, context, coordinate])
 }
 
 function comparePushEventRecords (left, right) {
@@ -2600,14 +2615,11 @@ export function createNostrDbSyncController ({
 
   async function handleReply (ownerPubkey, message, context) {
     throwIfHandlerAborted(context)
-    const payload = normalizeEventBatchPayload(requireDataBody(message))
+    const body = requireDataBody(message)
+    const payload = normalizeEventBatchPayload(body)
     const peerPubkey = normalizePubkey(message?.event?.pubkey)
     if (!payload) throw syncPayloadInvalid('reply-payload-invalid')
     if (!peerPubkey) return true
-
-    const { events, rejected } = parseJsonlEventsDetailed(payload.jsonl)
-    await ingestEvents(ownerPubkey, events)
-    throwIfHandlerAborted(context)
 
     const state = getState()
     const entry = peerState(state, ownerPubkey, peerPubkey)
@@ -2618,6 +2630,22 @@ export function createNostrDbSyncController ({
       ? entry.recent.pending
       : null
     const pending = historyPending || recentPending
+    if (pending) {
+      const hasSinceScore = Object.hasOwn(body, 'sinceScore')
+      const hasUntilScore = Object.hasOwn(body, 'untilScore')
+      if (hasSinceScore !== hasUntilScore) {
+        throw syncPayloadInvalid('reply-range-incomplete')
+      }
+      if (hasSinceScore &&
+          (payload.sinceScore !== pending.sinceScore || payload.untilScore !== pending.untilScore)) {
+        throw syncPayloadInvalid('reply-range-mismatch')
+      }
+    }
+
+    const { events, rejected } = parseJsonlEventsDetailed(payload.jsonl)
+    await ingestEvents(ownerPubkey, events)
+    throwIfHandlerAborted(context)
+
     if (pending) {
       const lane = historyPending ? 'history' : 'recent'
       pending.replyCount = (pending.replyCount || 0) + events.length
@@ -3341,6 +3369,42 @@ export function createNostrDbSyncController ({
     queue.recoveryAgain = true
   }
 
+  async function coalescePushChunkPair (ownerPubkey, queue) {
+    const chunks = [...queue.chunks.values()]
+      .sort((left, right) => pushRecordOrder(left, right) || left.index - right.index)
+    for (let index = 0; index < chunks.length - 1; index++) {
+      const first = chunks[index]
+      const second = chunks[index + 1]
+      if (!canCoalescePushChunks(first, second)) continue
+      const eventIds = [...first.eventIds, ...second.eventIds]
+      const jsonl = first.jsonl + second.jsonl
+      const id = pushChunkIdempotencyKey(eventIds.map(eventId => ({ id: eventId })))
+      if (id === first.id || id === second.id) continue
+      const chunk = {
+        id,
+        channelPubkey: first.channelPubkey,
+        receiverPubkeys: [...first.receiverPubkeys],
+        eventIds,
+        eventCount: eventIds.length,
+        priority: first.priority,
+        index: first.index,
+        isLast: second.isLast,
+        jsonl,
+        bytes: encoder.encode(jsonl).byteLength,
+        addedAt: Math.min(first.addedAt, second.addedAt)
+      }
+      const persisted = await persistPushChunkRecord(ownerPubkey, queue, chunk)
+      if (!persisted) return false
+      queue.chunks.set(chunk.id, chunk)
+      queue.chunks.delete(first.id)
+      queue.chunks.delete(second.id)
+      await removePushChunkRecord(ownerPubkey, first)
+      await removePushChunkRecord(ownerPubkey, second)
+      return true
+    }
+    return false
+  }
+
   async function packPushPriority (ownerPubkey, queue, priority, target) {
     const rawRecords = [...queue.events.values()]
       .filter(record => record.persisted && record.priority === priority)
@@ -3494,6 +3558,8 @@ export function createNostrDbSyncController ({
         }
       }
 
+      if (current()) await coalescePushChunkPair(ownerPubkey, queue)
+      if (!current()) return
       const chunks = [...queue.chunks.values()]
         .sort((left, right) => pushRecordOrder(left, right) || left.index - right.index)
       for (const chunk of chunks) {
