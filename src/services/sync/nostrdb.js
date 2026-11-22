@@ -616,6 +616,100 @@ function setLaneCycleReplyIds (entry, lane, values) {
   else delete entry.historyCycleReplyIds
 }
 
+function normalizedRecentHead (value) {
+  const floor = isSafeScore(value?.floor) ? value.floor : null
+  const ceiling = isSafeScore(value?.ceiling) ? value.ceiling : null
+  return floor != null && ceiling != null && floor <= ceiling
+    ? { floor, ceiling }
+    : null
+}
+
+// Recent keeps one contiguous base and at most one fresh head. The head gives
+// priority to the latest advert while the middle gap is filled from old to new.
+function normalizeRecentState (entry, advertisedTarget, completedScore) {
+  const previous = isPlainObject(entry.recent) ? entry.recent : {}
+  const structured = isSafeScore(previous.descentScore) && isSafeScore(previous.coveredCeiling)
+  const legacyTarget = isSafeScore(previous.targetScore)
+    ? Math.min(previous.targetScore, advertisedTarget)
+    : null
+  const descentScore = isSafeScore(previous.descentScore)
+    ? previous.descentScore
+    : legacyTarget ?? advertisedTarget
+  let coveredCeiling = Math.max(
+    completedScore,
+    isSafeScore(previous.coveredCeiling)
+      ? previous.coveredCeiling
+      : legacyTarget ?? completedScore
+  )
+  let headCoverage = normalizedRecentHead(previous.headCoverage)
+  let gapCeiling = isSafeScore(previous.gapCeiling) ? previous.gapCeiling : null
+  let pending = isPlainObject(previous.pending) ? previous.pending : null
+  if (!structured && pending && pending.untilScore > advertisedTarget) pending = null
+  if (pending && !['descent', 'gap-head', 'gap-fill'].includes(pending.phase)) {
+    pending.phase = 'descent'
+  }
+  if (headCoverage && headCoverage.floor <= coveredCeiling + 1) {
+    coveredCeiling = Math.max(coveredCeiling, headCoverage.ceiling)
+    headCoverage = null
+  }
+  if (headCoverage && (gapCeiling == null || gapCeiling < headCoverage.ceiling)) {
+    gapCeiling = headCoverage.ceiling
+  }
+  if (gapCeiling != null && gapCeiling <= coveredCeiling) gapCeiling = null
+  const next = {
+    ...previous,
+    descentScore,
+    coveredCeiling,
+    gapCeiling,
+    headCoverage,
+    pending
+  }
+  delete next.targetScore
+  return next
+}
+
+function reconcileRecentCoverage (recent) {
+  if (recent.headCoverage && recent.headCoverage.floor <= recent.coveredCeiling + 1) {
+    recent.coveredCeiling = Math.max(recent.coveredCeiling, recent.headCoverage.ceiling)
+    recent.headCoverage = null
+  }
+  if (recent.headCoverage &&
+      (recent.gapCeiling == null || recent.gapCeiling < recent.headCoverage.ceiling)) {
+    recent.gapCeiling = recent.headCoverage.ceiling
+  }
+  if (recent.gapCeiling != null && recent.gapCeiling <= recent.coveredCeiling) {
+    recent.gapCeiling = null
+  }
+}
+
+function recentPhase (recent) {
+  reconcileRecentCoverage(recent)
+  if (recent.gapCeiling != null && recent.gapCeiling > recent.coveredCeiling) {
+    if (!recent.headCoverage || recent.gapCeiling > recent.headCoverage.ceiling) return 'gap-head'
+    return 'gap-fill'
+  }
+  return 'descent'
+}
+
+function advanceRecentCoverage (recent, pending) {
+  const phase = pending.phase || 'descent'
+  if (phase === 'descent') {
+    recent.descentScore = Math.min(
+      isSafeScore(recent.descentScore) ? recent.descentScore : pending.untilScore,
+      pending.sinceScore - 1
+    )
+    recent.coveredCeiling = Math.max(recent.coveredCeiling, pending.untilScore)
+  } else if (phase === 'gap-head') {
+    const previous = normalizedRecentHead(recent.headCoverage)
+    recent.headCoverage = previous && pending.sinceScore === previous.ceiling + 1
+      ? { floor: previous.floor, ceiling: pending.untilScore }
+      : { floor: pending.sinceScore, ceiling: pending.untilScore }
+  } else {
+    recent.coveredCeiling = Math.max(recent.coveredCeiling, pending.untilScore)
+  }
+  reconcileRecentCoverage(recent)
+}
+
 function appBackfillsState (state) {
   if (!isPlainObject(state.appBackfills)) state.appBackfills = {}
   return state.appBackfills
@@ -2066,11 +2160,12 @@ export function createNostrDbSyncController ({
 
   async function buildRecentAskWindow (db, minScore, targetScore, windowMs, {
     allowExpanded = false,
-    additionalExcludeIds = []
+    additionalExcludeIds = [],
+    minSince = minScore
   } = {}) {
     let size = clampWindow(windowMs)
     while (true) {
-      const sinceScore = Math.max(minScore, targetScore - size + 1)
+      const sinceScore = Math.max(minScore, minSince, targetScore - size + 1)
       const excludeIds = await localInventoryIds(db, sinceScore, targetScore)
       const mergedIds = mergeIdLists(
         DENSE_INVENTORY_QUERY_LIMIT,
@@ -2142,64 +2237,113 @@ export function createNostrDbSyncController ({
     const completedValue = storedCompleted > advert.maxScore
       ? advert.minScore - 1
       : storedCompleted
-    if (completedValue !== storedCompleted) entry.completedScore = completedValue
+    if (completedValue !== storedCompleted) {
+      entry.completedScore = completedValue
+      setLaneCycleReplyIds(entry, 'recent', [])
+    }
     const advertisedTarget = Math.max(advert.maxScore, now + SYNC_ANCHOR_MAX_FUTURE_SKEW_MS)
-    const completed = completedValue
-    const recent = isPlainObject(entry.recent) ? entry.recent : { targetScore: advertisedTarget }
-    if (completedValue !== storedCompleted) setLaneCycleReplyIds(entry, 'recent', [])
+    const hadRecentState = isPlainObject(entry.recent)
+    const recent = normalizeRecentState(entry, advertisedTarget, completedValue)
+    entry.recent = recent
     const pending = recent.pending
-    if (pending && (
-      (reason !== 'advertise' && pending.untilScore >= advertisedTarget) ||
-      (reason === 'advertise' && pending.untilScore === advertisedTarget)
-    )) {
+    if (pending) {
+      const coveredThrough = Math.max(
+        recent.coveredCeiling,
+        recent.gapCeiling || -1,
+        recent.headCoverage?.ceiling ?? -1,
+        pending.untilScore || -1
+      )
+      if (advertisedTarget > coveredThrough) {
+        recent.gapCeiling = advertisedTarget
+        entry.updatedAt = now
+        throwIfHandlerAborted(context)
+        await setState(state)
+      }
       scheduleExchangeMaintenance(context)
       return null
     }
-    if (pending && (reason === 'advertise' || pending.untilScore < advertisedTarget)) {
-      const previous = exchangeRecord(state, ownerPubkey, peerPubkey, 'ask', pending.requestId)
-      if (previous) {
-        previous.status = 'deleting-ask'
-        previous.updatedAt = now
-      }
+    if (reason === 'advertise' &&
+        hadRecentState &&
+        advertisedTarget > recent.coveredCeiling &&
+        advertisedTarget > (recent.gapCeiling ?? -1)) {
+      recent.gapCeiling = advertisedTarget
     }
-    const targetScore = reason === 'advertise'
-      ? advertisedTarget
-      : (isSafeScore(recent.targetScore) ? recent.targetScore : advertisedTarget)
-    const minScore = Math.max(advert.minScore, completed + 1)
-    if (targetScore < minScore) {
-      flushDenseRangeDebug(context, denseBatch)
-      entry.recent = { ...recent, targetScore: minScore - 1, pending: null }
-      setLaneCycleReplyIds(entry, 'recent', [])
-      entry.updatedAt = now
-      throwIfHandlerAborted(context)
-      await setState(state)
-      return null
-    }
+    const minScore = Math.max(advert.minScore, completedValue + 1)
+    if (recent.coveredCeiling < completedValue) recent.coveredCeiling = completedValue
+    if (recent.descentScore < minScore - 1) recent.descentScore = minScore - 1
+    reconcileRecentCoverage(recent)
+    const phase = recentPhase(recent)
+    let targetScore
     let askWindow
-    try {
-      askWindow = await buildRecentAskWindow(
-        getDb(ownerPubkey),
-        minScore,
-        targetScore,
-        recent.windowMs || entry.windowMs,
-        {
+    if (phase === 'gap-fill') {
+      const sinceScore = recent.coveredCeiling + 1
+      targetScore = recent.headCoverage.floor - 1
+      if (sinceScore > targetScore) {
+        reconcileRecentCoverage(recent)
+        entry.updatedAt = now
+        setState(state)
+        return maybeAskRecent(ownerPubkey, peerPubkey, context, {
+          reason: 'gap-connected',
+          denseBatch
+        })
+      }
+      try {
+        askWindow = await buildAskWindow(getDb(ownerPubkey), sinceScore, targetScore, recent.windowMs, {
           allowExpanded: reason === 'has-more',
           additionalExcludeIds: laneCycleReplyIds(entry, 'recent')
-        }
-      )
-      throwIfHandlerAborted(context)
-    } catch (error) {
-      if (context.signal?.aborted) throw error
-      report(error)
-      return null
+        })
+        throwIfHandlerAborted(context)
+      } catch (error) {
+        if (context.signal?.aborted) throw error
+        report(error)
+        return null
+      }
+    } else {
+      targetScore = phase === 'gap-head' ? recent.gapCeiling : recent.descentScore
+      if (!isSafeScore(targetScore) || targetScore < minScore) {
+        flushDenseRangeDebug(context, denseBatch)
+        recent.descentScore = minScore - 1
+        recent.pending = null
+        entry.updatedAt = now
+        setState(state)
+        return null
+      }
+      let minSince = minScore
+      if (phase === 'gap-head') {
+        minSince = Math.max(
+          minScore,
+          recent.coveredCeiling + 1,
+          recent.headCoverage ? recent.headCoverage.ceiling + 1 : recent.coveredCeiling + 1
+        )
+      }
+      try {
+        askWindow = await buildRecentAskWindow(
+          getDb(ownerPubkey),
+          minScore,
+          targetScore,
+          recent.windowMs,
+          {
+            allowExpanded: reason === 'has-more',
+            additionalExcludeIds: laneCycleReplyIds(entry, 'recent'),
+            minSince
+          }
+        )
+        throwIfHandlerAborted(context)
+      } catch (error) {
+        if (context.signal?.aborted) throw error
+        report(error)
+        return null
+      }
     }
     if (askWindow.saturated) {
-      entry.recent = {
-        ...recent,
-        targetScore: Math.min(targetScore, askWindow.sinceScore - 1),
-        windowMs: askWindow.windowMs,
-        pending: null
+      const coveredPending = {
+        phase,
+        sinceScore: askWindow.sinceScore,
+        untilScore: askWindow.untilScore
       }
+      advanceRecentCoverage(recent, coveredPending)
+      recent.windowMs = askWindow.windowMs
+      recent.pending = null
       setLaneCycleReplyIds(entry, 'recent', [])
       entry.updatedAt = now
       throwIfHandlerAborted(context)
@@ -2227,10 +2371,11 @@ export function createNostrDbSyncController ({
     }
     const cycleReplyIds = laneCycleReplyIds(entry, 'recent')
     entry.recent = {
-      targetScore,
+      ...recent,
       windowMs: askWindow.windowMs,
       ...(cycleReplyIds.length ? { cycleReplyIds } : {}),
       pending: {
+        phase,
         requestId: id,
         sinceScore: askWindow.sinceScore,
         untilScore: askWindow.untilScore,
@@ -2303,6 +2448,7 @@ export function createNostrDbSyncController ({
       excludeCount: payload.excludeIds.length,
       reason,
       lane: 'recent',
+      recentPhase: phase,
       attempt
     })
     flushDenseRangeDebug(context, denseBatch)
@@ -2945,8 +3091,8 @@ export function createNostrDbSyncController ({
             entry.completedScore = Math.max(entry.completedScore || 0, pending.untilScore)
             entry.windowMs = adaptWindow(entry.windowMs, replyCount, pending.limit || REQUEST_LIMIT)
           } else {
-            entry.recent.targetScore = Math.min(entry.recent.targetScore, pending.sinceScore - 1)
             entry.recent.windowMs = adaptWindow(entry.recent.windowMs, replyCount, pending.limit || REQUEST_LIMIT)
+            advanceRecentCoverage(entry.recent, pending)
           }
         }
         if (lane === 'history') entry.pending = null

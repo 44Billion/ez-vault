@@ -433,7 +433,7 @@ test('advert updates are immediately visible to the recent recovery lane without
   controller.stop()
 })
 
-test('a new advert replaces a legacy future recent target with its current maxScore', async () => {
+test('a new advert repairs a legacy future recent cursor with its current maxScore', async () => {
   const msg = messenger()
   globalThis.localStorage.setItem(SYNC_STATE_KEY, JSON.stringify({
     owners: {
@@ -473,7 +473,8 @@ test('a new advert replaces a legacy future recent target with its current maxSc
 
   const recent = controller._getState().owners[OWNER][PEER].recent
   assert.equal(controller._getState().owners[OWNER][PEER].completedScore, 999)
-  assert.equal(recent.targetScore, 10000)
+  assert.equal(recent.descentScore, 10000)
+  assert.equal(recent.coveredCeiling, 10000)
   assert.equal(recent.pending.untilScore, 10000)
   assert.notEqual(recent.pending.requestId, 'legacy-future')
 })
@@ -499,7 +500,7 @@ test('stale adverts use the five-second local score margin in both lanes', async
 
   const owner = controller._getState().owners[OWNER][PEER]
   assert.equal(owner.pending.untilScore, 6000)
-  assert.equal(owner.recent.targetScore, 6000)
+  assert.equal(owner.recent.descentScore, 6000)
   assert.equal(owner.recent.pending.untilScore, 6000)
 })
 
@@ -607,7 +608,7 @@ test('newer advertisements do not bypass pending exchange verification', async (
   assert.equal(pending.attempt, 0)
 
   const stats = controller.getDebugSnapshot().askStats
-  assert.equal(stats.emitted[`${NOSTRDB_SYNC_ASK_CODE}:advertise`], 5)
+  assert.equal(stats.emitted[`${NOSTRDB_SYNC_ASK_CODE}:advertise`], 2)
   assert.equal(stats.suppressed[`${NOSTRDB_SYNC_ASK_CODE}:advertise`], 3)
 })
 
@@ -2395,6 +2396,10 @@ test('recent recovery walks backward independently of the historical lane', asyn
   const secondRecent = controller._getState().owners[OWNER][PEER].recent.pending
   assert.ok(secondRecent)
   assert.equal(secondRecent.untilScore, firstRecent.sinceScore - 1)
+  assert.equal(
+    controller._getState().owners[OWNER][PEER].recent.descentScore,
+    firstRecent.sinceScore - 1
+  )
   assert.ok(secondRecent.requestId !== firstRecent.requestId)
   assert.ok(msg.sent.some(item => item.options.payload.requestId === secondRecent.requestId))
 })
@@ -2453,11 +2458,415 @@ test('recent growth from a one-second window also uses the one-minute floor', as
 
   const state = controller._getState().owners[OWNER][PEER]
   assert.equal(state.recent.windowMs, 4 * 60 * 1000)
-  assert.equal(state.recent.targetScore, firstRecent.sinceScore - 1)
+  assert.equal(state.recent.descentScore, firstRecent.sinceScore - 1)
   assert.equal(
     state.recent.pending.sinceScore,
-    state.recent.targetScore - state.recent.windowMs + 1
+    state.recent.descentScore - state.recent.windowMs + 1
   )
+})
+
+test('recent lets an in-flight descent finish before covering a newer advert gap', async () => {
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { scores: [] } }
+      },
+      async add () {
+        return { ok: true, stored: true }
+      }
+    })
+  })
+  controller.ensureSubscriptions(context(msg))
+  const recentAsks = () => msg.sent
+    .filter(item => item.method === 'ask' && item.options.payload.priority === undefined)
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: 900, minScore: 1000, maxScore: 10000 }
+  }), context(msg))
+  const firstPending = controller._getState().owners[OWNER][PEER].recent.pending
+  assert.equal(firstPending.phase, 'descent')
+  assert.equal(firstPending.untilScore, 10000)
+  assert.equal(recentAsks().length, 1)
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: 901, minScore: 1000, maxScore: 20000 }
+  }), context(msg))
+  let recent = controller._getState().owners[OWNER][PEER].recent
+  assert.equal(recent.pending.requestId, firstPending.requestId)
+  assert.equal(recent.pending.phase, 'descent')
+  assert.equal(recent.gapCeiling, 20000)
+  assert.equal(recentAsks().length, 1)
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_REPLY_CODE,
+    payload: {
+      requestId: firstPending.requestId,
+      sinceScore: firstPending.sinceScore,
+      untilScore: firstPending.untilScore,
+      hasMore: false,
+      index: 0,
+      isLast: true,
+      jsonl: ''
+    }
+  }), context(msg))
+
+  recent = controller._getState().owners[OWNER][PEER].recent
+  assert.equal(recent.descentScore, firstPending.sinceScore - 1)
+  assert.equal(recent.pending.phase, 'gap-head')
+  assert.equal(recent.pending.untilScore, 20000)
+  assert.equal(recent.pending.sinceScore, recent.coveredCeiling + 1)
+  assert.equal(recent.gapCeiling, 20000)
+  assert.equal(recentAsks().length, 2)
+})
+
+test('recent fills a gap with a fresh head and then connects it from the base upward', async () => {
+  globalThis.localStorage.setItem(SYNC_STATE_KEY, JSON.stringify({
+    owners: {
+      [OWNER]: {
+        [PEER]: {
+          completedScore: 1000,
+          recent: {
+            descentScore: 90000,
+            coveredCeiling: 100000,
+            gapCeiling: 120000,
+            headCoverage: null,
+            windowMs: 10000
+          },
+          updatedAt: 1000
+        }
+      }
+    }
+  }))
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { scores: [] } }
+      },
+      async add () {
+        return { ok: true, stored: true }
+      }
+    })
+  })
+  controller.ensureSubscriptions(context(msg))
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: 900, minScore: 1000, maxScore: 120000 }
+  }), context(msg))
+  let recent = controller._getState().owners[OWNER][PEER].recent
+  const headAsk = recent.pending
+  assert.equal(headAsk.phase, 'gap-head')
+  assert.equal(headAsk.sinceScore, 110001)
+  assert.equal(headAsk.untilScore, 120000)
+  assert.equal(recent.descentScore, 90000)
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_REPLY_CODE,
+    payload: {
+      requestId: headAsk.requestId,
+      sinceScore: headAsk.sinceScore,
+      untilScore: headAsk.untilScore,
+      hasMore: false,
+      index: 0,
+      isLast: true,
+      jsonl: ''
+    }
+  }), context(msg))
+  recent = controller._getState().owners[OWNER][PEER].recent
+  const fillAsk = recent.pending
+  assert.deepEqual(recent.headCoverage, { floor: 110001, ceiling: 120000 })
+  assert.equal(fillAsk.phase, 'gap-fill')
+  assert.equal(fillAsk.sinceScore, 100001)
+  assert.equal(fillAsk.untilScore, 110000)
+  assert.equal(recent.descentScore, 90000)
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_REPLY_CODE,
+    payload: {
+      requestId: fillAsk.requestId,
+      sinceScore: fillAsk.sinceScore,
+      untilScore: fillAsk.untilScore,
+      hasMore: false,
+      index: 0,
+      isLast: true,
+      jsonl: ''
+    }
+  }), context(msg))
+  recent = controller._getState().owners[OWNER][PEER].recent
+  assert.equal(recent.coveredCeiling, 120000)
+  assert.equal(recent.headCoverage, null)
+  assert.equal(recent.gapCeiling, null)
+  assert.equal(recent.descentScore, 90000)
+  assert.equal(recent.pending.phase, 'descent')
+  assert.equal(recent.pending.untilScore, 90000)
+})
+
+test('newer adverts during a gap update only the ceiling and never replace the pending ask', async () => {
+  globalThis.localStorage.setItem(SYNC_STATE_KEY, JSON.stringify({
+    owners: {
+      [OWNER]: {
+        [PEER]: {
+          completedScore: 1000,
+          recent: {
+            descentScore: 90000,
+            coveredCeiling: 100000,
+            gapCeiling: 120000,
+            headCoverage: null,
+            windowMs: 10000
+          },
+          updatedAt: 1000
+        }
+      }
+    }
+  }))
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { scores: [] } }
+      },
+      async add () {
+        return { ok: true, stored: true }
+      }
+    })
+  })
+  controller.ensureSubscriptions(context(msg))
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: 900, minScore: 1000, maxScore: 120000 }
+  }), context(msg))
+  const firstPending = controller._getState().owners[OWNER][PEER].recent.pending
+  assert.equal(firstPending.phase, 'gap-head')
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: 901, minScore: 1000, maxScore: 140000 }
+  }), context(msg))
+  let recent = controller._getState().owners[OWNER][PEER].recent
+  assert.equal(recent.pending.requestId, firstPending.requestId)
+  assert.equal(recent.pending.phase, 'gap-head')
+  assert.equal(recent.gapCeiling, 140000)
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_REPLY_CODE,
+    payload: {
+      requestId: firstPending.requestId,
+      sinceScore: firstPending.sinceScore,
+      untilScore: firstPending.untilScore,
+      hasMore: false,
+      index: 0,
+      isLast: true,
+      jsonl: ''
+    }
+  }), context(msg))
+  recent = controller._getState().owners[OWNER][PEER].recent
+  assert.equal(recent.headCoverage.floor, 110001)
+  assert.equal(recent.headCoverage.ceiling, 120000)
+  assert.equal(recent.gapCeiling, 140000)
+  assert.equal(recent.pending.phase, 'gap-head')
+  assert.equal(recent.pending.sinceScore, 120001)
+  assert.equal(recent.pending.untilScore, 140000)
+  assert.equal(recent.descentScore, 90000)
+})
+
+test('gap-fill pending also absorbs newer advert ceilings without cancellation', async () => {
+  globalThis.localStorage.setItem(SYNC_STATE_KEY, JSON.stringify({
+    owners: {
+      [OWNER]: {
+        [PEER]: {
+          completedScore: 1000,
+          recent: {
+            descentScore: 90000,
+            coveredCeiling: 100000,
+            gapCeiling: 120000,
+            headCoverage: { floor: 110001, ceiling: 120000 },
+            windowMs: 10000
+          },
+          updatedAt: 1000
+        }
+      }
+    }
+  }))
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { scores: [] } }
+      },
+      async add () {
+        return { ok: true, stored: true }
+      }
+    })
+  })
+  controller.ensureSubscriptions(context(msg))
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: 900, minScore: 1000, maxScore: 120000 }
+  }), context(msg))
+  const firstPending = controller._getState().owners[OWNER][PEER].recent.pending
+  assert.equal(firstPending.phase, 'gap-fill')
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: 901, minScore: 1000, maxScore: 150000 }
+  }), context(msg))
+  let recent = controller._getState().owners[OWNER][PEER].recent
+  assert.equal(recent.pending.requestId, firstPending.requestId)
+  assert.equal(recent.pending.phase, 'gap-fill')
+  assert.equal(recent.gapCeiling, 150000)
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_REPLY_CODE,
+    payload: {
+      requestId: firstPending.requestId,
+      sinceScore: firstPending.sinceScore,
+      untilScore: firstPending.untilScore,
+      hasMore: false,
+      index: 0,
+      isLast: true,
+      jsonl: ''
+    }
+  }), context(msg))
+  recent = controller._getState().owners[OWNER][PEER].recent
+  assert.equal(recent.coveredCeiling, 120000)
+  assert.equal(recent.gapCeiling, 150000)
+  assert.equal(recent.headCoverage, null)
+  assert.equal(recent.pending.phase, 'gap-head')
+  assert.equal(recent.pending.untilScore, 150000)
+})
+
+test('a large freshness extension keeps only the newest head region', async () => {
+  globalThis.localStorage.setItem(SYNC_STATE_KEY, JSON.stringify({
+    owners: {
+      [OWNER]: {
+        [PEER]: {
+          completedScore: 1000,
+          recent: {
+            descentScore: 90000,
+            coveredCeiling: 100000,
+            gapCeiling: 140000,
+            headCoverage: { floor: 110001, ceiling: 120000 },
+            windowMs: 1000
+          },
+          updatedAt: 1000
+        }
+      }
+    }
+  }))
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { scores: [] } }
+      },
+      async add () {
+        return { ok: true, stored: true }
+      }
+    })
+  })
+  controller.ensureSubscriptions(context(msg))
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: 900, minScore: 1000, maxScore: 140000 }
+  }), context(msg))
+  const headAsk = controller._getState().owners[OWNER][PEER].recent.pending
+  assert.equal(headAsk.phase, 'gap-head')
+  assert.equal(headAsk.sinceScore, 139001)
+  assert.equal(headAsk.untilScore, 140000)
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_REPLY_CODE,
+    payload: {
+      requestId: headAsk.requestId,
+      sinceScore: headAsk.sinceScore,
+      untilScore: headAsk.untilScore,
+      hasMore: false,
+      index: 0,
+      isLast: true,
+      jsonl: ''
+    }
+  }), context(msg))
+  const recent = controller._getState().owners[OWNER][PEER].recent
+  assert.deepEqual(recent.headCoverage, { floor: 139001, ceiling: 140000 })
+  assert.equal(recent.pending.phase, 'gap-fill')
+  assert.equal(recent.pending.sinceScore, 100001)
+  assert.ok(recent.pending.untilScore < 139001)
+  assert.equal(recent.descentScore, 90000)
+})
+
+test('history completion removes recent gap and head work already proven complete', async () => {
+  globalThis.localStorage.setItem(SYNC_STATE_KEY, JSON.stringify({
+    owners: {
+      [OWNER]: {
+        [PEER]: {
+          completedScore: 120000,
+          recent: {
+            descentScore: 90000,
+            coveredCeiling: 100000,
+            gapCeiling: 120000,
+            headCoverage: { floor: 110001, ceiling: 120000 },
+            windowMs: 10000
+          },
+          updatedAt: 1000
+        }
+      }
+    }
+  }))
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { scores: [] } }
+      },
+      async add () {
+        return { ok: true, stored: true }
+      }
+    })
+  })
+  controller.ensureSubscriptions(context(msg))
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: 900, minScore: 1000, maxScore: 120000 }
+  }), context(msg))
+
+  const recent = controller._getState().owners[OWNER][PEER].recent
+  assert.equal(recent.coveredCeiling, 120000)
+  assert.equal(recent.gapCeiling, null)
+  assert.equal(recent.headCoverage, null)
+  assert.equal(recent.descentScore, 120000)
+  assert.equal(recent.pending, null)
 })
 
 test('nostrdb sync advances and continues history when final reply is complete', async () => {
@@ -2877,7 +3286,7 @@ test('recent accumulates reply ids across every hasMore cycle and clears them on
   }), context(msg))
   const state = controller._getState().owners[OWNER][PEER]
   assert.equal(state.recent.cycleReplyIds, undefined)
-  assert.equal(state.recent.targetScore, thirdAsk.sinceScore - 1)
+  assert.equal(state.recent.descentScore, thirdAsk.sinceScore - 1)
   assert.equal(state.recent.pending.requestId, recentAsks().at(-1).requestId)
   assert.notEqual(state.recent.pending.requestId, thirdAsk.requestId)
 })
