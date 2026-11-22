@@ -34,7 +34,12 @@ const PUSH_EVENT_INDEXES = {
 }
 
 function createNostrDbSyncController (options = {}) {
-  return createController({ storage: globalThis.localStorage, _indexedDB: null, ...options })
+  return createController({
+    storage: globalThis.localStorage,
+    _indexedDB: null,
+    getLaneMode: () => 'both',
+    ...options
+  })
 }
 
 afterEach(() => {
@@ -403,6 +408,7 @@ test('advert updates are immediately visible to the recent recovery lane without
     _indexedDB: null,
     _nowMs: () => 1000,
     _random: () => 0.5,
+    getLaneMode: () => 'both',
     _setTimeout: () => ({}),
     _clearTimeout: () => {},
     getDb: () => ({
@@ -431,6 +437,100 @@ test('advert updates are immediately visible to the recent recovery lane without
   assert.ok(owner.pending)
   assert.equal(msg.sent.filter(item => item.method === 'ask').length, 2)
   controller.stop()
+})
+
+test('the default lane policy publishes only recent asks', async () => {
+  const msg = messenger()
+  const controller = createController({
+    storage: globalThis.localStorage,
+    _indexedDB: null,
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { firstScore: 1000, lastScore: 1000 } }
+      }
+    })
+  })
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: 900, minScore: 1000, maxScore: 10000000 }
+  }), context(msg))
+
+  const state = controller._getState().owners[OWNER][PEER]
+  assert.ok(state.recent.pending)
+  assert.equal(state.pending, undefined)
+  assert.equal(msg.sent.filter(item => item.method === 'ask').length, 1)
+  assert.equal(msg.sent[0].options.payload.priority, undefined)
+  controller.stop()
+})
+
+test('the default recent policy cancels legacy history work when subscriptions start', async () => {
+  globalThis.localStorage.setItem(SYNC_STATE_KEY, JSON.stringify({
+    owners: {
+      [OWNER]: {
+        [PEER]: {
+          completedScore: 5000,
+          pending: {
+            requestId: 'legacy-history',
+            sinceScore: 5001,
+            untilScore: 10000
+          },
+          updatedAt: 1000
+        }
+      }
+    }
+  }))
+  const controller = createController({
+    storage: globalThis.localStorage,
+    _indexedDB: null,
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({ subscribe: emptySubscription })
+  })
+
+  controller.ensureSubscriptions(context(messenger()))
+  await flushMicrotasks()
+
+  assert.equal(controller._getState().owners[OWNER][PEER].pending, null)
+  assert.equal(controller._getState().owners[OWNER][PEER].completedScore, 5000)
+  controller.stop()
+})
+
+test('history-only channels suppress recent asks and use the current advert target', async () => {
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getLaneMode: ({ ownerPubkey, channelPubkey }) => {
+      assert.equal(ownerPubkey, OWNER)
+      assert.equal(channelPubkey, 'channel')
+      return 'history'
+    },
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { firstScore: 1000, lastScore: 1000 } }
+      }
+    })
+  })
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: 900, minScore: 1000, maxScore: 2000000 }
+  }), context(msg))
+
+  const state = controller._getState().owners[OWNER][PEER]
+  assert.ok(state.pending)
+  assert.equal(state.recent, undefined)
+  assert.equal(msg.sent.filter(item => item.method === 'ask').length, 1)
+  assert.equal(msg.sent[0].options.payload.priority, 'lower')
+  assert.equal(msg.sent[0].options.payload.untilScore, 900999)
 })
 
 test('a new advert repairs a legacy future recent cursor with its current maxScore', async () => {
@@ -502,6 +602,225 @@ test('stale adverts use the five-second local score margin in both lanes', async
   assert.equal(owner.pending.untilScore, 6000)
   assert.equal(owner.recent.descentScore, 6000)
   assert.equal(owner.recent.pending.untilScore, 6000)
+})
+
+test('both lanes cap history at the recent contiguous descent frontier', async () => {
+  globalThis.localStorage.setItem(SYNC_STATE_KEY, JSON.stringify({
+    owners: {
+      [OWNER]: {
+        [PEER]: {
+          completedScore: 1000,
+          recent: {
+            descentScore: 5000,
+            coveredCeiling: 10000,
+            gapCeiling: null,
+            headCoverage: null,
+            windowMs: 900000
+          },
+          updatedAt: 1000
+        }
+      }
+    }
+  }))
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { scores: [] } }
+      }
+    })
+  })
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: 900, minScore: 1000, maxScore: 20000 }
+  }), context(msg))
+
+  const historyAsk = msg.sent.find(item =>
+    item.method === 'ask' && item.options.payload.priority === 'lower'
+  )
+  assert.ok(historyAsk)
+  assert.equal(historyAsk.options.payload.sinceScore, 1001)
+  assert.equal(historyAsk.options.payload.untilScore, 5000)
+  assert.equal(controller._getState().owners[OWNER][PEER].recent.descentScore, 5000)
+})
+
+test('both-lane refresh cancels history work that crossed the recent frontier', async () => {
+  globalThis.localStorage.setItem(SYNC_STATE_KEY, JSON.stringify({
+    owners: {
+      [OWNER]: {
+        [PEER]: {
+          advert: {
+            generatedAt: 900,
+            minScore: 1000,
+            maxScore: 20000,
+            messageAt: 900000,
+            eventId: 'advert-event'
+          },
+          completedScore: 1000,
+          pending: {
+            requestId: 'crossed-frontier',
+            sinceScore: 1001,
+            untilScore: 10000
+          },
+          recent: {
+            descentScore: 5000,
+            coveredCeiling: 10000,
+            gapCeiling: null,
+            headCoverage: null,
+            windowMs: 900000
+          },
+          updatedAt: 1000
+        }
+      }
+    },
+    exchanges: {
+      [OWNER]: {
+        [PEER]: {
+          'ask:crossed-frontier': {
+            direction: 'ask',
+            requestId: 'crossed-frontier',
+            status: 'awaiting-reply',
+            events: { ask: [], reply: [] },
+            updatedAt: 1000,
+            expiresAt: 9999999999999
+          }
+        }
+      }
+    }
+  }))
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { scores: [] } }
+      }
+    })
+  })
+
+  assert.equal(await controller.refreshLaneModes(context(messenger())), true)
+  const state = controller._getState()
+  assert.equal(state.exchanges[OWNER][PEER]['ask:crossed-frontier'].status, 'deleting-ask')
+  assert.notEqual(state.owners[OWNER][PEER].pending?.requestId, 'crossed-frontier')
+  assert.ok(state.owners[OWNER][PEER].pending.untilScore <= 5000)
+})
+
+test('refreshing to recent-only cancels the historical pending without losing progress', async () => {
+  let mode = 'both'
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getLaneMode: () => mode,
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { scores: [] } }
+      }
+    })
+  })
+  const syncContext = context(msg)
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: 900, minScore: 1000, maxScore: 100000 }
+  }), syncContext)
+  let state = controller._getState()
+  const historyRequestId = state.owners[OWNER][PEER].pending.requestId
+  assert.ok(state.owners[OWNER][PEER].recent.pending)
+
+  mode = 'recent'
+  assert.equal(await controller.refreshLaneModes(syncContext), true)
+  state = controller._getState()
+  assert.equal(state.owners[OWNER][PEER].pending, null)
+  assert.ok(state.owners[OWNER][PEER].recent.pending)
+  assert.equal(
+    state.exchanges[OWNER][PEER][`ask:${historyRequestId}`].status,
+    'deleting-ask'
+  )
+})
+
+test('refreshing to history-only cancels recent and absorbs only its contiguous base', async () => {
+  globalThis.localStorage.setItem(SYNC_STATE_KEY, JSON.stringify({
+    owners: {
+      [OWNER]: {
+        [PEER]: {
+          completedScore: 5000,
+          recent: {
+            descentScore: 5000,
+            coveredCeiling: 10000,
+            gapCeiling: 13000,
+            headCoverage: { floor: 12001, ceiling: 13000 },
+            windowMs: 10000,
+            pending: {
+              phase: 'gap-head',
+              requestId: 'recent-cancel',
+              sinceScore: 12001,
+              untilScore: 13000
+            }
+          },
+          updatedAt: 1000
+        }
+      }
+    }
+  }))
+  let mode = 'both'
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getLaneMode: () => mode,
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { scores: [] } }
+      }
+    })
+  })
+
+  mode = 'history'
+  assert.equal(await controller.refreshLaneModes(context(messenger())), true)
+  const recent = controller._getState().owners[OWNER][PEER].recent
+  assert.equal(controller._getState().owners[OWNER][PEER].completedScore, 10000)
+  assert.equal(recent.pending, null)
+  assert.equal(recent.descentScore, 10000)
+  assert.deepEqual(recent.headCoverage, { floor: 12001, ceiling: 13000 })
+  assert.equal(recent.gapCeiling, 13000)
+})
+
+test('invalid lane getters fall back to recent and report the policy error', async () => {
+  const msg = messenger()
+  const errors = []
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getLaneMode: async () => 'both',
+    onError: error => errors.push(error),
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { scores: [] } }
+      }
+    })
+  })
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: 900, minScore: 1000, maxScore: 100000 }
+  }), context(msg))
+
+  assert.equal(controller._getState().owners[OWNER][PEER].pending, undefined)
+  assert.ok(controller._getState().owners[OWNER][PEER].recent.pending)
+  assert.ok(errors.some(error => error.code === 'INVALID_NOSTRDB_LANE_MODE'))
 })
 
 test('state mutations become readable synchronously before IndexedDB persistence resolves', async () => {
@@ -2940,6 +3259,7 @@ for (const testCase of [
     const controller = createNostrDbSyncController({
       _nowMs: () => 1000,
       _random: () => 0.5,
+      getLaneMode: () => 'history',
       _setTimeout: () => ({}),
       getDb: () => ({
         subscribe: emptySubscription,
@@ -3004,6 +3324,7 @@ test('dense minimum ranges are marked covered and advanced in bounded batches', 
   const controller = createNostrDbSyncController({
     _nowMs: () => 1000,
     _random: () => 0.5,
+    getLaneMode: () => 'history',
     _setTimeout: (fn, ms) => {
       const timer = { fn, ms }
       timers.push(timer)

@@ -70,6 +70,8 @@ const MAX_DENSE_INVENTORY_IDS = 1024
 const DENSE_INVENTORY_QUERY_LIMIT = MAX_DENSE_INVENTORY_IDS + 1
 const DENSE_RANGE_BATCH_SIZE = 32
 const REQUEST_LIMIT = 200
+const DEFAULT_NOSTRDB_LANE_MODE = 'recent'
+const NOSTRDB_LANE_MODES = new Set(['recent', 'history', 'both'])
 const SMALL_REPLY_COUNT = 20
 const ONLINE_RETRY_MIN_MS = 5 * 60 * 1000
 const ONLINE_RETRY_MAX_MS = 6 * 60 * 60 * 1000
@@ -870,8 +872,10 @@ export function createNostrDbSyncController ({
   _createPushQueue = createQueue,
   _relayPool = defaultRelayPool,
   _isOnline = defaultIsOnline,
+  getLaneMode = () => DEFAULT_NOSTRDB_LANE_MODE,
   onError = err => console.warn('nostrdb sync failed', err?.message ?? err)
 } = {}) {
+  if (typeof getLaneMode !== 'function') throw new Error('INVALID_NOSTRDB_LANE_MODE_GETTER')
   const subscriptions = new Map()
   const pushQueues = new Map()
   const pushOutboxes = new Map()
@@ -927,8 +931,85 @@ export function createNostrDbSyncController ({
     }
   }
 
+  function laneModeFor (ownerPubkey, peerPubkey, context = runtime) {
+    const channelPubkey = ownerChannelPubkey(ownerPubkey, context)
+    let mode
+    try {
+      mode = getLaneMode({ ownerPubkey, channelPubkey })
+    } catch (error) {
+      report(error)
+      return DEFAULT_NOSTRDB_LANE_MODE
+    }
+    if (mode == null) return DEFAULT_NOSTRDB_LANE_MODE
+    if (typeof mode !== 'string' || !NOSTRDB_LANE_MODES.has(mode)) {
+      report(Object.assign(new Error('INVALID_NOSTRDB_LANE_MODE'), {
+        code: 'INVALID_NOSTRDB_LANE_MODE'
+      }))
+      return DEFAULT_NOSTRDB_LANE_MODE
+    }
+    return mode
+  }
+
   function getState () {
     return storage ? readState(storage) : structuredClone(durableState)
+  }
+
+  function laneEnabled (mode, lane) {
+    return mode === 'both' || mode === lane
+  }
+
+  function removeLanePending (state, ownerPubkey, peerPubkey, entry, lane, now) {
+    const pending = lane === 'history' ? entry.pending : entry.recent?.pending
+    if (!pending) return false
+    const exchange = exchangeRecord(state, ownerPubkey, peerPubkey, 'ask', pending.requestId)
+    if (exchange) {
+      exchange.status = 'deleting-ask'
+      exchange.updatedAt = now
+    }
+    if (lane === 'history') entry.pending = null
+    else entry.recent.pending = null
+    setLaneCycleReplyIds(entry, lane, [])
+    return true
+  }
+
+  function absorbRecentBaseIntoHistory (entry) {
+    const recent = entry.recent
+    if (!isPlainObject(recent) ||
+        !isSafeScore(recent.descentScore) ||
+        !isSafeScore(recent.coveredCeiling) ||
+        !isSafeScore(entry.completedScore) ||
+        entry.completedScore < recent.descentScore) return false
+    if (recent.coveredCeiling <= entry.completedScore) return false
+    entry.completedScore = recent.coveredCeiling
+    recent.descentScore = recent.coveredCeiling
+    reconcileRecentCoverage(recent)
+    return true
+  }
+
+  function reconcileEntryLaneMode (state, ownerPubkey, peerPubkey, entry, mode, now) {
+    let changed = false
+    if (!laneEnabled(mode, 'history')) {
+      changed = removeLanePending(state, ownerPubkey, peerPubkey, entry, 'history', now) || changed
+    }
+    if (!laneEnabled(mode, 'recent')) {
+      changed = removeLanePending(state, ownerPubkey, peerPubkey, entry, 'recent', now) || changed
+    }
+    if (mode === 'history') {
+      changed = absorbRecentBaseIntoHistory(entry) || changed
+    }
+    if (mode === 'both' &&
+        entry.pending &&
+        isSafeScore(entry.recent?.descentScore) &&
+        entry.pending.untilScore > entry.recent.descentScore) {
+      changed = removeLanePending(state, ownerPubkey, peerPubkey, entry, 'history', now) || changed
+    }
+    if (changed) entry.updatedAt = now
+    return changed
+  }
+
+  function historyTargetScore (entry, targetScore, mode) {
+    if (mode !== 'both' || !isSafeScore(entry?.recent?.descentScore)) return targetScore
+    return Math.min(targetScore, entry.recent.descentScore)
   }
 
   function nextRequestId () {
@@ -1402,6 +1483,16 @@ export function createNostrDbSyncController ({
     const record = entry.record
     if ((record.notBeforeAt || 0) > _nowMs()) return false
     if (!record.requestPayload || !record.channelPubkey || !record.peerPubkey) return false
+    const state = getState()
+    const peer = peerState(state, entry.ownerPubkey, entry.peerPubkey)
+    const lane = peer.pending?.requestId === record.requestId
+      ? 'history'
+      : peer.recent?.pending?.requestId === record.requestId
+        ? 'recent'
+        : ''
+    if (lane && !laneEnabled(laneModeFor(entry.ownerPubkey, entry.peerPubkey, context), lane)) {
+      return false
+    }
     const result = await context.messenger.ask({
       channelPubkey: record.channelPubkey,
       receiverPubkey: record.peerPubkey,
@@ -1423,8 +1514,8 @@ export function createNostrDbSyncController ({
       context
     })
     const updatedState = getState()
-    const peer = peerState(updatedState, entry.ownerPubkey, entry.peerPubkey)
-    for (const pending of [peer.pending, peer.recent?.pending]) {
+    const updatedPeer = peerState(updatedState, entry.ownerPubkey, entry.peerPubkey)
+    for (const pending of [updatedPeer.pending, updatedPeer.recent?.pending]) {
       if (pending?.requestId !== record.requestId) continue
       delete pending.waitingForResume
       pending.attempt = (pending.attempt || 0) + 1
@@ -1440,7 +1531,7 @@ export function createNostrDbSyncController ({
       appPeer.pending.nextRetryAt = _nowMs() + EXCHANGE_CHECK_INTERVAL_MS
       appPeer.pending.onlineRetryAt = appPeer.pending.nextRetryAt
     }
-    peer.updatedAt = _nowMs()
+    updatedPeer.updatedAt = _nowMs()
     await setState(updatedState)
     exchangeStats.asksRepublished++
     emitDebug(context.debug, 'ask-republished', {
@@ -1982,12 +2073,41 @@ export function createNostrDbSyncController ({
     if (!context.messenger?.ask) return null
     const channelPubkey = ownerChannelPubkey(ownerPubkey, context)
     if (!isOwnerReady(ownerPubkey, context) || !channelPubkey) return null
+    const mode = laneModeFor(ownerPubkey, peerPubkey, context)
     const state = getState()
     const entry = peerState(state, ownerPubkey, peerPubkey)
+    if (!laneEnabled(mode, 'history')) {
+      if (removeLanePending(state, ownerPubkey, peerPubkey, entry, 'history', _nowMs())) {
+        entry.updatedAt = _nowMs()
+        throwIfHandlerAborted(context)
+        await setState(state)
+        scheduleExchangeMaintenance(context, { immediate: true })
+      }
+      return null
+    }
     const advert = entry.advert
     if (!advert || advert.maxScore == null || advert.minScore == null) return null
 
     const now = _nowMs()
+    const storedCompleted = Number.isSafeInteger(entry.completedScore)
+      ? entry.completedScore
+      : advert.minScore - 1
+    const completedValue = storedCompleted > advert.maxScore
+      ? advert.minScore - 1
+      : storedCompleted
+    if (completedValue !== storedCompleted) {
+      entry.completedScore = completedValue
+      setLaneCycleReplyIds(entry, 'history', [])
+    }
+    const advertisedTarget = Math.max(advert.maxScore, now + SYNC_ANCHOR_MAX_FUTURE_SKEW_MS)
+    const targetScore = historyTargetScore(entry, advertisedTarget, mode)
+    if (entry.pending && entry.pending.untilScore > targetScore) {
+      removeLanePending(state, ownerPubkey, peerPubkey, entry, 'history', now)
+      entry.updatedAt = now
+      throwIfHandlerAborted(context)
+      await setState(state)
+      scheduleExchangeMaintenance(context, { immediate: true })
+    }
     if (entry.pending?.waitingForResume && !resume) return null
     if (entry.pending && resume && !entry.pending.waitingForResume) return null
     if (entry.pending && !force && !resume) {
@@ -2007,18 +2127,6 @@ export function createNostrDbSyncController ({
       scheduleExchangeMaintenance(context)
       return null
     }
-
-    const storedCompleted = Number.isSafeInteger(entry.completedScore)
-      ? entry.completedScore
-      : advert.minScore - 1
-    const completedValue = storedCompleted > advert.maxScore
-      ? advert.minScore - 1
-      : storedCompleted
-    if (completedValue !== storedCompleted) {
-      entry.completedScore = completedValue
-      setLaneCycleReplyIds(entry, 'history', [])
-    }
-    const targetScore = Math.max(advert.maxScore, now + SYNC_ANCHOR_MAX_FUTURE_SKEW_MS)
     const completed = completedValue
     const sinceScore = Math.max(advert.minScore, completed + 1)
     if (sinceScore > targetScore) {
@@ -2228,6 +2336,16 @@ export function createNostrDbSyncController ({
     if (!isOwnerReady(ownerPubkey, context) || !channelPubkey) return null
     const state = getState()
     const entry = peerState(state, ownerPubkey, peerPubkey)
+    const mode = laneModeFor(ownerPubkey, peerPubkey, context)
+    if (!laneEnabled(mode, 'recent')) {
+      if (removeLanePending(state, ownerPubkey, peerPubkey, entry, 'recent', _nowMs())) {
+        entry.updatedAt = _nowMs()
+        throwIfHandlerAborted(context)
+        await setState(state)
+        scheduleExchangeMaintenance(context, { immediate: true })
+      }
+      return null
+    }
     const advert = entry.advert
     if (!advert || advert.maxScore == null || advert.minScore == null) return null
     const now = _nowMs()
@@ -2348,6 +2466,9 @@ export function createNostrDbSyncController ({
       entry.updatedAt = now
       throwIfHandlerAborted(context)
       await setState(state)
+      if (laneModeFor(ownerPubkey, peerPubkey, context) === 'both') {
+        await maybeAsk(ownerPubkey, peerPubkey, context, { reason: 'recent-boundary' })
+      }
       const batch = denseBatch || newDenseRangeBatch('recent')
       addDenseRange(batch, askWindow.sinceScore, askWindow.untilScore)
       if (batch.count >= DENSE_RANGE_BATCH_SIZE) {
@@ -2708,6 +2829,45 @@ export function createNostrDbSyncController ({
     return true
   }
 
+  async function refreshLaneModes (context = runtime, { wake = true } = {}) {
+    runtime = { ...runtime, ...context }
+    const state = getState()
+    const now = _nowMs()
+    let changed = false
+    const modes = new Map()
+    for (const [ownerPubkey, owner] of Object.entries(state.owners || {})) {
+      for (const [peerPubkey, entry] of Object.entries(owner || {})) {
+        const mode = laneModeFor(ownerPubkey, peerPubkey, runtime)
+        modes.set(`${ownerPubkey}:${peerPubkey}`, mode)
+        changed = reconcileEntryLaneMode(
+          state,
+          ownerPubkey,
+          peerPubkey,
+          entry,
+          mode,
+          now
+        ) || changed
+      }
+    }
+    if (changed) {
+      await setState(state)
+      scheduleExchangeMaintenance(runtime, { immediate: true })
+    }
+    if (!wake) return changed
+    for (const [ownerPubkey, owner] of Object.entries(state.owners || {})) {
+      for (const [peerPubkey] of Object.entries(owner || {})) {
+        const mode = modes.get(`${ownerPubkey}:${peerPubkey}`) || DEFAULT_NOSTRDB_LANE_MODE
+        if (laneEnabled(mode, 'recent')) {
+          await maybeAskRecent(ownerPubkey, peerPubkey, runtime, { reason: 'lane-mode' })
+        }
+        if (laneEnabled(mode, 'history')) {
+          await maybeAsk(ownerPubkey, peerPubkey, runtime, { reason: 'lane-mode' })
+        }
+      }
+    }
+    return changed
+  }
+
   async function handleAdvertise (ownerPubkey, message, context) {
     throwIfHandlerAborted(context)
     const advert = normalizeAdvert(requireDataBody(message))
@@ -2733,8 +2893,13 @@ export function createNostrDbSyncController ({
       minScore: advert.minScore,
       maxScore: advert.maxScore
     })
-    await maybeAskRecent(ownerPubkey, peerPubkey, context, { reason: 'advertise' })
-    await maybeAsk(ownerPubkey, peerPubkey, context, { onlineHint: true, reason: 'advertise' })
+    const mode = laneModeFor(ownerPubkey, peerPubkey, context)
+    if (laneEnabled(mode, 'recent')) {
+      await maybeAskRecent(ownerPubkey, peerPubkey, context, { reason: 'advertise' })
+    }
+    if (laneEnabled(mode, 'history')) {
+      await maybeAsk(ownerPubkey, peerPubkey, context, { onlineHint: true, reason: 'advertise' })
+    }
     await processAppBackfills(context, {
       ownerPubkey,
       peerPubkey,
@@ -3116,11 +3281,19 @@ export function createNostrDbSyncController ({
         throwIfHandlerAborted(context)
         if (hasMore) {
           if (lane === 'history') await maybeAsk(ownerPubkey, peerPubkey, context, { force: true, reason: 'has-more' })
-          else await maybeAskRecent(ownerPubkey, peerPubkey, context, { reason: 'has-more' })
         } else if (lane === 'history') {
           await maybeAsk(ownerPubkey, peerPubkey, context, { reason: 'history-next' })
-        } else {
-          await maybeAskRecent(ownerPubkey, peerPubkey, context, { reason: 'recent-next' })
+        }
+        if (lane === 'recent') {
+          const mode = laneModeFor(ownerPubkey, peerPubkey, context)
+          if (laneEnabled(mode, 'recent')) {
+            await maybeAskRecent(ownerPubkey, peerPubkey, context, {
+              reason: hasMore ? 'has-more' : 'recent-next'
+            })
+          }
+          if (laneEnabled(mode, 'history')) {
+            await maybeAsk(ownerPubkey, peerPubkey, context, { reason: 'recent-boundary' })
+          }
         }
         if (rejected) throw syncPayloadInvalid('jsonl-entries-invalid', { partial: true })
         return true
@@ -4341,7 +4514,10 @@ export function createNostrDbSyncController ({
     processAppBackfills(runtime, { reason: 'initial' }).catch(report)
     scheduleRetrySweep(runtime)
     migratePendingExchanges(runtime)
-      .then(() => scheduleExchangeMaintenance(runtime))
+      .then(async () => {
+        await refreshLaneModes(runtime, { wake: false })
+        scheduleExchangeMaintenance(runtime)
+      })
       .catch(report)
   }
 
@@ -4372,6 +4548,7 @@ export function createNostrDbSyncController ({
     announceRange,
     handleMessage,
     ensureSubscriptions,
+    refreshLaneModes,
     resumeAfterPause,
     requestAppBackfill,
     processAppBackfills,

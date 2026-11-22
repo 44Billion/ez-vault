@@ -219,6 +219,44 @@ test('sync initialization clears private messenger temporary storage before unlo
   controller.close()
 })
 
+test('sync exposes an external NostrDB lane policy and explicit refresh', async () => {
+  let syncOptions
+  const refreshContexts = []
+  const external = createSyncController({
+    _store: { list: () => [] },
+    _secrets: { isUnlocked: () => false, subscribe: () => () => {} },
+    _trustedSigners: { list: () => [], subscribe: () => () => {} },
+    _createPeerGuard: () => ({}),
+    getNostrDbLaneMode: input => input.channelPubkey === 'channel' ? 'history' : 'recent',
+    _createNostrDbSyncController: options => {
+      syncOptions = options
+      return {
+        ensureSubscriptions: () => {},
+        refreshLaneModes: async context => {
+          refreshContexts.push(context)
+          return true
+        },
+        stop: () => {}
+      }
+    }
+  })
+
+  assert.equal(syncOptions.getLaneMode({
+    ownerPubkey: 'owner',
+    channelPubkey: 'channel'
+  }), 'history')
+  assert.equal(await external.refreshNostrDbLaneModes(), true)
+  assert.equal(refreshContexts.length, 1)
+  external.close()
+})
+
+test('sync rejects a non-callable NostrDB lane policy', () => {
+  assert.throws(
+    () => createSyncController({ getNostrDbLaneMode: true }),
+    /INVALID_NOSTRDB_LANE_MODE_GETTER/
+  )
+})
+
 test('sync orchestration watches nsec channels with identity-only sync options', async () => {
   const deviceSigner = signer('device')
   const accountSigners = {

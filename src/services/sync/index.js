@@ -185,6 +185,7 @@ export function createSyncController ({
   _subscribeRelayListUpdates = subscribeRelayListUpdates,
   _hasPendingMutation = hasPendingMutation,
   _subscribePendingMutations = subscribePendingMutations,
+  getNostrDbLaneMode = () => 'recent',
   _setTimeout = globalThis.setTimeout.bind(globalThis),
   _clearTimeout = globalThis.clearTimeout.bind(globalThis),
   _setInterval = globalThis.setInterval.bind(globalThis),
@@ -194,6 +195,7 @@ export function createSyncController ({
   _debug,
   onError = defaultOnError
 } = {}) {
+  if (typeof getNostrDbLaneMode !== 'function') throw new Error('INVALID_NOSTRDB_LANE_MODE_GETTER')
   let initialized = false
   let messenger = null
   let trustedByPubkey = new Map()
@@ -238,6 +240,7 @@ export function createSyncController ({
     _setTimeout,
     _clearTimeout,
     _performanceNow,
+    getLaneMode: input => getNostrDbLaneMode(input),
     onError
   })
 
@@ -1008,6 +1011,11 @@ export function createSyncController ({
     return accepted || _secrets.isUnlocked()
   }
 
+  function refreshNostrDbLaneModes () {
+    if (typeof nostrDbSync.refreshLaneModes !== 'function') return Promise.resolve(false)
+    return nostrDbSync.refreshLaneModes(nostrDbRuntimeContext())
+  }
+
   async function scheduleRotationsForRemovedRecords (records = []) {
     if (!records.length || !_secrets.isUnlocked()) return
     let localActorPubkey = devicePubkey
@@ -1271,6 +1279,7 @@ export function createSyncController ({
     close,
     scheduleAnnounce,
     scheduleAnnounceAll,
+    refreshNostrDbLaneModes,
     get messenger () { return messenger },
     get trustedByPubkey () { return trustedByPubkey },
     getDebugSnapshot: () => {
@@ -1328,6 +1337,7 @@ export const stop = controller.stop
 export const close = controller.close
 export const scheduleAnnounce = controller.scheduleAnnounce
 export const scheduleAnnounceAll = controller.scheduleAnnounceAll
+export const refreshNostrDbLaneModes = controller.refreshNostrDbLaneModes
 export const getDebugSnapshot = controller.getDebugSnapshot
 export const subscribeDebug = controller.subscribeDebug
 export const generateAndPublishContentKey = controller.generateAndPublishContentKey
