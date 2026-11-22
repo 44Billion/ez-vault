@@ -86,6 +86,7 @@ const PUSH_CHUNK_OUTBOX_PREFIX = 'ez-vault:trusted-signer-sync:nostrdb-push-chun
 const PUSH_EVENT_OUTBOX_MAX_BYTES = 32 * 1024 * 1024
 const PUSH_CHUNK_OUTBOX_MAX_BYTES = 16 * 1024 * 1024
 const PUSH_RECOVERY_PAGE_SIZE = 200
+const PUSH_COALESCING_INDEX = 'byCoalescingKey'
 const PUSH_PRIORITIES = Object.freeze(['normal', 'lower', 'lowest'])
 const PUSH_PRIORITY_RANK = Object.freeze({
   normal: 2,
@@ -161,6 +162,27 @@ function personalCopyTag (event, name) {
     ? event.tags.filter(tag => Array.isArray(tag) && tag[0] === name && tag.length === 2)
     : []
   return tags.length === 1 && typeof tags[0][1] === 'string' ? tags[0][1] : ''
+}
+
+function pushEventCoalescingKey (event) {
+  // Kind 30078 is addressable; the derived wrapper d already binds context,
+  // effective author and inner d-tag without exposing their plaintext values.
+  if (event?.kind !== PERSONAL_COPY || personalCopyTag(event, 'k') !== '30078') return ''
+  const context = personalCopyTag(event, 'c')
+  const coordinate = personalCopyTag(event, 'd')
+  if (!context || !coordinate) return ''
+  return coalescingDigest(['nostrdb-read-state', context, coordinate])
+}
+
+function comparePushEventRecords (left, right) {
+  const leftScore = isSafeScore(left?.score) ? left.score : -1
+  const rightScore = isSafeScore(right?.score) ? right.score : -1
+  if (leftScore !== rightScore) return leftScore > rightScore ? 1 : -1
+  const leftCreatedAt = Number(left?.event?.created_at) || 0
+  const rightCreatedAt = Number(right?.event?.created_at) || 0
+  if (leftCreatedAt !== rightCreatedAt) return leftCreatedAt > rightCreatedAt ? 1 : -1
+  if (left?.id === right?.id) return 0
+  return String(left?.id || '') < String(right?.id || '') ? 1 : -1
 }
 
 function requireDataBody (message) {
@@ -2891,6 +2913,7 @@ export function createNostrDbSyncController ({
     return {
       id,
       event,
+      coalescingKey: pushEventCoalescingKey(event),
       priority: PUSH_PRIORITIES.includes(record.priority)
         ? record.priority
         : pushPriorityForEvent(ownerPubkey, event),
@@ -2939,7 +2962,10 @@ export function createNostrDbSyncController ({
           indexedDB: _indexedDB,
           evictionPolicy: 'reject',
           maxBytes: PUSH_EVENT_OUTBOX_MAX_BYTES,
-          indexes: { id: { keyPath: 'id', unique: true } }
+          indexes: {
+            id: { keyPath: 'id', unique: true },
+            [PUSH_COALESCING_INDEX]: 'coalescingKey'
+          }
         }),
         _createPushQueue({
           prefix: `${PUSH_CHUNK_OUTBOX_PREFIX}:${ownerPubkey}`,
@@ -2973,11 +2999,75 @@ export function createNostrDbSyncController ({
     }
   }
 
+  function coalescePushEventInMemory (queue, record) {
+    if (!record.coalescingKey) return 'inserted'
+    const matches = [...queue.events.values()]
+      .filter(candidate => candidate.id !== record.id && candidate.coalescingKey === record.coalescingKey)
+    const latest = matches.reduce((current, candidate) => (
+      !current || comparePushEventRecords(candidate, current) > 0 ? candidate : current
+    ), null)
+    if (latest && comparePushEventRecords(record, latest) <= 0) {
+      if (queue.events.get(record.id) === record) queue.events.delete(record.id)
+      return 'ignored'
+    }
+    for (const candidate of matches) queue.events.delete(candidate.id)
+    queue.events.set(record.id, record)
+    return matches.length ? 'replaced' : 'inserted'
+  }
+
+  async function reconcilePushCoalescingGroup (ownerPubkey, outboxes, queue, key) {
+    const persisted = new Map()
+    for await (const value of outboxes.events.storedItemsBy(PUSH_COALESCING_INDEX, key)) {
+      const record = normalizePushEventRecord(ownerPubkey, value)
+      if (!record || record.coalescingKey !== key) continue
+      record.persisted = true
+      persisted.set(record.id, record)
+    }
+    for (const [id, record] of queue.events) {
+      if (record.coalescingKey === key && !persisted.has(id)) queue.events.delete(id)
+    }
+    for (const [id, record] of persisted) queue.events.set(id, record)
+  }
+
+  async function compactRestoredPushQueue (ownerPubkey, outboxes, queue) {
+    const groups = new Map()
+    for (const record of queue.events.values()) {
+      if (!record.coalescingKey) continue
+      const group = groups.get(record.coalescingKey) || []
+      group.push(record)
+      groups.set(record.coalescingKey, group)
+    }
+    for (const [key, group] of groups) {
+      if (group.length < 2) continue
+      const latest = group.reduce((current, record) =>
+        comparePushEventRecords(record, current) > 0 ? record : current
+      )
+      for (const record of group) {
+        if (record === latest) continue
+        if (queue.events.get(record.id) === record) queue.events.delete(record.id)
+        try { await outboxes.events.removeBy('id', record.id) } catch (error) { report(error) }
+      }
+      await outboxes.events.putBy('id', latest)
+      await reconcilePushCoalescingGroup(ownerPubkey, outboxes, queue, key)
+    }
+  }
+
   async function persistPushEventRecord (ownerPubkey, queue, record) {
     const outboxes = await getPushOutboxes(ownerPubkey)
-    if (!outboxes) return true
+    if (!outboxes) {
+      coalescePushEventInMemory(queue, record)
+      return true
+    }
     try {
-      await outboxes.events.putBy('id', record)
+      if (record.coalescingKey) {
+        await outboxes.events.coalesceBy(PUSH_COALESCING_INDEX, record, {
+          compare: comparePushEventRecords,
+          keep: 'latest'
+        })
+        await reconcilePushCoalescingGroup(ownerPubkey, outboxes, queue, record.coalescingKey)
+      } else {
+        await outboxes.events.putBy('id', record)
+      }
       queue.eventBackpressure = false
       queue.eventRetryAt = 0
       queue.eventRetryDelayMs = 1000
@@ -3123,6 +3213,8 @@ export function createNostrDbSyncController ({
   async function restorePushQueue (ownerPubkey) {
     const queue = getPushQueue(ownerPubkey)
     await refreshPushOutboxes(ownerPubkey, queue)
+    const outboxes = await getPushOutboxes(ownerPubkey)
+    if (outboxes) await compactRestoredPushQueue(ownerPubkey, outboxes, queue)
     for (const record of queue.events.values()) {
       record.persisted = true
       markPushPriorityReady(queue, record.priority)
@@ -3204,6 +3296,7 @@ export function createNostrDbSyncController ({
     const record = {
       id,
       event,
+      coalescingKey: pushEventCoalescingKey(event),
       priority,
       score: isSafeScore(score) ? score : null,
       addedAt: existing?.addedAt ?? _nowMs(),
@@ -3249,12 +3342,34 @@ export function createNostrDbSyncController ({
   }
 
   async function packPushPriority (ownerPubkey, queue, priority, target) {
-    const records = [...queue.events.values()]
+    const rawRecords = [...queue.events.values()]
       .filter(record => record.persisted && record.priority === priority)
       .sort((left, right) => left.addedAt - right.addedAt)
+    const latestByKey = new Map()
+    for (const record of rawRecords) {
+      if (!record.coalescingKey) continue
+      const current = latestByKey.get(record.coalescingKey)
+      if (!current || comparePushEventRecords(record, current) > 0) {
+        latestByKey.set(record.coalescingKey, record)
+      }
+    }
+    const records = rawRecords.filter(record =>
+      !record.coalescingKey || latestByKey.get(record.coalescingKey) === record
+    )
+    const selected = new Set(records)
+    const superseded = rawRecords.filter(record => !selected.has(record))
     if (!records.length) return true
-    let cursor = 0
     let persistedThroughScore = null
+    for (const record of superseded) {
+      if (queue.events.get(record.id) === record) queue.events.delete(record.id)
+      if (isSafeScore(record.score)) {
+        persistedThroughScore = persistedThroughScore == null
+          ? record.score
+          : Math.max(persistedThroughScore, record.score)
+      }
+      await removePushEventRecord(ownerPubkey, record)
+    }
+    let cursor = 0
     while (cursor < records.length) {
       const start = cursor
       let jsonl = ''

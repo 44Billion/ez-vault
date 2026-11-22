@@ -28,6 +28,10 @@ const EVENT_ID = 'c'.repeat(64)
 const SYNC_STATE_KEY = 'ez-vault:trusted-signer-sync:nostrdb:v1'
 const PUSH_EVENT_OUTBOX = `ez-vault:trusted-signer-sync:nostrdb-push:v1:events:${OWNER}:idb-queue`
 const PUSH_CHUNK_OUTBOX = `ez-vault:trusted-signer-sync:nostrdb-push-chunks:v1:${OWNER}:idb-queue`
+const PUSH_EVENT_INDEXES = {
+  id: { keyPath: 'id', unique: true },
+  byCoalescingKey: 'coalescingKey'
+}
 
 function createNostrDbSyncController (options = {}) {
   return createController({ storage: globalThis.localStorage, _indexedDB: null, ...options })
@@ -92,6 +96,22 @@ function pushEvent (number) {
     tags: [['k', '9'], ['c', 'nonempty-context']],
     content: '',
     sig: 'd'.repeat(128)
+  }
+}
+
+function readStateEvent (number, {
+  coordinate = 'read-state-coordinate',
+  createdAt = number,
+  context = 'empty-context-ciphertext'
+} = {}) {
+  return {
+    ...pushEvent(number),
+    created_at: createdAt,
+    tags: [
+      ['k', '30078'],
+      ['c', context],
+      ['d', coordinate]
+    ]
   }
 }
 
@@ -2364,6 +2384,146 @@ test('lower-priority pushes reset the quiet window and flush at the one-second c
   assert.equal(msg.sent[0].options.payload.jsonl.trim().split('\n').length, 10)
 })
 
+test('read-state pushes coalesce to the latest stored version per coordinate', async () => {
+  let now = 1000
+  const timers = []
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => now,
+    getDb: () => ({ subscribe: emptySubscription }),
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: timer => {
+      const index = timers.indexOf(timer)
+      if (index >= 0) timers.splice(index, 1)
+    }
+  })
+  controller.ensureSubscriptions(context(msg, {
+    emptyPersonalCopyContextByOwner: new Map([[OWNER, 'empty-context-ciphertext']])
+  }))
+  const olderA = readStateEvent(1, { coordinate: 'coordinate-a', createdAt: 10 })
+  const newerA = readStateEvent(2, { coordinate: 'coordinate-a', createdAt: 20 })
+  const newerB = readStateEvent(3, { coordinate: 'coordinate-b', createdAt: 30 })
+  const olderB = readStateEvent(4, { coordinate: 'coordinate-b', createdAt: 15 })
+  const sameTimeHighId = readStateEvent(6, { coordinate: 'coordinate-c', createdAt: 40 })
+  const sameTimeLowId = readStateEvent(5, { coordinate: 'coordinate-c', createdAt: 40 })
+
+  await controller.queuePush(OWNER, olderA, 10)
+  await controller.queuePush(OWNER, newerA, 20)
+  await controller.queuePush(OWNER, newerB, 30)
+  await controller.queuePush(OWNER, olderB, 15)
+  await controller.queuePush(OWNER, sameTimeHighId)
+  await controller.queuePush(OWNER, sameTimeLowId)
+  assert.equal(timers.length, 1)
+  assert.equal(timers[0].ms, 200)
+
+  now = 1200
+  await timers.shift().fn()
+  assert.equal(msg.sent.length, 1)
+  assert.deepEqual(
+    msg.sent[0].options.payload.jsonl.trim().split('\n').map(line => JSON.parse(line).id),
+    [newerA.id, newerB.id, sameTimeLowId.id]
+  )
+})
+
+test('durable read-state push outbox keeps one latest record per coordinate', async () => {
+  await deleteDatabase(PUSH_EVENT_OUTBOX)
+  await deleteDatabase(PUSH_CHUNK_OUTBOX)
+  const timers = []
+  const controller = createNostrDbSyncController({
+    _indexedDB: globalThis.indexedDB,
+    _nowMs: () => 1000,
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { firstScore: 1, lastScore: 1, scores: [] } }
+      }
+    }),
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: () => {}
+  })
+  controller.ensureSubscriptions(context(messenger(), {
+    emptyPersonalCopyContextByOwner: new Map([[OWNER, 'empty-context-ciphertext']])
+  }))
+  const older = readStateEvent(1, { coordinate: 'durable-coordinate', createdAt: 10 })
+  const newer = readStateEvent(2, { coordinate: 'durable-coordinate', createdAt: 20 })
+  await controller.queuePush(OWNER, older, 10)
+  await controller.queuePush(OWNER, newer, 20)
+
+  const eventOutbox = await createQueue({
+    prefix: PUSH_EVENT_OUTBOX.slice(0, -':idb-queue'.length),
+    indexedDB: globalThis.indexedDB,
+    evictionPolicy: 'reject',
+    indexes: PUSH_EVENT_INDEXES
+  })
+  try {
+    assert.equal(await storedCount(eventOutbox), 1)
+    const stored = []
+    for await (const value of eventOutbox.storedItems()) stored.push(value)
+    assert.deepEqual(stored.map(value => value.id), [newer.id])
+  } finally {
+    controller.stop()
+    await eventOutbox.close()
+    await deleteDatabase(PUSH_EVENT_OUTBOX)
+    await deleteDatabase(PUSH_CHUNK_OUTBOX)
+  }
+})
+
+test('restoring a legacy read-state outbox removes superseded versions', async () => {
+  await deleteDatabase(PUSH_EVENT_OUTBOX)
+  await deleteDatabase(PUSH_CHUNK_OUTBOX)
+  const older = readStateEvent(1, { coordinate: 'legacy-coordinate', createdAt: 10 })
+  const newer = readStateEvent(2, { coordinate: 'legacy-coordinate', createdAt: 20 })
+  const seed = await createQueue({
+    prefix: PUSH_EVENT_OUTBOX.slice(0, -':idb-queue'.length),
+    indexedDB: globalThis.indexedDB,
+    evictionPolicy: 'reject',
+    indexes: PUSH_EVENT_INDEXES
+  })
+  await seed.enqueue({ id: older.id, event: older, priority: 'lower', score: 10, addedAt: 10 })
+  await seed.enqueue({ id: newer.id, event: newer, priority: 'lower', score: 20, addedAt: 20 })
+  await seed.close()
+
+  const controller = createNostrDbSyncController({
+    _indexedDB: globalThis.indexedDB,
+    _nowMs: () => 1000,
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { firstScore: 1, lastScore: 1, scores: [] } }
+      }
+    }),
+    _setTimeout: () => ({}),
+    _clearTimeout: () => {}
+  })
+  controller.ensureSubscriptions(context(messenger()))
+  await new Promise(resolve => setTimeout(resolve, 20))
+
+  const compacted = await createQueue({
+    prefix: PUSH_EVENT_OUTBOX.slice(0, -':idb-queue'.length),
+    indexedDB: globalThis.indexedDB,
+    evictionPolicy: 'reject',
+    indexes: PUSH_EVENT_INDEXES
+  })
+  try {
+    const stored = []
+    for await (const value of compacted.storedItems()) stored.push(value)
+    assert.deepEqual(stored.map(value => value.id), [newer.id])
+  } finally {
+    controller.stop()
+    await compacted.close()
+    await deleteDatabase(PUSH_EVENT_OUTBOX)
+    await deleteDatabase(PUSH_CHUNK_OUTBOX)
+  }
+})
+
 test('nostrdb zero-output push wakes are counted without an empty push log', async () => {
   let now = 1000
   const performanceReadings = [10, 11, 12, 17]
@@ -2441,7 +2601,7 @@ test('durable push outbox survives reload and removes chunks only after publicat
     prefix: PUSH_EVENT_OUTBOX.slice(0, -':idb-queue'.length),
     indexedDB: globalThis.indexedDB,
     evictionPolicy: 'reject',
-    indexes: { id: { keyPath: 'id', unique: true } }
+    indexes: PUSH_EVENT_INDEXES
   })
   assert.equal(await storedCount(eventOutbox), 1)
   await eventOutbox.close()
@@ -2473,7 +2633,7 @@ test('durable push outbox survives reload and removes chunks only after publicat
     prefix: PUSH_EVENT_OUTBOX.slice(0, -':idb-queue'.length),
     indexedDB: globalThis.indexedDB,
     evictionPolicy: 'reject',
-    indexes: { id: { keyPath: 'id', unique: true } }
+    indexes: PUSH_EVENT_INDEXES
   })
   const chunkOutbox = await createQueue({
     prefix: PUSH_CHUNK_OUTBOX.slice(0, -':idb-queue'.length),
