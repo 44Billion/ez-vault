@@ -57,10 +57,18 @@ const REQUEST_ID_MAX_LENGTH = 256
 const MAX_SYNC_JSONL_CHARS = 4 * 1024 * 1024
 const MAX_SYNC_JSONL_BYTES = 4 * 1024 * 1024
 const DEFAULT_WINDOW_MS = 15 * 60 * 1000
-const MIN_WINDOW_MS = 60 * 1000
+const MIN_WINDOW_MS = 1000
+// Small ranges may grow directly back to minutes after a complete reply.
+const MIN_ADAPTIVE_WINDOW_MS = 60 * 1000
 const MAX_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
 const SYNC_ANCHOR_MAX_FUTURE_SKEW_MS = 5000
 const INVENTORY_LIMIT = 200
+// Scores are monotonic milliseconds, so a one-second range has about 1,000
+// possible values. The extra slot distinguishes a complete range from one
+// whose local inventory still exceeds the safe exclusion budget.
+const MAX_DENSE_INVENTORY_IDS = 1024
+const DENSE_INVENTORY_QUERY_LIMIT = MAX_DENSE_INVENTORY_IDS + 1
+const DENSE_RANGE_BATCH_SIZE = 32
 const REQUEST_LIMIT = 200
 const SMALL_REPLY_COUNT = 20
 const ONLINE_RETRY_MIN_MS = 5 * 60 * 1000
@@ -242,8 +250,9 @@ function clampWindow (value) {
 
 function adaptWindow (current, replyCount, limit) {
   const windowMs = clampWindow(current)
-  if (replyCount <= 0) return clampWindow(windowMs * 4)
-  if (replyCount < SMALL_REPLY_COUNT) return clampWindow(windowMs * 2)
+  const growthBase = Math.max(windowMs, MIN_ADAPTIVE_WINDOW_MS)
+  if (replyCount <= 0) return clampWindow(growthBase * 4)
+  if (replyCount < SMALL_REPLY_COUNT) return clampWindow(growthBase * 2)
   if (replyCount >= limit) return clampWindow(Math.floor(windowMs / 2))
   return windowMs
 }
@@ -261,6 +270,21 @@ function normalizeIdList (values, limit = INVENTORY_LIMIT) {
     seen.add(id)
     out.push(id)
     if (out.length >= limit) break
+  }
+  return out
+}
+
+function mergeIdLists (limit, ...lists) {
+  const out = []
+  const seen = new Set()
+  for (const values of lists) {
+    for (const value of Array.isArray(values) ? values : []) {
+      const id = normalizePubkey(value)
+      if (!id || seen.has(id)) continue
+      seen.add(id)
+      out.push(id)
+      if (out.length >= limit) return out
+    }
   }
   return out
 }
@@ -286,11 +310,13 @@ function normalizeAsk (payload) {
   const sinceScore = normalizeScore(payload.sinceScore)
   const untilScore = normalizeScore(payload.untilScore)
   if (!requestId || sinceScore == null || untilScore == null || untilScore < sinceScore) return null
+  const excludeIds = normalizeIdList(payload.excludeIds, DENSE_INVENTORY_QUERY_LIMIT)
+  if (excludeIds.length > MAX_DENSE_INVENTORY_IDS) return null
   return {
     requestId,
     sinceScore,
     untilScore,
-    excludeIds: normalizeIdList(payload.excludeIds),
+    excludeIds,
     limit: normalizePositiveInteger(payload.limit, REQUEST_LIMIT, REQUEST_LIMIT),
     priority: payload.priority === 'lower' || payload.priority === 'lowest'
       ? payload.priority
@@ -569,6 +595,25 @@ function peerState (state, ownerPubkey, peerPubkey) {
   const owner = ownerState(state, ownerPubkey)
   if (!isPlainObject(owner[peerPubkey])) owner[peerPubkey] = {}
   return owner[peerPubkey]
+}
+
+function laneCycleReplyIds (entry, lane) {
+  // A hasMore cycle spans several requestIds. Retain every received id because
+  // the peer database may contain older replaceable/addressable versions.
+  const values = lane === 'recent' ? entry?.recent?.cycleReplyIds : entry?.historyCycleReplyIds
+  return normalizeIdList(values, DENSE_INVENTORY_QUERY_LIMIT)
+}
+
+function setLaneCycleReplyIds (entry, lane, values) {
+  const ids = normalizeIdList(values, DENSE_INVENTORY_QUERY_LIMIT)
+  if (lane === 'recent') {
+    entry.recent = isPlainObject(entry.recent) ? entry.recent : {}
+    if (ids.length) entry.recent.cycleReplyIds = ids
+    else delete entry.recent.cycleReplyIds
+    return
+  }
+  if (ids.length) entry.historyCycleReplyIds = ids
+  else delete entry.historyCycleReplyIds
 }
 
 function appBackfillsState (state) {
@@ -1722,33 +1767,122 @@ export function createNostrDbSyncController ({
     return result
   }
 
-  async function localInventoryIds (db, sinceScore, untilScore) {
+  async function localInventoryIds (db, sinceScore, untilScore, limit = INVENTORY_LIMIT) {
     const { results } = await db.query(syncQuery(sinceScore, untilScore, {
       ids_only: true,
-      limit: INVENTORY_LIMIT
+      limit
     }))
-    return normalizeIdList(results)
+    return normalizeIdList(results, limit)
   }
 
-  async function buildAskWindow (db, sinceScore, targetScore, windowMs) {
+  async function buildAskWindow (db, sinceScore, targetScore, windowMs, {
+    allowExpanded = false,
+    additionalExcludeIds = []
+  } = {}) {
     // Windows are over NostrDB sync-anchor scores (`sa`, milliseconds), not
     // Nostr event created_at seconds.
     let size = clampWindow(windowMs)
     while (true) {
       const untilScore = Math.min(targetScore, sinceScore + size - 1)
       const excludeIds = await localInventoryIds(db, sinceScore, untilScore)
-      if (excludeIds.length < INVENTORY_LIMIT || size <= MIN_WINDOW_MS) {
-        return { sinceScore, untilScore, excludeIds, windowMs: size }
+      const mergedIds = mergeIdLists(
+        DENSE_INVENTORY_QUERY_LIMIT,
+        excludeIds,
+        additionalExcludeIds
+      )
+      if (excludeIds.length < INVENTORY_LIMIT && mergedIds.length <= MAX_DENSE_INVENTORY_IDS) {
+        return { sinceScore, untilScore, excludeIds: mergedIds, windowMs: size, saturated: false }
+      }
+      const expand = allowExpanded || size <= MIN_WINDOW_MS
+      if (expand) {
+        const expandedIds = await localInventoryIds(
+          db,
+          sinceScore,
+          untilScore,
+          DENSE_INVENTORY_QUERY_LIMIT
+        )
+        const denseIds = mergeIdLists(
+          DENSE_INVENTORY_QUERY_LIMIT,
+          expandedIds,
+          additionalExcludeIds
+        )
+        if (denseIds.length <= MAX_DENSE_INVENTORY_IDS) {
+          return { sinceScore, untilScore, excludeIds: denseIds, windowMs: size, saturated: false }
+        }
+      }
+      if (size <= MIN_WINDOW_MS) {
+        return {
+          sinceScore,
+          untilScore,
+          excludeIds: [],
+          inventoryCount: mergedIds.length,
+          windowMs: size,
+          saturated: true
+        }
       }
       size = Math.max(MIN_WINDOW_MS, Math.floor(size / 2))
     }
+  }
+
+  function newDenseRangeBatch (lane) {
+    return {
+      lane,
+      startScore: null,
+      endScore: null,
+      count: 0
+    }
+  }
+
+  function addDenseRange (batch, sinceScore, untilScore) {
+    batch.startScore = batch.startScore == null
+      ? sinceScore
+      : Math.min(batch.startScore, sinceScore)
+    batch.endScore = batch.endScore == null
+      ? untilScore
+      : Math.max(batch.endScore, untilScore)
+    batch.count++
+  }
+
+  function flushDenseRangeDebug (context, batch) {
+    if (!batch?.count) return
+    emitDebug(context.debug, 'dense-range', {
+      lane: batch.lane,
+      rangeStart: batch.startScore,
+      rangeEnd: batch.endScore,
+      rangeCount: batch.count,
+      inventoryLimit: MAX_DENSE_INVENTORY_IDS
+    })
+    batch.startScore = null
+    batch.endScore = null
+    batch.count = 0
+  }
+
+  function scheduleDenseContinuation (ownerPubkey, peerPubkey, lane, context) {
+    context = backgroundContext(context)
+    const run = () => {
+      if (lane === 'history') {
+        return maybeAsk(ownerPubkey, peerPubkey, context, {
+          reason: 'dense-next',
+          denseBatch: newDenseRangeBatch('history')
+        })
+      }
+      return maybeAskRecent(ownerPubkey, peerPubkey, context, {
+        reason: 'dense-next',
+        denseBatch: newDenseRangeBatch('recent')
+      })
+    }
+    _setTimeout(() => {
+      if (runtime.messenger?.readStatus?.().paused === true) return
+      Promise.resolve().then(run).catch(report)
+    }, 0)?.unref?.()
   }
 
   async function maybeAsk (ownerPubkey, peerPubkey, context = runtime, {
     onlineHint = false,
     force = false,
     resume = false,
-    reason = onlineHint ? 'advertise' : 'initial'
+    reason = onlineHint ? 'advertise' : 'initial',
+    denseBatch = null
   } = {}) {
     throwIfHandlerAborted(context)
     if (!context.messenger?.ask) return null
@@ -1786,12 +1920,17 @@ export function createNostrDbSyncController ({
     const completedValue = storedCompleted > advert.maxScore
       ? advert.minScore - 1
       : storedCompleted
-    if (completedValue !== storedCompleted) entry.completedScore = completedValue
+    if (completedValue !== storedCompleted) {
+      entry.completedScore = completedValue
+      setLaneCycleReplyIds(entry, 'history', [])
+    }
     const targetScore = Math.max(advert.maxScore, now + SYNC_ANCHOR_MAX_FUTURE_SKEW_MS)
     const completed = completedValue
     const sinceScore = Math.max(advert.minScore, completed + 1)
     if (sinceScore > targetScore) {
+      flushDenseRangeDebug(context, denseBatch)
       entry.pending = null
+      setLaneCycleReplyIds(entry, 'history', [])
       entry.updatedAt = now
       setState(state)
       return null
@@ -1799,12 +1938,35 @@ export function createNostrDbSyncController ({
 
     let askWindow
     try {
-      askWindow = await buildAskWindow(getDb(ownerPubkey), sinceScore, targetScore, entry.windowMs)
+      askWindow = await buildAskWindow(getDb(ownerPubkey), sinceScore, targetScore, entry.windowMs, {
+        allowExpanded: reason === 'has-more',
+        additionalExcludeIds: laneCycleReplyIds(entry, 'history')
+      })
       throwIfHandlerAborted(context)
     } catch (err) {
       if (context.signal?.aborted) throw err
       report(err)
       return null
+    }
+    if (askWindow.saturated) {
+      entry.completedScore = Math.max(completedValue, askWindow.untilScore)
+      entry.windowMs = askWindow.windowMs
+      entry.pending = null
+      setLaneCycleReplyIds(entry, 'history', [])
+      entry.updatedAt = now
+      throwIfHandlerAborted(context)
+      await setState(state)
+      const batch = denseBatch || newDenseRangeBatch('history')
+      addDenseRange(batch, askWindow.sinceScore, askWindow.untilScore)
+      if (batch.count >= DENSE_RANGE_BATCH_SIZE) {
+        flushDenseRangeDebug(context, batch)
+        scheduleDenseContinuation(ownerPubkey, peerPubkey, 'history', context)
+        return null
+      }
+      return maybeAsk(ownerPubkey, peerPubkey, context, {
+        reason: 'dense-next',
+        denseBatch: batch
+      })
     }
 
     const id = entry.pending?.requestId || nextRequestId()
@@ -1829,6 +1991,7 @@ export function createNostrDbSyncController ({
       limit: REQUEST_LIMIT,
       replyCount: 0,
       replyIndexes: [],
+      replyIds: [],
       attempt,
       sentAt: now,
       nextRetryAt: now + EXCHANGE_CHECK_INTERVAL_MS,
@@ -1897,23 +2060,72 @@ export function createNostrDbSyncController ({
       onlineDelay,
       retryAt: entry.pending.onlineRetryAt
     })
+    flushDenseRangeDebug(context, denseBatch)
     return payload
   }
 
-  async function buildRecentAskWindow (db, minScore, targetScore, windowMs) {
+  async function buildRecentAskWindow (db, minScore, targetScore, windowMs, {
+    allowExpanded = false,
+    additionalExcludeIds = []
+  } = {}) {
     let size = clampWindow(windowMs)
     while (true) {
       const sinceScore = Math.max(minScore, targetScore - size + 1)
       const excludeIds = await localInventoryIds(db, sinceScore, targetScore)
-      if (excludeIds.length < INVENTORY_LIMIT || size <= MIN_WINDOW_MS) {
-        return { sinceScore, untilScore: targetScore, excludeIds, windowMs: size }
+      const mergedIds = mergeIdLists(
+        DENSE_INVENTORY_QUERY_LIMIT,
+        excludeIds,
+        additionalExcludeIds
+      )
+      if (excludeIds.length < INVENTORY_LIMIT && mergedIds.length <= MAX_DENSE_INVENTORY_IDS) {
+        return {
+          sinceScore,
+          untilScore: targetScore,
+          excludeIds: mergedIds,
+          windowMs: size,
+          saturated: false
+        }
+      }
+      const expand = allowExpanded || size <= MIN_WINDOW_MS
+      if (expand) {
+        const expandedIds = await localInventoryIds(
+          db,
+          sinceScore,
+          targetScore,
+          DENSE_INVENTORY_QUERY_LIMIT
+        )
+        const denseIds = mergeIdLists(
+          DENSE_INVENTORY_QUERY_LIMIT,
+          expandedIds,
+          additionalExcludeIds
+        )
+        if (denseIds.length <= MAX_DENSE_INVENTORY_IDS) {
+          return {
+            sinceScore,
+            untilScore: targetScore,
+            excludeIds: denseIds,
+            windowMs: size,
+            saturated: false
+          }
+        }
+      }
+      if (size <= MIN_WINDOW_MS) {
+        return {
+          sinceScore,
+          untilScore: targetScore,
+          excludeIds: [],
+          inventoryCount: mergedIds.length,
+          windowMs: size,
+          saturated: true
+        }
       }
       size = Math.max(MIN_WINDOW_MS, Math.floor(size / 2))
     }
   }
 
   async function maybeAskRecent (ownerPubkey, peerPubkey, context = runtime, {
-    reason = 'recent'
+    reason = 'recent',
+    denseBatch = null
   } = {}) {
     throwIfHandlerAborted(context)
     if (!context.messenger?.ask) return null
@@ -1934,6 +2146,7 @@ export function createNostrDbSyncController ({
     const advertisedTarget = Math.max(advert.maxScore, now + SYNC_ANCHOR_MAX_FUTURE_SKEW_MS)
     const completed = completedValue
     const recent = isPlainObject(entry.recent) ? entry.recent : { targetScore: advertisedTarget }
+    if (completedValue !== storedCompleted) setLaneCycleReplyIds(entry, 'recent', [])
     const pending = recent.pending
     if (pending && (
       (reason !== 'advertise' && pending.untilScore >= advertisedTarget) ||
@@ -1954,7 +2167,9 @@ export function createNostrDbSyncController ({
       : (isSafeScore(recent.targetScore) ? recent.targetScore : advertisedTarget)
     const minScore = Math.max(advert.minScore, completed + 1)
     if (targetScore < minScore) {
+      flushDenseRangeDebug(context, denseBatch)
       entry.recent = { ...recent, targetScore: minScore - 1, pending: null }
+      setLaneCycleReplyIds(entry, 'recent', [])
       entry.updatedAt = now
       throwIfHandlerAborted(context)
       await setState(state)
@@ -1966,13 +2181,40 @@ export function createNostrDbSyncController ({
         getDb(ownerPubkey),
         minScore,
         targetScore,
-        recent.windowMs || entry.windowMs
+        recent.windowMs || entry.windowMs,
+        {
+          allowExpanded: reason === 'has-more',
+          additionalExcludeIds: laneCycleReplyIds(entry, 'recent')
+        }
       )
       throwIfHandlerAborted(context)
     } catch (error) {
       if (context.signal?.aborted) throw error
       report(error)
       return null
+    }
+    if (askWindow.saturated) {
+      entry.recent = {
+        ...recent,
+        targetScore: Math.min(targetScore, askWindow.sinceScore - 1),
+        windowMs: askWindow.windowMs,
+        pending: null
+      }
+      setLaneCycleReplyIds(entry, 'recent', [])
+      entry.updatedAt = now
+      throwIfHandlerAborted(context)
+      await setState(state)
+      const batch = denseBatch || newDenseRangeBatch('recent')
+      addDenseRange(batch, askWindow.sinceScore, askWindow.untilScore)
+      if (batch.count >= DENSE_RANGE_BATCH_SIZE) {
+        flushDenseRangeDebug(context, batch)
+        scheduleDenseContinuation(ownerPubkey, peerPubkey, 'recent', context)
+        return null
+      }
+      return maybeAskRecent(ownerPubkey, peerPubkey, context, {
+        reason: 'dense-next',
+        denseBatch: batch
+      })
     }
     const id = nextRequestId()
     const attempt = 0
@@ -1983,9 +2225,11 @@ export function createNostrDbSyncController ({
       excludeIds: askWindow.excludeIds,
       limit: REQUEST_LIMIT
     }
+    const cycleReplyIds = laneCycleReplyIds(entry, 'recent')
     entry.recent = {
       targetScore,
       windowMs: askWindow.windowMs,
+      ...(cycleReplyIds.length ? { cycleReplyIds } : {}),
       pending: {
         requestId: id,
         sinceScore: askWindow.sinceScore,
@@ -1994,6 +2238,7 @@ export function createNostrDbSyncController ({
         limit: REQUEST_LIMIT,
         replyCount: 0,
         replyIndexes: [],
+        replyIds: [],
         attempt,
         sentAt: now,
         nextRetryAt: now + EXCHANGE_CHECK_INTERVAL_MS,
@@ -2060,6 +2305,7 @@ export function createNostrDbSyncController ({
       lane: 'recent',
       attempt
     })
+    flushDenseRangeDebug(context, denseBatch)
     return payload
   }
 
@@ -2649,6 +2895,11 @@ export function createNostrDbSyncController ({
     if (pending) {
       const lane = historyPending ? 'history' : 'recent'
       pending.replyCount = (pending.replyCount || 0) + events.length
+      pending.replyIds = mergeIdLists(
+        DENSE_INVENTORY_QUERY_LIMIT,
+        pending.replyIds,
+        events.map(event => event.id)
+      )
       if (Number.isSafeInteger(payload.index) && payload.index >= 0) {
         pending.replyIndexes = [...new Set([...(pending.replyIndexes || []), payload.index])]
           .sort((left, right) => left - right)
@@ -2677,6 +2928,15 @@ export function createNostrDbSyncController ({
         }
         const replyCount = pending.replyCount || 0
         const hasMore = payload.hasMore ?? replyCount >= (pending.limit || REQUEST_LIMIT)
+        if (hasMore) {
+          setLaneCycleReplyIds(entry, lane, mergeIdLists(
+            DENSE_INVENTORY_QUERY_LIMIT,
+            laneCycleReplyIds(entry, lane),
+            pending.replyIds
+          ))
+        } else {
+          setLaneCycleReplyIds(entry, lane, [])
+        }
         if (hasMore) {
           if (lane === 'history') entry.windowMs = shrinkWindow(entry.windowMs)
           else entry.recent.windowMs = shrinkWindow(entry.recent.windowMs)
@@ -2711,7 +2971,9 @@ export function createNostrDbSyncController ({
         if (hasMore) {
           if (lane === 'history') await maybeAsk(ownerPubkey, peerPubkey, context, { force: true, reason: 'has-more' })
           else await maybeAskRecent(ownerPubkey, peerPubkey, context, { reason: 'has-more' })
-        } else if (lane === 'recent') {
+        } else if (lane === 'history') {
+          await maybeAsk(ownerPubkey, peerPubkey, context, { reason: 'history-next' })
+        } else {
           await maybeAskRecent(ownerPubkey, peerPubkey, context, { reason: 'recent-next' })
         }
         if (rejected) throw syncPayloadInvalid('jsonl-entries-invalid', { partial: true })

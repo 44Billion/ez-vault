@@ -1541,6 +1541,50 @@ test('nostrdb sync replies with hasMore when responder cap is hit', async () => 
   )
 })
 
+test('responders accept dense exclude lists up to 1024 ids and still detect hasMore', async () => {
+  const msg = messenger()
+  const events = Array.from({ length: 201 }, (_, index) => event(index + 1))
+  const excludeIds = Array.from({ length: 1024 }, (_, index) => eventId(10000 + index))
+  let seenFilter
+  const controller = createNostrDbSyncController({
+    getDb: () => ({
+      async query (filter) {
+        seenFilter = filter
+        return { results: events, meta: { scores: [] } }
+      }
+    })
+  })
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ASK_CODE,
+    payload: {
+      requestId: 'dense-excludes',
+      sinceScore: 1,
+      untilScore: 1000,
+      excludeIds,
+      limit: 200
+    }
+  }), context(msg))
+
+  assert.equal(seenFilter['!ids'].length, 1024)
+  assert.equal(seenFilter.limit, 201)
+  assert.equal(msg.sent.length > 0, true)
+  assert.equal(msg.sent[0].options.payload.hasMore, true)
+
+  const replies = msg.sent.length
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ASK_CODE,
+    payload: {
+      requestId: 'too-many-excludes',
+      sinceScore: 1,
+      untilScore: 1000,
+      excludeIds: Array.from({ length: 1025 }, (_, index) => eventId(20000 + index)),
+      limit: 200
+    }
+  }), context(msg))
+  assert.equal(msg.sent.length, replies)
+})
+
 test('nostrdb app backfill stores install intent and asks trusted peers', async () => {
   const msg = messenger()
   const controller = createNostrDbSyncController({
@@ -2355,7 +2399,68 @@ test('recent recovery walks backward independently of the historical lane', asyn
   assert.ok(msg.sent.some(item => item.options.payload.requestId === secondRecent.requestId))
 })
 
-test('nostrdb sync advances only when final reply is complete', async () => {
+test('recent growth from a one-second window also uses the one-minute floor', async () => {
+  globalThis.localStorage.setItem(SYNC_STATE_KEY, JSON.stringify({
+    owners: {
+      [OWNER]: {
+        [PEER]: {
+          completedScore: 1000,
+          windowMs: 1000,
+          recent: {
+            targetScore: 1000000,
+            windowMs: 1000
+          }
+        }
+      }
+    }
+  }))
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query () {
+        return { results: [], meta: { scores: [] } }
+      },
+      async add () {
+        return { ok: true, stored: true }
+      }
+    })
+  })
+  controller.ensureSubscriptions(context(msg))
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: 900, minScore: 1000, maxScore: 1000000 }
+  }), context(msg))
+  const firstRecent = controller._getState().owners[OWNER][PEER].recent.pending
+  assert.equal(firstRecent.untilScore - firstRecent.sinceScore + 1, 1000)
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_REPLY_CODE,
+    payload: {
+      requestId: firstRecent.requestId,
+      sinceScore: firstRecent.sinceScore,
+      untilScore: firstRecent.untilScore,
+      hasMore: false,
+      index: 0,
+      isLast: true,
+      jsonl: ''
+    }
+  }), context(msg))
+
+  const state = controller._getState().owners[OWNER][PEER]
+  assert.equal(state.recent.windowMs, 4 * 60 * 1000)
+  assert.equal(state.recent.targetScore, firstRecent.sinceScore - 1)
+  assert.equal(
+    state.recent.pending.sinceScore,
+    state.recent.targetScore - state.recent.windowMs + 1
+  )
+})
+
+test('nostrdb sync advances and continues history when final reply is complete', async () => {
   const msg = messenger()
   const controller = createNostrDbSyncController({
     _nowMs: () => 1000,
@@ -2392,10 +2497,154 @@ test('nostrdb sync advances only when final reply is complete', async () => {
     }
   }), context(msg))
 
-  assert.equal(msg.sent.length, 2)
+  const historyAsks = msg.sent
+    .map(item => item.options.payload)
+    .filter(payload => payload.priority === 'lower')
+  assert.equal(historyAsks.length, 2)
+  const nextAsk = historyAsks.find(payload => payload.requestId !== firstAsk.requestId)
+  assert.ok(nextAsk)
   const owner = controller._getState().owners[OWNER][PEER]
-  assert.equal(owner.pending, null)
+  assert.equal(owner.pending.requestId, nextAsk.requestId)
   assert.equal(owner.completedScore, firstAsk.untilScore)
+  assert.equal(nextAsk.sinceScore, firstAsk.untilScore + 1)
+})
+
+for (const testCase of [
+  { replyCount: 0, expectedWindowMs: 4 * 60 * 1000 },
+  { replyCount: 1, expectedWindowMs: 2 * 60 * 1000 },
+  { replyCount: 20, expectedWindowMs: 1000 },
+  { replyCount: 200, expectedWindowMs: 1000 }
+]) {
+  test(`history growth from a one-second window uses the one-minute floor for ${testCase.replyCount} events`, async () => {
+    globalThis.localStorage.setItem(SYNC_STATE_KEY, JSON.stringify({
+      owners: {
+        [OWNER]: {
+          [PEER]: {
+            completedScore: 1000,
+            windowMs: 1000,
+            updatedAt: 1000
+          }
+        }
+      }
+    }))
+    const msg = messenger()
+    const controller = createNostrDbSyncController({
+      _nowMs: () => 1000,
+      _random: () => 0.5,
+      _setTimeout: () => ({}),
+      getDb: () => ({
+        subscribe: emptySubscription,
+        async query () {
+          return { results: [], meta: { scores: [] } }
+        },
+        async add () {
+          return { ok: true, stored: true }
+        }
+      })
+    })
+    controller.ensureSubscriptions(context(msg))
+
+    await controller.handleMessage(syncMessage({
+      code: NOSTRDB_SYNC_ADVERTISE_CODE,
+      payload: { generatedAt: 900, minScore: 1000, maxScore: 1000000 }
+    }), context(msg))
+    const firstAsk = msg.sent.find(item => item.options.payload.priority === 'lower').options.payload
+    assert.equal(firstAsk.untilScore - firstAsk.sinceScore + 1, 1000)
+    const events = Array.from({ length: testCase.replyCount }, (_, index) => event(index + 1))
+
+    await controller.handleMessage(syncMessage({
+      code: NOSTRDB_SYNC_REPLY_CODE,
+      payload: {
+        requestId: firstAsk.requestId,
+        sinceScore: firstAsk.sinceScore,
+        untilScore: firstAsk.untilScore,
+        hasMore: false,
+        index: 0,
+        isLast: true,
+        jsonl: events.map(item => JSON.stringify(item)).join('\n') + (events.length ? '\n' : '')
+      }
+    }), context(msg))
+
+    const nextAsk = msg.sent
+      .map(item => item.options.payload)
+      .find(payload => payload.priority === 'lower' &&
+        payload.requestId !== firstAsk.requestId)
+    assert.ok(nextAsk)
+    assert.equal(nextAsk.sinceScore, firstAsk.untilScore + 1)
+    assert.equal(nextAsk.untilScore, nextAsk.sinceScore + testCase.expectedWindowMs - 1)
+    assert.equal(controller._getState().owners[OWNER][PEER].windowMs, testCase.expectedWindowMs)
+    assert.equal(controller._getState().owners[OWNER][PEER].historyCycleReplyIds, undefined)
+  })
+}
+
+test('dense minimum ranges are marked covered and advanced in bounded batches', async () => {
+  globalThis.localStorage.setItem(SYNC_STATE_KEY, JSON.stringify({
+    owners: {
+      [OWNER]: {
+        [PEER]: {
+          completedScore: 1000,
+          windowMs: 1000,
+          updatedAt: 1000
+        }
+      }
+    }
+  }))
+  const timers = []
+  const diagnostics = []
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: timer => {
+      const index = timers.indexOf(timer)
+      if (index >= 0) timers.splice(index, 1)
+    },
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query (filter) {
+        if (!filter.ids_only) return { results: [], meta: { scores: [] } }
+        return {
+          results: Array.from({ length: filter.limit }, (_, index) => eventId(100000 + index)),
+          meta: { scores: [] }
+        }
+      }
+    })
+  })
+  controller.ensureSubscriptions(context(msg, {
+    debug: entry => diagnostics.push(entry)
+  }))
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: 900, minScore: 1000, maxScore: 1000000 }
+  }), context(msg, {
+    debug: entry => diagnostics.push(entry)
+  }))
+
+  const state = controller._getState().owners[OWNER][PEER]
+  assert.equal(state.completedScore, 33000)
+  assert.equal(state.pending, null)
+  const dense = diagnostics.find(entry =>
+    entry.action === 'dense-range' && entry.lane === 'history'
+  )
+  assert.deepEqual({
+    rangeStart: dense?.rangeStart,
+    rangeEnd: dense?.rangeEnd,
+    rangeCount: dense?.rangeCount,
+    inventoryLimit: dense?.inventoryLimit
+  }, {
+    rangeStart: 1001,
+    rangeEnd: 33000,
+    rangeCount: 32,
+    inventoryLimit: 1024
+  })
+  assert.ok(timers.some(timer => timer.ms === 0))
+  controller.stop()
 })
 
 test('nostrdb sync treats missing hasMore full pages as incomplete', async () => {
@@ -2442,11 +2691,195 @@ test('nostrdb sync treats missing hasMore full pages as incomplete', async () =>
     .map(item => item.options.payload)
     .find(payload => payload.requestId !== firstAsk.requestId &&
       payload.sinceScore === firstAsk.sinceScore &&
-      payload.untilScore === firstAsk.sinceScore + 60000 - 1)
+      payload.untilScore === firstAsk.sinceScore + Math.floor(
+        (firstAsk.untilScore - firstAsk.sinceScore + 1) / 2
+      ) - 1)
   assert.ok(nextAsk)
   assert.equal(nextAsk.sinceScore, firstAsk.sinceScore)
-  assert.equal(nextAsk.untilScore, firstAsk.sinceScore + 60000 - 1)
+  assert.equal(nextAsk.untilScore, firstAsk.sinceScore + Math.floor(
+    (firstAsk.untilScore - firstAsk.sinceScore + 1) / 2
+  ) - 1)
   assert.equal(nextAsk.excludeIds.length, 200)
+})
+
+test('history accumulates reply ids across every hasMore cycle and clears them on completion', async () => {
+  const added = []
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query (filter) {
+        if (!filter.ids_only) return { results: [], meta: { scores: [] } }
+        return {
+          results: added.slice(0, filter.limit).map(item => item.id),
+          meta: { scores: [] }
+        }
+      },
+      async add (addedEvent) {
+        added.push(addedEvent)
+        return { ok: true, stored: true }
+      }
+    })
+  })
+  controller.ensureSubscriptions(context(msg))
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: 900, minScore: 1000, maxScore: 10000000 }
+  }), context(msg))
+  const historyAsks = () => msg.sent
+    .map(item => item.options.payload)
+    .filter(payload => payload.priority === 'lower')
+  const firstAsk = historyAsks()[0]
+  const firstEvents = Array.from({ length: 200 }, (_, index) => event(index + 1))
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_REPLY_CODE,
+    payload: {
+      requestId: firstAsk.requestId,
+      sinceScore: firstAsk.sinceScore,
+      untilScore: firstAsk.untilScore,
+      hasMore: true,
+      index: 0,
+      isLast: true,
+      jsonl: firstEvents.map(item => JSON.stringify(item)).join('\n') + '\n'
+    }
+  }), context(msg))
+  const secondAsk = historyAsks().find(payload => payload.requestId !== firstAsk.requestId)
+  assert.ok(secondAsk)
+  assert.equal(secondAsk.excludeIds.length, 200)
+  assert.equal(controller._getState().owners[OWNER][PEER].historyCycleReplyIds.length, 200)
+  const secondEvents = Array.from({ length: 200 }, (_, index) => event(index + 201))
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_REPLY_CODE,
+    payload: {
+      requestId: secondAsk.requestId,
+      sinceScore: secondAsk.sinceScore,
+      untilScore: secondAsk.untilScore,
+      hasMore: true,
+      index: 0,
+      isLast: true,
+      jsonl: secondEvents.map(item => JSON.stringify(item)).join('\n') + '\n'
+    }
+  }), context(msg))
+  const thirdAsk = historyAsks().find(payload =>
+    payload.requestId !== firstAsk.requestId &&
+    payload.requestId !== secondAsk.requestId
+  )
+  assert.ok(thirdAsk)
+  assert.equal(thirdAsk.excludeIds.length, 400)
+  assert.equal(controller._getState().owners[OWNER][PEER].historyCycleReplyIds.length, 400)
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_REPLY_CODE,
+    payload: {
+      requestId: thirdAsk.requestId,
+      sinceScore: thirdAsk.sinceScore,
+      untilScore: thirdAsk.untilScore,
+      hasMore: false,
+      index: 0,
+      isLast: true,
+      jsonl: ''
+    }
+  }), context(msg))
+  const state = controller._getState().owners[OWNER][PEER]
+  assert.equal(state.historyCycleReplyIds, undefined)
+  assert.equal(state.completedScore, thirdAsk.untilScore)
+  assert.equal(historyAsks().length, 4)
+  assert.notEqual(historyAsks().at(-1).requestId, thirdAsk.requestId)
+})
+
+test('recent accumulates reply ids across every hasMore cycle and clears them on completion', async () => {
+  const added = []
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async query (filter) {
+        if (!filter.ids_only) return { results: [], meta: { scores: [] } }
+        return {
+          results: added.slice(0, filter.limit).map(item => item.id),
+          meta: { scores: [] }
+        }
+      },
+      async add (addedEvent) {
+        added.push(addedEvent)
+        return { ok: true, stored: true }
+      }
+    })
+  })
+  controller.ensureSubscriptions(context(msg))
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: 900, minScore: 1000, maxScore: 10000000 }
+  }), context(msg))
+  const recentAsks = () => msg.sent
+    .map(item => item.options.payload)
+    .filter(payload => payload.priority === undefined)
+  const firstAsk = controller._getState().owners[OWNER][PEER].recent.pending
+  const firstEvents = Array.from({ length: 200 }, (_, index) => event(index + 1))
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_REPLY_CODE,
+    payload: {
+      requestId: firstAsk.requestId,
+      sinceScore: firstAsk.sinceScore,
+      untilScore: firstAsk.untilScore,
+      hasMore: true,
+      index: 0,
+      isLast: true,
+      jsonl: firstEvents.map(item => JSON.stringify(item)).join('\n') + '\n'
+    }
+  }), context(msg))
+  const secondAsk = controller._getState().owners[OWNER][PEER].recent.pending
+  assert.ok(secondAsk)
+  assert.equal(secondAsk.requestId, recentAsks().at(-1).requestId)
+  assert.equal(secondAsk.excludeIds.length, 200)
+  assert.equal(controller._getState().owners[OWNER][PEER].recent.cycleReplyIds.length, 200)
+  const secondEvents = Array.from({ length: 200 }, (_, index) => event(index + 201))
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_REPLY_CODE,
+    payload: {
+      requestId: secondAsk.requestId,
+      sinceScore: secondAsk.sinceScore,
+      untilScore: secondAsk.untilScore,
+      hasMore: true,
+      index: 0,
+      isLast: true,
+      jsonl: secondEvents.map(item => JSON.stringify(item)).join('\n') + '\n'
+    }
+  }), context(msg))
+  const thirdAsk = controller._getState().owners[OWNER][PEER].recent.pending
+  assert.ok(thirdAsk)
+  assert.equal(thirdAsk.excludeIds.length, 400)
+  assert.equal(controller._getState().owners[OWNER][PEER].recent.cycleReplyIds.length, 400)
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_REPLY_CODE,
+    payload: {
+      requestId: thirdAsk.requestId,
+      sinceScore: thirdAsk.sinceScore,
+      untilScore: thirdAsk.untilScore,
+      hasMore: false,
+      index: 0,
+      isLast: true,
+      jsonl: ''
+    }
+  }), context(msg))
+  const state = controller._getState().owners[OWNER][PEER]
+  assert.equal(state.recent.cycleReplyIds, undefined)
+  assert.equal(state.recent.targetScore, thirdAsk.sinceScore - 1)
+  assert.equal(state.recent.pending.requestId, recentAsks().at(-1).requestId)
+  assert.notEqual(state.recent.pending.requestId, thirdAsk.requestId)
 })
 
 test('nostrdb sync ingests with mergeSource sync and suppresses echo pushes', async () => {
