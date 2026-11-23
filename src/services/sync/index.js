@@ -88,6 +88,7 @@ function redactDebugEvent (event) {
 function defaultDebugSink () {
   if (!debugEnabledForWindow()) return null
   return event => {
+    if (event?.action === 'inbound-peer-dropped') return
     const safe = redactDebugEvent(event)
     console.log('[ez-vault sync]', safe.action || 'event', safe)
   }
@@ -1358,6 +1359,7 @@ export function createSyncController ({
       cooldownsOpened: 0,
       cooldownsExpired: 0,
       droppedByCode: {},
+      cooldownDropsByCode: {},
       violationsByReason: {}
     }
   }

@@ -133,11 +133,25 @@ test('peer guard opens, enforces, expires, and escalates cooldown', () => {
   assert.equal(snapshot.cooldownsOpened, 1)
 
   f.advance(1000)
+  const beforeCooldownDrop = f.debug.length
   assert.equal(f.guard.admit(message(), context({ now: f.current() })), false)
-  assert.equal(f.guard.getDebugSnapshot().peerGuard.droppedByCooldown, 1)
+  assert.equal(f.guard.admit(
+    message('other-code'),
+    context({ code: 'other-code', now: f.current() })
+  ), false)
+  snapshot = f.guard.getDebugSnapshot().peerGuard
+  assert.equal(snapshot.droppedByCooldown, 2)
+  assert.equal(snapshot.cooldownDropsByCode['tell-code'], 1)
+  assert.equal(snapshot.cooldownDropsByCode['other-code'], 1)
+  assert.equal(f.debug.length, beforeCooldownDrop, 'cooldown drops are aggregated')
 
   f.advance(5 * 60 * 1000)
   assert.equal(f.guard.admit(message(), context({ now: f.current() })), true)
+  const aggregate = f.debug.find(event => event.action === 'peer-cooldown-drops')
+  assert.equal(aggregate.count, 2)
+  assert.equal(aggregate.byCode['tell-code'], 1)
+  assert.equal(aggregate.byCode['other-code'], 1)
+  assert.equal(aggregate.cooldownLevel, 1)
   for (let index = 0; index < 3; index++) {
     assert.equal(f.guard.admit(message(), context({ now: f.current() })), false)
   }

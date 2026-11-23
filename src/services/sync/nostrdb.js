@@ -19,9 +19,11 @@ import { assertSupportedPayloadVersion, syncPayloadInvalid } from './payload-err
 // - The parent currently flushes owner accounts in series; each advert is one
 //   yell to all trusted peer pubkeys on that owner's derived sync channel.
 // - Asks are per owner+peer and replies arrive later through the normal message
-//   drain, so we never block waiting for an offline peer to answer. Published
-//   wire envelopes are checked every 20 minutes; missing asks/replies are
-//   republished only after five minutes, and observed envelopes are deleted.
+//   drain, so we never block waiting for an offline peer to answer. Asks retain
+//   an explicit publication state: short retries until a relay ACK, 20-minute
+//   presence checks once published, and five-minute-to-six-hour peer backoff.
+//   Published wire envelopes are checked every 20 minutes; missing asks/replies
+//   are republished only after five minutes, and observed envelopes are deleted.
 // - A recent lane walks backward from the advertised edge while the historical
 //   lane advances from local completeness, so an old blocked range cannot hide
 //   current messages.
@@ -72,11 +74,20 @@ const DENSE_RANGE_BATCH_SIZE = 32
 const REQUEST_LIMIT = 200
 const DEFAULT_NOSTRDB_LANE_MODE = 'recent'
 const NOSTRDB_LANE_MODES = new Set(['recent', 'history', 'both'])
+const ASK_PUBLICATION_STATES = new Set([
+  'unconfirmed',
+  'published',
+  'offline',
+  'waitingForResume'
+])
 const SMALL_REPLY_COUNT = 20
 const ONLINE_RETRY_MIN_MS = 5 * 60 * 1000
 const ONLINE_RETRY_MAX_MS = 6 * 60 * 60 * 1000
 const EXCHANGE_CHECK_INTERVAL_MS = 20 * 60 * 1000
 const EXCHANGE_MIN_RESEND_MS = 5 * 60 * 1000
+const ASK_PUBLICATION_RETRY_MIN_MS = 1000
+const ASK_PUBLICATION_RETRY_MAX_MS = 60 * 1000
+const FRESH_ADVERT_MS = 5 * 60 * 1000
 const EXCHANGE_EXPIRY_GRACE_MS = 10 * 60 * 1000
 const EXCHANGE_PRESENCE_BATCH_SIZE = 200
 const EXCHANGE_DELETE_BATCH_SIZE = 100
@@ -829,6 +840,108 @@ function publicationSucceeded (result) {
   return Array.isArray(reports) && reports.length > 0 && reports.every(report => report?.success === true)
 }
 
+function publicationHasAck (result) {
+  return publicationAckCount(result) > 0
+}
+
+function publicationAckCount (result) {
+  // Older test doubles and pre-delivery messenger versions did not expose
+  // reports. Their resolved promise still meant that publication completed.
+  if (result?.success === false) return 0
+  if (!result?.delivery) return 1
+  const reports = result.delivery.reports
+  if (!Array.isArray(reports)) return 0
+  let count = 0
+  for (const report of reports) {
+    if (report?.success !== true) continue
+    count += Array.isArray(report.succeededRelays) && report.succeededRelays.length
+      ? report.succeededRelays.length
+      : 1
+  }
+  return count
+}
+
+function askPublicationRetryDelay (attempt) {
+  const safeAttempt = Number.isSafeInteger(attempt) && attempt > 0 ? attempt : 0
+  return Math.min(
+    ASK_PUBLICATION_RETRY_MAX_MS,
+    ASK_PUBLICATION_RETRY_MIN_MS * (2 ** Math.min(safeAttempt, 6))
+  )
+}
+
+function onlineRetryDelay (attempt) {
+  const safeAttempt = Number.isSafeInteger(attempt) && attempt > 0 ? attempt : 0
+  return Math.min(
+    ONLINE_RETRY_MAX_MS,
+    ONLINE_RETRY_MIN_MS * (2 ** Math.min(safeAttempt, 32))
+  )
+}
+
+function pendingPublicationState (pending) {
+  if (ASK_PUBLICATION_STATES.has(pending?.publicationState)) return pending.publicationState
+  return pending?.waitingForResume ? 'waitingForResume' : 'unconfirmed'
+}
+
+function pendingIsWaitingForResume (pending) {
+  return pendingPublicationState(pending) === 'waitingForResume'
+}
+
+function clearPendingPublicationDeadlines (pending) {
+  pending.nextRetryAt = 0
+  pending.onlineRetryAt = 0
+  pending.nextCheckAt = 0
+}
+
+function setPendingUnconfirmed (pending, now, attempt, retryAt = 0) {
+  pending.publicationState = 'unconfirmed'
+  delete pending.waitingForResume
+  delete pending.publishedAt
+  pending.relayAckCount = 0
+  clearPendingPublicationDeadlines(pending)
+  const nextRetryAt = Math.max(now + askPublicationRetryDelay(attempt), retryAt)
+  pending.nextRetryAt = nextRetryAt
+  pending.onlineRetryAt = nextRetryAt
+}
+
+function setPendingPublished (pending, now, relayAckCount) {
+  pending.publicationState = 'published'
+  delete pending.waitingForResume
+  pending.publishedAt = now
+  pending.relayAckCount = Math.max(1, relayAckCount || 1)
+  clearPendingPublicationDeadlines(pending)
+  pending.nextCheckAt = now + EXCHANGE_CHECK_INTERVAL_MS
+}
+
+function setPendingOffline (pending, now, attempt, retryAt = 0) {
+  pending.publicationState = 'offline'
+  delete pending.waitingForResume
+  delete pending.publishedAt
+  pending.relayAckCount = 0
+  clearPendingPublicationDeadlines(pending)
+  const nextRetryAt = Math.max(now + onlineRetryDelay(attempt), retryAt)
+  pending.nextRetryAt = nextRetryAt
+  pending.onlineRetryAt = nextRetryAt
+}
+
+function setPendingWaitingForResume (pending, retryAt = 0) {
+  pending.publicationState = 'waitingForResume'
+  pending.waitingForResume = true
+  delete pending.publishedAt
+  pending.relayAckCount = 0
+  clearPendingPublicationDeadlines(pending)
+  if (retryAt > 0) {
+    pending.nextRetryAt = retryAt
+    pending.onlineRetryAt = retryAt
+  }
+}
+
+function advertIsFresh (advert, now) {
+  const timestamp = advert?.messageAt || advert?.generatedAt
+  return Number.isSafeInteger(timestamp) &&
+    timestamp >= now - FRESH_ADVERT_MS &&
+    timestamp <= now + SYNC_ANCHOR_MAX_FUTURE_SKEW_MS
+}
+
 function messengerPausedError (error) {
   const pending = [error]
   const seen = new Set()
@@ -843,22 +956,6 @@ function messengerPausedError (error) {
     }
   }
   return false
-}
-
-function markPendingForResume (entry, error, now, lane = 'history') {
-  const pending = lane === 'recent' ? entry?.recent?.pending : entry?.pending
-  if (!pending) return
-  const retryAt = publicationRetryAt(error, now)
-  if (retryAt > now) {
-    delete pending.waitingForResume
-    pending.nextRetryAt = retryAt
-    pending.onlineRetryAt = retryAt
-  } else {
-    pending.waitingForResume = true
-    pending.nextRetryAt = 0
-    pending.onlineRetryAt = 0
-  }
-  entry.updatedAt = now
 }
 
 function trustedPubkeys (context) {
@@ -900,6 +997,7 @@ export function createNostrDbSyncController ({
   const pushOutboxes = new Map()
   const emptyContextByOwner = new Map()
   const recentSyncEventIds = new Map()
+  const publishingAsks = new Set()
   let runtime = {}
   let retryTimer = null
   let exchangeTimer = null
@@ -1136,6 +1234,8 @@ export function createNostrDbSyncController ({
     const fallbackRelays = channelRelays(channelPubkey, context)
     const deletionSeckey = normalizeSecret(result?.delivery?.deletionSeckey)
     const now = _nowMs()
+    const relayAckCount = publicationAckCount(result)
+    const publicationComplete = publicationSucceeded(result)
     const state = getState()
     const record = exchangeRecord(state, ownerPubkey, peerPubkey, direction, requestId, true)
     record.code = code
@@ -1143,7 +1243,8 @@ export function createNostrDbSyncController ({
     record.updatedAt = now
     record.lastPublishedAt = now
     record.notBeforeAt = 0
-    record.nextCheckAt = now + EXCHANGE_CHECK_INTERVAL_MS
+    const confirmed = direction === 'ask' ? relayAckCount > 0 : publicationComplete
+    record.nextCheckAt = confirmed ? now + EXCHANGE_CHECK_INTERVAL_MS : 0
     record.expiresAt = Math.max(
       record.expiresAt || 0,
       now + SYNC_EVENT_EXPIRATION_MS + EXCHANGE_EXPIRY_GRACE_MS
@@ -1179,14 +1280,14 @@ export function createNostrDbSyncController ({
       .filter(event => event.id)
     record.events[direction] = mergeWireEvents(record.events[direction], incoming)
     if (direction === 'ask') {
-      record.status = 'awaiting-reply'
-      record.lastAskPublishedAt = now
+      record.status = relayAckCount > 0 ? 'awaiting-reply' : 'unconfirmed'
+      if (relayAckCount > 0) record.lastAskPublishedAt = now
     } else if (direction === 'reply') {
-      record.status = 'reply-published'
-      record.lastReplyPublishedAt = now
+      record.status = publicationComplete ? 'reply-published' : 'reply-unconfirmed'
+      if (publicationComplete) record.lastReplyPublishedAt = now
     } else {
-      record.status = 'advert-published'
-      record.lastAdvertPublishedAt = now
+      record.status = publicationComplete ? 'advert-published' : 'advert-unconfirmed'
+      if (publicationComplete) record.lastAdvertPublishedAt = now
     }
     trimOwnerExchanges(state, ownerPubkey)
     trimExchangeOwners(state)
@@ -1257,10 +1358,61 @@ export function createNostrDbSyncController ({
     return record
   }
 
+  function pendingAskState (state, ownerPubkey, peerPubkey, lane, appId = '') {
+    if (lane === 'app-backfill') {
+      const { app, entry } = existingAppBackfillPeerState(state, ownerPubkey, appId, peerPubkey)
+      return entry?.pending ? { app, entry, pending: entry.pending, lane, appId } : null
+    }
+    const entry = state.owners?.[ownerPubkey]?.[peerPubkey]
+    const pending = lane === 'recent' ? entry?.recent?.pending : entry?.pending
+    return pending ? { entry, pending, lane, appId } : null
+  }
+
+  function pendingAskForRecord (state, recordEntry) {
+    const record = recordEntry.record
+    if (record.direction !== 'ask') return null
+    const ownerPubkey = recordEntry.ownerPubkey || record.ownerPubkey
+    const peerPubkey = recordEntry.peerPubkey || record.peerPubkey
+    const appId = normalizeAppId(
+      record.appId ||
+      record.requestPayload?.appId ||
+      record.range?.appId
+    )
+    const candidates = record.code === NOSTRDB_SYNC_APP_ASK_CODE
+      ? [['app-backfill', appId]]
+      : [
+          ['history', ''],
+          ['recent', '']
+        ]
+    for (const [lane, candidateAppId] of candidates) {
+      const pendingState = pendingAskState(
+        state,
+        ownerPubkey,
+        peerPubkey,
+        lane,
+        candidateAppId
+      )
+      if (pendingState?.pending?.requestId === record.requestId) return pendingState
+    }
+    return null
+  }
+
+  function pendingRecordIgnoredForExchangeCheck (pending) {
+    if (!pending) return false
+    const state = pendingPublicationState(pending)
+    return state === 'waitingForResume' || state === 'unconfirmed' || state === 'offline'
+  }
+
+  function exchangeEntryNeedsPresenceCheck (state, entry) {
+    if (entry.record.direction !== 'ask' || entry.record.status === 'deleting-ask') return true
+    return !pendingRecordIgnoredForExchangeCheck(pendingAskForRecord(state, entry)?.pending)
+  }
+
   function exchangeDeadline (state) {
     let next = Infinity
     for (const entry of allExchangeRecords(state)) {
       if (entry.record.status === 'done') continue
+      if (!exchangeEntryNeedsPresenceCheck(state, entry)) continue
       next = Math.min(next, entry.record.nextCheckAt || Infinity)
     }
     return next
@@ -1283,51 +1435,111 @@ export function createNostrDbSyncController ({
 
   function syncPendingCheckDeadline (state, record, nextCheckAt) {
     if (record.direction !== 'ask') return
-    for (const peer of [
-      state.owners?.[record.ownerPubkey]?.[record.peerPubkey],
-      state.appBackfills?.[record.ownerPubkey]?.[appStateKey(record.code === NOSTRDB_SYNC_APP_ASK_CODE ? record.appId : '')]?.peers?.[record.peerPubkey]
-    ]) {
-      if (!peer) continue
-      if (peer.pending?.requestId === record.requestId) {
-        peer.pending.nextRetryAt = nextCheckAt
-        peer.pending.onlineRetryAt = nextCheckAt
+    const pendingState = pendingAskForRecord(state, { record })
+    if (!pendingState) return
+    const pending = pendingState.pending
+    if (pendingPublicationState(pending) !== 'published') {
+      pending.nextCheckAt = 0
+      return
+    }
+    pending.nextCheckAt = nextCheckAt
+  }
+
+  function migratePendingState (pending, record, now) {
+    if (!pending?.requestId) return false
+    let changed = false
+    if (!ASK_PUBLICATION_STATES.has(pending.publicationState)) {
+      const askedEnvelope = (record?.events?.ask || []).some(event => normalizePubkey(event?.id))
+      let inferred = 'unconfirmed'
+      if (pending.waitingForResume || record?.status === 'paused') inferred = 'waitingForResume'
+      else if (record?.status === 'awaiting-reply' && askedEnvelope) inferred = 'published'
+      const attempt = pending.attempt || 0
+      if (inferred === 'waitingForResume') {
+        const externalRetryAt = Number.isSafeInteger(pending.nextRetryAt) &&
+          pending.nextRetryAt > now
+          ? pending.nextRetryAt
+          : 0
+        setPendingWaitingForResume(pending, externalRetryAt)
+      } else if (inferred === 'published') {
+        setPendingPublished(
+          pending,
+          record.lastAskPublishedAt || record.lastPublishedAt || pending.sentAt || now,
+          Math.max(
+            1,
+            Number.isSafeInteger(pending.relayAckCount)
+              ? pending.relayAckCount
+              : (record.events?.ask || []).length
+          )
+        )
+      } else {
+        setPendingUnconfirmed(pending, now, attempt)
       }
-      if (peer.recent?.pending?.requestId === record.requestId) {
-        peer.recent.pending.nextRetryAt = nextCheckAt
-        peer.recent.pending.onlineRetryAt = nextCheckAt
+      changed = true
+    }
+
+    const state = pendingPublicationState(pending)
+    if (state === 'published') {
+      const publishedAt = pending.publishedAt || pending.sentAt || now
+      const nextCheckAt = record?.nextCheckAt || publishedAt + EXCHANGE_CHECK_INTERVAL_MS
+      if (pending.publishedAt !== publishedAt) {
+        pending.publishedAt = publishedAt
+        changed = true
+      }
+      if (pending.nextCheckAt !== nextCheckAt) {
+        pending.nextCheckAt = nextCheckAt
+        changed = true
+      }
+      if (record && record.nextCheckAt !== nextCheckAt) {
+        record.nextCheckAt = nextCheckAt
+        changed = true
+      }
+      if (record && record.status !== 'awaiting-reply') {
+        record.status = 'awaiting-reply'
+        changed = true
+      }
+    } else if (record) {
+      const status = state === 'waitingForResume'
+        ? 'paused'
+        : state
+      if (record.status !== status) {
+        record.status = status
+        changed = true
+      }
+      if (record.nextCheckAt !== 0) {
+        record.nextCheckAt = 0
+        changed = true
       }
     }
+    return changed
   }
 
   async function migratePendingExchanges (context = runtime) {
     const state = getState()
+    const now = _nowMs()
     let changed = false
     for (const [ownerPubkey, peers] of Object.entries(state.owners || {})) {
       for (const [peerPubkey, entry] of Object.entries(peers || {})) {
         for (const [lane, pending] of [['history', entry?.pending], ['recent', entry?.recent?.pending]]) {
-          if (!pending?.requestId || exchangeRecord(state, ownerPubkey, peerPubkey, 'ask', pending.requestId)) continue
+          if (!pending?.requestId) continue
           const record = exchangeRecord(state, ownerPubkey, peerPubkey, 'ask', pending.requestId, true)
-          const sentAt = pending.sentAt || _nowMs()
-          record.code = NOSTRDB_SYNC_ASK_CODE
-          record.channelPubkey = ownerChannelPubkey(ownerPubkey, context)
-          record.lane = lane
-          record.requestPayload = {
-            requestId: pending.requestId,
-            sinceScore: pending.sinceScore,
-            untilScore: pending.untilScore,
-            excludeIds: Array.isArray(pending.excludeIds) ? pending.excludeIds : [],
-            limit: pending.limit || REQUEST_LIMIT
+          const sentAt = pending.sentAt || now
+          if (!record.code || !record.requestPayload) {
+            record.code = NOSTRDB_SYNC_ASK_CODE
+            record.channelPubkey = ownerChannelPubkey(ownerPubkey, context)
+            record.lane = lane
+            record.requestPayload = {
+              requestId: pending.requestId,
+              sinceScore: pending.sinceScore,
+              untilScore: pending.untilScore,
+              excludeIds: Array.isArray(pending.excludeIds) ? pending.excludeIds : [],
+              limit: pending.limit || REQUEST_LIMIT
+            }
+            record.lastPublishedAt ||= sentAt
+            record.notBeforeAt ||= Math.max(pending.nextRetryAt || 0, pending.onlineRetryAt || 0)
+            record.expiresAt ||= sentAt + SYNC_EVENT_EXPIRATION_MS + EXCHANGE_EXPIRY_GRACE_MS
+            changed = true
           }
-          record.lastPublishedAt = sentAt
-          record.lastAskPublishedAt = sentAt
-          record.notBeforeAt = Math.max(pending.nextRetryAt || 0, pending.onlineRetryAt || 0)
-          record.nextCheckAt = Math.max(
-            sentAt + EXCHANGE_CHECK_INTERVAL_MS,
-            record.notBeforeAt
-          )
-          record.expiresAt = sentAt + SYNC_EVENT_EXPIRATION_MS + EXCHANGE_EXPIRY_GRACE_MS
-          record.status = pending.waitingForResume ? 'paused' : 'awaiting-reply'
-          changed = true
+          changed = migratePendingState(pending, record, now) || changed
         }
       }
     }
@@ -1335,33 +1547,33 @@ export function createNostrDbSyncController ({
       for (const app of Object.values(apps || {})) {
         for (const [peerPubkey, entry] of Object.entries(app?.peers || {})) {
           const pending = entry?.pending
-          if (!pending?.requestId || exchangeRecord(state, ownerPubkey, peerPubkey, 'ask', pending.requestId)) continue
+          if (!pending?.requestId) continue
           const record = exchangeRecord(state, ownerPubkey, peerPubkey, 'ask', pending.requestId, true)
-          const sentAt = pending.sentAt || _nowMs()
-          record.code = NOSTRDB_SYNC_APP_ASK_CODE
-          record.channelPubkey = ownerChannelPubkey(ownerPubkey, context)
-          record.lane = 'app-backfill'
-          record.appId = pending.appId
-          record.requestPayload = {
-            requestId: pending.requestId,
-            appId: pending.appId,
-            after: pending.after || '',
-            batchSize: pending.batchSize || REQUEST_LIMIT
+          const sentAt = pending.sentAt || now
+          if (!record.code || !record.requestPayload) {
+            record.code = NOSTRDB_SYNC_APP_ASK_CODE
+            record.channelPubkey = ownerChannelPubkey(ownerPubkey, context)
+            record.lane = 'app-backfill'
+            record.appId = pending.appId
+            record.requestPayload = {
+              requestId: pending.requestId,
+              appId: pending.appId,
+              after: pending.after || '',
+              batchSize: pending.batchSize || REQUEST_LIMIT
+            }
+            record.lastPublishedAt ||= sentAt
+            record.notBeforeAt ||= Math.max(pending.nextRetryAt || 0, pending.onlineRetryAt || 0)
+            record.expiresAt ||= sentAt + SYNC_EVENT_EXPIRATION_MS + EXCHANGE_EXPIRY_GRACE_MS
+            changed = true
           }
-          record.lastPublishedAt = sentAt
-          record.lastAskPublishedAt = sentAt
-          record.notBeforeAt = Math.max(pending.nextRetryAt || 0, pending.onlineRetryAt || 0)
-          record.nextCheckAt = Math.max(
-            sentAt + EXCHANGE_CHECK_INTERVAL_MS,
-            record.notBeforeAt
-          )
-          record.expiresAt = sentAt + SYNC_EVENT_EXPIRATION_MS + EXCHANGE_EXPIRY_GRACE_MS
-          record.status = pending.waitingForResume ? 'paused' : 'awaiting-reply'
-          changed = true
+          changed = migratePendingState(pending, record, now) || changed
         }
       }
     }
-    if (changed) await setState(state)
+    if (changed) {
+      await setState(state)
+      scheduleRetrySweep(context)
+    }
     return changed
   }
 
@@ -1510,15 +1722,34 @@ export function createNostrDbSyncController ({
     if ((record.notBeforeAt || 0) > _nowMs()) return false
     if (!record.requestPayload || !record.channelPubkey || !record.peerPubkey) return false
     const state = getState()
-    const peer = peerState(state, entry.ownerPubkey, entry.peerPubkey)
-    const lane = peer.pending?.requestId === record.requestId
-      ? 'history'
-      : peer.recent?.pending?.requestId === record.requestId
-        ? 'recent'
-        : ''
-    if (lane && !laneEnabled(laneModeFor(entry.ownerPubkey, entry.peerPubkey, context), lane)) {
+    const pendingState = pendingAskForRecord(state, entry)
+    if (pendingState &&
+        pendingState.lane !== 'app-backfill' &&
+        !laneEnabled(laneModeFor(entry.ownerPubkey, entry.peerPubkey, context), pendingState.lane)) {
       return false
     }
+    if (pendingState) {
+      const published = await publishPendingAsk({
+        ownerPubkey: entry.ownerPubkey,
+        peerPubkey: entry.peerPubkey,
+        lane: pendingState.lane,
+        appId: pendingState.appId,
+        requestId: record.requestId,
+        context,
+        reason: 'presence-missing',
+        incrementAttempt: true
+      })
+      if (!published) return false
+      exchangeStats.asksRepublished++
+      emitDebug(context.debug, 'ask-republished', {
+        code: record.code,
+        ownerPubkey: entry.ownerPubkey,
+        receiverPubkey: entry.peerPubkey,
+        requestId: record.requestId
+      })
+      return true
+    }
+
     const result = await context.messenger.ask({
       channelPubkey: record.channelPubkey,
       receiverPubkey: record.peerPubkey,
@@ -1527,7 +1758,7 @@ export function createNostrDbSyncController ({
       idempotencyKey: coalescingDigest(['nostrdb-ask', record.code, record.requestId]),
       useBulkPacing: true
     })
-    if (!publicationSucceeded(result)) throw new Error('SYNC_PUBLICATION_FAILED')
+    if (!publicationHasAck(result)) throw new Error('SYNC_PUBLICATION_FAILED')
     await trackPublication({
       ownerPubkey: entry.ownerPubkey,
       peerPubkey: entry.peerPubkey,
@@ -1539,26 +1770,6 @@ export function createNostrDbSyncController ({
       range: record.requestPayload,
       context
     })
-    const updatedState = getState()
-    const updatedPeer = peerState(updatedState, entry.ownerPubkey, entry.peerPubkey)
-    for (const pending of [updatedPeer.pending, updatedPeer.recent?.pending]) {
-      if (pending?.requestId !== record.requestId) continue
-      delete pending.waitingForResume
-      pending.attempt = (pending.attempt || 0) + 1
-      pending.sentAt = _nowMs()
-      pending.nextRetryAt = _nowMs() + EXCHANGE_CHECK_INTERVAL_MS
-      pending.onlineRetryAt = pending.nextRetryAt
-    }
-    const appPeer = updatedState.appBackfills?.[entry.ownerPubkey]?.[appStateKey(record.appId)]?.peers?.[entry.peerPubkey]
-    if (appPeer?.pending?.requestId === record.requestId) {
-      delete appPeer.pending.waitingForResume
-      appPeer.pending.attempt = (appPeer.pending.attempt || 0) + 1
-      appPeer.pending.sentAt = _nowMs()
-      appPeer.pending.nextRetryAt = _nowMs() + EXCHANGE_CHECK_INTERVAL_MS
-      appPeer.pending.onlineRetryAt = appPeer.pending.nextRetryAt
-    }
-    updatedPeer.updatedAt = _nowMs()
-    await setState(updatedState)
     exchangeStats.asksRepublished++
     emitDebug(context.debug, 'ask-republished', {
       code: record.code,
@@ -1624,9 +1835,9 @@ export function createNostrDbSyncController ({
     return true
   }
 
-  async function queryExchangePresence (state) {
+  async function queryExchangePresence (state, exchanges = allExchangeRecords(state)) {
     const groups = new Map()
-    for (const entry of allExchangeRecords(state)) {
+    for (const entry of exchanges) {
       for (const kind of ['ask', 'reply', 'advert']) {
         for (const event of entry.record.events[kind] || []) {
           const id = normalizePubkey(event.id)
@@ -1689,6 +1900,7 @@ export function createNostrDbSyncController ({
     const state = getState()
     const nextCheckAt = _nowMs() + EXCHANGE_CHECK_INTERVAL_MS
     for (const entry of allExchangeRecords(state)) {
+      if (!exchangeEntryNeedsPresenceCheck(state, entry)) continue
       entry.record.nextCheckAt = Math.max(nextCheckAt, entry.record.notBeforeAt || 0)
       entry.record.updatedAt = _nowMs()
       syncPendingCheckDeadline(state, entry.record, entry.record.nextCheckAt)
@@ -1725,7 +1937,8 @@ export function createNostrDbSyncController ({
         return null
       }
       const exchanges = allExchangeRecords(state)
-      const presence = await queryExchangePresence(state)
+        .filter(entry => exchangeEntryNeedsPresenceCheck(state, entry))
+      const presence = await queryExchangePresence(state, exchanges)
       if (generation !== exchangeGeneration) return null
       for (const entry of exchanges) {
         const record = entry.record
@@ -1757,6 +1970,10 @@ export function createNostrDbSyncController ({
         }
 
         if (record.direction === 'ask') {
+          const pendingState = pendingAskForRecord(state, entry)
+          const publicationState = pendingState
+            ? pendingPublicationState(pendingState.pending)
+            : ''
           if (record.status === 'deleting-ask') {
             if (asks.allAbsent) {
               exchangeStats.deletionConfirmed++
@@ -1764,6 +1981,8 @@ export function createNostrDbSyncController ({
             } else {
               actions.push({ type: 'delete', entry, kind: 'ask', context, presence })
             }
+          } else if (publicationState && publicationState !== 'published') {
+            continue
           } else if (record.status === 'paused' ||
               ((asks.allAbsent || !record.events.ask.length) && now - askLastSent >= EXCHANGE_MIN_RESEND_MS)) {
             actions.push({ type: 'ask', entry, context })
@@ -2088,6 +2307,209 @@ export function createNostrDbSyncController ({
     }, 0)?.unref?.()
   }
 
+  function pendingAskPayload (pending, lane, appId = '') {
+    if (lane === 'app-backfill') {
+      return {
+        requestId: pending.requestId,
+        appId: pending.appId || appId,
+        after: pending.after || '',
+        batchSize: pending.batchSize || REQUEST_LIMIT
+      }
+    }
+    return {
+      requestId: pending.requestId,
+      sinceScore: pending.sinceScore,
+      untilScore: pending.untilScore,
+      excludeIds: Array.isArray(pending.excludeIds) ? [...pending.excludeIds] : [],
+      limit: pending.limit || REQUEST_LIMIT,
+      ...(pending.priority ? { priority: pending.priority } : {})
+    }
+  }
+
+  function pendingAskPublicationKey (ownerPubkey, peerPubkey, pendingState) {
+    return JSON.stringify([
+      ownerPubkey,
+      peerPubkey,
+      pendingState.lane,
+      pendingState.appId || '',
+      pendingState.pending.requestId
+    ])
+  }
+
+  function savePendingPublicationState (state, pendingState, ownerPubkey, peerPubkey, code) {
+    const record = exchangeRecord(state, ownerPubkey, peerPubkey, 'ask', pendingState.pending.requestId, true)
+    record.code = code
+    record.lane = pendingState.lane
+    if (pendingState.lane === 'app-backfill') record.appId = pendingState.appId
+    record.updatedAt = _nowMs()
+    record.lastPublishedAt ||= pendingState.pending.sentAt || record.updatedAt
+    record.expiresAt ||= record.lastPublishedAt + SYNC_EVENT_EXPIRATION_MS + EXCHANGE_EXPIRY_GRACE_MS
+    record.requestPayload = pendingAskPayload(
+      pendingState.pending,
+      pendingState.lane,
+      pendingState.appId
+    )
+    const publicationState = pendingPublicationState(pendingState.pending)
+    record.status = publicationState === 'published'
+      ? 'awaiting-reply'
+      : publicationState === 'waitingForResume'
+        ? 'paused'
+        : publicationState
+    syncPendingCheckDeadline(state, record, pendingState.pending.nextCheckAt || 0)
+  }
+
+  async function publishPendingAsk ({
+    ownerPubkey,
+    peerPubkey,
+    lane,
+    appId = '',
+    requestId,
+    context = runtime,
+    reason,
+    incrementAttempt = true
+  }) {
+    throwIfHandlerAborted(context)
+    if (!context.messenger?.ask) return null
+    const channelPubkey = ownerChannelPubkey(ownerPubkey, context)
+    if (!isOwnerReady(ownerPubkey, context) || !channelPubkey) return null
+    if (lane === 'app-backfill' && !context.trustedByPubkey?.has?.(peerPubkey)) return null
+
+    let state = getState()
+    let pendingState = pendingAskState(state, ownerPubkey, peerPubkey, lane, appId)
+    if (!pendingState || pendingState.pending.requestId !== requestId) return null
+    const now = _nowMs()
+    if (pendingPublicationState(pendingState.pending) === 'waitingForResume' &&
+        pendingState.pending.nextRetryAt > now) {
+      scheduleRetrySweep(context)
+      return null
+    }
+    const publicationKey = pendingAskPublicationKey(ownerPubkey, peerPubkey, pendingState)
+    if (publishingAsks.has(publicationKey)) return null
+    publishingAsks.add(publicationKey)
+
+    const pending = pendingState.pending
+    const attempt = (pending.attempt || 0) + (incrementAttempt ? 1 : 0)
+    pending.attempt = attempt
+    pending.sentAt = now
+    setPendingUnconfirmed(pending, now, attempt)
+    pendingState.entry.updatedAt = now
+    if (pendingState.app) pendingState.app.updatedAt = now
+    const code = lane === 'app-backfill'
+      ? NOSTRDB_SYNC_APP_ASK_CODE
+      : NOSTRDB_SYNC_ASK_CODE
+    savePendingPublicationState(state, pendingState, ownerPubkey, peerPubkey, code)
+    try {
+      await setState(state)
+      const payload = pendingAskPayload(pending, lane, appId)
+      throwIfHandlerAborted(context)
+      const result = await context.messenger.ask({
+        channelPubkey,
+        receiverPubkey: peerPubkey,
+        code,
+        payload,
+        idempotencyKey: coalescingDigest([
+          lane === 'app-backfill' ? 'nostrdb-app-ask' : 'nostrdb-ask',
+          code,
+          requestId
+        ]),
+        useBulkPacing: true
+      })
+      throwIfHandlerAborted(context)
+      const relayAckCount = publicationAckCount(result)
+      await trackPublication({
+        ownerPubkey,
+        peerPubkey,
+        direction: 'ask',
+        requestId,
+        code,
+        channelPubkey,
+        result,
+        range: payload,
+        lane,
+        context
+      })
+
+      state = getState()
+      pendingState = pendingAskState(state, ownerPubkey, peerPubkey, lane, appId)
+      if (pendingState?.pending?.requestId === requestId) {
+        const finishedAt = _nowMs()
+        if (relayAckCount > 0) {
+          setPendingPublished(pendingState.pending, finishedAt, relayAckCount)
+        } else {
+          setPendingUnconfirmed(
+            pendingState.pending,
+            finishedAt,
+            attempt,
+            publicationRetryAt(result, finishedAt)
+          )
+          report(new Error('SYNC_PUBLICATION_FAILED'))
+        }
+        pendingState.entry.updatedAt = finishedAt
+        if (pendingState.app) pendingState.app.updatedAt = finishedAt
+        savePendingPublicationState(state, pendingState, ownerPubkey, peerPubkey, code)
+        await setState(state)
+      }
+
+      scheduleRetrySweep(context)
+      scheduleExchangeMaintenance(context)
+      recordAskStat('emitted', code, reason)
+      const detail = {
+        code,
+        ownerPubkey,
+        receiverPubkey: peerPubkey,
+        requestId,
+        reason,
+        attempt,
+        relayAckCount,
+        publicationState: relayAckCount > 0 ? 'published' : 'unconfirmed'
+      }
+      if (lane === 'app-backfill') {
+        Object.assign(detail, {
+          appId,
+          after: payload.after
+        })
+        emitDebug(context.debug, 'app-ask', detail)
+      } else {
+        Object.assign(detail, {
+          sinceScore: payload.sinceScore,
+          untilScore: payload.untilScore,
+          excludeCount: payload.excludeIds.length,
+          lane,
+          ...(lane === 'recent' ? { recentPhase: pending.phase } : {})
+        })
+        emitDebug(context.debug, 'ask', detail)
+      }
+      return payload
+    } catch (error) {
+      if (context.signal?.aborted) throw error
+      state = getState()
+      pendingState = pendingAskState(state, ownerPubkey, peerPubkey, lane, appId)
+      if (pendingState?.pending?.requestId === requestId) {
+        const failedAt = _nowMs()
+        if (messengerPausedError(error)) {
+          setPendingWaitingForResume(pendingState.pending, publicationRetryAt(error, failedAt))
+        } else {
+          setPendingOffline(
+            pendingState.pending,
+            failedAt,
+            attempt,
+            publicationRetryAt(error, failedAt)
+          )
+        }
+        pendingState.entry.updatedAt = failedAt
+        if (pendingState.app) pendingState.app.updatedAt = failedAt
+        savePendingPublicationState(state, pendingState, ownerPubkey, peerPubkey, code)
+        await setState(state)
+      }
+      scheduleRetrySweep(context)
+      report(error)
+      return null
+    } finally {
+      publishingAsks.delete(publicationKey)
+      scheduleRetrySweep(context)
+    }
+  }
+
   async function maybeAsk (ownerPubkey, peerPubkey, context = runtime, {
     onlineHint = false,
     force = false,
@@ -2134,11 +2556,24 @@ export function createNostrDbSyncController ({
       await setState(state)
       scheduleExchangeMaintenance(context, { immediate: true })
     }
-    if (entry.pending?.waitingForResume && !resume) return null
-    if (entry.pending && resume && !entry.pending.waitingForResume) return null
-    if (entry.pending && !force && !resume) {
+    const pendingState = entry.pending ? pendingPublicationState(entry.pending) : ''
+    if (pendingState === 'waitingForResume' && !resume) return null
+    if (entry.pending && resume && pendingState !== 'waitingForResume') return null
+    if (entry.pending && (force || resume)) {
+      return publishPendingAsk({
+        ownerPubkey,
+        peerPubkey,
+        lane: 'history',
+        requestId: entry.pending.requestId,
+        context,
+        reason,
+        incrementAttempt: true
+      })
+    }
+    if (entry.pending) {
       if (onlineHint) {
         recordAskStat('suppressed', NOSTRDB_SYNC_ASK_CODE, reason)
+        const retryAt = entry.pending.nextRetryAt || entry.pending.nextCheckAt || 0
         emitDebug(context.debug, 'ask-suppressed', {
           code: NOSTRDB_SYNC_ASK_CODE,
           ownerPubkey,
@@ -2146,8 +2581,9 @@ export function createNostrDbSyncController ({
           requestId: entry.pending.requestId,
           reason,
           attempt: entry.pending.attempt || 0,
-          retryAt: now + EXCHANGE_CHECK_INTERVAL_MS,
-          waitMs: EXCHANGE_CHECK_INTERVAL_MS
+          publicationState: pendingState,
+          retryAt,
+          waitMs: retryAt > now ? retryAt - now : 0
         })
       }
       scheduleExchangeMaintenance(context)
@@ -2197,18 +2633,8 @@ export function createNostrDbSyncController ({
       })
     }
 
-    const id = entry.pending?.requestId || nextRequestId()
-    const previousAttempt = entry.pending?.attempt || 0
-    const attempt = entry.pending ? previousAttempt + 1 : 0
-    const onlineDelay = Math.min(ONLINE_RETRY_MAX_MS, ONLINE_RETRY_MIN_MS * (2 ** attempt))
-    const payload = {
-      requestId: id,
-      sinceScore: askWindow.sinceScore,
-      untilScore: askWindow.untilScore,
-      excludeIds: askWindow.excludeIds,
-      limit: REQUEST_LIMIT,
-      priority: 'lower'
-    }
+    const id = nextRequestId()
+    const attempt = 0
 
     entry.windowMs = askWindow.windowMs
     entry.pending = {
@@ -2217,79 +2643,32 @@ export function createNostrDbSyncController ({
       untilScore: askWindow.untilScore,
       excludeIds: [...askWindow.excludeIds],
       limit: REQUEST_LIMIT,
+      priority: 'lower',
       replyCount: 0,
       replyIndexes: [],
       replyIds: [],
       attempt,
       sentAt: now,
-      nextRetryAt: now + EXCHANGE_CHECK_INTERVAL_MS,
-      onlineRetryAt: now + onlineDelay
+      publicationState: 'unconfirmed',
+      relayAckCount: 0,
+      nextRetryAt: now + ASK_PUBLICATION_RETRY_MIN_MS,
+      onlineRetryAt: now + ASK_PUBLICATION_RETRY_MIN_MS,
+      nextCheckAt: 0
     }
     entry.updatedAt = now
     throwIfHandlerAborted(context)
-    setState(state)
-
-    try {
-      throwIfHandlerAborted(context)
-      const result = await context.messenger.ask({
-        channelPubkey,
-        receiverPubkey: peerPubkey,
-        code: NOSTRDB_SYNC_ASK_CODE,
-        payload,
-        idempotencyKey: coalescingDigest(['nostrdb-ask', NOSTRDB_SYNC_ASK_CODE, id]),
-        useBulkPacing: true
-      })
-      throwIfHandlerAborted(context)
-      if (!publicationSucceeded(result)) throw new Error('SYNC_PUBLICATION_FAILED')
-      if (resume) delete entry.pending?.waitingForResume
-      await trackPublication({
-        ownerPubkey,
-        peerPubkey,
-        direction: 'ask',
-        requestId: id,
-        code: NOSTRDB_SYNC_ASK_CODE,
-        channelPubkey,
-        result,
-        range: payload,
-        lane: 'history',
-        context
-      })
-    } catch (err) {
-      if (context.signal?.aborted) throw err
-      const now = _nowMs()
-      if (messengerPausedError(err)) {
-        markPendingForResume(entry, err, now)
-        entry.pending.attempt = previousAttempt
-      } else {
-        const retryAt = publicationRetryAt(err, now) || now + 1
-        entry.pending.nextRetryAt = retryAt
-        entry.pending.onlineRetryAt = retryAt
-        entry.updatedAt = now
-      }
-      setState(state)
-      scheduleRetrySweep(context)
-      report(err)
-      return null
-    }
-
-    scheduleRetrySweep(context)
-    scheduleExchangeMaintenance(context)
-    recordAskStat('emitted', NOSTRDB_SYNC_ASK_CODE, reason)
-    emitDebug(context.debug, 'ask', {
-      channelPubkey,
+    await setState(state)
+    const published = await publishPendingAsk({
       ownerPubkey,
-      receiverPubkey: peerPubkey,
+      peerPubkey,
+      lane: 'history',
       requestId: id,
-      sinceScore: payload.sinceScore,
-      untilScore: payload.untilScore,
-      excludeCount: payload.excludeIds.length,
+      context,
       reason,
-      attempt,
-      onlineDelay,
-      retryAt: entry.pending.onlineRetryAt
+      incrementAttempt: false
     })
-    flushDenseRangeDebug(context, denseBatch)
-    return payload
+    if (published) flushDenseRangeDebug(context, denseBatch)
+    return published
   }
 
   async function buildRecentAskWindow (db, minScore, targetScore, windowMs, {
@@ -2509,13 +2888,6 @@ export function createNostrDbSyncController ({
     }
     const id = nextRequestId()
     const attempt = 0
-    const payload = {
-      requestId: id,
-      sinceScore: askWindow.sinceScore,
-      untilScore: askWindow.untilScore,
-      excludeIds: askWindow.excludeIds,
-      limit: REQUEST_LIMIT
-    }
     const cycleReplyIds = laneCycleReplyIds(entry, 'recent')
     entry.recent = {
       ...recent,
@@ -2533,73 +2905,27 @@ export function createNostrDbSyncController ({
         replyIds: [],
         attempt,
         sentAt: now,
-        nextRetryAt: now + EXCHANGE_CHECK_INTERVAL_MS,
-        onlineRetryAt: now + ONLINE_RETRY_MIN_MS
+        publicationState: 'unconfirmed',
+        relayAckCount: 0,
+        nextRetryAt: now + ASK_PUBLICATION_RETRY_MIN_MS,
+        onlineRetryAt: now + ASK_PUBLICATION_RETRY_MIN_MS,
+        nextCheckAt: 0
       }
     }
     entry.updatedAt = now
     throwIfHandlerAborted(context)
     await setState(state)
-    try {
-      throwIfHandlerAborted(context)
-      const result = await context.messenger.ask({
-        channelPubkey,
-        receiverPubkey: peerPubkey,
-        code: NOSTRDB_SYNC_ASK_CODE,
-        payload,
-        idempotencyKey: coalescingDigest(['nostrdb-ask', NOSTRDB_SYNC_ASK_CODE, id]),
-        useBulkPacing: true
-      })
-      throwIfHandlerAborted(context)
-      if (!publicationSucceeded(result)) throw new Error('SYNC_PUBLICATION_FAILED')
-      await trackPublication({
-        ownerPubkey,
-        peerPubkey,
-        direction: 'ask',
-        requestId: id,
-        code: NOSTRDB_SYNC_ASK_CODE,
-        channelPubkey,
-        result,
-        range: payload,
-        lane: 'recent',
-        context
-      })
-    } catch (error) {
-      if (context.signal?.aborted) throw error
-      const nextState = getState()
-      const nextEntry = peerState(nextState, ownerPubkey, peerPubkey)
-      if (nextEntry.recent?.pending?.requestId === id) {
-        const failedAt = _nowMs()
-        if (messengerPausedError(error)) {
-          markPendingForResume(nextEntry, error, failedAt, 'recent')
-        } else {
-          const retryAt = publicationRetryAt(error, failedAt) || failedAt + 1
-          nextEntry.recent.pending.nextRetryAt = retryAt
-          nextEntry.recent.pending.onlineRetryAt = retryAt
-          nextEntry.updatedAt = failedAt
-        }
-        await setState(nextState)
-        scheduleRetrySweep(context)
-      }
-      report(error)
-      return null
-    }
-    recordAskStat('emitted', NOSTRDB_SYNC_ASK_CODE, reason)
-    emitDebug(context.debug, 'ask', {
-      channelPubkey,
+    const published = await publishPendingAsk({
       ownerPubkey,
-      receiverPubkey: peerPubkey,
-      requestId: id,
-      sinceScore: payload.sinceScore,
-      untilScore: payload.untilScore,
-      excludeCount: payload.excludeIds.length,
-      reason,
+      peerPubkey,
       lane: 'recent',
-      recentPhase: phase,
-      attempt
+      requestId: id,
+      context,
+      reason,
+      incrementAttempt: false
     })
-    flushDenseRangeDebug(context, denseBatch)
-    return payload
+    if (published) flushDenseRangeDebug(context, denseBatch)
+    return published
   }
 
   async function maybeAskAppBackfill (ownerPubkey, appId, peerPubkey, context = runtime, {
@@ -2624,11 +2950,25 @@ export function createNostrDbSyncController ({
     if (entry.completed) return null
 
     const now = _nowMs()
-    if (entry.pending?.waitingForResume && !resume) return null
-    if (entry.pending && resume && !entry.pending.waitingForResume) return null
-    if (entry.pending && !resume) {
+    const pendingState = entry.pending ? pendingPublicationState(entry.pending) : ''
+    if (pendingState === 'waitingForResume' && !resume) return null
+    if (entry.pending && resume && pendingState !== 'waitingForResume') return null
+    if (entry.pending && resume) {
+      return publishPendingAsk({
+        ownerPubkey,
+        peerPubkey,
+        lane: 'app-backfill',
+        appId,
+        requestId: entry.pending.requestId,
+        context,
+        reason,
+        incrementAttempt: true
+      })
+    }
+    if (entry.pending) {
       if (onlineHint) {
         recordAskStat('suppressed', NOSTRDB_SYNC_APP_ASK_CODE, reason)
+        const retryAt = entry.pending.nextRetryAt || entry.pending.nextCheckAt || 0
         emitDebug(context.debug, 'app-ask-suppressed', {
           code: NOSTRDB_SYNC_APP_ASK_CODE,
           ownerPubkey,
@@ -2637,18 +2977,17 @@ export function createNostrDbSyncController ({
           requestId: entry.pending.requestId,
           reason,
           attempt: entry.pending.attempt || 0,
-          retryAt: now + EXCHANGE_CHECK_INTERVAL_MS,
-          waitMs: EXCHANGE_CHECK_INTERVAL_MS
+          publicationState: pendingState,
+          retryAt,
+          waitMs: retryAt > now ? retryAt - now : 0
         })
       }
       scheduleExchangeMaintenance(context)
       return null
     }
 
-    const id = entry.pending?.requestId || nextRequestId()
-    const previousAttempt = entry.pending?.attempt || 0
-    const attempt = entry.pending ? previousAttempt + 1 : 0
-    const onlineDelay = Math.min(ONLINE_RETRY_MAX_MS, ONLINE_RETRY_MIN_MS * (2 ** attempt))
+    const id = nextRequestId()
+    const attempt = 0
     const payload = {
       requestId: id,
       appId,
@@ -2666,77 +3005,26 @@ export function createNostrDbSyncController ({
       replyIndexes: [],
       attempt,
       sentAt: now,
-      nextRetryAt: now + EXCHANGE_CHECK_INTERVAL_MS,
-      onlineRetryAt: now + onlineDelay
+      publicationState: 'unconfirmed',
+      relayAckCount: 0,
+      nextRetryAt: now + ASK_PUBLICATION_RETRY_MIN_MS,
+      onlineRetryAt: now + ASK_PUBLICATION_RETRY_MIN_MS,
+      nextCheckAt: 0
     }
     entry.updatedAt = now
     app.updatedAt = now
     throwIfHandlerAborted(context)
-    setState(state)
-
-    try {
-      throwIfHandlerAborted(context)
-      const result = await context.messenger.ask({
-        channelPubkey,
-        receiverPubkey: peerPubkey,
-        code: NOSTRDB_SYNC_APP_ASK_CODE,
-        payload,
-        idempotencyKey: coalescingDigest(['nostrdb-app-ask', NOSTRDB_SYNC_APP_ASK_CODE, id]),
-        useBulkPacing: true
-      })
-      throwIfHandlerAborted(context)
-      if (!publicationSucceeded(result)) throw new Error('SYNC_PUBLICATION_FAILED')
-      if (resume) delete entry.pending?.waitingForResume
-      await trackPublication({
-        ownerPubkey,
-        peerPubkey,
-        direction: 'ask',
-        requestId: id,
-        code: NOSTRDB_SYNC_APP_ASK_CODE,
-        channelPubkey,
-        result,
-        range: payload,
-        lane: 'app-backfill',
-        context
-      })
-    } catch (err) {
-      if (context.signal?.aborted) throw err
-      const nextState = getState()
-      const { app: nextApp, entry: nextEntry } = existingAppBackfillPeerState(nextState, ownerPubkey, appId, peerPubkey)
-      if (nextEntry?.pending?.requestId === id) {
-        const now = _nowMs()
-        if (messengerPausedError(err)) {
-          markPendingForResume(nextEntry, err, now)
-          nextEntry.pending.attempt = previousAttempt
-        } else {
-          const retryAt = publicationRetryAt(err, now) || now + 1
-          nextEntry.pending.nextRetryAt = retryAt
-          nextEntry.pending.onlineRetryAt = retryAt
-          nextEntry.updatedAt = now
-        }
-        nextApp.updatedAt = nextEntry.updatedAt
-        setState(nextState)
-      }
-      scheduleRetrySweep(context)
-      report(err)
-      return null
-    }
-
-    scheduleRetrySweep(context)
-    scheduleExchangeMaintenance(context)
-    recordAskStat('emitted', NOSTRDB_SYNC_APP_ASK_CODE, reason)
-    emitDebug(context.debug, 'app-ask', {
+    await setState(state)
+    return publishPendingAsk({
       ownerPubkey,
+      peerPubkey,
+      lane: 'app-backfill',
       appId,
-      receiverPubkey: peerPubkey,
       requestId: id,
-      after: payload.after,
+      context,
       reason,
-      attempt,
-      onlineDelay,
-      retryAt: entry.pending.onlineRetryAt
+      incrementAttempt: false
     })
-    return payload
   }
 
   async function processAppBackfillsNow (context = runtime, {
@@ -2894,6 +3182,57 @@ export function createNostrDbSyncController ({
     return changed
   }
 
+  function anticipatePendingAsksForAdvert (state, ownerPubkey, peerPubkey, advert, now) {
+    if (!advertIsFresh(advert, now)) return { retry: false, check: false }
+    let retry = false
+    let check = false
+    const entry = state.owners?.[ownerPubkey]?.[peerPubkey]
+    const appStates = Object.values(state.appBackfills?.[ownerPubkey] || {})
+    const pendingStates = [
+      entry?.pending
+        ? { entry, pending: entry.pending, lane: 'history', appId: '' }
+        : null,
+      entry?.recent?.pending
+        ? { entry, pending: entry.recent.pending, lane: 'recent', appId: '' }
+        : null,
+      ...appStates.map(app => {
+        const appEntry = app?.peers?.[peerPubkey]
+        return appEntry?.pending
+          ? { app, entry: appEntry, pending: appEntry.pending, lane: 'app-backfill', appId: app.appId }
+          : null
+      })
+    ].filter(Boolean)
+
+    for (const pendingState of pendingStates) {
+      const publicationState = pendingPublicationState(pendingState.pending)
+      if (publicationState === 'unconfirmed' || publicationState === 'offline') {
+        pendingState.pending.nextRetryAt = now
+        pendingState.pending.onlineRetryAt = now
+        pendingState.entry.updatedAt = now
+        if (pendingState.app) pendingState.app.updatedAt = now
+        retry = true
+      } else if (publicationState === 'published') {
+        const code = pendingState.lane === 'app-backfill'
+          ? NOSTRDB_SYNC_APP_ASK_CODE
+          : NOSTRDB_SYNC_ASK_CODE
+        const record = exchangeRecord(
+          state,
+          ownerPubkey,
+          peerPubkey,
+          'ask',
+          pendingState.pending.requestId
+        )
+        if (!record) continue
+        record.code = code
+        record.nextCheckAt = now
+        record.updatedAt = now
+        pendingState.pending.nextCheckAt = now
+        check = true
+      }
+    }
+    return { retry, check }
+  }
+
   async function handleAdvertise (ownerPubkey, message, context) {
     throwIfHandlerAborted(context)
     const advert = normalizeAdvert(requireDataBody(message))
@@ -2910,14 +3249,27 @@ export function createNostrDbSyncController ({
     const entry = peerState(state, ownerPubkey, peerPubkey)
     if (compareAdvert(nextAdvert, entry.advert) <= 0) return true
     entry.advert = nextAdvert
-    entry.updatedAt = _nowMs()
+    const now = _nowMs()
+    const anticipation = anticipatePendingAsksForAdvert(
+      state,
+      ownerPubkey,
+      peerPubkey,
+      nextAdvert,
+      now
+    )
+    entry.updatedAt = now
     throwIfHandlerAborted(context)
     await setState(state)
+    if (anticipation.retry) scheduleRetrySweep(context)
+    if (anticipation.check) scheduleExchangeMaintenance(context, { immediate: true })
     emitDebug(context.debug, 'advertise-received', {
       ownerPubkey,
       senderPubkey: peerPubkey,
       minScore: advert.minScore,
-      maxScore: advert.maxScore
+      maxScore: advert.maxScore,
+      fresh: advertIsFresh(nextAdvert, now),
+      anticipatedRetry: anticipation.retry,
+      anticipatedCheck: anticipation.check
     })
     const mode = laneModeFor(ownerPubkey, peerPubkey, context)
     if (laneEnabled(mode, 'recent')) {
@@ -4451,22 +4803,45 @@ export function createNostrDbSyncController ({
   function nextRetryAt (context = runtime) {
     const state = getState()
     let next = Infinity
+    const include = (ownerPubkey, peerPubkey, pendingState) => {
+      const pending = pendingState?.pending
+      if (!pending) return
+      if (publishingAsks.has(pendingAskPublicationKey(ownerPubkey, peerPubkey, pendingState))) return
+      const publicationState = pendingPublicationState(pending)
+      if (publicationState === 'published') return
+      if (publicationState === 'waitingForResume' && !(pending.nextRetryAt > 0)) return
+      next = Math.min(next, pending.nextRetryAt || Infinity)
+    }
     for (const [ownerPubkey, owner] of Object.entries(state.owners || {})) {
       if (!isOwnerReady(ownerPubkey, context)) continue
-      for (const entry of Object.values(owner || {})) {
-        for (const pending of [entry?.pending, entry?.recent?.pending]) {
-          if (!pending || pending.waitingForResume) continue
-          next = Math.min(next, pending.nextRetryAt || Infinity)
+      for (const [peerPubkey, entry] of Object.entries(owner || {})) {
+        if (entry?.pending) {
+          include(ownerPubkey, peerPubkey, {
+            lane: 'history',
+            appId: '',
+            pending: entry.pending
+          })
+        }
+        if (entry?.recent?.pending) {
+          include(ownerPubkey, peerPubkey, {
+            lane: 'recent',
+            appId: '',
+            pending: entry.recent.pending
+          })
         }
       }
     }
     for (const [ownerPubkey, apps] of Object.entries(state.appBackfills || {})) {
       if (!isOwnerReady(ownerPubkey, context)) continue
-      for (const app of Object.values(apps || {})) {
-        for (const entry of Object.values(app?.peers || {})) {
-          const pending = entry?.pending
-          if (!pending || pending.waitingForResume) continue
-          next = Math.min(next, pending.nextRetryAt || Infinity)
+      for (const [key, app] of Object.entries(apps || {})) {
+        const appId = normalizeAppId(app?.appId) || appIdFromStateKey(key)
+        for (const [peerPubkey, entry] of Object.entries(app?.peers || {})) {
+          if (!entry?.pending) continue
+          include(ownerPubkey, peerPubkey, {
+            lane: 'app-backfill',
+            appId,
+            pending: entry.pending
+          })
         }
       }
     }
@@ -4487,60 +4862,101 @@ export function createNostrDbSyncController ({
   }
 
   async function retryDueRequests (context = runtime, { force = false, resume = false, apps = true } = {}) {
-    if (!force && !resume) {
-      await runExchangeMaintenance(context)
-      return
-    }
     const state = getState()
     const now = _nowMs()
+    const due = []
+    const include = (ownerPubkey, peerPubkey, pendingState) => {
+      const pending = pendingState.pending
+      if (publishingAsks.has(pendingAskPublicationKey(ownerPubkey, peerPubkey, pendingState))) return
+      const publicationState = pendingPublicationState(pending)
+      if (publicationState === 'published') return
+      if (resume) {
+        if (publicationState !== 'waitingForResume') return
+        if (pending.nextRetryAt > now) return
+      } else if (!force &&
+          (!pending.nextRetryAt || pending.nextRetryAt > now)) {
+        return
+      }
+      if (!resume && publicationState === 'waitingForResume' &&
+          pending.nextRetryAt > now) return
+      due.push({ ownerPubkey, peerPubkey, pendingState, publicationState })
+    }
+
     for (const [ownerPubkey, owner] of Object.entries(state.owners || {})) {
       if (context.ownerPubkeys instanceof Set && !context.ownerPubkeys.has(ownerPubkey)) continue
       for (const [peerPubkey, entry] of Object.entries(owner || {})) {
-        if (!entry?.pending) continue
-        if (resume ? !entry.pending.waitingForResume : entry.pending.waitingForResume) continue
-        if (!resume && !force && (entry.pending.nextRetryAt || Infinity) > now) continue
-        await maybeAsk(ownerPubkey, peerPubkey, context, {
-          force,
-          resume,
-          reason: resume ? 'resume' : 'no-reply'
-        })
-      }
-    }
-    if (!apps) {
-      scheduleRetrySweep(context)
-      return
-    }
-    for (const [ownerPubkey, apps] of Object.entries(state.appBackfills || {})) {
-      if (context.ownerPubkeys instanceof Set && !context.ownerPubkeys.has(ownerPubkey)) continue
-      for (const [key, app] of Object.entries(apps || {})) {
-        const appId = normalizeAppId(app?.appId) || appIdFromStateKey(key)
-        if (!appId) continue
-        for (const [peerPubkey, entry] of Object.entries(app?.peers || {})) {
-          if (!entry?.pending) continue
-          if (resume ? !entry.pending.waitingForResume : entry.pending.waitingForResume) continue
-          if (!resume && !force && (entry.pending.nextRetryAt || Infinity) > now) continue
-          await processAppBackfills(context, {
-            ownerPubkey,
-            peerPubkey,
-            resume,
-            reason: resume ? 'resume' : 'no-reply'
+        if (entry?.pending) {
+          include(ownerPubkey, peerPubkey, {
+            lane: 'history',
+            entry,
+            pending: entry.pending,
+            appId: ''
           })
-          break
+        }
+        if (entry?.recent?.pending) {
+          include(ownerPubkey, peerPubkey, {
+            lane: 'recent',
+            entry,
+            pending: entry.recent.pending,
+            appId: ''
+          })
         }
       }
     }
+    if (apps) {
+      for (const [ownerPubkey, appStates] of Object.entries(state.appBackfills || {})) {
+        if (context.ownerPubkeys instanceof Set && !context.ownerPubkeys.has(ownerPubkey)) continue
+        for (const [key, app] of Object.entries(appStates || {})) {
+          const appId = normalizeAppId(app?.appId) || appIdFromStateKey(key)
+          if (!appId) continue
+          for (const [peerPubkey, entry] of Object.entries(app?.peers || {})) {
+            if (!entry?.pending) continue
+            include(ownerPubkey, peerPubkey, {
+              lane: 'app-backfill',
+              app,
+              entry,
+              pending: entry.pending,
+              appId
+            })
+          }
+        }
+      }
+    }
+    for (const item of due) {
+      const reason = resume
+        ? 'resume'
+        : item.publicationState === 'unconfirmed'
+          ? 'unconfirmed-retry'
+          : item.publicationState === 'offline'
+            ? 'offline-retry'
+            : 'resume-retry'
+      await publishPendingAsk({
+        ownerPubkey: item.ownerPubkey,
+        peerPubkey: item.peerPubkey,
+        lane: item.pendingState.lane,
+        appId: item.pendingState.appId,
+        requestId: item.pendingState.pending.requestId,
+        context,
+        reason,
+        incrementAttempt: true
+      })
+    }
     scheduleRetrySweep(context)
+    scheduleExchangeMaintenance(context)
   }
 
   function hasWaitingForResume (state = getState()) {
     for (const owner of Object.values(state.owners || {})) {
       for (const entry of Object.values(owner || {})) {
-        if (entry?.pending?.waitingForResume || entry?.recent?.pending?.waitingForResume) return true
+        if (pendingIsWaitingForResume(entry?.pending) ||
+            pendingIsWaitingForResume(entry?.recent?.pending)) return true
       }
     }
     for (const apps of Object.values(state.appBackfills || {})) {
       for (const app of Object.values(apps || {})) {
-        for (const entry of Object.values(app?.peers || {})) if (entry?.pending?.waitingForResume) return true
+        for (const entry of Object.values(app?.peers || {})) {
+          if (pendingIsWaitingForResume(entry?.pending)) return true
+        }
       }
     }
     return false

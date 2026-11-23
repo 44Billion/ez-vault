@@ -475,13 +475,23 @@ most one active successor without sharing trust, ACK/NACK or capacity policy.
 Content-key asks are coordinated durably per owner and peer: an identical
 missing-key set is suppressed until its announcement-driven retry deadline,
 while changed sets request immediately. Imported keys and removed peers clear
-the coordination state. NostrDB range retries grow from five minutes toward six
-hours as consecutive pending attempts are replaced.
+the coordination state. NostrDB history, recent-tail and app-backfill asks keep
+an explicit `unconfirmed`, `published`, `offline` or `waitingForResume` state.
+Unconfirmed publications retry the same request and payload after 1 second,
+doubling to at most 60 seconds. A publication accepted by at least one relay is
+`published` and gets a presence check after 20 minutes. Failed peer publications
+back off from five minutes toward six hours. A fresh advert (at most five minutes
+old) can advance an unconfirmed/offline retry, while a published ask gets at most
+an early presence check and is never duplicated. Pause recovery has no
+self-generated timer and preserves a relay-provided `retryAt`.
 Inbound sync is additionally guarded per channel and peer with bounded message,
 byte and work-unit buckets. Announcement streams have a one-hour frequency cap.
 Repeated quota or invalid-payload violations open temporary 5/15/30-minute
-cooldowns; excess deliveries are dropped without retry. Relay, storage, pause
-and local errors never count as peer abuse.
+cooldowns; excess deliveries are dropped without retry. Individual cooldown-drop
+logs are aggregated on expiry and counted by operation code, while quota
+violations remain detailed. The ez-vault default diagnostics sink suppresses its
+duplicate `inbound-peer-dropped` wrapper. Relay, storage, pause and local errors
+never count as peer abuse.
 The durable inbox begins backpressure at 70% and resumes at 50%; NostrDB pushes
 park without polling while the messenger is paused and honor relay retry deadlines.
 Reservation renewal persists the extended deadline in IndexedDB, and push progress

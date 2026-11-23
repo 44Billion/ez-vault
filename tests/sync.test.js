@@ -2496,6 +2496,50 @@ test('sync persists invalid data payloads before ACK and drops invalid requests 
   controller.close()
 })
 
+test('default sync diagnostics suppress the duplicate inbound peer drop', () => {
+  const originalWindow = globalThis.window
+  const originalLog = console.log
+  const logs = []
+  let sink
+  const fakeWindow = { location: { search: '?debug=1' } }
+  fakeWindow.top = fakeWindow
+  globalThis.window = fakeWindow
+  console.log = (...args) => logs.push(args)
+  try {
+    const controller = createSyncController({
+      _createPeerGuard: ({ onDebug }) => {
+        sink = onDebug
+        return { admit: () => true, recordInvalidPayload: () => false, getDebugSnapshot: () => ({ peerGuard: {} }) }
+      }
+    })
+    sink({ source: 'sync', action: 'inbound-peer-dropped', reason: 'quota' })
+    sink({ source: 'sync-peer-guard', action: 'peer-cooldown-opened', reason: 'quota' })
+    controller.close()
+  } finally {
+    globalThis.window = originalWindow
+    console.log = originalLog
+  }
+
+  assert.deepEqual(logs.map(args => args[1]), ['peer-cooldown-opened'])
+})
+
+test('custom sync diagnostics still receive inbound peer drops', () => {
+  const events = []
+  let sink
+  const controller = createSyncController({
+    _debug: event => events.push(event),
+    _createPeerGuard: ({ onDebug }) => {
+      sink = onDebug
+      return { admit: () => true, recordInvalidPayload: () => false, getDebugSnapshot: () => ({ peerGuard: {} }) }
+    }
+  })
+  sink({ source: 'sync', action: 'inbound-peer-dropped', reason: 'quota' })
+  controller.close()
+
+  assert.equal(events.length, 1)
+  assert.equal(events[0].action, 'inbound-peer-dropped')
+})
+
 test('sync replays quarantine once before inbox deliveries and leaves storage failures held', async () => {
   const storeStub = createSubscribable({
     list: () => [{ type: 'nsec', pubkey: 'nsec1' }]

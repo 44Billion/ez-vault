@@ -908,9 +908,12 @@ test('newer advertisements do not bypass pending exchange verification', async (
   )
   assert.equal(historySends().length, 1)
   assert.equal(pending.attempt, 0)
-  assert.equal(pending.onlineRetryAt, now + 5 * 60 * 1000)
+  assert.equal(pending.publicationState, 'published')
+  assert.equal(pending.relayAckCount, 1)
+  assert.equal(pending.onlineRetryAt, 0)
+  assert.equal(pending.nextCheckAt, now + 20 * 60 * 1000)
 
-  now = pending.onlineRetryAt
+  now = pending.nextCheckAt
   await advertise(now)
   assert.equal(historySends().length, 1)
   pending = controller._getState().owners[OWNER][PEER].pending
@@ -998,6 +1001,279 @@ test('missing range asks are republished only after the exchange check interval'
   assert.ok(presenceQueries.every(query => query.options.deduplicateAcrossRelays === false))
 })
 
+test('unconfirmed asks retry quickly with the exact same request and payload', async () => {
+  let now = 1000
+  let attempts = 0
+  const timers = []
+  const msg = messenger()
+  msg.ask = async options => {
+    attempts++
+    msg.sent.push({ method: 'ask', options })
+    if (attempts === 1) return { delivery: { reports: [] } }
+    return {
+      delivery: {
+        reports: [{
+          outerEventId: eventId(705),
+          succeededRelays: ['wss://relay.test'],
+          success: true
+        }]
+      }
+    }
+  }
+  const controller = createNostrDbSyncController({
+    _nowMs: () => now,
+    _random: () => 0.5,
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: timer => {
+      const index = timers.indexOf(timer)
+      if (index >= 0) timers.splice(index, 1)
+    },
+    getLaneMode: () => 'history',
+    onError: () => {},
+    getDb: () => ({
+      async query () {
+        return { results: [], meta: { firstScore: now, lastScore: now } }
+      }
+    })
+  })
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: now, minScore: now, maxScore: now + 1 }
+  }), context(msg))
+
+  let pending = controller._getState().owners[OWNER][PEER].pending
+  const firstPayload = msg.sent[0].options.payload
+  assert.equal(pending.publicationState, 'unconfirmed')
+  assert.equal(pending.nextRetryAt, now + 1000)
+  assert.equal(pending.nextCheckAt, 0)
+  assert.equal(pending.attempt, 0)
+
+  now = pending.nextRetryAt
+  const retry = timers.find(timer => timer.ms === 1000)
+  assert.ok(retry)
+  retry.fn()
+  await flushMicrotasks()
+
+  pending = controller._getState().owners[OWNER][PEER].pending
+  assert.equal(attempts, 2)
+  assert.deepEqual(msg.sent[1].options.payload, firstPayload)
+  assert.equal(msg.sent[1].options.idempotencyKey, msg.sent[0].options.idempotencyKey)
+  assert.equal(pending.publicationState, 'published')
+  assert.equal(pending.attempt, 1)
+  assert.equal(pending.relayAckCount, 1)
+  assert.equal(pending.nextRetryAt, 0)
+  assert.equal(pending.nextCheckAt, now + 20 * 60 * 1000)
+})
+
+test('one accepted relay publication confirms an ask without waiting for every report', async () => {
+  const now = 1000
+  const msg = messenger()
+  msg.ask = async options => {
+    msg.sent.push({ method: 'ask', options })
+    return {
+      delivery: {
+        reports: [{
+          outerEventId: eventId(708),
+          succeededRelays: ['wss://relay-a.test'],
+          success: true
+        }, {
+          outerEventId: eventId(709),
+          succeededRelays: [],
+          success: false
+        }]
+      }
+    }
+  }
+  const errors = []
+  const controller = createNostrDbSyncController({
+    _nowMs: () => now,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getLaneMode: () => 'history',
+    onError: error => errors.push(error),
+    getDb: () => ({
+      async query () {
+        return { results: [], meta: { firstScore: now, lastScore: now } }
+      }
+    })
+  })
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: now, minScore: now, maxScore: now + 1 }
+  }), context(msg))
+
+  const pending = controller._getState().owners[OWNER][PEER].pending
+  assert.equal(pending.publicationState, 'published')
+  assert.equal(pending.relayAckCount, 1)
+  assert.equal(pending.nextRetryAt, 0)
+  assert.deepEqual(errors, [])
+})
+
+test('offline asks keep their backoff until a fresh advert arrives', async () => {
+  let now = 10 * 60 * 1000
+  let attempts = 0
+  const timers = []
+  const diagnostic = []
+  const msg = messenger()
+  msg.ask = async options => {
+    attempts++
+    msg.sent.push({ method: 'ask', options })
+    if (attempts === 1) throw new Error('peer unavailable')
+    return {
+      delivery: {
+        reports: [{
+          outerEventId: eventId(706),
+          succeededRelays: ['wss://relay.test'],
+          success: true
+        }]
+      }
+    }
+  }
+  const syncContext = context(msg, { debug: event => diagnostic.push(event) })
+  const controller = createNostrDbSyncController({
+    _nowMs: () => now,
+    _random: () => 0.5,
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: timer => {
+      const index = timers.indexOf(timer)
+      if (index >= 0) timers.splice(index, 1)
+    },
+    getLaneMode: () => 'history',
+    onError: () => {},
+    getDb: () => ({
+      async query () {
+        return { results: [], meta: { firstScore: now, lastScore: now } }
+      }
+    })
+  })
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: now, minScore: now, maxScore: now + 1 }
+  }), syncContext)
+  let pending = controller._getState().owners[OWNER][PEER].pending
+  const offlineRetryAt = pending.nextRetryAt
+  assert.equal(pending.publicationState, 'offline')
+  assert.equal(offlineRetryAt, now + 5 * 60 * 1000)
+
+  now += 1000
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: now, minScore: now, maxScore: now + 1 }
+  }), syncContext)
+  pending = controller._getState().owners[OWNER][PEER].pending
+  assert.equal(pending.nextRetryAt, offlineRetryAt)
+
+  now += 1
+  const fresh = syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: now, minScore: now, maxScore: now + 1 }
+  })
+  fresh.outer = { id: 'fresh-advert', created_at: Math.floor(now / 1000) }
+  await controller.handleMessage(fresh, syncContext)
+  pending = controller._getState().owners[OWNER][PEER].pending
+  assert.equal(pending.nextRetryAt, now)
+  assert.ok(diagnostic.some(event =>
+    event.action === 'advertise-received' && event.anticipatedRetry === true
+  ))
+
+  const retry = timers.find(timer => timer.ms === 0)
+  assert.ok(retry)
+  retry.fn()
+  await flushMicrotasks()
+  pending = controller._getState().owners[OWNER][PEER].pending
+  assert.equal(attempts, 2)
+  assert.equal(pending.publicationState, 'published')
+  assert.equal(pending.attempt, 1)
+})
+
+test('a fresh advert can check a published ask without republishing it', async () => {
+  let now = 1000
+  const askId = eventId(707)
+  const timers = []
+  const presenceChecks = []
+  const msg = messenger()
+  msg.ask = async options => {
+    msg.sent.push({ method: 'ask', options })
+    return {
+      delivery: {
+        reports: [{
+          outerEventId: askId,
+          succeededRelays: ['wss://relay.test'],
+          success: true
+        }]
+      }
+    }
+  }
+  const controller = createNostrDbSyncController({
+    _nowMs: () => now,
+    _random: () => 0.5,
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: timer => {
+      const index = timers.indexOf(timer)
+      if (index >= 0) timers.splice(index, 1)
+    },
+    _isOnline: async () => true,
+    _relayPool: {
+      async getEvents (filter, relays) {
+        presenceChecks.push({ filter, relays })
+        return {
+          result: filter.ids.includes(askId) ? [{ event: { id: askId }, relay: relays[0] }] : [],
+          relays: relays.map(relay => ({ relay, status: 'eose' }))
+        }
+      }
+    },
+    getLaneMode: () => 'history',
+    getDb: () => ({
+      async query () {
+        return { results: [], meta: { firstScore: now, lastScore: now } }
+      }
+    })
+  })
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: now, minScore: now, maxScore: now + 1 }
+  }), context(msg, { relaysForChannel: () => ['wss://relay.test'] }))
+  assert.equal(msg.sent.length, 1)
+  assert.equal(controller._getState().owners[OWNER][PEER].pending.publicationState, 'published')
+
+  now += 60 * 1000
+  const fresh = syncMessage({
+    code: NOSTRDB_SYNC_ADVERTISE_CODE,
+    payload: { generatedAt: now, minScore: now, maxScore: now + 1 }
+  })
+  fresh.outer = { id: 'fresh-check', created_at: Math.floor(now / 1000) }
+  await controller.handleMessage(fresh, context(msg, {
+    relaysForChannel: () => ['wss://relay.test']
+  }))
+
+  const check = timers.find(timer => timer.ms === 0)
+  assert.ok(check)
+  check.fn()
+  await flushMicrotasks()
+
+  assert.equal(msg.sent.length, 1)
+  assert.equal(presenceChecks.length, 1)
+  const pending = controller._getState().owners[OWNER][PEER].pending
+  assert.equal(pending.publicationState, 'published')
+  assert.equal(pending.nextCheckAt, now + 20 * 60 * 1000)
+})
+
 test('legacy pending asks migrate to exchange tracking and recover their exact request', async () => {
   let now = 1000000
   const relay = 'wss://relay.test'
@@ -1037,9 +1313,18 @@ test('legacy pending asks migrate to exchange tracking and recover their exact r
       }
     }
   }
+  const timers = []
   const controller = createNostrDbSyncController({
     _nowMs: () => now,
-    _setTimeout: () => ({}),
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: timer => {
+      const index = timers.indexOf(timer)
+      if (index >= 0) timers.splice(index, 1)
+    },
     _isOnline: async () => true,
     _relayPool: {
       async getEvents (filter, relays) {
@@ -1055,6 +1340,14 @@ test('legacy pending asks migrate to exchange tracking and recover their exact r
     channelPubkeyForOwner: () => 'channel',
     relaysForChannel: () => [relay]
   }))
+
+  assert.equal(controller._getState().owners[OWNER][PEER].pending.publicationState, 'unconfirmed')
+  assert.equal(msg.sent.length, 0)
+  const retry = timers.find(timer => timer.ms === 4000)
+  assert.ok(retry)
+  now = controller._getState().owners[OWNER][PEER].pending.nextRetryAt
+  retry.fn()
+  await flushMicrotasks()
 
   assert.equal(msg.sent.length, 1)
   assert.deepEqual(msg.sent[0].options.payload, {
@@ -1494,7 +1787,15 @@ test('exchange retention expires after the ten-minute grace even while offline',
       [OWNER]: {
         [PEER]: {
           pending: { requestId: 'expired' },
-          recent: { pending: { requestId: 'fresh' } },
+          recent: {
+            pending: {
+              requestId: 'fresh',
+              publicationState: 'published',
+              publishedAt: now,
+              relayAckCount: 1,
+              nextCheckAt: now
+            }
+          },
           updatedAt: now
         }
       }
@@ -2072,6 +2373,7 @@ test('nostrdb app backfill does not retry before a publication circuit deadline'
   let attempts = 0
   const retryAt = now + 30 * 60 * 1000
   const errors = []
+  const timers = []
   const msg = messenger()
   msg.ask = async options => {
     attempts++
@@ -2097,7 +2399,15 @@ test('nostrdb app backfill does not retry before a publication circuit deadline'
   const controller = createNostrDbSyncController({
     _nowMs: () => now,
     _random: () => 0.5,
-    _setTimeout: () => ({}),
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: timer => {
+      const index = timers.indexOf(timer)
+      if (index >= 0) timers.splice(index, 1)
+    },
     _isOnline: async () => true,
     _relayPool: {
       async getEvents (filter, relays) {
@@ -2121,11 +2431,18 @@ test('nostrdb app backfill does not retry before a publication circuit deadline'
   assert.equal(errors.at(-1).code, 'RELAY_CIRCUIT_OPEN')
 
   now = retryAt - 1
-  await controller.runExchangeMaintenance(context(msg))
+  let retry = timers.find(timer => timer.ms === 1)
+  if (!retry) retry = timers.at(-1)
+  assert.ok(retry)
+  retry.fn()
+  await flushMicrotasks()
   assert.equal(attempts, 1)
 
   now = retryAt
-  await controller.runExchangeMaintenance(context(msg))
+  retry = timers.find(timer => timer.ms === 1)
+  assert.ok(retry)
+  retry.fn()
+  await flushMicrotasks()
   assert.equal(attempts, 2)
 })
 
@@ -2133,6 +2450,7 @@ test('nostrdb range sync does not retry before a publication circuit deadline', 
   let now = 1000
   const retryAt = now + 30 * 60 * 1000
   let attempts = 0
+  const timers = []
   const msg = messenger()
   msg.ask = async options => {
     attempts++
@@ -2147,7 +2465,15 @@ test('nostrdb range sync does not retry before a publication circuit deadline', 
   const controller = createNostrDbSyncController({
     _nowMs: () => now,
     _random: () => 0.5,
-    _setTimeout: () => ({}),
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: timer => {
+      const index = timers.indexOf(timer)
+      if (index >= 0) timers.splice(index, 1)
+    },
     _isOnline: async () => true,
     _relayPool: {
       async getEvents (filter, relays) {
@@ -2176,11 +2502,18 @@ test('nostrdb range sync does not retry before a publication circuit deadline', 
   assert.equal(owner.pending.onlineRetryAt, retryAt)
 
   now = retryAt - 1
-  await controller.runExchangeMaintenance(context(msg))
+  let retry = timers.find(timer => timer.ms === 1)
+  if (!retry) retry = timers.at(-1)
+  assert.ok(retry)
+  retry.fn()
+  await flushMicrotasks()
   assert.equal(attempts, 2)
 
   now = retryAt
-  await controller.runExchangeMaintenance(context(msg))
+  retry = timers.find(timer => timer.ms === 1)
+  assert.ok(retry)
+  retry.fn()
+  await flushMicrotasks()
   assert.equal(attempts, 4)
 })
 
@@ -2248,17 +2581,17 @@ test('paused range asks wait for explicit resume without spending backoff', asyn
   assert.equal(timers.some(timer => timer.ms === 5 * 60 * 1000), false)
 
   await controller.resumeAfterPause(context(msg))
-  assert.equal(attempts, 3)
+  assert.equal(attempts, 4)
   assert.equal(controller._getState().owners[OWNER][PEER].pending.waitingForResume, undefined)
   assert.equal(controller._getState().owners[OWNER][PEER].pending.attempt, 1)
+  assert.equal(controller._getState().owners[OWNER][PEER].recent.pending.waitingForResume, undefined)
+  assert.equal(controller._getState().owners[OWNER][PEER].recent.pending.attempt, 1)
 
   const exchangeFlush = timers.find(timer => timer.ms === 0)
   assert.ok(exchangeFlush)
   await exchangeFlush.fn()
   await flushMicrotasks()
   assert.equal(attempts, 4)
-  assert.equal(controller._getState().owners[OWNER][PEER].recent.pending.waitingForResume, undefined)
-  assert.equal(controller._getState().owners[OWNER][PEER].recent.pending.attempt, 1)
 })
 
 test('waiting-for-resume state recovers after reload once the messenger is active', async () => {
@@ -2294,14 +2627,17 @@ test('waiting-for-resume state recovers after reload once the messenger is activ
   secondController.ensureSubscriptions(context(second))
   await flushMicrotasks(30)
 
-  assert.equal(second.sent.filter(item => item.options.code === NOSTRDB_SYNC_ASK_CODE).length, 1)
+  assert.equal(second.sent.filter(item => item.options.code === NOSTRDB_SYNC_ASK_CODE).length, 2)
   assert.equal(secondController._getState().owners[OWNER][PEER].pending.waitingForResume, undefined)
+  assert.equal(secondController._getState().owners[OWNER][PEER].recent.pending.waitingForResume, undefined)
 })
 
 test('resume does not bypass a relay retry deadline attached to a paused error', async () => {
+  let now = 1000
   let attempts = 0
-  const retryAt = 1000 + 10 * 60 * 1000
+  const retryAt = now + 10 * 60 * 1000
   const msg = messenger()
+  const timers = []
   msg.ask = async () => {
     attempts++
     throw Object.assign(new Error('PRIVATE_MESSENGER_PAUSED'), {
@@ -2311,9 +2647,17 @@ test('resume does not bypass a relay retry deadline attached to a paused error',
     })
   }
   const controller = createNostrDbSyncController({
-    _nowMs: () => 1000,
+    _nowMs: () => now,
     _random: () => 0.5,
-    _setTimeout: () => ({}),
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: timer => {
+      const index = timers.indexOf(timer)
+      if (index >= 0) timers.splice(index, 1)
+    },
     getDb: () => ({
       subscribe: emptySubscription,
       async query () {
@@ -2328,10 +2672,18 @@ test('resume does not bypass a relay retry deadline attached to a paused error',
   }), context(msg))
 
   const pending = controller._getState().owners[OWNER][PEER].pending
-  assert.equal(pending.waitingForResume, undefined)
+  assert.equal(pending.waitingForResume, true)
+  assert.equal(pending.publicationState, 'waitingForResume')
   assert.equal(pending.nextRetryAt, retryAt)
   await controller.resumeAfterPause(context(msg))
   assert.equal(attempts, 2)
+
+  const retry = timers.find(timer => timer.ms === retryAt - 1000)
+  assert.ok(retry)
+  now = retryAt
+  retry.fn()
+  await flushMicrotasks()
+  assert.equal(attempts, 4)
 })
 
 test('paused app backfills resume immediately without increasing backoff', async () => {
@@ -2565,8 +2917,7 @@ test('nostrdb app backfill reply imports for app and pages when hasMore', async 
   })
   controller.ensureSubscriptions(context(msg))
   controller.requestAppBackfill({ ownerPubkey: OWNER, appId: 'app-1' }, context(msg))
-  await Promise.resolve()
-  await Promise.resolve()
+  await waitForCondition(() => msg.sent.length === 1)
   const firstAsk = msg.sent[0].options.payload
 
   await controller.handleMessage(syncMessage({

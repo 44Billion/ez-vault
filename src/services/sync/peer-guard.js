@@ -134,6 +134,7 @@ export function createSyncPeerGuard ({
     cooldownsOpened: 0,
     cooldownsExpired: 0,
     droppedByCode: {},
+    cooldownDropsByCode: {},
     violationsByReason: {}
   }
 
@@ -160,7 +161,9 @@ export function createSyncPeerGuard ({
         violations: [],
         lastViolationAt: 0,
         cooldownUntil: 0,
-        cooldownLevel: 0
+        cooldownLevel: 0,
+        droppedDuringCooldown: 0,
+        cooldownDropsByCode: {}
       }
       peers.set(key, state)
     }
@@ -214,16 +217,24 @@ export function createSyncPeerGuard ({
       if (current < state.cooldownUntil) {
         stats.droppedByCooldown++
         increment(stats.droppedByCode, context.code)
-        debug('peer-message-dropped', {
-          type: context.type || '',
-          code: context.code || '',
-          reason: 'cooldown',
-          cooldownRemainingMs: state.cooldownUntil - current
-        })
+        increment(stats.cooldownDropsByCode, context.code)
+        state.droppedDuringCooldown++
+        increment(state.cooldownDropsByCode, context.code)
         return false
       }
+      const droppedDuringCooldown = state.droppedDuringCooldown
+      const cooldownDropsByCode = { ...state.cooldownDropsByCode }
       state.cooldownUntil = 0
+      state.droppedDuringCooldown = 0
+      state.cooldownDropsByCode = {}
       stats.cooldownsExpired++
+      if (droppedDuringCooldown > 0) {
+        debug('peer-cooldown-drops', {
+          count: droppedDuringCooldown,
+          byCode: cooldownDropsByCode,
+          cooldownLevel: state.cooldownLevel
+        })
+      }
       debug('peer-cooldown-expired', {
         type: context.type || '',
         code: context.code || '',
