@@ -1077,6 +1077,88 @@ test('sync drains messages enqueued while another message is being handled', asy
   controller.close()
 })
 
+test('sync propagates a false acknowledgement without retrying a lost delivery', async () => {
+  const message = {
+    type: 'reply',
+    channelPubkey: 'channel',
+    provenance: 'direct',
+    event: { id: 'event-ack-false', pubkey: 'trusted1' },
+    payload: { code: 'probe' }
+  }
+  const acknowledgements = []
+  const deferrals = []
+  const errors = []
+  const handled = []
+  const progress = { version: 1, messageEventId: 'event-ack-false', payloadIndex: 0, processedEvents: 3 }
+  const checkpoint = async () => true
+  const ownership = new AbortController()
+
+  class FakeMessenger {
+    constructor () {
+      this.queue = [message]
+    }
+
+    async init () { return this }
+    async nextMessage () {
+      const next = this.queue.shift()
+      return next
+        ? {
+            message: next,
+            progress,
+            checkpoint,
+            ownershipSignal: ownership.signal,
+            lastFailure: { code: 'QUEUE_RESERVATION_TAKEN_OVER' },
+            ack: async () => {
+              acknowledgements.push(next.event.id)
+              ownership.abort(new Error('ownership lost'))
+              return false
+            },
+            nack: async options => {
+              deferrals.push({ id: next.event.id, options })
+              return true
+            }
+          }
+        : null
+    }
+
+    close () {}
+  }
+
+  const controller = createSyncController({
+    MessengerClass: FakeMessenger,
+    _store: createSubscribable({ list: () => [{ type: 'nsec', pubkey: 'nsec1' }] }),
+    _secrets: createSubscribable({ isUnlocked: () => true, getDeviceSigner: async () => signer('device') }),
+    _trustedSigners: createSubscribable({ list: () => [{ pubkey: 'trusted1', platform: 'Laptop' }] }),
+    _contentKeys: {
+      resetDebugSources: () => {},
+      announceContentKeys: async () => {},
+      handleMessage: async (_message, context) => {
+        handled.push(context)
+        return true
+      }
+    },
+    _claimSigner: () => signer('nsec1'),
+    _setInterval: () => ({}),
+    _clearInterval: () => {},
+    onError: error => errors.push(error)
+  })
+
+  try {
+    await controller.init()
+    await waitUntil(() => errors.length === 1)
+    assert.equal(handled.length, 1)
+    assert.deepEqual(handled[0].progress, progress)
+    assert.equal(handled[0].checkpoint, checkpoint)
+    assert.equal(handled[0].signal.aborted, true)
+    assert.deepEqual(acknowledgements, ['event-ack-false'])
+    assert.deepEqual(deferrals, [])
+    assert.equal(errors[0].code, 'INBOX_ACK_FAILED')
+    assert.equal(errors[0].cause.code, 'QUEUE_RESERVATION_TAKEN_OVER')
+  } finally {
+    controller.close()
+  }
+})
+
 test('sync defers a timed-out handler, runs the next item and never overlaps the stalled one', async () => {
   const timers = createManualTimeouts()
   const firstHandler = Promise.withResolvers()

@@ -87,6 +87,9 @@ const SYNC_EVENT_EXPIRATION_MS = 2 * 24 * 60 * 60 * 1000
 const STATE_PRUNE_MS = 30 * 24 * 60 * 60 * 1000
 const PUSH_EVENTS_PER_CHUNK = 100
 const SYNC_BYTES_PER_CHUNK = 128 * 1024
+const PUSH_INGEST_PROGRESS_VERSION = 1
+const PUSH_INGEST_CHECKPOINT_EVENTS = 8
+const PUSH_INGEST_CHECKPOINT_MS = 10 * 1000
 const encoder = new TextEncoder()
 const RECENT_SYNC_EVENT_TTL_MS = 2 * 60 * 1000
 const PUSH_BATCH_WINDOW_MS = 200
@@ -435,6 +438,22 @@ function parseJsonlEventsDetailed (jsonl) {
     }
   }
   return { events, rejected }
+}
+
+function pushIngestProgress (value, messageEventId, payloadIndex, eventCount) {
+  if (value == null) return { processedEvents: 0, valid: true, previous: false }
+  if (!isPlainObject(value) ||
+      value.version !== PUSH_INGEST_PROGRESS_VERSION ||
+      value.messageEventId !== messageEventId ||
+      value.payloadIndex !== payloadIndex) {
+    return { processedEvents: 0, valid: false, previous: true }
+  }
+  if (!Number.isSafeInteger(value.processedEvents) ||
+      value.processedEvents < 0 ||
+      value.processedEvents > eventCount) {
+    return { processedEvents: 0, valid: false, previous: true }
+  }
+  return { processedEvents: value.processedEvents, valid: true, previous: true }
 }
 
 function eventsToJsonl (events) {
@@ -920,6 +939,13 @@ export function createNostrDbSyncController ({
 
   function throwIfHandlerAborted (context) {
     context.signal?.throwIfAborted()
+  }
+
+  function inboxOwnershipLostError () {
+    return Object.assign(new Error('INBOX_DELIVERY_LOST'), {
+      code: 'INBOX_DELIVERY_LOST',
+      retryWhenAvailable: true
+    })
   }
 
   function backgroundContext (context = runtime) {
@@ -3115,7 +3141,12 @@ export function createNostrDbSyncController ({
     return true
   }
 
-  async function ingestEvents (ownerPubkey, events) {
+  async function ingestEvents (ownerPubkey, events, {
+    context = null,
+    startIndex = 0,
+    progressScope = null,
+    checkpoint = null
+  } = {}) {
     if (!events.length) return 0
     let imported = 0
     let db
@@ -3125,7 +3156,28 @@ export function createNostrDbSyncController ({
       report(err)
       return 0
     }
-    for (const event of events) {
+    const canCheckpoint = Boolean(context && progressScope && typeof checkpoint === 'function')
+    let processedEvents = Math.max(0, Math.min(events.length, startIndex))
+    let lastCheckpoint = processedEvents
+    let checkpointStartedAt = _nowMs()
+    const persistProgress = async () => {
+      if (!canCheckpoint || processedEvents <= lastCheckpoint) return
+      throwIfHandlerAborted(context)
+      const saved = await checkpoint({
+        ...progressScope,
+        processedEvents
+      })
+      if (!saved) throw inboxOwnershipLostError()
+      lastCheckpoint = processedEvents
+      checkpointStartedAt = _nowMs()
+      emitDebug(context.debug, 'push-checkpoint', {
+        processedEvents,
+        eventCount: events.length
+      })
+    }
+    for (let index = processedEvents; index < events.length; index++) {
+      if (canCheckpoint) throwIfHandlerAborted(context)
+      const event = events[index]
       markRecentSyncEvent(event)
       try {
         // Synced rows stay app-neutral; CRDT merge uses deterministic sync
@@ -3137,8 +3189,17 @@ export function createNostrDbSyncController ({
         if (result?.ok !== false) imported++
       } catch (err) {
         report(err)
+        if (canCheckpoint) throw err
+      }
+      if (canCheckpoint) throwIfHandlerAborted(context)
+      processedEvents = index + 1
+      if (canCheckpoint &&
+          (processedEvents - lastCheckpoint >= PUSH_INGEST_CHECKPOINT_EVENTS ||
+           _nowMs() - checkpointStartedAt >= PUSH_INGEST_CHECKPOINT_MS)) {
+        await persistProgress()
       }
     }
+    await persistProgress()
     return imported
   }
 
@@ -3399,12 +3460,35 @@ export function createNostrDbSyncController ({
     const payload = normalizeEventBatchPayload(requireDataBody(message))
     if (!payload) throw syncPayloadInvalid('push-payload-invalid')
     const { events, rejected } = parseJsonlEventsDetailed(payload.jsonl)
-    const imported = await ingestEvents(ownerPubkey, events)
+    const messageEventId = typeof message.event?.id === 'string' ? message.event.id : ''
+    const progress = pushIngestProgress(
+      context.progress,
+      messageEventId,
+      payload.index,
+      events.length
+    )
+    if (progress.previous && !progress.valid) {
+      emitDebug(context.debug, 'push-progress-ignored', {
+        reason: 'invalid-or-scope-mismatch'
+      })
+    }
+    const imported = await ingestEvents(ownerPubkey, events, {
+      context,
+      startIndex: progress.processedEvents,
+      progressScope: {
+        version: PUSH_INGEST_PROGRESS_VERSION,
+        messageEventId,
+        payloadIndex: payload.index
+      },
+      checkpoint: context.checkpoint
+    })
     throwIfHandlerAborted(context)
     emitDebug(context.debug, 'push-received', {
       ownerPubkey,
       senderPubkey: message.event?.pubkey || '',
-      count: imported
+      count: imported,
+      processedEvents: events.length,
+      resumedFrom: progress.processedEvents
     })
     await processAppBackfills(context, {
       ownerPubkey,

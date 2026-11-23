@@ -3644,6 +3644,163 @@ test('nostrdb sync ingests with mergeSource sync and suppresses echo pushes', as
   assert.deepEqual(msg.sent, [])
 })
 
+test('push ingestion checkpoints every eight events and resumes from stored progress', async () => {
+  const events = Array.from({ length: 10 }, (_, index) => event(index + 1))
+  const added = []
+  const checkpoints = []
+  const msg = messenger()
+  let now = 1000
+  const controller = createNostrDbSyncController({
+    _nowMs: () => now,
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async add (event) {
+        added.push(event.id)
+        now++
+        return { ok: true }
+      }
+    })
+  })
+  controller.ensureSubscriptions(context(msg))
+  const message = syncMessage({
+    id: 'push-message',
+    code: NOSTRDB_SYNC_PUSH_CODE,
+    payload: {
+      index: 2,
+      isLast: true,
+      jsonl: events.map(value => JSON.stringify(value)).join('\n') + '\n'
+    }
+  })
+
+  await controller.handleMessage(message, context(msg, {
+    checkpoint: async value => {
+      checkpoints.push(value)
+      return true
+    }
+  }))
+  assert.deepEqual(checkpoints, [
+    { version: 1, messageEventId: 'push-message', payloadIndex: 2, processedEvents: 8 },
+    { version: 1, messageEventId: 'push-message', payloadIndex: 2, processedEvents: 10 }
+  ])
+  assert.deepEqual(added, events.map(value => value.id))
+
+  added.length = 0
+  checkpoints.length = 0
+  await controller.handleMessage(message, context(msg, {
+    progress: {
+      version: 1,
+      messageEventId: 'push-message',
+      payloadIndex: 2,
+      processedEvents: 8
+    },
+    checkpoint: async value => {
+      checkpoints.push(value)
+      return true
+    }
+  }))
+  assert.deepEqual(added, events.slice(8).map(value => value.id))
+  assert.deepEqual(checkpoints, [
+    { version: 1, messageEventId: 'push-message', payloadIndex: 2, processedEvents: 10 }
+  ])
+
+  added.length = 0
+  checkpoints.length = 0
+  await controller.handleMessage(message, context(msg, {
+    progress: {
+      version: 1,
+      messageEventId: 'different-message',
+      payloadIndex: 2,
+      processedEvents: 8
+    },
+    checkpoint: async value => {
+      checkpoints.push(value)
+      return true
+    }
+  }))
+  assert.deepEqual(added, events.map(value => value.id))
+  assert.equal(checkpoints[0].processedEvents, 8)
+})
+
+test('push ingestion checkpoints by elapsed time and stops when ownership is lost', async () => {
+  const events = Array.from({ length: 3 }, (_, index) => event(index + 1))
+  const added = []
+  const checkpoints = []
+  const msg = messenger()
+  let now = 1000
+  const controller = createNostrDbSyncController({
+    _nowMs: () => now,
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async add (event) {
+        added.push(event.id)
+        now += 6000
+        return { ok: true }
+      }
+    })
+  })
+  controller.ensureSubscriptions(context(msg))
+  const message = syncMessage({
+    id: 'slow-push',
+    code: NOSTRDB_SYNC_PUSH_CODE,
+    payload: {
+      index: 0,
+      isLast: true,
+      jsonl: events.map(value => JSON.stringify(value)).join('\n') + '\n'
+    }
+  })
+
+  await assert.rejects(
+    controller.handleMessage(message, context(msg, {
+      checkpoint: async value => {
+        checkpoints.push(value)
+        return checkpoints.length === 1
+      }
+    })),
+    error => error.code === 'INBOX_DELIVERY_LOST'
+  )
+  assert.deepEqual(added, events.map(value => value.id))
+  assert.equal(checkpoints[0].processedEvents, 2)
+  assert.equal(checkpoints[1].processedEvents, 3)
+})
+
+test('push ingestion never checkpoints past a database write failure', async () => {
+  const events = Array.from({ length: 9 }, (_, index) => event(index + 1))
+  const checkpoints = []
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async add (event) {
+        if (event.id === events[8].id) throw new Error('WRITE_FAILED')
+        return { ok: true }
+      }
+    })
+  })
+  controller.ensureSubscriptions(context(msg))
+
+  await assert.rejects(
+    controller.handleMessage(syncMessage({
+      id: 'failed-push',
+      code: NOSTRDB_SYNC_PUSH_CODE,
+      payload: {
+        index: 0,
+        isLast: true,
+        jsonl: events.map(value => JSON.stringify(value)).join('\n') + '\n'
+      }
+    }), context(msg, {
+      checkpoint: async value => {
+        checkpoints.push(value)
+        return true
+      }
+    })),
+    /WRITE_FAILED/
+  )
+  assert.deepEqual(checkpoints, [
+    { version: 1, messageEventId: 'failed-push', payloadIndex: 0, processedEvents: 8 }
+  ])
+})
+
 test('nostrdb sync batches normal events without mixing priority lanes', async () => {
   const msg = messenger()
   const timers = []

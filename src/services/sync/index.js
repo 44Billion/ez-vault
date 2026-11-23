@@ -43,6 +43,13 @@ const DEFAULT_COALESCING_HINTS = [
   trustedSignerSync.coalescingHint
 ]
 
+function inboxAckError (failure) {
+  return Object.assign(new Error('INBOX_ACK_FAILED'), {
+    code: 'INBOX_ACK_FAILED',
+    cause: failure || null
+  })
+}
+
 // Account data sync derives one private channel per unlocked nsec account and
 // talks only to configured trusted signer pubkeys. Content-key sync exchanges
 // key metadata/secrets, while NostrDB sync uses the same account-scoped channel
@@ -244,13 +251,20 @@ export function createSyncController ({
     onError
   })
 
-  function syncHandlerContext ({ messenger: handlerMessenger, signal } = {}) {
+  function syncHandlerContext ({
+    messenger: handlerMessenger,
+    signal,
+    progress,
+    checkpoint
+  } = {}) {
     return {
       messenger: handlerMessenger || messenger,
       backgroundMessenger: messenger,
       trustedByPubkey,
       devicePubkey,
       signal,
+      progress,
+      checkpoint,
       ownerPubkeyForChannel,
       channelPubkeyForOwner,
       channelSignerFor: channelPubkey => channelSignerByChannelPubkey.get(channelPubkey) || null,
@@ -691,10 +705,15 @@ export function createSyncController ({
             : null
           try {
             const controller = new AbortController()
+            const signal = delivery.ownershipSignal
+              ? AbortSignal.any([controller.signal, delivery.ownershipSignal])
+              : controller.signal
             const handler = Promise.resolve()
               .then(() => handleSyncMessage(message, {
                 messenger: delivery.capacityEgress || messenger,
-                signal: controller.signal
+                signal,
+                progress: delivery.progress,
+                checkpoint: delivery.checkpoint
               }))
               .then(
                 value => ({ status: 'resolved', value }),
@@ -737,9 +756,14 @@ export function createSyncController ({
               if (processDiagnostic) processDiagnostic.outcome = 'failed'
               throw outcome.error
             }
-            await ack()
+            if (await ack() === false) throw inboxAckError(delivery.lastFailure)
           } catch (err) {
             let failure = err
+            if (failure?.code === 'INBOX_ACK_FAILED') {
+              onError(failure)
+              drainQueued = false
+              break
+            }
             if (isSyncPayloadError(err)) {
               peerGuard.recordInvalidPayload({
                 type: message?.type || 'message',
@@ -771,14 +795,24 @@ export function createSyncController ({
                     })
                   }
                 }
-                if (await ack() === false) throw new Error('INBOX_ACK_FAILED')
+                if (await ack() === false) throw inboxAckError(delivery.lastFailure)
                 continue
               } catch (quarantineError) {
                 failure = quarantineError
               }
             }
-            await nack()
+            if (failure?.code === 'INBOX_ACK_FAILED') {
+              onError(failure)
+              drainQueued = false
+              break
+            }
+            const ownershipLost = delivery.ownershipSignal?.aborted === true
+            if (!ownershipLost) await nack()
             onError(failure)
+            if (ownershipLost) {
+              drainQueued = false
+              break
+            }
             // Capacity and pause are admission/lifecycle conditions, not
             // permanent handler failures. Keep the durable backlog moving.
             if (isInboxAdmissionError(failure) || messenger?.readStatus?.().paused) {

@@ -319,6 +319,11 @@ pending work. Redelivery after interruption is expected and handled by existing
 sync deduplication. Locking still closes the messenger; reopening uses its
 persisted recovery checkpoints and the default seven-day remote recovery window.
 Recovery is limited by data retained on relays/seeders, not guaranteed delivery.
+NostrDB push ingestion checkpoints every eight events or ten seconds, whichever
+comes first, and resumes from the next event after timeout, capacity recovery or
+reload. A lost queue reservation aborts the handler through the delivery
+ownership signal. A successful handler must receive `true` from `ack()`; a false
+ACK is reported as `INBOX_ACK_FAILED` instead of silently retrying the same item.
 
 Private-messenger consumers are coordinated on libp2r2p 0.11.0. Its encrypted
 router recipient tag is `p`; inner sync/control tags remain unchanged. Outgoing
@@ -479,6 +484,8 @@ cooldowns; excess deliveries are dropped without retry. Relay, storage, pause
 and local errors never count as peer abuse.
 The durable inbox begins backpressure at 70% and resumes at 50%; NostrDB pushes
 park without polling while the messenger is paused and honor relay retry deadlines.
+Reservation renewal persists the extended deadline in IndexedDB, and push progress
+survives NACK without keeping already ingested events at the queue head.
 Trusted-device sync payloads that are structurally incompatible are sealed in a
 bounded, 30-day quarantine/retry state before being acknowledged. They are
 revalidated after a decoder-version update, so an older vault can process a peer's
