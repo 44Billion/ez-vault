@@ -484,6 +484,14 @@ back off from five minutes toward six hours. A fresh advert (at most five minute
 old) can advance an unconfirmed/offline retry, while a published ask gets at most
 an early presence check and is never duplicated. Pause recovery has no
 self-generated timer and preserves a relay-provided `retryAt`.
+App-backfill remains a separate per-owner/app/peer cursor flow. Replies must echo
+the pending `after`; imported results must account for every event as added or
+skipped. Cursor mismatches, `hasMore` without cursor progress, and unconfirmed
+import failures ACK/drop the current reply and settle only that peer as
+best-effort or stalled. Settled peers are not retried automatically, keep their
+last durable cursor, and resume only through an explicit new app-backfill
+request. `settled` is authoritative; `completed` remains a mirrored legacy
+field, and no state migration is required.
 Inbound sync is additionally guarded per channel and peer with bounded message,
 byte and work-unit buckets. Announcement streams have a one-hour frequency cap.
 Repeated quota or invalid-payload violations open temporary 5/15/30-minute

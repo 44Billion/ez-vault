@@ -1332,6 +1332,15 @@ export function createSyncController ({
           idleWakeMs: 0,
           lastIdleWakeAt: null
         },
+        appBackfills: nostrDb.appBackfills || {
+          counts: {
+            active: 0,
+            stalled: 0,
+            bestEffortComplete: 0,
+            complete: 0
+          },
+          settledReasons: {}
+        },
         exchange: nostrDb.exchange || {},
         inboxHandlers: {
           stalled: stalledInboxHandlers.size,

@@ -783,6 +783,31 @@ function setAppBackfillTargetPeers (app, peerPubkeys) {
   for (const peerPubkey of peerPubkeys) app.peers[peerPubkey] = {}
 }
 
+function appBackfillIsSettled (entry) {
+  return entry?.settled === true ||
+    (entry?.settled == null && entry?.completed === true)
+}
+
+function settleAppBackfillPeer (entry, backfillState, settledReason, now) {
+  entry.settled = true
+  entry.completed = true
+  entry.backfillState = backfillState
+  entry.settledReason = settledReason
+  entry.pending = null
+  if (backfillState === 'stalled') entry.stalledAt = now
+  else delete entry.stalledAt
+  entry.updatedAt = now
+}
+
+function activateAppBackfillPeer (entry, now) {
+  entry.settled = false
+  entry.completed = false
+  entry.backfillState = 'active'
+  delete entry.settledReason
+  delete entry.stalledAt
+  entry.updatedAt = now
+}
+
 function compareAdvert (next, current) {
   if (!current) return 1
   if ((next.generatedAt || 0) !== (current.generatedAt || 0)) return (next.generatedAt || 0) - (current.generatedAt || 0)
@@ -940,6 +965,13 @@ function advertIsFresh (advert, now) {
   return Number.isSafeInteger(timestamp) &&
     timestamp >= now - FRESH_ADVERT_MS &&
     timestamp <= now + SYNC_ANCHOR_MAX_FUTURE_SKEW_MS
+}
+
+function appBackfillImportResultUnknown (cause = null) {
+  return Object.assign(new Error('APP_BACKFILL_IMPORT_RESULT_UNKNOWN'), {
+    code: 'APP_BACKFILL_IMPORT_RESULT_UNKNOWN',
+    cause
+  })
 }
 
 function messengerPausedError (error) {
@@ -2947,7 +2979,7 @@ export function createNostrDbSyncController ({
     if (!isPlainObject(existingApp?.peers) || !Object.hasOwn(existingApp.peers, peerPubkey)) return null
     const app = appBackfillState(state, ownerPubkey, appId)
     const entry = appBackfillPeerState(state, ownerPubkey, appId, peerPubkey)
-    if (entry.completed) return null
+    if (appBackfillIsSettled(entry)) return null
 
     const now = _nowMs()
     const pendingState = entry.pending ? pendingPublicationState(entry.pending) : ''
@@ -2995,7 +3027,7 @@ export function createNostrDbSyncController ({
       batchSize: REQUEST_LIMIT
     }
 
-    entry.completed = false
+    activateAppBackfillPeer(entry, now)
     entry.pending = {
       requestId: id,
       appId,
@@ -3556,31 +3588,46 @@ export function createNostrDbSyncController ({
   }
 
   async function ingestAppEvents (ownerPubkey, appId, events) {
-    if (!events.length) return 0
+    if (!events.length) return { added: 0, skipped: 0 }
     for (const event of events) markRecentSyncEvent(event)
-    try {
-      const db = getDb(ownerPubkey)
-      if (typeof db.addEventsForApp === 'function') {
-        const result = await db.addEventsForApp(appId, events)
-        // Merged personal copies are stored under a new wrapper id; mark those
-        // too so the peer is not asked for them immediately.
-        for (const id of Array.isArray(result?.storedIds) ? result.storedIds : []) {
-          markRecentSyncEvent({ id })
-        }
-        return normalizePositiveInteger(result?.added, 0)
+    const db = getDb(ownerPubkey)
+    if (typeof db.addEventsForApp === 'function') {
+      const result = await db.addEventsForApp(appId, events)
+      if (!isPlainObject(result) ||
+          !Number.isSafeInteger(result.added) ||
+          result.added < 0 ||
+          (result.storedIds !== undefined && !Array.isArray(result.storedIds))) {
+        throw appBackfillImportResultUnknown()
       }
-      let imported = 0
-      for (const event of events) {
-        const result = await db.add(event, { appId, mergeSource: 'sync' })
-        if (result?.ok === false) continue
-        imported++
-        if (result?.storedEvent) markRecentSyncEvent(result.storedEvent)
+      const skipped = result.skipped === undefined
+        ? events.length - result.added
+        : result.skipped
+      if (!Number.isSafeInteger(skipped) ||
+          skipped < 0 ||
+          result.added + skipped !== events.length) {
+        throw appBackfillImportResultUnknown()
       }
-      return imported
-    } catch (err) {
-      report(err)
-      return 0
+      // Merged personal copies are stored under a new wrapper id; mark those
+      // too so the peer is not asked for them immediately.
+      for (const id of result.storedIds || []) markRecentSyncEvent({ id })
+      return { added: result.added, skipped }
     }
+
+    let added = 0
+    let skipped = 0
+    for (const event of events) {
+      const result = await db.add(event, { appId, mergeSource: 'sync' })
+      if (!isPlainObject(result) || typeof result.ok !== 'boolean') {
+        throw appBackfillImportResultUnknown()
+      }
+      if (!result.ok) {
+        skipped++
+        continue
+      }
+      added++
+      if (result.storedEvent) markRecentSyncEvent(result.storedEvent)
+    }
+    return { added, skipped }
   }
 
   async function handleReply (ownerPubkey, message, context) {
@@ -3719,6 +3766,38 @@ export function createNostrDbSyncController ({
     return true
   }
 
+  function settleAppBackfillRequest ({
+    ownerPubkey,
+    peerPubkey,
+    appId,
+    requestId,
+    backfillState,
+    settledReason,
+    now = _nowMs()
+  }) {
+    const state = getState()
+    const { app, entry } = existingAppBackfillPeerState(
+      state,
+      ownerPubkey,
+      appId,
+      peerPubkey
+    )
+    if (entry?.pending?.requestId !== requestId) return null
+    settleAppBackfillPeer(entry, backfillState, settledReason, now)
+    app.updatedAt = now
+    const exchange = exchangeRecord(
+      state,
+      ownerPubkey,
+      peerPubkey,
+      'ask',
+      requestId,
+      true
+    )
+    exchange.status = 'deleting-ask'
+    exchange.updatedAt = now
+    return { state, app, entry, exchange }
+  }
+
   async function handleAppReply (ownerPubkey, message, context) {
     throwIfHandlerAborted(context)
     const payload = normalizeAppEventBatchPayload(requireDataBody(message))
@@ -3735,8 +3814,68 @@ export function createNostrDbSyncController ({
       return true
     }
 
+    if (payload.after !== (pending.after || '')) {
+      const now = _nowMs()
+      const settled = settleAppBackfillRequest({
+        ownerPubkey,
+        peerPubkey,
+        appId: payload.appId,
+        requestId: payload.requestId,
+        backfillState: 'best-effort-complete',
+        settledReason: 'cursor-mismatch',
+        now
+      })
+      if (settled) {
+        throwIfHandlerAborted(context)
+        await setState(settled.state)
+        scheduleExchangeMaintenance(context, { immediate: true })
+        emitDebug(context.debug, 'app-backfill-best-effort', {
+          ownerPubkey,
+          appId: payload.appId,
+          senderPubkey: peerPubkey,
+          requestId: payload.requestId,
+          reason: 'cursor-mismatch',
+          count: 0,
+          cursorAdvanced: false
+        })
+      }
+      return true
+    }
+
     const { events, rejected } = parseJsonlEventsDetailed(payload.jsonl)
-    await ingestAppEvents(ownerPubkey, payload.appId, events)
+    try {
+      await ingestAppEvents(ownerPubkey, payload.appId, events)
+    } catch (error) {
+      if (context.signal?.aborted) throw error
+      const now = _nowMs()
+      const settledReason = error?.code === 'APP_BACKFILL_IMPORT_RESULT_UNKNOWN'
+        ? 'import-result-unknown'
+        : 'import-failed'
+      const settled = settleAppBackfillRequest({
+        ownerPubkey,
+        peerPubkey,
+        appId: payload.appId,
+        requestId: payload.requestId,
+        backfillState: 'stalled',
+        settledReason,
+        now
+      })
+      if (settled) {
+        await setState(settled.state)
+        scheduleExchangeMaintenance(context, { immediate: true })
+        emitDebug(context.debug, 'app-backfill-stalled', {
+          ownerPubkey,
+          appId: payload.appId,
+          senderPubkey: peerPubkey,
+          requestId: payload.requestId,
+          reason: settledReason,
+          count: events.length,
+          cursorAdvanced: false
+        })
+      }
+      report(error)
+      return true
+    }
     throwIfHandlerAborted(context)
     pending.replyCount = (pending.replyCount || 0) + events.length
     if (Number.isSafeInteger(payload.index) && payload.index >= 0) {
@@ -3768,16 +3907,24 @@ export function createNostrDbSyncController ({
       const replyCount = pending.replyCount || 0
       const nextAfter = payload.nextAfter || pending.lastEventId || pending.after || ''
       const hasMore = payload.hasMore ?? replyCount >= (pending.batchSize || REQUEST_LIMIT)
-      entry.after = nextAfter
-      entry.completed = !hasMore
-      entry.pending = null
+      const cursorAdvanced = nextAfter !== (pending.after || '')
+      const now = _nowMs()
+      if (!hasMore) {
+        entry.after = nextAfter
+        settleAppBackfillPeer(entry, 'complete', 'completed', now)
+      } else if (!cursorAdvanced) {
+        settleAppBackfillPeer(entry, 'best-effort-complete', 'peer-no-progress', now)
+      } else {
+        entry.after = nextAfter
+        activateAppBackfillPeer(entry, now)
+        entry.pending = null
+      }
       const exchange = exchangeRecord(state, ownerPubkey, peerPubkey, 'ask', payload.requestId, true)
       exchange.status = 'deleting-ask'
-      exchange.updatedAt = _nowMs()
-      entry.updatedAt = _nowMs()
-      app.updatedAt = entry.updatedAt
+      exchange.updatedAt = now
+      app.updatedAt = now
       throwIfHandlerAborted(context)
-      setState(state)
+      await setState(state)
       scheduleExchangeMaintenance(context, { immediate: true })
       emitDebug(context.debug, 'app-reply-received', {
         ownerPubkey,
@@ -3786,9 +3933,22 @@ export function createNostrDbSyncController ({
         requestId: payload.requestId,
         count: replyCount,
         hasMore,
-        nextAfter
+        nextAfter,
+        cursorAdvanced,
+        settled: entry.settled,
+        settledReason: entry.settledReason
       })
-      if (hasMore) {
+      if (entry.settled && entry.settledReason === 'peer-no-progress') {
+        emitDebug(context.debug, 'app-backfill-best-effort', {
+          ownerPubkey,
+          appId: payload.appId,
+          senderPubkey: peerPubkey,
+          requestId: payload.requestId,
+          reason: 'peer-no-progress',
+          count: replyCount,
+          cursorAdvanced
+        })
+      } else if (hasMore) {
         await processAppBackfills(context, {
           ownerPubkey,
           peerPubkey,
@@ -4962,6 +5122,35 @@ export function createNostrDbSyncController ({
     return false
   }
 
+  function appBackfillDebugSnapshot (state = getState()) {
+    const counts = {
+      active: 0,
+      stalled: 0,
+      bestEffortComplete: 0,
+      complete: 0
+    }
+    const settledReasons = {}
+    const incrementReason = reason => {
+      const token = debugToken(reason) || 'unknown'
+      settledReasons[token] = (settledReasons[token] || 0) + 1
+    }
+    for (const apps of Object.values(state.appBackfills || {})) {
+      for (const app of Object.values(apps || {})) {
+        for (const entry of Object.values(app?.peers || {})) {
+          if (!appBackfillIsSettled(entry)) {
+            counts.active++
+            continue
+          }
+          if (entry.backfillState === 'stalled') counts.stalled++
+          else if (entry.backfillState === 'best-effort-complete') counts.bestEffortComplete++
+          else counts.complete++
+          incrementReason(entry.settledReason || 'completed')
+        }
+      }
+    }
+    return { counts, settledReasons }
+  }
+
   async function resumeAfterPause (context = runtime) {
     runtime = { ...runtime, ...context }
     const pushes = []
@@ -5057,6 +5246,7 @@ export function createNostrDbSyncController ({
     stop,
     getDebugSnapshot: () => ({
       askStats: askStatsSnapshot(),
+      appBackfills: appBackfillDebugSnapshot(),
       push: { ...pushStats },
       exchange: { ...exchangeStats }
     }),

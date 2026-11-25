@@ -188,6 +188,25 @@ async function waitForCondition (condition, timeoutMs = 2000) {
   }
 }
 
+async function startAppBackfill (controller, msg, {
+  appId = 'app-1',
+  syncContext = null
+} = {}) {
+  const selectedContext = syncContext || context(msg)
+  controller.ensureSubscriptions(selectedContext)
+  controller.requestAppBackfill({ ownerPubkey: OWNER, appId }, selectedContext)
+  await waitForCondition(() => msg.sent.some(item =>
+    item.method === 'ask' &&
+    item.options.code === NOSTRDB_SYNC_APP_ASK_CODE &&
+    item.options.payload.appId === appId
+  ))
+  return msg.sent.find(item =>
+    item.method === 'ask' &&
+    item.options.code === NOSTRDB_SYNC_APP_ASK_CODE &&
+    item.options.payload.appId === appId
+  ).options.payload
+}
+
 async function flushSeededPushChunks (records) {
   await deleteDatabase(PUSH_EVENT_OUTBOX)
   await seedPushChunks(records)
@@ -2940,6 +2959,376 @@ test('nostrdb app backfill reply imports for app and pages when hasMore', async 
   assert.equal(msg.sent.length, 2)
   assert.equal(msg.sent[1].options.code, NOSTRDB_SYNC_APP_ASK_CODE)
   assert.equal(msg.sent[1].options.payload.after, imported.id)
+})
+
+test('app backfill settles a peer best-effort when the reply cursor does not match', async () => {
+  const msg = messenger()
+  const diagnostics = []
+  let importCalls = 0
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async addEventsForApp () {
+        importCalls++
+        return { added: 0, skipped: 0 }
+      }
+    })
+  })
+  const syncContext = context(msg, { debug: event => diagnostics.push(event) })
+  const ask = await startAppBackfill(controller, msg, { syncContext })
+
+  assert.equal(await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_APP_REPLY_CODE,
+    payload: {
+      requestId: ask.requestId,
+      appId: 'app-1',
+      after: eventId(99),
+      nextAfter: eventId(100),
+      hasMore: false,
+      index: 0,
+      isLast: true,
+      jsonl: ''
+    }
+  }), syncContext), true)
+
+  const state = controller._getState()
+  const app = Object.values(state.appBackfills[OWNER])[0]
+  const entry = app.peers[PEER]
+  assert.equal(importCalls, 0)
+  assert.equal(entry.after, undefined)
+  assert.equal(entry.pending, null)
+  assert.equal(entry.settled, true)
+  assert.equal(entry.completed, true)
+  assert.equal(entry.backfillState, 'best-effort-complete')
+  assert.equal(entry.settledReason, 'cursor-mismatch')
+  assert.equal(state.exchanges[OWNER][PEER][`ask:${ask.requestId}`].status, 'deleting-ask')
+  assert.equal(msg.sent.filter(item => item.options.code === NOSTRDB_SYNC_APP_ASK_CODE).length, 1)
+  assert.ok(diagnostics.some(event =>
+    event.action === 'app-backfill-best-effort' && event.reason === 'cursor-mismatch'
+  ))
+  assert.deepEqual(controller.getDebugSnapshot().appBackfills, {
+    counts: {
+      active: 0,
+      stalled: 0,
+      bestEffortComplete: 1,
+      complete: 0
+    },
+    settledReasons: { 'cursor-mismatch': 1 }
+  })
+})
+
+test('app backfill settles a peer when hasMore retains the same cursor', async () => {
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async addEventsForApp () {
+        return { added: 0, skipped: 0 }
+      }
+    })
+  })
+  const ask = await startAppBackfill(controller, msg)
+
+  assert.equal(await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_APP_REPLY_CODE,
+    payload: {
+      requestId: ask.requestId,
+      appId: 'app-1',
+      after: '',
+      nextAfter: '',
+      hasMore: true,
+      index: 0,
+      isLast: true,
+      jsonl: ''
+    }
+  }), context(msg)), true)
+
+  const app = Object.values(controller._getState().appBackfills[OWNER])[0]
+  const entry = app.peers[PEER]
+  assert.equal(entry.after, undefined)
+  assert.equal(entry.pending, null)
+  assert.equal(entry.settled, true)
+  assert.equal(entry.completed, true)
+  assert.equal(entry.backfillState, 'best-effort-complete')
+  assert.equal(entry.settledReason, 'peer-no-progress')
+  assert.equal(msg.sent.filter(item => item.options.code === NOSTRDB_SYNC_APP_ASK_CODE).length, 1)
+})
+
+test('settling one app-backfill peer does not block another peer', async () => {
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async addEventsForApp () {
+        return { added: 0, skipped: 0 }
+      }
+    })
+  })
+  const syncContext = context(msg, {
+    trustedByPubkey: new Map([
+      [PEER, { pubkey: PEER }],
+      [PEER2, { pubkey: PEER2 }]
+    ])
+  })
+  await startAppBackfill(controller, msg, { syncContext })
+  await waitForCondition(() =>
+    msg.sent.filter(item => item.options.code === NOSTRDB_SYNC_APP_ASK_CODE).length === 2
+  )
+  const ask = msg.sent.find(item =>
+    item.options.code === NOSTRDB_SYNC_APP_ASK_CODE &&
+    item.options.receiverPubkey === PEER
+  ).options.payload
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_APP_REPLY_CODE,
+    payload: {
+      requestId: ask.requestId,
+      appId: 'app-1',
+      after: '',
+      nextAfter: '',
+      hasMore: true,
+      index: 0,
+      isLast: true,
+      jsonl: ''
+    }
+  }), syncContext)
+  await controller.processAppBackfills(syncContext)
+
+  const peers = Object.values(controller._getState().appBackfills[OWNER])[0].peers
+  assert.equal(peers[PEER].settled, true)
+  assert.equal(peers[PEER].settledReason, 'peer-no-progress')
+  assert.equal(peers[PEER2].settled, false)
+  assert.ok(peers[PEER2].pending)
+  assert.equal(msg.sent.filter(item => item.options.code === NOSTRDB_SYNC_APP_ASK_CODE).length, 2)
+})
+
+test('an empty app-backfill page continues when its cursor advances', async () => {
+  const msg = messenger()
+  const nextCursor = eventId(101)
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async addEventsForApp () {
+        return { added: 0, skipped: 0 }
+      }
+    })
+  })
+  const syncContext = context(msg)
+  const ask = await startAppBackfill(controller, msg, { syncContext })
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_APP_REPLY_CODE,
+    payload: {
+      requestId: ask.requestId,
+      appId: 'app-1',
+      after: '',
+      nextAfter: nextCursor,
+      hasMore: true,
+      index: 0,
+      isLast: true,
+      jsonl: ''
+    }
+  }), syncContext)
+
+  const app = Object.values(controller._getState().appBackfills[OWNER])[0]
+  const entry = app.peers[PEER]
+  assert.equal(entry.after, nextCursor)
+  assert.equal(entry.settled, false)
+  assert.equal(entry.completed, false)
+  assert.equal(entry.backfillState, 'active')
+  assert.ok(entry.pending)
+  const asks = msg.sent.filter(item => item.options.code === NOSTRDB_SYNC_APP_ASK_CODE)
+  assert.equal(asks.length, 2)
+  assert.equal(asks[1].options.payload.after, nextCursor)
+})
+
+test('app backfill import failures settle stalled without advancing the cursor', async () => {
+  const msg = messenger()
+  const failure = new Error('APP_DB_WRITE_FAILED')
+  const errors = []
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    onError: error => errors.push(error),
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async addEventsForApp () {
+        throw failure
+      }
+    })
+  })
+  const syncContext = context(msg)
+  const ask = await startAppBackfill(controller, msg, { syncContext })
+  const imported = event(102)
+
+  assert.equal(await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_APP_REPLY_CODE,
+    payload: {
+      requestId: ask.requestId,
+      appId: 'app-1',
+      after: '',
+      nextAfter: imported.id,
+      hasMore: true,
+      index: 0,
+      isLast: true,
+      jsonl: `${JSON.stringify(imported)}\n`
+    }
+  }), syncContext), true)
+
+  const app = Object.values(controller._getState().appBackfills[OWNER])[0]
+  const entry = app.peers[PEER]
+  assert.equal(entry.after, undefined)
+  assert.equal(entry.pending, null)
+  assert.equal(entry.settled, true)
+  assert.equal(entry.completed, true)
+  assert.equal(entry.backfillState, 'stalled')
+  assert.equal(entry.settledReason, 'import-failed')
+  assert.equal(entry.stalledAt, 1000)
+  assert.equal(entry.nextRetryAt, undefined)
+  assert.equal(errors.at(-1), failure)
+  assert.equal(msg.sent.filter(item => item.options.code === NOSTRDB_SYNC_APP_ASK_CODE).length, 1)
+  assert.deepEqual(controller.getDebugSnapshot().appBackfills.counts, {
+    active: 0,
+    stalled: 1,
+    bestEffortComplete: 0,
+    complete: 0
+  })
+})
+
+test('app backfill unknown import results settle stalled', async () => {
+  const msg = messenger()
+  const errors = []
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    onError: error => errors.push(error),
+    getDb: () => ({
+      subscribe: emptySubscription,
+      async addEventsForApp () {
+        return null
+      }
+    })
+  })
+  const syncContext = context(msg)
+  const ask = await startAppBackfill(controller, msg, { syncContext })
+  const imported = event(103)
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_APP_REPLY_CODE,
+    payload: {
+      requestId: ask.requestId,
+      appId: 'app-1',
+      after: '',
+      nextAfter: imported.id,
+      hasMore: true,
+      index: 0,
+      isLast: true,
+      jsonl: `${JSON.stringify(imported)}\n`
+    }
+  }), syncContext)
+
+  const entry = Object.values(controller._getState().appBackfills[OWNER])[0].peers[PEER]
+  assert.equal(entry.after, undefined)
+  assert.equal(entry.backfillState, 'stalled')
+  assert.equal(entry.settledReason, 'import-result-unknown')
+  assert.equal(errors.at(-1)?.code, 'APP_BACKFILL_IMPORT_RESULT_UNKNOWN')
+})
+
+test('app backfill completion mirrors settled into completed', async () => {
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _random: () => 0.5,
+    _setTimeout: () => ({}),
+    getDb: () => ({ subscribe: emptySubscription })
+  })
+  const ask = await startAppBackfill(controller, msg)
+
+  await controller.handleMessage(syncMessage({
+    code: NOSTRDB_SYNC_APP_REPLY_CODE,
+    payload: {
+      requestId: ask.requestId,
+      appId: 'app-1',
+      after: '',
+      nextAfter: '',
+      hasMore: false,
+      index: 0,
+      isLast: true,
+      jsonl: ''
+    }
+  }), context(msg))
+
+  const entry = Object.values(controller._getState().appBackfills[OWNER])[0].peers[PEER]
+  assert.equal(entry.settled, true)
+  assert.equal(entry.completed, true)
+  assert.equal(entry.backfillState, 'complete')
+  assert.equal(entry.settledReason, 'completed')
+
+  controller.requestAppBackfill({ ownerPubkey: OWNER, appId: 'app-1' }, context(msg))
+  await waitForCondition(() =>
+    msg.sent.filter(item => item.options.code === NOSTRDB_SYNC_APP_ASK_CODE).length === 2
+  )
+  const restarted = Object.values(controller._getState().appBackfills[OWNER])[0].peers[PEER]
+  assert.equal(restarted.settled, false)
+  assert.equal(restarted.completed, false)
+  assert.equal(restarted.backfillState, 'active')
+  assert.ok(restarted.pending)
+})
+
+test('a legacy app-backfill completed entry is treated as settled', async () => {
+  globalThis.localStorage.setItem(SYNC_STATE_KEY, JSON.stringify({
+    appBackfills: {
+      [OWNER]: {
+        [JSON.stringify('app-1')]: {
+          appId: 'app-1',
+          requestedAt: 1000,
+          updatedAt: 1000,
+          peers: {
+            [PEER]: {
+              after: eventId(104),
+              completed: true,
+              updatedAt: 1000
+            }
+          }
+        }
+      }
+    }
+  }))
+  const msg = messenger()
+  const controller = createNostrDbSyncController({
+    _nowMs: () => 1000,
+    _setTimeout: () => ({}),
+    getDb: () => ({ subscribe: emptySubscription })
+  })
+
+  controller.ensureSubscriptions(context(msg))
+  await controller.processAppBackfills(context(msg))
+  await flushMicrotasks()
+
+  assert.equal(msg.sent.some(item => item.options.code === NOSTRDB_SYNC_APP_ASK_CODE), false)
+  assert.deepEqual(controller.getDebugSnapshot().appBackfills, {
+    counts: {
+      active: 0,
+      stalled: 0,
+      bestEffortComplete: 0,
+      complete: 1
+    },
+    settledReasons: { completed: 1 }
+  })
 })
 
 test('nostrdb app backfill ignores unsolicited replies without creating state', async () => {
