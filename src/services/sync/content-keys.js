@@ -7,6 +7,7 @@ import { filterVisibleAccounts } from '../account-mutations.js'
 import { upsertContentKeyEvent } from '../content-key/index.js'
 import { getState, removeState, setState } from '../storage/index.js'
 import { assertSupportedPayloadVersion, syncPayloadInvalid } from './payload-error.js'
+import { publicationErrorFromResult, publicationRetryAt } from '../../helpers/publication-retry.js'
 
 // Flow notes:
 // - This trusted-device layer only syncs content-key material for local nsec
@@ -40,6 +41,7 @@ const listeners = new Set()
 const debugSourceByKey = new Map()
 const publishStatusByOwner = new Map()
 const askStats = { emitted: {}, suppressed: {} }
+const publishingContentKeyAsks = new Set()
 let askStateWriteTail = Promise.resolve()
 
 function sourceKey (ownerPubkey, contentPubkey) {
@@ -99,7 +101,9 @@ function normalizeAskRecord (value) {
     pubkeys,
     attempts: value.attempts,
     sentAt: value.sentAt,
-    retryAt: value.retryAt
+    retryAt: value.retryAt,
+    channelPubkey: typeof value.channelPubkey === 'string' ? value.channelPubkey : '',
+    publicationPending: value.publicationPending === true
   }
 }
 
@@ -291,7 +295,9 @@ function recordContentKeyAsk (ownerPubkey, peerPubkey, decision) {
       pubkeys: decision.pubkeys,
       attempts: decision.attempts,
       sentAt: decision.sentAt,
-      retryAt: decision.retryAt
+      retryAt: decision.retryAt,
+      channelPubkey: decision.channelPubkey,
+      publicationPending: decision.publicationPending === true
     }
     return { changed: true }
   })
@@ -304,6 +310,117 @@ function clearContentKeyAsk (ownerPubkey, peerPubkey) {
     if (!Object.keys(state[ownerPubkey]).length) delete state[ownerPubkey]
     return { changed: true }
   })
+}
+
+export function nextContentKeyAskRetryAt () {
+  let nextAt = 0
+  for (const owner of Object.values(readAskState())) {
+    for (const record of Object.values(owner)) {
+      if (!record.publicationPending || !Number.isSafeInteger(record.retryAt)) continue
+      if (!nextAt || record.retryAt < nextAt) nextAt = record.retryAt
+    }
+  }
+  return nextAt || null
+}
+
+async function publishContentKeyAsk ({
+  ownerPubkey,
+  peerPubkey,
+  channelPubkey,
+  pubkeys,
+  decision,
+  context
+}) {
+  pubkeys = [...pubkeys].sort()
+  const publicationKey = `${ownerPubkey}:${peerPubkey}:${channelPubkey}:${pubkeys.join(',')}`
+  if (publishingContentKeyAsks.has(publicationKey)) return { inFlight: true, published: false }
+  publishingContentKeyAsks.add(publicationKey)
+  const now = Date.now()
+  let publicationPending = false
+  let publicationError = null
+  let retryAt = decision.retryAt
+  try {
+    try {
+      const result = await context.messenger.ask({
+        channelPubkey,
+        receiverPubkey: peerPubkey,
+        code: CONTENT_KEYS_ASK_CODE,
+        payload: { pubkeys },
+        useBulkPacing: true
+      })
+      publicationError = await publicationErrorFromResult(result, 'CONTENT_KEY_ASK_PUBLICATION_FAILED')
+      publicationPending = Boolean(publicationError)
+      if (publicationError) {
+        retryAt = Math.max(retryAt, publicationRetryAt(publicationError, now))
+      }
+    } catch (error) {
+      if (context.signal?.aborted) throw error
+      publicationPending = true
+      publicationError = error
+      retryAt = Math.max(retryAt, publicationRetryAt(error, now))
+    }
+    await recordContentKeyAsk(ownerPubkey, peerPubkey, {
+      ...decision,
+      pubkeys,
+      channelPubkey,
+      retryAt,
+      publicationPending
+    })
+    incrementAskStat('emitted', CONTENT_KEYS_ASK_CODE, decision.reason)
+  } finally {
+    publishingContentKeyAsks.delete(publicationKey)
+  }
+  if (publicationError) {
+    try {
+      context.onError?.(publicationError)
+    } catch {}
+  }
+  return { published: !publicationPending, publicationPending, retryAt, error: publicationError }
+}
+
+export async function retryDueContentKeyAsks (context = {}, { now = Date.now() } = {}) {
+  if (!context.messenger) return nextContentKeyAskRetryAt()
+  const state = readAskState()
+  let blocked = false
+  for (const [ownerPubkey, peers] of Object.entries(state)) {
+    for (const [peerPubkey, record] of Object.entries(peers)) {
+      if (!record.publicationPending || record.retryAt > now) continue
+      if (store.get(ownerPubkey)?.type !== 'nsec' || !context.trustedByPubkey?.has?.(peerPubkey)) {
+        await clearContentKeyAsk(ownerPubkey, peerPubkey)
+        continue
+      }
+      const held = new Set(contentKeysForOwner(ownerPubkey).map(key => key.pubkey))
+      const pubkeys = record.pubkeys.filter(pubkey => !held.has(pubkey)).sort()
+      if (!pubkeys.length) {
+        await clearContentKeyAsk(ownerPubkey, peerPubkey)
+        continue
+      }
+      const channelPubkey = record.channelPubkey || context.channelPubkeyForOwner?.(ownerPubkey)
+      if (!channelPubkey) {
+        blocked = true
+        continue
+      }
+      const attempts = record.attempts + 1
+      const result = await publishContentKeyAsk({
+        ownerPubkey,
+        peerPubkey,
+        channelPubkey,
+        pubkeys,
+        decision: {
+          reason: 'retry',
+          attempts,
+          sentAt: now,
+          retryAt: now + askRetryDelay(attempts),
+          channelPubkey,
+          publicationPending: false
+        },
+        context
+      })
+      if (result.inFlight) blocked = true
+    }
+  }
+  const nextAt = nextContentKeyAskRetryAt()
+  return blocked && (!nextAt || nextAt <= now) ? null : nextAt
 }
 
 function removeImportedContentKeys (ownerPubkey, peerPubkey, importedPubkeys) {
@@ -509,16 +626,18 @@ async function handleAnnounce (message, context) {
     retryAt: decision.retryAt
   })
   context.signal?.throwIfAborted()
-  await context.messenger.ask({
+  await publishContentKeyAsk({
+    ownerPubkey,
+    peerPubkey: message.event.pubkey,
     channelPubkey,
-    receiverPubkey: message.event.pubkey,
-    code: CONTENT_KEYS_ASK_CODE,
-    payload: { pubkeys },
-    useBulkPacing: true
+    pubkeys,
+    decision: {
+      ...decision,
+      channelPubkey,
+      publicationPending: false
+    },
+    context
   })
-  context.signal?.throwIfAborted()
-  await recordContentKeyAsk(ownerPubkey, message.event.pubkey, decision)
-  incrementAskStat('emitted', CONTENT_KEYS_ASK_CODE, decision.reason)
   if (rejected) throw syncPayloadInvalid('keys-entries-invalid', { partial: true })
   return true
 }
@@ -534,7 +653,7 @@ async function handleRequest (message, context) {
   const pubkeys = normalizePubkeyList(body.pubkeys)
   if (!pubkeys.length) return true
 
-  await secrets.replyWithContentKeySecrets({
+  const result = await secrets.replyWithContentKeySecrets({
     ownerPubkey,
     pubkeys,
     send: payload => {
@@ -560,6 +679,14 @@ async function handleRequest (message, context) {
       })
     }
   })
+  const publicationError = await publicationErrorFromResult(
+    result,
+    'CONTENT_KEY_REPLY_PUBLICATION_FAILED'
+  )
+  if (publicationError) {
+    publicationError.inboxRetryScope = 'message'
+    throw publicationError
+  }
   return true
 }
 

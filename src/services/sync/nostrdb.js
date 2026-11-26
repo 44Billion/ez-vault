@@ -193,6 +193,7 @@ function pushChunkReceiverKey (chunk) {
 
 function canCoalescePushChunks (first, second) {
   if (!first || !second || first.id === second.id ||
+      (first.retryAt || 0) > 0 || (second.retryAt || 0) > 0 ||
       first.channelPubkey !== second.channelPubkey ||
       first.priority !== second.priority ||
       pushChunkReceiverKey(first) !== pushChunkReceiverKey(second)) return false
@@ -4200,6 +4201,13 @@ export function createNostrDbSyncController ({
       bytes: Number.isSafeInteger(record.bytes) && record.bytes >= 0
         ? record.bytes
         : encoder.encode(record.jsonl).byteLength,
+      retryAt: Number.isSafeInteger(record.retryAt) && record.retryAt >= 0
+        ? record.retryAt
+        : 0,
+      retryDelayMs: normalizePositiveInteger(record.retryDelayMs, 1000, 30000),
+      attempt: Number.isSafeInteger(record.attempt) && record.attempt >= 0
+        ? record.attempt
+        : 0,
       addedAt: Number.isSafeInteger(record.addedAt) && record.addedAt >= 0
         ? record.addedAt
         : _nowMs()
@@ -4395,7 +4403,9 @@ export function createNostrDbSyncController ({
     if (queue.chunkBackpressure && !queue.chunks.size) {
       dueAt = Math.min(dueAt, Math.max(now, queue.chunkRetryAt || now))
     }
-    if (queue.chunks.size) dueAt = Math.min(dueAt, Math.max(now, queue.retryAt || 0))
+    for (const chunk of queue.chunks.values()) {
+      dueAt = Math.min(dueAt, Math.max(now, chunk.retryAt || 0))
+    }
     return dueAt
   }
 
@@ -4623,6 +4633,9 @@ export function createNostrDbSyncController ({
         isLast: second.isLast,
         jsonl,
         bytes: encoder.encode(jsonl).byteLength,
+        retryAt: 0,
+        retryDelayMs: 1000,
+        attempt: 0,
         addedAt: Math.min(first.addedAt, second.addedAt)
       }
       const persisted = await persistPushChunkRecord(ownerPubkey, queue, chunk)
@@ -4691,6 +4704,9 @@ export function createNostrDbSyncController ({
         isLast: cursor === records.length,
         jsonl,
         bytes,
+        retryAt: 0,
+        retryDelayMs: 1000,
+        attempt: 0,
         addedAt: _nowMs()
       }
       const persisted = await persistPushChunkRecord(ownerPubkey, queue, chunk)
@@ -4827,6 +4843,7 @@ export function createNostrDbSyncController ({
       for (const chunk of chunks) {
         if (!current()) return
         if ((queue.retryAt || 0) > _nowMs()) break
+        if ((chunk.retryAt || 0) > _nowMs()) continue
         const startedAt = runtime.debug ? _performanceNow() : 0
         try {
           const result = await sendPushChunk(ownerPubkey, queue, target, chunk)
@@ -4851,9 +4868,11 @@ export function createNostrDbSyncController ({
           const advisedRetryAt = publicationRetryAt(error, failedAt)
           const retryWhenOnline = error?.retryWhenOnline === true
           const retryWhenAvailable = error?.retryWhenAvailable === true
+          const failedChunk = queue.chunks.get(chunk.id) || chunk
+          const retryDelayMs = Math.min(30000, Math.max(1000, failedChunk.retryDelayMs || 1000))
           const retryAt = retryWhenOnline
             ? advisedRetryAt
-            : advisedRetryAt || failedAt + 1000
+            : advisedRetryAt || failedAt + retryDelayMs
           emitDebug(runtime.debug, 'push-chunk', {
             code: NOSTRDB_SYNC_PUSH_CODE,
             priority: chunk.priority,
@@ -4880,8 +4899,24 @@ export function createNostrDbSyncController ({
             clearPushTimer(queue)
             ensureOnlinePushWake()
           } else {
-            queue.retryAt = retryAt
+            const nextChunk = {
+              ...failedChunk,
+              retryAt,
+              retryDelayMs: Math.min(
+                30000,
+                Math.max(retryDelayMs * 2, Math.max(1000, retryAt - failedAt))
+              ),
+              attempt: (failedChunk.attempt || 0) + 1
+            }
+            const persisted = await persistPushChunkRecord(ownerPubkey, queue, nextChunk)
+            if (!persisted) {
+              queue.retryAt = retryAt
+              report(error)
+              break
+            }
+            if (queue.chunks.has(failedChunk.id)) queue.chunks.set(nextChunk.id, nextChunk)
             report(error)
+            continue
           }
           break
         }

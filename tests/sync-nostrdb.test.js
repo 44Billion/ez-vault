@@ -141,6 +141,10 @@ async function storedCount (queue) {
 }
 
 async function storedPushChunkCount () {
+  return (await storedPushChunks()).length
+}
+
+async function storedPushChunks () {
   const queue = await createQueue({
     prefix: PUSH_CHUNK_OUTBOX.slice(0, -':idb-queue'.length),
     indexedDB: globalThis.indexedDB,
@@ -148,7 +152,9 @@ async function storedPushChunkCount () {
     indexes: { id: { keyPath: 'id', unique: true } }
   })
   try {
-    return await storedCount(queue)
+    const chunks = []
+    for await (const chunk of queue.storedItems()) chunks.push(chunk)
+    return chunks
   } finally {
     await queue.close()
   }
@@ -160,7 +166,10 @@ function storedPushChunk (number, {
   receiverPubkeys = [PEER],
   priority = 'normal',
   isLast = false,
-  content = ''
+  content = '',
+  retryAt = 0,
+  retryDelayMs = 1000,
+  attempt = 0
 } = {}) {
   const item = { ...pushEvent(eventNumber), content }
   const jsonl = `${JSON.stringify(item)}\n`
@@ -175,6 +184,9 @@ function storedPushChunk (number, {
     isLast,
     jsonl,
     bytes: Buffer.byteLength(jsonl),
+    retryAt,
+    retryDelayMs,
+    attempt,
     addedAt: number
   }
 }
@@ -222,7 +234,7 @@ async function startAppBackfill (controller, msg, {
 }
 
 async function flushSeededPushChunks (records, options = {}) {
-  const { deferFlush = false, ...controllerOptions } = options
+  const { deferFlush = false, afterEnsure, ...controllerOptions } = options
   await deleteDatabase(PUSH_EVENT_OUTBOX)
   await seedPushChunks(records)
   const channelPubkey = records[0].channelPubkey
@@ -253,6 +265,7 @@ async function flushSeededPushChunks (records, options = {}) {
     ownerPubkeyForChannel: channel => channel === channelPubkey ? OWNER : '',
     channelPubkeyForOwner: ownerPubkey => ownerPubkey === OWNER ? channelPubkey : ''
   }))
+  if (afterEnsure) await afterEnsure(controller)
   await waitForCondition(() => timers.some(timer => timer.ms === 0))
   const flush = timers.find(timer => timer.ms === 0)
   assert.ok(flush)
@@ -5064,7 +5077,103 @@ test('a push result with zero ACKs and no connectivity advice retries after one 
 
     assert.equal(attempts.length, 1)
     assert.equal(await storedPushChunkCount(), 1)
-    assert.ok(timers.some(timer => timer.ms === 1000))
+    assert.ok(timers.some(timer => timer.ms > 0 && timer.ms <= 1000))
+  } finally {
+    controller.stop()
+    await new Promise(resolve => setImmediate(resolve))
+    await deleteDatabase(PUSH_EVENT_OUTBOX)
+    await deleteDatabase(PUSH_CHUNK_OUTBOX)
+  }
+})
+
+test('an isolated push chunk failure does not block the next chunk in the same flush', async () => {
+  const attempts = []
+  const { controller, msg, timers, flush } = await flushSeededPushChunks([
+    storedPushChunk(1, { priority: 'normal' }),
+    storedPushChunk(2, { priority: 'lower' })
+  ], { deferFlush: true })
+  msg.yell = async options => {
+    attempts.push(options)
+    if (options.payload.priority !== 'lower') {
+      return { delivery: { reports: [{ success: false }] } }
+    }
+    return {
+      delivery: {
+        reports: [{ success: true, succeededRelays: ['wss://relay.test'] }]
+      }
+    }
+  }
+  try {
+    await flush.fn()
+
+    assert.equal(attempts.length, 2)
+    assert.equal(attempts[1].payload.priority, 'lower')
+    const remaining = await storedPushChunks()
+    assert.equal(remaining.length, 1)
+    assert.equal(remaining[0].eventIds[0], pushEvent(1).id)
+    assert.equal(remaining[0].attempt, 1)
+    assert.ok(remaining[0].retryAt > 0)
+    assert.ok(timers.some(timer => timer.ms > 0 && timer.ms <= 1000))
+  } finally {
+    controller.stop()
+    await new Promise(resolve => setImmediate(resolve))
+    await deleteDatabase(PUSH_EVENT_OUTBOX)
+    await deleteDatabase(PUSH_CHUNK_OUTBOX)
+  }
+})
+
+test('a restored chunk keeps its individual retry deadline', async () => {
+  const retryAt = Date.now() + 60_000
+  const attempts = []
+  const { controller, msg, timers, flush } = await flushSeededPushChunks([
+    storedPushChunk(1, { retryAt, retryDelayMs: 2000, attempt: 3 })
+  ], {
+    deferFlush: true,
+    afterEnsure: controller => controller.queuePush(OWNER, pushEvent(2))
+  })
+  msg.yell = async options => {
+    attempts.push(options)
+    return { delivery: { reports: [{ success: true }] } }
+  }
+  try {
+    await flush.fn()
+
+    assert.equal(attempts.length, 1)
+    assert.equal(JSON.parse(attempts[0].payload.jsonl.trim()).id, pushEvent(2).id)
+    const remaining = await storedPushChunks()
+    assert.equal(remaining.length, 1)
+    assert.equal(remaining[0].retryAt, retryAt)
+    assert.equal(remaining[0].retryDelayMs, 2000)
+    assert.equal(remaining[0].attempt, 3)
+    assert.ok(timers.some(timer => timer.ms > 0 && timer.ms <= 60_000))
+  } finally {
+    controller.stop()
+    await new Promise(resolve => setImmediate(resolve))
+    await deleteDatabase(PUSH_EVENT_OUTBOX)
+    await deleteDatabase(PUSH_CHUNK_OUTBOX)
+  }
+})
+
+test('a chunk in backoff is not coalesced with a newly eligible chunk', async () => {
+  const retryAt = Date.now() + 60_000
+  const attempts = []
+  const { controller, msg, flush } = await flushSeededPushChunks([
+    storedPushChunk(1, { retryAt, retryDelayMs: 2000, attempt: 1 }),
+    storedPushChunk(2)
+  ], { deferFlush: true })
+  msg.yell = async options => {
+    attempts.push(options)
+    return { delivery: { reports: [{ success: true }] } }
+  }
+  try {
+    await flush.fn()
+
+    assert.equal(attempts.length, 1)
+    assert.equal(JSON.parse(attempts[0].payload.jsonl.trim()).id, pushEvent(2).id)
+    const remaining = await storedPushChunks()
+    assert.equal(remaining.length, 1)
+    assert.deepEqual(remaining[0].eventIds, [pushEvent(1).id])
+    assert.equal(remaining[0].retryAt, retryAt)
   } finally {
     controller.stop()
     await new Promise(resolve => setImmediate(resolve))
@@ -5317,7 +5426,7 @@ test('push batches bound UTF-8 bytes, retry failures and never overlap in-flight
   gate.reject(new Error('rate-limited: busy'))
   await flush
   await flushMicrotasks()
-  assert.equal(errors.length, 1)
+  assert.equal(errors.length, 5)
   msg.yell = successfulReply
   now += 1000
   await timers.shift().fn()

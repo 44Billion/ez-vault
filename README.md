@@ -366,11 +366,21 @@ acceptance by at least one relay. Partial reports are accepted and diagnosed,
 while zero ACKs retain the chunk. `retryWhenOnline` waits for confirmed
 connectivity without a short polling loop, `retryWhenAvailable` follows messenger
 resume, and a relay-provided `retryAt` wins over the one-second fallback.
+Retry deadlines and backoff are persisted per chunk, so an isolated failed chunk
+does not hold up independent chunks behind it.
 Interruption, pause, reload or a failed relay leaves the chunk available under
 the same idempotency key. Filling an outbox pauses further production instead of
 evicting events. Account removal clears both queues and their cursor. Capacity
 pressure blocks new inbox admission but still wakes the existing drain, so
 durable rows are processed and acknowledged without reload.
+
+Content-key asks retain the same owner, peer, channel and missing-key set when
+their publication was not confirmed. A controller-owned timer retries them with
+the existing 5-minute-to-6-hour backoff, independently from the four-hour
+announcement cadence. Content-key replies are acknowledged only after the
+required outer events are published; a message-scoped failure is deferred with
+`nack({ retryAfterMs })` while the inbox continues with other eligible work.
+Connectivity, pause and admission failures still stop the drain until recovery.
 
 ### Deferred bunker synchronization
 

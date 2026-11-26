@@ -3,6 +3,7 @@ import { publicationErrorFromResult, publicationRetryAt } from '../../helpers/pu
 import { debugEnabledForWindow } from '../../helpers/diagnostics-mode.js'
 import { PrivateMessenger } from 'libp2r2p/private-messenger'
 import { PERSONAL_COPY } from 'libp2r2p/kind'
+import { isOnline, onOnline } from 'libp2r2p/network'
 import { claimSigner } from '../signer.js'
 import { subscribeRelayListUpdates } from 'libp2r2p/relay'
 import * as store from '../accounts-store.js'
@@ -194,6 +195,8 @@ export function createSyncController ({
   _hasPendingMutation = hasPendingMutation,
   _subscribePendingMutations = subscribePendingMutations,
   getNostrDbLaneMode = () => 'recent',
+  _isOnline = isOnline,
+  _onOnline = onOnline,
   _setTimeout = globalThis.setTimeout.bind(globalThis),
   _clearTimeout = globalThis.clearTimeout.bind(globalThis),
   _setInterval = globalThis.setInterval.bind(globalThis),
@@ -212,10 +215,18 @@ export function createSyncController ({
   let drainScheduled = false
   let draining = false
   let drainRetryTimer = null
+  let drainRetryAt = 0
+  let contentKeyAskRetryTimer = null
+  let contentKeyAskRetryAt = 0
   let channelConfiguration = null
   let announceTimer = null
   let announceTimerAt = 0
   let announceInterval = null
+  let stopOnlineAnnouncements = null
+  const ownersWaitingForOnline = new Set()
+  const ownersWaitingForResume = new Set()
+  let trustedWaitingForOnline = false
+  let trustedWaitingForResume = false
   let pendingResetInterval = false
   let lastStoreIdentityKey = ''
   let stopRelayListWatcher = null
@@ -248,6 +259,8 @@ export function createSyncController ({
     _setTimeout,
     _clearTimeout,
     _performanceNow,
+    _isOnline,
+    _onOnline,
     getLaneMode: input => getNostrDbLaneMode(input),
     onError
   })
@@ -273,17 +286,22 @@ export function createSyncController ({
       onRangeChanged: ownerPubkey => scheduleAnnounce(ownerPubkey),
       ownerPubkeys: new Set(nostrDbOwnerPubkeys(_store)),
       trustedSigners: _trustedSigners,
+      onError,
       debug
     }
   }
 
   async function handleSyncMessage (message, options) {
-    const context = syncHandlerContext(options)
-    const handled = await _contentKeys.handleMessage(message, context)
-    if (handled) return true
-    const handledTrustedSigners = await _trustedSignerSync.handleMessage(message, context)
-    if (handledTrustedSigners) return true
-    return nostrDbSync.handleMessage(message, context)
+    try {
+      const context = syncHandlerContext(options)
+      const handled = await _contentKeys.handleMessage(message, context)
+      if (handled) return true
+      const handledTrustedSigners = await _trustedSignerSync.handleMessage(message, context)
+      if (handledTrustedSigners) return true
+      return nostrDbSync.handleMessage(message, context)
+    } finally {
+      scheduleContentKeyAskRetry()
+    }
   }
 
   function emitQuarantineDiagnostic (message, error, result) {
@@ -591,6 +609,7 @@ export function createSyncController ({
     if (drainRetryTimer) {
       _clearTimeout(drainRetryTimer)
       drainRetryTimer = null
+      drainRetryAt = 0
     }
     const id = lifecycleId
     drainQueued = true
@@ -600,12 +619,63 @@ export function createSyncController ({
   }
 
   function scheduleDrainRetry (delayMs = 1000) {
-    if (drainRetryTimer || !initialized) return
+    if (!initialized) return
+    const retryAt = _now() + Math.max(0, delayMs)
+    if (drainRetryTimer && drainRetryAt <= retryAt) return
+    if (drainRetryTimer) _clearTimeout(drainRetryTimer)
+    drainRetryAt = retryAt
     drainRetryTimer = _setTimeout(() => {
       drainRetryTimer = null
+      drainRetryAt = 0
       scheduleDrain()
-    }, delayMs)
+    }, Math.max(0, retryAt - _now()))
     drainRetryTimer?.unref?.()
+  }
+
+  function clearContentKeyAskRetry () {
+    if (contentKeyAskRetryTimer) _clearTimeout(contentKeyAskRetryTimer)
+    contentKeyAskRetryTimer = null
+    contentKeyAskRetryAt = 0
+  }
+
+  function scheduleContentKeyAskRetry (nextAtOverride) {
+    if (!initialized || !messenger || !_secrets.isUnlocked() ||
+        typeof _contentKeys.nextContentKeyAskRetryAt !== 'function') {
+      clearContentKeyAskRetry()
+      return
+    }
+    const nextAt = nextAtOverride === undefined
+      ? _contentKeys.nextContentKeyAskRetryAt()
+      : nextAtOverride
+    if (!Number.isSafeInteger(nextAt) || nextAt <= 0) {
+      clearContentKeyAskRetry()
+      return
+    }
+    if (contentKeyAskRetryTimer && contentKeyAskRetryAt <= nextAt) return
+    clearContentKeyAskRetry()
+    const id = lifecycleId
+    contentKeyAskRetryAt = nextAt
+    contentKeyAskRetryTimer = _setTimeout(async () => {
+      contentKeyAskRetryTimer = null
+      contentKeyAskRetryAt = 0
+      if (!isCurrentLifecycle(id) || !messenger || !_secrets.isUnlocked()) return
+      if (channelConfiguration || refreshPromise) {
+        scheduleContentKeyAskRetry(_now() + 1000)
+        return
+      }
+      let nextAt
+      try {
+        if (typeof _contentKeys.retryDueContentKeyAsks === 'function') {
+          nextAt = await _contentKeys.retryDueContentKeyAsks(syncHandlerContext())
+        }
+      } catch (error) {
+        onError(error)
+        nextAt = _now() + INBOX_HANDLER_RETRY_MS
+      } finally {
+        scheduleContentKeyAskRetry(nextAt)
+      }
+    }, Math.max(0, nextAt - _now()))
+    contentKeyAskRetryTimer?.unref?.()
   }
 
   function flushMessengerResume (monitor = messengerStateMonitor) {
@@ -613,6 +683,8 @@ export function createSyncController ({
       !messenger || messenger !== monitor.messenger) return
     if (channelConfiguration || refreshPromise) return
     monitor.resumePending = false
+    ownersWaitingForResume.clear()
+    trustedWaitingForResume = false
     scheduleAnnounceAll({ immediate: true, resetInterval: true })
     nostrDbSync.resumeAfterPause(nostrDbRuntimeContext()).catch(onError)
     scheduleDrain()
@@ -808,6 +880,25 @@ export function createSyncController ({
               break
             }
             const ownershipLost = delivery.ownershipSignal?.aborted === true
+            if (!ownershipLost && failure?.inboxRetryScope === 'message') {
+              const retryAt = publicationRetryAt(failure, _now())
+              const retryAfterMs = retryAt > _now()
+                ? retryAt - _now()
+                : INBOX_HANDLER_RETRY_MS
+              const globalFailure = failure.retryWhenOnline === true ||
+                failure.retryWhenAvailable === true ||
+                isInboxAdmissionError(failure) ||
+                messenger?.readStatus?.().paused === true
+              const nacked = await nack({ retryAfterMs })
+              if (!nacked) throw inboxAckError(delivery.lastFailure)
+              onError(failure)
+              scheduleDrainRetry(retryAfterMs)
+              if (globalFailure) {
+                drainQueued = false
+                break
+              }
+              continue
+            }
             if (!ownershipLost) await nack()
             onError(failure)
             if (ownershipLost) {
@@ -856,7 +947,51 @@ export function createSyncController ({
     pendingResetInterval = false
     trustedAnnounceRetryAt = 0
     announceRetryAtByOwner.clear()
+    ownersWaitingForOnline.clear()
+    ownersWaitingForResume.clear()
+    trustedWaitingForOnline = false
+    trustedWaitingForResume = false
+    stopOnlineAnnouncements?.()
+    stopOnlineAnnouncements = null
     if (clearPending) pendingAnnounceOwners.clear()
+  }
+
+  function waitForOnlineAnnouncements () {
+    if (stopOnlineAnnouncements) return true
+    try {
+      const stop = _onOnline(() => {
+        stopOnlineAnnouncements = null
+        stop?.()
+        ownersWaitingForOnline.clear()
+        ownersWaitingForResume.clear()
+        trustedWaitingForOnline = false
+        trustedWaitingForResume = false
+        if (initialized && messenger && _secrets.isUnlocked()) {
+          scheduleAnnounceAll({ immediate: true })
+        }
+      })
+      stopOnlineAnnouncements = typeof stop === 'function' ? stop : null
+      return true
+    } catch (error) {
+      onError(error)
+      return false
+    }
+  }
+
+  function announcementRetryAt (error, now) {
+    if (error?.retryWhenOnline === true) {
+      if (waitForOnlineAnnouncements()) {
+        return { waitForOnline: true, waitForResume: false, retryAt: publicationRetryAt(error, now) }
+      }
+    }
+    if (error?.retryWhenAvailable === true && messenger?.readStatus?.().paused === true) {
+      return { waitForOnline: false, waitForResume: true, retryAt: publicationRetryAt(error, now) }
+    }
+    return {
+      waitForOnline: false,
+      waitForResume: false,
+      retryAt: publicationRetryAt(error, now) || now + 1
+    }
   }
 
   function armAnnouncementTimer (id, at) {
@@ -875,8 +1010,11 @@ export function createSyncController ({
   function scheduleNextAnnouncementRetry (id) {
     const now = _now()
     const deadlines = [...pendingAnnounceOwners]
+      .filter(ownerPubkey =>
+        !ownersWaitingForOnline.has(ownerPubkey) &&
+        !ownersWaitingForResume.has(ownerPubkey))
       .map(ownerPubkey => announceRetryAtByOwner.get(ownerPubkey) || 0)
-      .concat(trustedAnnounceRetryAt)
+      .concat(trustedWaitingForOnline || trustedWaitingForResume ? [] : [trustedAnnounceRetryAt])
       .filter(retryAt => retryAt > now)
     if (deadlines.length) armAnnouncementTimer(id, Math.min(...deadlines))
   }
@@ -960,9 +1098,17 @@ export function createSyncController ({
             }))
           }
           announceRetryAtByOwner.delete(ownerPubkey)
+          ownersWaitingForOnline.delete(ownerPubkey)
+          ownersWaitingForResume.delete(ownerPubkey)
         } catch (err) {
           pendingAnnounceOwners.add(ownerPubkey)
-          announceRetryAtByOwner.set(ownerPubkey, publicationRetryAt(err, now) || now + 1)
+          const advice = announcementRetryAt(err, now)
+          if (advice.waitForOnline) ownersWaitingForOnline.add(ownerPubkey)
+          else ownersWaitingForOnline.delete(ownerPubkey)
+          if (advice.waitForResume) ownersWaitingForResume.add(ownerPubkey)
+          else ownersWaitingForResume.delete(ownerPubkey)
+          if (advice.retryAt) announceRetryAtByOwner.set(ownerPubkey, advice.retryAt)
+          else announceRetryAtByOwner.delete(ownerPubkey)
           onError(err)
         }
       }
@@ -978,8 +1124,13 @@ export function createSyncController ({
           debug
         })
         trustedAnnounceRetryAt = 0
+        trustedWaitingForOnline = false
+        trustedWaitingForResume = false
       } catch (err) {
-        trustedAnnounceRetryAt = publicationRetryAt(err, now) || now + 1
+        const advice = announcementRetryAt(err, now)
+        trustedWaitingForOnline = advice.waitForOnline
+        trustedWaitingForResume = advice.waitForResume
+        trustedAnnounceRetryAt = advice.retryAt || 0
         onError(err)
       }
     }
@@ -1012,6 +1163,7 @@ export function createSyncController ({
     if (!messenger) refresh()
     else messenger.retryPendingDecryptions?.().catch(onError)
     scheduleAnnounce(ownerPubkey, { immediate: true, resetInterval: true })
+    scheduleContentKeyAskRetry()
   }
 
   function nostrDbRuntimeContext () {
@@ -1079,6 +1231,7 @@ export function createSyncController ({
       .then(() => {
         if (initialized && _secrets.isUnlocked()) {
           scheduleAnnounceAll({ immediate: true, resetInterval: true })
+          scheduleContentKeyAskRetry()
         }
       })
     return promise
@@ -1098,6 +1251,7 @@ export function createSyncController ({
     if (drainRetryTimer) {
       _clearTimeout(drainRetryTimer)
       drainRetryTimer = null
+      drainRetryAt = 0
     }
     clearRelayListWatcher()
     channelPubkeyByOwnerPubkey.clear()
@@ -1111,6 +1265,7 @@ export function createSyncController ({
     channelBuildFailuresByOwner.clear()
     devicePubkey = ''
     clearAnnouncementTimers()
+    clearContentKeyAskRetry()
     nostrDbSync.stop()
     _contentKeys.resetDebugSources?.()
     return Promise.resolve(currentMessenger?.close?.()).catch(onError)
@@ -1221,6 +1376,7 @@ export function createSyncController ({
     ensureAnnouncementInterval()
     scheduleAnnounceAll()
     scheduleDrain()
+    scheduleContentKeyAskRetry()
     return messenger
   }
 

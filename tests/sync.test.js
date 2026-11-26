@@ -13,7 +13,9 @@ import {
   generateAndPublishContentKey,
   getDebugSnapshot,
   handleMessage,
+  nextContentKeyAskRetryAt,
   pruneContentKeyAskState,
+  retryDueContentKeyAsks,
   resetDebugSources
 } from '../src/services/sync/content-keys.js'
 import { TRUSTED_SIGNERS_STATE_CODE } from '../src/services/sync/trusted-signers.js'
@@ -1159,6 +1161,151 @@ test('sync propagates a false acknowledgement without retrying a lost delivery',
   }
 })
 
+test('sync defers a message-scoped publication failure and continues with the next delivery', async () => {
+  const owner = 'a'.repeat(64)
+  const handled = []
+  const acknowledgements = []
+  const rejections = []
+  const timers = []
+  class FakeMessenger {
+    constructor () {
+      this.queue = [{ id: 'failed-reply' }, { id: 'next-message' }]
+    }
+
+    async init () { return this }
+    async nextMessage () {
+      const message = this.queue.shift()
+      if (!message) return null
+      return {
+        message,
+        ack: async () => { acknowledgements.push(message.id); return true },
+        nack: async options => { rejections.push({ id: message.id, options }); return true }
+      }
+    }
+
+    close () {}
+  }
+  const controller = createSyncController({
+    MessengerClass: FakeMessenger,
+    _store: createSubscribable({ list: () => [{ type: 'nsec', pubkey: owner }] }),
+    _secrets: createSubscribable({ isUnlocked: () => true, getDeviceSigner: async () => signer('device') }),
+    _trustedSigners: createSubscribable({ list: () => [] }),
+    _claimSigner: () => signer(owner),
+    _contentKeys: {
+      resetDebugSources: () => {},
+      announceContentKeys: async () => {},
+      handleMessage: async message => {
+        handled.push(message.id)
+        if (message.id === 'failed-reply') {
+          throw Object.assign(new Error('reply not published'), {
+            code: 'CONTENT_KEY_REPLY_PUBLICATION_FAILED',
+            inboxRetryScope: 'message'
+          })
+        }
+      }
+    },
+    _trustedSignerSync: {
+      handleMessage: async () => false,
+      announceTrustedSignerState: async () => {}
+    },
+    _createNostrDbSyncController: () => ({
+      ensureSubscriptions: () => {},
+      announceRange: async () => {},
+      handleMessage: async () => false,
+      stop: () => {}
+    }),
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: () => {},
+    _setInterval: () => ({}),
+    _clearInterval: () => {},
+    onError: () => {}
+  })
+
+  await controller.init()
+  await flushMicrotasks(32)
+
+  assert.deepEqual(handled, ['failed-reply', 'next-message'])
+  assert.deepEqual(acknowledgements, ['next-message'])
+  assert.deepEqual(rejections, [{
+    id: 'failed-reply',
+    options: { retryAfterMs: 30000 }
+  }])
+  assert.ok(timers.some(timer => timer.ms === 30000))
+  controller.close()
+})
+
+test('sync stops the drain for a publication failure that requires connectivity', async () => {
+  const owner = 'a'.repeat(64)
+  const handled = []
+  const rejections = []
+  class FakeMessenger {
+    constructor () {
+      this.queue = [{ id: 'offline-reply' }, { id: 'must-wait' }]
+    }
+
+    async init () { return this }
+    async nextMessage () {
+      const message = this.queue.shift()
+      if (!message) return null
+      return {
+        message,
+        ack: async () => true,
+        nack: async options => { rejections.push({ id: message.id, options }); return true }
+      }
+    }
+
+    close () {}
+  }
+  const controller = createSyncController({
+    MessengerClass: FakeMessenger,
+    _store: createSubscribable({ list: () => [{ type: 'nsec', pubkey: owner }] }),
+    _secrets: createSubscribable({ isUnlocked: () => true, getDeviceSigner: async () => signer('device') }),
+    _trustedSigners: createSubscribable({ list: () => [] }),
+    _claimSigner: () => signer(owner),
+    _contentKeys: {
+      resetDebugSources: () => {},
+      announceContentKeys: async () => {},
+      handleMessage: async message => {
+        handled.push(message.id)
+        throw Object.assign(new Error('offline'), {
+          code: 'CONTENT_KEY_REPLY_PUBLICATION_FAILED',
+          inboxRetryScope: 'message',
+          retryWhenOnline: true,
+          retryAt: Date.now() + 5000
+        })
+      }
+    },
+    _trustedSignerSync: {
+      handleMessage: async () => false,
+      announceTrustedSignerState: async () => {}
+    },
+    _createNostrDbSyncController: () => ({
+      ensureSubscriptions: () => {},
+      announceRange: async () => {},
+      handleMessage: async () => false,
+      stop: () => {}
+    }),
+    _setTimeout: () => ({}),
+    _clearTimeout: () => {},
+    _setInterval: () => ({}),
+    _clearInterval: () => {},
+    onError: () => {}
+  })
+
+  await controller.init()
+  await flushMicrotasks(32)
+
+  assert.deepEqual(handled, ['offline-reply'])
+  assert.equal(rejections[0].id, 'offline-reply')
+  assert.ok(rejections[0].options.retryAfterMs > 0)
+  assert.equal(controller.messenger.queue[0].id, 'must-wait')
+  controller.close()
+})
+
 test('sync defers a timed-out handler, runs the next item and never overlaps the stalled one', async () => {
   const timers = createManualTimeouts()
   const firstHandler = Promise.withResolvers()
@@ -1624,6 +1771,159 @@ test('sync announcement retries are independent per owner and honor circuit dead
   controller.close()
 })
 
+test('sync waits for connectivity before retrying announcements', async () => {
+  let now = 1_000_000
+  let onlineHandler = null
+  let onlineStops = 0
+  let attempts = 0
+  const timers = []
+  const owner = 'a'.repeat(64)
+
+  class FakeMessenger {
+    async init () { return this }
+    async update () { return this }
+    nextMessage () { return null }
+    close () {}
+  }
+
+  const controller = createSyncController({
+    MessengerClass: FakeMessenger,
+    _store: createSubscribable({ list: () => [{ type: 'nsec', pubkey: owner }] }),
+    _secrets: createSubscribable({
+      isUnlocked: () => true,
+      getDeviceSigner: async () => signer('device'),
+      subscribeContentKeys: () => () => {}
+    }),
+    _trustedSigners: createSubscribable({ list: () => [{ pubkey: 'trusted1', platform: 'Laptop' }] }),
+    _claimSigner: () => signer(owner),
+    _contentKeys: {
+      resetDebugSources: () => {},
+      handleMessage: async () => false,
+      announceContentKeys: async () => {
+        attempts++
+        if (attempts === 1) {
+          return {
+            delivery: {
+              reports: [{
+                success: false,
+                retryWhenAvailable: true,
+                retryWhenOnline: true,
+                retryAt: now + 60_000
+              }]
+            }
+          }
+        }
+      }
+    },
+    _trustedSignerSync: {
+      announceTrustedSignerState: async () => {},
+      handleMessage: async () => false
+    },
+    _createNostrDbSyncController: () => ({
+      announceRange: async () => {},
+      handleMessage: async () => false,
+      ensureSubscriptions: () => {},
+      stop: () => {}
+    }),
+    _now: () => now,
+    _onOnline: handler => {
+      onlineHandler = handler
+      return () => { onlineStops++ }
+    },
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: timer => {
+      const index = timers.indexOf(timer)
+      if (index >= 0) timers.splice(index, 1)
+    },
+    _setInterval: () => ({}),
+    _clearInterval: () => {},
+    onError: () => {}
+  })
+
+  await controller.init()
+  const initial = timers.find(timer => timer.ms === 1000)
+  await initial.fn()
+  assert.equal(attempts, 1)
+  assert.equal(typeof onlineHandler, 'function')
+  assert.equal(timers.some(timer => timer.ms > 1000 && timer.ms <= 60_000), false)
+
+  onlineHandler()
+  now += 60_000
+  const immediate = timers.find(timer => timer.ms === 0)
+  await immediate.fn()
+  assert.equal(attempts, 2)
+
+  controller.close()
+  assert.equal(onlineStops, 1)
+})
+
+test('sync schedules persisted content-key ask retries independently of announcements', async () => {
+  let now = 1_000_000
+  let retries = 0
+  const timers = []
+  const owner = 'a'.repeat(64)
+
+  class FakeMessenger {
+    async init () { return this }
+    async update () { return this }
+    nextMessage () { return null }
+    close () {}
+  }
+
+  const controller = createSyncController({
+    MessengerClass: FakeMessenger,
+    _store: createSubscribable({ list: () => [{ type: 'nsec', pubkey: owner }] }),
+    _secrets: createSubscribable({
+      isUnlocked: () => true,
+      getDeviceSigner: async () => signer('device')
+    }),
+    _trustedSigners: createSubscribable({ list: () => [{ pubkey: 'trusted1', platform: 'Laptop' }] }),
+    _claimSigner: () => signer(owner),
+    _contentKeys: {
+      resetDebugSources: () => {},
+      handleMessage: async () => false,
+      announceContentKeys: async () => {},
+      nextContentKeyAskRetryAt: () => now + 5000,
+      retryDueContentKeyAsks: async () => {
+        retries++
+        return null
+      }
+    },
+    _trustedSignerSync: {
+      announceTrustedSignerState: async () => {},
+      handleMessage: async () => false
+    },
+    _createNostrDbSyncController: () => ({
+      announceRange: async () => {},
+      handleMessage: async () => false,
+      ensureSubscriptions: () => {},
+      stop: () => {}
+    }),
+    _now: () => now,
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: () => {},
+    _setInterval: () => ({}),
+    _clearInterval: () => {},
+    onError: () => {}
+  })
+
+  await controller.init()
+  const retry = timers.find(timer => timer.ms === 5000)
+  assert.ok(retry)
+  now += 5000
+  await retry.fn()
+  assert.equal(retries, 1)
+  controller.close()
+})
+
 test('sync close cancels init work that resolves later', async () => {
   let resolveInit
   const timers = []
@@ -1952,6 +2252,8 @@ test('content-key asks suppress exact sets and grow the cooldown', async t => {
   assert.deepEqual(record.pubkeys, [first, second].sort())
   assert.equal(record.attempts, 0)
   assert.equal(record.retryAt, now + 5 * 60 * 1000)
+  assert.equal(record.publicationPending, false)
+  assert.equal(nextContentKeyAskRetryAt(), null)
 
   now += 60 * 1000
   await announce([first, second], 'announce-2')
@@ -2051,7 +2353,7 @@ test('content-key ask state clears imported keys and survives storage reads', as
   assert.equal(getState(CONTENT_KEY_ASK_STATE_KEY, null), null)
 })
 
-test('content-key ask failures do not create pending state and stale state is pruned', async t => {
+test('content-key ask failures schedule retry and stale state is pruned', async t => {
   let now = 1800000000000
   t.mock.method(Date, 'now', () => now)
   secrets.unlock(generateSecretKey(), null)
@@ -2072,12 +2374,22 @@ test('content-key ask failures do not create pending state and stale state is pr
     payload: { keys: [{ pubkey: missing, createdAt: Math.floor(now / 1000) }] }
   }), context)
 
-  await assert.rejects(announce('failed-ask'), /ask unavailable/)
-  assert.equal(getState(CONTENT_KEY_ASK_STATE_KEY, null), null)
+  const errors = []
+  context.onError = error => errors.push(error)
+  assert.equal(await announce('failed-ask'), true)
+  let record = getState(CONTENT_KEY_ASK_STATE_KEY)[owner.pubkey][trusted]
+  assert.equal(record.publicationPending, true)
+  assert.equal(record.retryAt, now + 5 * 60 * 1000)
+  assert.equal(nextContentKeyAskRetryAt(), record.retryAt)
+  assert.match(errors[0].message, /ask unavailable/)
 
   context.messenger = fakeMessenger()
-  await announce('successful-ask')
-  assert.ok(getState(CONTENT_KEY_ASK_STATE_KEY)[owner.pubkey][trusted])
+  now = record.retryAt
+  await retryDueContentKeyAsks(context, { now })
+  record = getState(CONTENT_KEY_ASK_STATE_KEY)[owner.pubkey][trusted]
+  assert.equal(record.publicationPending, false)
+  assert.equal(record.attempts, 1)
+  assert.equal(context.messenger.sent.length, 1)
   await pruneContentKeyAskState({
     ownerPubkeys: new Set([owner.pubkey]),
     peerPubkeys: new Set()
@@ -2098,6 +2410,53 @@ test('content-key ask failures do not create pending state and stale state is pr
     peerPubkeys: new Set([trusted])
   })
   assert.equal(getState(CONTENT_KEY_ASK_STATE_KEY, null), null)
+})
+
+test('content-key ask publication reports and relay retry advice drive the pending retry', async t => {
+  let now = 1800000000000
+  t.mock.method(Date, 'now', () => now)
+  secrets.unlock(generateSecretKey(), null)
+  const owner = await addNsecAccount()
+  const missing = pubkeyFromSecret(seckey())
+  const trusted = '8'.repeat(64)
+  const errors = []
+  const messenger = {
+    async ask () {
+      return {
+        delivery: {
+          reports: [{
+            success: false,
+            retryAt: now + 30 * 60 * 1000
+          }]
+        }
+      }
+    }
+  }
+  const context = {
+    messenger,
+    trustedByPubkey: new Map([[trusted, { pubkey: trusted }]]),
+    onError: error => errors.push(error)
+  }
+
+  assert.equal(await handleMessage(syncMessage({
+    channelPubkey: owner.pubkey,
+    senderPubkey: trusted,
+    code: CONTENT_KEYS_ANNOUNCE_CODE,
+    payload: { keys: [{ pubkey: missing, createdAt: Math.floor(now / 1000) }] }
+  }), context), true)
+
+  let record = getState(CONTENT_KEY_ASK_STATE_KEY)[owner.pubkey][trusted]
+  assert.equal(record.publicationPending, true)
+  assert.equal(record.retryAt, now + 30 * 60 * 1000)
+  assert.equal(nextContentKeyAskRetryAt(), record.retryAt)
+  assert.equal(errors[0].code, 'CONTENT_KEY_ASK_PUBLICATION_FAILED')
+
+  messenger.ask = async () => ({ delivery: { reports: [{ success: true }] } })
+  now = record.retryAt
+  await retryDueContentKeyAsks(context, { now })
+  record = getState(CONTENT_KEY_ASK_STATE_KEY)[owner.pubkey][trusted]
+  assert.equal(record.publicationPending, false)
+  assert.equal(nextContentKeyAskRetryAt(), null)
 })
 
 test('content-key announce contains only public key metadata', async () => {
@@ -2150,6 +2509,30 @@ test('content-key requests reply with only locally held requested secrets', asyn
     pubkey: content.pubkey,
     seckey: content.secret,
     createdAt: 40
+  })
+})
+
+test('content-key replies fail when no relay accepted the response', async () => {
+  secrets.unlock(generateSecretKey(), null)
+  const owner = await addNsecAccount()
+  const content = await addContentKey(owner.pubkey, 40)
+  const trusted = '5'.repeat(64)
+
+  await assert.rejects(handleMessage(syncMessage({
+    channelPubkey: owner.pubkey,
+    senderPubkey: trusted,
+    code: CONTENT_KEYS_ASK_CODE,
+    payload: { pubkeys: [content.pubkey] }
+  }), {
+    messenger: {
+      reply: async () => ({ delivery: { reports: [{ success: false, retryAt: Date.now() + 120000 }] } })
+    },
+    trustedByPubkey: new Map([[trusted, { pubkey: trusted }]])
+  }), error => {
+    assert.equal(error.code, 'CONTENT_KEY_REPLY_PUBLICATION_FAILED')
+    assert.equal(error.inboxRetryScope, 'message')
+    assert.ok(error.retryAt > Date.now())
+    return true
   })
 })
 
