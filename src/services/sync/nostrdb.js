@@ -5,12 +5,18 @@ import { finalizeEvent } from 'libp2r2p/event'
 import { PERSONAL_COPY } from 'libp2r2p/kind'
 import { createQueue } from 'libp2r2p/idb-queue'
 import { keypairFromSeckey } from 'libp2r2p/key'
-import { isOnline as defaultIsOnline } from 'libp2r2p/network'
+import {
+  isOnline as defaultIsOnline,
+  onOnline as defaultOnOnline
+} from 'libp2r2p/network'
 import { PRIVATE_BROADCAST_KIND } from 'libp2r2p/private-channel'
 import { relayPool as defaultRelayPool } from 'libp2r2p/relay'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { NOSTRDB_SYNC, readRecords, replaceRecords } from '../storage/index.js'
-import { publicationRetryAt } from '../../helpers/publication-retry.js'
+import {
+  publicationErrorFromResult,
+  publicationRetryAt
+} from '../../helpers/publication-retry.js'
 import { assertSupportedPayloadVersion, syncPayloadInvalid } from './payload-error.js'
 
 // Flow notes:
@@ -1020,6 +1026,7 @@ export function createNostrDbSyncController ({
   _createPushQueue = createQueue,
   _relayPool = defaultRelayPool,
   _isOnline = defaultIsOnline,
+  _onOnline = defaultOnOnline,
   getLaneMode = () => DEFAULT_NOSTRDB_LANE_MODE,
   onError = err => console.warn('nostrdb sync failed', err?.message ?? err)
 } = {}) {
@@ -1040,6 +1047,8 @@ export function createNostrDbSyncController ({
   let appBackfillProcessTail = Promise.resolve()
   let appBackfillProcessGeneration = 0
   let pendingAppBackfillProcess = null
+  let stopOnlinePushWake = null
+  let onlinePushWakeActive = false
   let durableState = storage
     ? readState(storage)
     : (readRecords(NOSTRDB_SYNC).find(record => record.key === 'state')?.value || {})
@@ -4058,6 +4067,45 @@ export function createNostrDbSyncController ({
     }
   }
 
+  function hasPushQueueWaitingForOnline () {
+    for (const queue of pushQueues.values()) {
+      if (queue.waitingForOnline) return true
+    }
+    return false
+  }
+
+  function releaseOnlinePushWake () {
+    if (hasPushQueueWaitingForOnline()) return
+    stopOnlinePushWake?.()
+    stopOnlinePushWake = null
+    onlinePushWakeActive = false
+  }
+
+  function ensureOnlinePushWake () {
+    if (onlinePushWakeActive) return
+    onlinePushWakeActive = true
+    try {
+      const stop = _onOnline(() => {
+        for (const [ownerPubkey, queue] of pushQueues) {
+          if (!queue.waitingForOnline) continue
+          queue.waitingForOnline = false
+          schedulePushWake(ownerPubkey, queue)
+        }
+        releaseOnlinePushWake()
+      })
+      stopOnlinePushWake = typeof stop === 'function' ? stop : null
+    } catch (error) {
+      onlinePushWakeActive = false
+      report(error)
+      for (const [ownerPubkey, queue] of pushQueues) {
+        if (!queue.waitingForOnline) continue
+        queue.waitingForOnline = false
+        queue.retryAt = Math.max(queue.retryAt || 0, _nowMs() + 1000)
+        schedulePushWake(ownerPubkey, queue)
+      }
+    }
+  }
+
   function isPushBackpressureError (error) {
     return error?.code === 'QUEUE_CAPACITY_EXCEEDED' ||
       error?.message === 'QUEUE_ITEM_TOO_LARGE' ||
@@ -4088,6 +4136,7 @@ export function createNostrDbSyncController ({
         cooling: false,
         retryAt: 0,
         waitingForResume: false,
+        waitingForOnline: false,
         resumePending: false,
         eventBackpressure: false,
         eventRetryAt: 0,
@@ -4329,6 +4378,7 @@ export function createNostrDbSyncController ({
   }
 
   function nextPushDueAt (ownerPubkey, queue) {
+    if (queue.waitingForOnline) return Infinity
     if (queue.waitingForResume || runtime.messenger?.readStatus?.().paused === true) return Infinity
     if (!pushRuntime(ownerPubkey)) return Infinity
     const now = _nowMs()
@@ -4351,6 +4401,11 @@ export function createNostrDbSyncController ({
 
   function schedulePushWake (ownerPubkey, queue) {
     if (pushQueues.get(ownerPubkey) !== queue) return
+    if (queue.waitingForOnline) {
+      clearPushTimer(queue)
+      ensureOnlinePushWake()
+      return
+    }
     if (queue.waitingForResume || runtime.messenger?.readStatus?.().paused === true) {
       parkPushQueue(ownerPubkey, queue)
       return
@@ -4668,7 +4723,13 @@ export function createNostrDbSyncController ({
     if (!receiverPubkeys.length) {
       queue.chunks.delete(chunk.id)
       await removePushChunkRecord(ownerPubkey, chunk)
-      return { removed: true, empty: true }
+      return {
+        removed: true,
+        empty: true,
+        relayAckCount: 0,
+        reportCount: 0,
+        failedReportCount: 0
+      }
     }
     if (receiverPubkeys.length !== chunk.receiverPubkeys.length ||
         chunk.channelPubkey !== target.channelPubkey) {
@@ -4687,7 +4748,7 @@ export function createNostrDbSyncController ({
       jsonl: chunk.jsonl
     }
     if (chunk.priority !== 'normal') payload.priority = chunk.priority
-    await target.messenger.yell({
+    const result = await target.messenger.yell({
       channelPubkey: target.channelPubkey,
       receiverPubkeys,
       code: NOSTRDB_SYNC_PUSH_CODE,
@@ -4695,14 +4756,38 @@ export function createNostrDbSyncController ({
       idempotencyKey: chunk.id,
       useBulkPacing: chunk.priority !== 'normal'
     })
+    const reports = Array.isArray(result?.delivery?.reports) ? result.delivery.reports : []
+    const relayAckCount = publicationAckCount(result)
+    const failedReportCount = reports.filter(report => report?.success !== true).length
+    if (relayAckCount <= 0) {
+      const error = await publicationErrorFromResult(
+        result,
+        'SYNC_PUSH_PUBLICATION_FAILED'
+      ) || Object.assign(new Error('SYNC_PUSH_PUBLICATION_FAILED'), {
+        code: 'SYNC_PUSH_PUBLICATION_FAILED'
+      })
+      error.relayAckCount = 0
+      error.reportCount = reports.length
+      error.failedReportCount = failedReportCount
+      throw error
+    }
     queue.chunks.delete(chunk.id)
     await removePushChunkRecord(ownerPubkey, chunk)
-    return { removed: true }
+    return {
+      removed: true,
+      relayAckCount,
+      reportCount: reports.length,
+      failedReportCount
+    }
   }
 
   async function flushPushQueue (ownerPubkey) {
     const queue = pushQueues.get(ownerPubkey)
     if (!queue || queue.waitingForResume) return
+    if (queue.waitingForOnline) {
+      ensureOnlinePushWake()
+      return
+    }
     const target = pushRuntime(ownerPubkey)
     if (!target) return
     if (target.messenger.readStatus?.().paused === true) {
@@ -4755,12 +4840,20 @@ export function createNostrDbSyncController ({
             eventCount: chunk.eventCount,
             bytes: chunk.bytes,
             elapsedMs: Math.max(0, Math.round(_performanceNow() - startedAt)),
-            outcome: result.empty ? 'dropped-no-recipients' : 'published'
+            outcome: result.empty ? 'dropped-no-recipients' : 'published',
+            relayAckCount: result.relayAckCount,
+            reportCount: result.reportCount,
+            failedReportCount: result.failedReportCount
           })
         } catch (error) {
           if (!current()) return
           const failedAt = _nowMs()
-          const retryAt = publicationRetryAt(error, failedAt) || failedAt + 1000
+          const advisedRetryAt = publicationRetryAt(error, failedAt)
+          const retryWhenOnline = error?.retryWhenOnline === true
+          const retryWhenAvailable = error?.retryWhenAvailable === true
+          const retryAt = retryWhenOnline
+            ? advisedRetryAt
+            : advisedRetryAt || failedAt + 1000
           emitDebug(runtime.debug, 'push-chunk', {
             code: NOSTRDB_SYNC_PUSH_CODE,
             priority: chunk.priority,
@@ -4771,10 +4864,21 @@ export function createNostrDbSyncController ({
             outcome: 'failed',
             errorCode: debugToken(error?.code) || debugToken(error?.name) || 'UNKNOWN',
             retryAt,
-            retryAfterMs: Math.max(0, retryAt - failedAt)
+            retryAfterMs: Math.max(0, retryAt - failedAt),
+            retryWhenOnline,
+            retryWhenAvailable,
+            relayAckCount: error?.relayAckCount || 0,
+            reportCount: error?.reportCount || 0,
+            failedReportCount: error?.failedReportCount || 0
           })
           if (messengerPausedError(error)) {
             parkPushQueue(ownerPubkey, queue, error)
+          } else if (retryWhenOnline) {
+            queue.waitingForOnline = true
+            queue.waitingForResume = false
+            queue.retryAt = advisedRetryAt
+            clearPushTimer(queue)
+            ensureOnlinePushWake()
           } else {
             queue.retryAt = retryAt
             report(error)
@@ -4782,8 +4886,12 @@ export function createNostrDbSyncController ({
           break
         }
       }
-      if (current() && !queue.chunks.size && !queue.events.size) queue.retryAt = 0
-      if (current() && queue.chunks.size && (queue.retryAt || 0) <= _nowMs()) {
+      if (current() && !queue.chunks.size && !queue.events.size) {
+        queue.retryAt = 0
+        queue.waitingForOnline = false
+        releaseOnlinePushWake()
+      }
+      if (current() && !queue.waitingForOnline && queue.chunks.size && (queue.retryAt || 0) <= _nowMs()) {
         queue.retryAt = _nowMs()
       }
       if (current() && (sentChunks > 0 || publishedBytes > 0)) {
@@ -4830,6 +4938,7 @@ export function createNostrDbSyncController ({
     const queue = pushQueues.get(ownerPubkey)
     if (queue) clearPushTimer(queue)
     pushQueues.delete(ownerPubkey)
+    releaseOnlinePushWake()
     const outboxes = pushOutboxes.get(ownerPubkey)
     pushOutboxes.delete(ownerPubkey)
     try {
@@ -5226,6 +5335,7 @@ export function createNostrDbSyncController ({
     emptyContextByOwner.clear()
     if (retryTimer) _clearTimeout?.(retryTimer)
     retryTimer = null
+    releaseOnlinePushWake()
     stopExchangeMaintenance()
     appBackfillProcessGeneration += 1
     appBackfillProcessTail = Promise.resolve()

@@ -140,6 +140,20 @@ async function storedCount (queue) {
   return count
 }
 
+async function storedPushChunkCount () {
+  const queue = await createQueue({
+    prefix: PUSH_CHUNK_OUTBOX.slice(0, -':idb-queue'.length),
+    indexedDB: globalThis.indexedDB,
+    evictionPolicy: 'reject',
+    indexes: { id: { keyPath: 'id', unique: true } }
+  })
+  try {
+    return await storedCount(queue)
+  } finally {
+    await queue.close()
+  }
+}
+
 function storedPushChunk (number, {
   eventNumber = number,
   channelPubkey = 'f'.repeat(64),
@@ -207,7 +221,8 @@ async function startAppBackfill (controller, msg, {
   ).options.payload
 }
 
-async function flushSeededPushChunks (records) {
+async function flushSeededPushChunks (records, options = {}) {
+  const { deferFlush = false, ...controllerOptions } = options
   await deleteDatabase(PUSH_EVENT_OUTBOX)
   await seedPushChunks(records)
   const channelPubkey = records[0].channelPubkey
@@ -229,7 +244,8 @@ async function flushSeededPushChunks (records) {
     _clearTimeout: timer => {
       const index = timers.indexOf(timer)
       if (index >= 0) timers.splice(index, 1)
-    }
+    },
+    ...controllerOptions
   })
   controller.ensureSubscriptions(context(msg, {
     trustedByPubkey: new Map([...new Set(records.flatMap(record => record.receiverPubkeys))]
@@ -240,8 +256,8 @@ async function flushSeededPushChunks (records) {
   await waitForCondition(() => timers.some(timer => timer.ms === 0))
   const flush = timers.find(timer => timer.ms === 0)
   assert.ok(flush)
-  await flush.fn()
-  return { channelPubkey, controller, msg, timers }
+  if (!deferFlush) await flush.fn()
+  return { channelPubkey, controller, msg, timers, flush }
 }
 
 test('nostrdb sync advertises one account range without ownerPubkey in payload', async () => {
@@ -4931,6 +4947,130 @@ test('nostrdb zero-output push wakes are counted without an empty push log', asy
     lastIdleWakeAt: 2000
   })
   controller.stop()
+})
+
+test('a push without relay ACK stays queued until connectivity returns', async () => {
+  let now = 1000
+  let online = null
+  let onlineStops = 0
+  const attempts = []
+  const { controller, msg, timers, flush } = await flushSeededPushChunks([
+    storedPushChunk(1)
+  ], {
+    deferFlush: true,
+    _nowMs: () => now,
+    _onOnline: handler => {
+      online = handler
+      return () => { onlineStops++ }
+    }
+  })
+  msg.yell = async options => {
+    attempts.push(options)
+    if (attempts.length === 1) {
+      return {
+        delivery: {
+          reports: [{
+            success: false,
+            retryWhenAvailable: true,
+            retryWhenOnline: true,
+            retryAt: 5000
+          }]
+        }
+      }
+    }
+    return {
+      delivery: {
+        reports: [{
+          success: true,
+          succeededRelays: ['wss://relay.test']
+        }]
+      }
+    }
+  }
+  try {
+    await flush.fn()
+
+    assert.equal(attempts.length, 1)
+    assert.equal(await storedPushChunkCount(), 1)
+    assert.equal(timers.some(timer => timer.ms === 1000), false)
+    assert.equal(typeof online, 'function')
+
+    online()
+    const retry = timers.find(timer => timer.ms === 4000)
+    assert.ok(retry)
+    now = 5000
+    await retry.fn()
+
+    assert.equal(attempts.length, 2)
+    assert.equal(attempts[1].idempotencyKey, attempts[0].idempotencyKey)
+    assert.equal(await storedPushChunkCount(), 0)
+    assert.equal(onlineStops, 1)
+  } finally {
+    controller.stop()
+    await new Promise(resolve => setImmediate(resolve))
+    await deleteDatabase(PUSH_EVENT_OUTBOX)
+    await deleteDatabase(PUSH_CHUNK_OUTBOX)
+  }
+})
+
+test('one successful push report is enough when another report fails', async () => {
+  const attempts = []
+  const { controller, msg, timers, flush } = await flushSeededPushChunks([
+    storedPushChunk(1)
+  ], { deferFlush: true })
+  msg.yell = async options => {
+    attempts.push(options)
+    return {
+      delivery: {
+        reports: [{
+          success: true,
+          succeededRelays: ['wss://relay-a.test']
+        }, {
+          success: false,
+          retryWhenAvailable: false
+        }]
+      }
+    }
+  }
+  try {
+    await flush.fn()
+
+    assert.equal(attempts.length, 1)
+    assert.equal(await storedPushChunkCount(), 0)
+    assert.equal(timers.some(timer => timer.ms > 0), false)
+  } finally {
+    controller.stop()
+    await new Promise(resolve => setImmediate(resolve))
+    await deleteDatabase(PUSH_EVENT_OUTBOX)
+    await deleteDatabase(PUSH_CHUNK_OUTBOX)
+  }
+})
+
+test('a push result with zero ACKs and no connectivity advice retries after one second', async () => {
+  const attempts = []
+  const { controller, msg, timers, flush } = await flushSeededPushChunks([
+    storedPushChunk(1)
+  ], { deferFlush: true })
+  msg.yell = async options => {
+    attempts.push(options)
+    return {
+      delivery: {
+        reports: [{ success: false }]
+      }
+    }
+  }
+  try {
+    await flush.fn()
+
+    assert.equal(attempts.length, 1)
+    assert.equal(await storedPushChunkCount(), 1)
+    assert.ok(timers.some(timer => timer.ms === 1000))
+  } finally {
+    controller.stop()
+    await new Promise(resolve => setImmediate(resolve))
+    await deleteDatabase(PUSH_EVENT_OUTBOX)
+    await deleteDatabase(PUSH_CHUNK_OUTBOX)
+  }
 })
 
 test('durable push outbox survives reload and removes chunks only after publication', async () => {

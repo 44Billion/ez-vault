@@ -362,11 +362,15 @@ zero-byte `push` debug record. The debug snapshot tracks `idleWakeCount`,
 Pending source events and packed chunks are persisted per owner in bounded,
 rejecting IndexedDB queues. A durable NostrDB score cursor advances only after
 the event is present in that outbox. A chunk is removed only after publication
-acceptance; interruption, pause, reload or a failed relay leaves it available
-for retry under the same idempotency key. Filling an outbox pauses further
-production instead of evicting events. Account removal clears both queues and
-their cursor. Capacity pressure blocks new inbox admission but still wakes the
-existing drain, so durable rows are processed and acknowledged without reload.
+acceptance by at least one relay. Partial reports are accepted and diagnosed,
+while zero ACKs retain the chunk. `retryWhenOnline` waits for confirmed
+connectivity without a short polling loop, `retryWhenAvailable` follows messenger
+resume, and a relay-provided `retryAt` wins over the one-second fallback.
+Interruption, pause, reload or a failed relay leaves the chunk available under
+the same idempotency key. Filling an outbox pauses further production instead of
+evicting events. Account removal clears both queues and their cursor. Capacity
+pressure blocks new inbox admission but still wakes the existing drain, so
+durable rows are processed and acknowledged without reload.
 
 ### Deferred bunker synchronization
 

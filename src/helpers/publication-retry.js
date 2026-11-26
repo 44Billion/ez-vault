@@ -37,7 +37,9 @@ export function publicationError (message, value, now = Date.now()) {
 }
 
 export async function publicationErrorFromResult (result, message = 'PUBLICATION_FAILED') {
-  const reports = result?.delivery?.reports
+  const reports = Array.isArray(result?.delivery?.reports)
+    ? result.delivery.reports
+    : []
   const failed = (result?.delivery && (!Array.isArray(reports) || !reports.length ||
       reports.some(report => report?.success !== true))) ||
     result?.success === false
@@ -60,5 +62,14 @@ export async function publicationErrorFromResult (result, message = 'PUBLICATION
       details.push({ errors: [{ reason: cause }] })
     }
   }
-  return publicationError(message, details)
+  const error = publicationError(message, details)
+  const retryWhenAvailable = reports.length > 0 &&
+    reports.every(report => report?.retryWhenAvailable === true)
+  if (retryWhenAvailable) {
+    error.retryWhenAvailable = true
+    if (reports.some(report => report?.retryWhenOnline === true)) {
+      error.retryWhenOnline = true
+    }
+  }
+  return error
 }
