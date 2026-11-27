@@ -234,12 +234,12 @@ async function startAppBackfill (controller, msg, {
 }
 
 async function flushSeededPushChunks (records, options = {}) {
-  const { deferFlush = false, afterEnsure, ...controllerOptions } = options
+  const { deferFlush = false, afterEnsure, messenger: providedMessenger, ...controllerOptions } = options
   await deleteDatabase(PUSH_EVENT_OUTBOX)
   await seedPushChunks(records)
   const channelPubkey = records[0].channelPubkey
   const timers = []
-  const msg = messenger()
+  const msg = providedMessenger || messenger()
   const controller = createNostrDbSyncController({
     _indexedDB: globalThis.indexedDB,
     getDb: () => ({
@@ -2903,6 +2903,203 @@ test('paused push preserves a relay retry deadline across resume', async () => {
   const timer = timers.shift()
   await timer.fn()
   assert.equal(attempts, 2)
+})
+
+test('capacity-only pause drains durable pushes with scoped egress', async () => {
+  const attempts = []
+  const timers = []
+  const tokens = []
+  const msg = messenger()
+  msg.readStatus = () => ({ closed: false, paused: true, pauseReasons: ['capacity'] })
+  msg.createCapacityEgress = () => {
+    const token = { active: true, controller: new AbortController() }
+    tokens.push(token)
+    return {
+      token,
+      messenger: {},
+      release () { token.controller.abort() }
+    }
+  }
+  msg.yell = async options => {
+    attempts.push(options)
+    return { delivery: { reports: [{ success: true }] } }
+  }
+  const controller = createNostrDbSyncController({
+    _setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      timers.push(timer)
+      return timer
+    },
+    _clearTimeout: timer => {
+      const index = timers.indexOf(timer)
+      if (index >= 0) timers.splice(index, 1)
+    },
+    getDb: () => ({ subscribe: emptySubscription })
+  })
+  controller.ensureSubscriptions(context(msg))
+  await controller.queuePush(OWNER, pushEvent(1))
+  assert.equal(timers.length, 1)
+
+  await timers.shift().fn()
+  assert.equal(attempts.length, 1)
+  assert.equal(tokens.length, 1)
+  assert.equal(attempts[0].capacityEgress, tokens[0])
+  assert.equal(tokens[0].controller.signal.aborted, true)
+  assert.equal(timers.length, 0)
+})
+
+test('push waits for resume when capacity is combined with another pause or egress is unavailable', async () => {
+  for (const mode of ['compound', 'legacy']) {
+    let attempts = 0
+    let reasons = mode === 'compound' ? ['capacity', 'network'] : ['capacity']
+    const timers = []
+    const msg = messenger()
+    msg.readStatus = () => ({ closed: false, paused: reasons.length > 0, pauseReasons: reasons })
+    msg.yell = async () => {
+      attempts++
+      return { delivery: { reports: [{ success: true }] } }
+    }
+    const controller = createNostrDbSyncController({
+      _setTimeout: (fn, ms) => {
+        const timer = { fn, ms }
+        timers.push(timer)
+        return timer
+      },
+      _clearTimeout: timer => {
+        const index = timers.indexOf(timer)
+        if (index >= 0) timers.splice(index, 1)
+      },
+      getDb: () => ({ subscribe: emptySubscription })
+    })
+    controller.ensureSubscriptions(context(msg))
+    await controller.queuePush(OWNER, pushEvent(1))
+    assert.equal(timers.length, 0)
+    assert.equal(attempts, 0)
+
+    if (mode === 'compound') {
+      reasons = []
+      await controller.resumeAfterPause(context(msg))
+      assert.equal(attempts, 1)
+    }
+    controller.stop()
+    await new Promise(resolve => setImmediate(resolve))
+    await deleteDatabase(PUSH_EVENT_OUTBOX)
+    await deleteDatabase(PUSH_CHUNK_OUTBOX)
+  }
+})
+
+test('capacity egress is re-evaluated before every push chunk', async () => {
+  const first = storedPushChunk(1, { receiverPubkeys: [PEER] })
+  const second = storedPushChunk(2, { receiverPubkeys: [PEER2] })
+  let reasons = ['capacity']
+  const tokens = []
+  const msg = messenger()
+  msg.readStatus = () => ({ closed: false, paused: reasons.length > 0, pauseReasons: [...reasons] })
+  msg.createCapacityEgress = () => {
+    const token = { active: true, controller: new AbortController() }
+    tokens.push(token)
+    return {
+      token,
+      messenger: {},
+      release () { token.controller.abort() }
+    }
+  }
+  const sent = []
+  msg.yell = async options => {
+    sent.push(options)
+    if (sent.length === 1) reasons = ['capacity', 'network']
+    return { delivery: { reports: [{ success: true }] } }
+  }
+  const { controller } = await flushSeededPushChunks([first, second], { messenger: msg })
+  try {
+    assert.equal(sent.length, 1)
+    assert.equal(await storedPushChunkCount(), 1)
+    assert.equal(tokens.length, 1)
+    assert.equal(tokens[0].controller.signal.aborted, true)
+
+    reasons = ['capacity']
+    await controller.resumeAfterPause(context(msg, {
+      trustedByPubkey: new Map([
+        [PEER, { pubkey: PEER }],
+        [PEER2, { pubkey: PEER2 }]
+      ])
+    }))
+    assert.equal(sent.length, 2)
+    assert.equal(await storedPushChunkCount(), 0)
+    assert.equal(tokens.length, 2)
+  } finally {
+    controller.stop()
+    await new Promise(resolve => setImmediate(resolve))
+    await deleteDatabase(PUSH_EVENT_OUTBOX)
+    await deleteDatabase(PUSH_CHUNK_OUTBOX)
+  }
+})
+
+test('capacity-only push preserves retryWhenOnline scheduling', async () => {
+  let now = 1000
+  let online = null
+  const attempts = []
+  const tokens = []
+  const msg = messenger()
+  msg.readStatus = () => ({ closed: false, paused: true, pauseReasons: ['capacity'] })
+  msg.createCapacityEgress = () => {
+    const token = { active: true, controller: new AbortController() }
+    tokens.push(token)
+    return {
+      token,
+      messenger: {},
+      release () { token.controller.abort() }
+    }
+  }
+  msg.yell = async options => {
+    attempts.push(options)
+    if (attempts.length === 1) {
+      return {
+        delivery: {
+          reports: [{
+            success: false,
+            retryWhenAvailable: true,
+            retryWhenOnline: true,
+            retryAt: 5000
+          }]
+        }
+      }
+    }
+    return { delivery: { reports: [{ success: true }] } }
+  }
+  const { controller, timers, flush } = await flushSeededPushChunks([
+    storedPushChunk(1)
+  ], {
+    deferFlush: true,
+    messenger: msg,
+    _nowMs: () => now,
+    _onOnline: handler => {
+      online = handler
+      return () => {}
+    }
+  })
+  try {
+    await flush.fn()
+    assert.equal(attempts.length, 1)
+    assert.equal(attempts[0].capacityEgress, tokens[0])
+    assert.equal(tokens[0].controller.signal.aborted, true)
+    assert.equal(typeof online, 'function')
+
+    online()
+    const retry = timers.find(timer => timer.ms === 4000)
+    assert.ok(retry)
+    now = 5000
+    await retry.fn()
+    assert.equal(attempts.length, 2)
+    assert.equal(attempts[1].capacityEgress, tokens[1])
+    assert.equal(tokens[1].controller.signal.aborted, true)
+    assert.equal(await storedPushChunkCount(), 0)
+  } finally {
+    controller.stop()
+    await new Promise(resolve => setImmediate(resolve))
+    await deleteDatabase(PUSH_EVENT_OUTBOX)
+    await deleteDatabase(PUSH_CHUNK_OUTBOX)
+  }
 })
 
 test('nostrdb app backfill ask exports one app page', async () => {

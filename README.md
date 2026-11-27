@@ -324,6 +324,10 @@ comes first, and resumes from the next event after timeout, capacity recovery or
 reload. A lost queue reservation aborts the handler through the delivery
 ownership signal. A successful handler must receive `true` from `ack()`; a false
 ACK is reported as `INBOX_ACK_FAILED` instead of silently retrying the same item.
+NostrDB pushes also drain while `capacity` is the only messenger pause reason.
+They use a fresh scoped capacity-egress token at flush time and again before
+each chunk. Network, storage, signer, session-storage or any combined pause
+still parks the queue until resume. Relays and chunk ordering are unchanged.
 
 Private-messenger consumers are coordinated on libp2r2p 0.11.0. Its encrypted
 router recipient tag is `p`; inner sync/control tags remain unchanged. Outgoing

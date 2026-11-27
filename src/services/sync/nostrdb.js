@@ -988,13 +988,32 @@ function messengerPausedError (error) {
     const current = pending.pop()
     if (!current || typeof current !== 'object' || seen.has(current)) continue
     seen.add(current)
-    if (current.code === 'PRIVATE_MESSENGER_PAUSED' || current.message === 'PRIVATE_MESSENGER_PAUSED') return true
+    if (current.code === 'PRIVATE_MESSENGER_PAUSED' ||
+        current.code === 'PRIVATE_MESSENGER_CAPACITY_PAUSED' ||
+        current.message === 'PRIVATE_MESSENGER_PAUSED' ||
+        current.message === 'PRIVATE_MESSENGER_CAPACITY_PAUSED') return true
     for (const key of ['cause', 'reason', 'error']) pending.push(current[key])
     for (const key of ['errors', 'reports', 'relays']) {
       if (Array.isArray(current[key])) pending.push(...current[key])
     }
   }
   return false
+}
+
+function isCapacityOnlyPause (status) {
+  return status?.paused === true &&
+    Array.isArray(status.pauseReasons) &&
+    status.pauseReasons.length === 1 &&
+    status.pauseReasons[0] === 'capacity'
+}
+
+function supportsCapacityPush (messenger, status = messenger?.readStatus?.()) {
+  return isCapacityOnlyPause(status) &&
+    typeof messenger?.createCapacityEgress === 'function'
+}
+
+function pushMayFlush (messenger, status = messenger?.readStatus?.()) {
+  return status?.paused !== true || supportsCapacityPush(messenger, status)
 }
 
 function trustedPubkeys (context) {
@@ -4060,12 +4079,20 @@ export function createNostrDbSyncController ({
     const retryAt = error ? publicationRetryAt(error, _nowMs()) : 0
     if (retryAt > _nowMs()) queue.retryAt = Math.max(queue.retryAt || 0, retryAt)
     clearPushTimer(queue)
-    if (queue.retryAt > _nowMs() && runtime.messenger?.readStatus?.().paused !== true) {
-      queue.waitingForResume = false
-      if (!queue.flushing) schedulePushWake(ownerPubkey, queue)
-    } else {
+    const status = runtime.messenger?.readStatus?.()
+    const pausedFailure = Boolean(error && messengerPausedError(error))
+    const capacityPush = supportsCapacityPush(runtime.messenger, status)
+    if (!pushMayFlush(runtime.messenger, status) ||
+        ((queue.waitingForResume || pausedFailure) && !capacityPush)) {
+      if (queue.flushing && queue.retryAt > _nowMs() && status?.paused !== true) {
+        queue.waitingForResume = false
+        return
+      }
       queue.waitingForResume = true
+      return
     }
+    queue.waitingForResume = false
+    if (!queue.flushing) schedulePushWake(ownerPubkey, queue)
   }
 
   function hasPushQueueWaitingForOnline () {
@@ -4387,7 +4414,9 @@ export function createNostrDbSyncController ({
 
   function nextPushDueAt (ownerPubkey, queue) {
     if (queue.waitingForOnline) return Infinity
-    if (queue.waitingForResume || runtime.messenger?.readStatus?.().paused === true) return Infinity
+    const status = runtime.messenger?.readStatus?.()
+    if ((queue.waitingForResume || status?.paused === true) &&
+        !supportsCapacityPush(runtime.messenger, status)) return Infinity
     if (!pushRuntime(ownerPubkey)) return Infinity
     const now = _nowMs()
     if ((queue.retryAt || 0) > now) return queue.retryAt
@@ -4416,10 +4445,13 @@ export function createNostrDbSyncController ({
       ensureOnlinePushWake()
       return
     }
-    if (queue.waitingForResume || runtime.messenger?.readStatus?.().paused === true) {
+    const status = runtime.messenger?.readStatus?.()
+    if ((queue.waitingForResume || status?.paused === true) &&
+        !supportsCapacityPush(runtime.messenger, status)) {
       parkPushQueue(ownerPubkey, queue)
       return
     }
+    if (queue.waitingForResume) queue.waitingForResume = false
     if (queue.flushing) {
       queue.rerun = true
       return
@@ -4581,7 +4613,8 @@ export function createNostrDbSyncController ({
     }
     notifyRangeChanged(ownerPubkey, priority)
     markPushPriorityReady(queue, priority)
-    if (runtime.messenger?.readStatus?.().paused === true) {
+    const status = runtime.messenger?.readStatus?.()
+    if (status?.paused === true && !supportsCapacityPush(runtime.messenger, status)) {
       parkPushQueue(ownerPubkey, queue)
       return true
     }
@@ -4732,7 +4765,7 @@ export function createNostrDbSyncController ({
     return true
   }
 
-  async function sendPushChunk (ownerPubkey, queue, target, chunk) {
+  async function sendPushChunk (ownerPubkey, queue, target, chunk, capacityEgress = null) {
     const receiverPubkeys = chunk.receiverPubkeys.filter(pubkey =>
       target.receiverPubkeys.includes(pubkey)
     )
@@ -4770,7 +4803,8 @@ export function createNostrDbSyncController ({
       code: NOSTRDB_SYNC_PUSH_CODE,
       payload,
       idempotencyKey: chunk.id,
-      useBulkPacing: chunk.priority !== 'normal'
+      useBulkPacing: chunk.priority !== 'normal',
+      ...(capacityEgress ? { capacityEgress: capacityEgress.token } : {})
     })
     const reports = Array.isArray(result?.delivery?.reports) ? result.delivery.reports : []
     const relayAckCount = publicationAckCount(result)
@@ -4799,17 +4833,20 @@ export function createNostrDbSyncController ({
 
   async function flushPushQueue (ownerPubkey) {
     const queue = pushQueues.get(ownerPubkey)
-    if (!queue || queue.waitingForResume) return
+    if (!queue) return
     if (queue.waitingForOnline) {
       ensureOnlinePushWake()
       return
     }
     const target = pushRuntime(ownerPubkey)
     if (!target) return
-    if (target.messenger.readStatus?.().paused === true) {
+    const status = target.messenger.readStatus?.()
+    if ((queue.waitingForResume || status?.paused === true) &&
+        !supportsCapacityPush(target.messenger, status)) {
       parkPushQueue(ownerPubkey, queue)
       return
     }
+    queue.waitingForResume = false
     if (queue.flushing) {
       queue.rerun = true
       return
@@ -4820,7 +4857,14 @@ export function createNostrDbSyncController ({
     const flushStartedAt = _performanceNow()
     let publishedBytes = 0
     let sentChunks = 0
+    let capacityEgress = null
     try {
+      if (isCapacityOnlyPause(status)) {
+        capacityEgress = target.messenger.createCapacityEgress()
+        if (!capacityEgress?.token || typeof capacityEgress.release !== 'function') {
+          throw new Error('INVALID_CAPACITY_EGRESS')
+        }
+      }
       await refreshPushOutboxes(ownerPubkey, queue)
       await retryUnpersistedPushEvents(ownerPubkey, queue)
       const now = _nowMs()
@@ -4842,11 +4886,17 @@ export function createNostrDbSyncController ({
         .sort((left, right) => pushRecordOrder(left, right) || left.index - right.index)
       for (const chunk of chunks) {
         if (!current()) return
+        const currentStatus = target.messenger.readStatus?.()
+        if (currentStatus?.paused === true &&
+            !supportsCapacityPush(target.messenger, currentStatus)) {
+          parkPushQueue(ownerPubkey, queue)
+          break
+        }
         if ((queue.retryAt || 0) > _nowMs()) break
         if ((chunk.retryAt || 0) > _nowMs()) continue
         const startedAt = runtime.debug ? _performanceNow() : 0
         try {
-          const result = await sendPushChunk(ownerPubkey, queue, target, chunk)
+          const result = await sendPushChunk(ownerPubkey, queue, target, chunk, capacityEgress)
           if (result.paused) break
           sentChunks++
           publishedBytes += chunk.bytes
@@ -4858,6 +4908,7 @@ export function createNostrDbSyncController ({
             bytes: chunk.bytes,
             elapsedMs: Math.max(0, Math.round(_performanceNow() - startedAt)),
             outcome: result.empty ? 'dropped-no-recipients' : 'published',
+            ...(capacityEgress ? { capacityEgress: true } : {}),
             relayAckCount: result.relayAckCount,
             reportCount: result.reportCount,
             failedReportCount: result.failedReportCount
@@ -4886,6 +4937,7 @@ export function createNostrDbSyncController ({
             retryAfterMs: Math.max(0, retryAt - failedAt),
             retryWhenOnline,
             retryWhenAvailable,
+            ...(capacityEgress ? { capacityEgress: true } : {}),
             relayAckCount: error?.relayAckCount || 0,
             reportCount: error?.reportCount || 0,
             failedReportCount: error?.failedReportCount || 0
@@ -4942,6 +4994,7 @@ export function createNostrDbSyncController ({
         pushStats.lastIdleWakeAt = _nowMs()
       }
     } finally {
+      capacityEgress?.release()
       queue.flushing = false
       const rerun = queue.rerun
       queue.rerun = false
@@ -5302,7 +5355,8 @@ export function createNostrDbSyncController ({
       clearPushTimer(queue)
       queue.waitingForResume = false
       queue.resumePending = false
-      if (runtime.messenger?.readStatus?.().paused === true) {
+      const status = runtime.messenger?.readStatus?.()
+      if (status?.paused === true && !supportsCapacityPush(runtime.messenger, status)) {
         parkPushQueue(ownerPubkey, queue)
         continue
       }

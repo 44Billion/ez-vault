@@ -485,6 +485,13 @@ run one fenced resume pass for existing announcements, parked range asks and
 app-backfills, push queues and inbox delivery. Requests receiving
 PRIVATE_MESSENGER_PAUSED persist `waitingForResume`, create no retry timer and
 preserve any relay retryAt; a reload with an active messenger resumes them.
+When `capacity` is the only pause reason and the messenger exposes
+`createCapacityEgress()`, NostrDB push may instead drain immediately with a
+fresh scoped token. Recheck the current pause reasons before every chunk; any
+additional reason parks the queue. Keep existing retry deadlines, `retryWhenOnline`
+behavior and chunk ordering. Do not extend this bypass to asks, replies,
+announcements, presence, app-backfills or other control traffic. Older
+messengers without the API retain the waiting-for-resume behavior.
 Capacity diagnostics may include queue kind, required/used/max bytes and pause
 reasons plus bounded counts by inner message code, never payloads, filters or
 identities. Detailed NostrDB sync diagnostics require the exact `?debug=1`
